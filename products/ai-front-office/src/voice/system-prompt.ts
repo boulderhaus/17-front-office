@@ -177,6 +177,7 @@ export function buildTelnyxAssistantUpdate(config: BusinessConfig, publicBaseUrl
   return {
     instructions: buildVoiceSystemPrompt(config),
     greeting: buildTelnyxGreeting(config),
+    tool_ids: [],
     tools: buildTelnyxTools(config, baseUrl),
     dynamic_variables_webhook_url: `${baseUrl}/webhooks/telnyx`,
     dynamic_variables_webhook_timeout_ms: 8_000,

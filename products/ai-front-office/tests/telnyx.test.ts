@@ -125,6 +125,7 @@ describe("Telnyx provider boundary", () => {
 
   it("generates a Telnyx-only assistant configuration with protected tool identifiers", () => {
     const update = buildTelnyxAssistantUpdate(createDemoConfig(), "https://front-office.example");
+    expect(update.tool_ids).toEqual([]);
     const serialized = JSON.stringify(update);
     expect(serialized).toContain("/webhooks/telnyx");
     expect(serialized).toContain("/tools/save-intake");
