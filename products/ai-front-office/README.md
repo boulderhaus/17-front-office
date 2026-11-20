@@ -4,7 +4,7 @@ A narrow, supervised AI receptionist for solo and 1–10-person home-service sho
 
 ## Honest status
 
-The application is buildable, tested, containerized, and deployed to a fail-closed Railway staging service with isolated Postgres and public HTTPS. It is not a proven customer service until real Retell, Google, and Twilio accounts, recording-consent approval, and a target shop's routing configuration complete the launch checklist below. Jobber is the intended primary system of record; Google Calendar is the working solo-mode bridge because Jobber mutations require a registered app, OAuth credentials, scopes, and schema validation in Jobber GraphiQL.
+The application is buildable, tested, containerized, and deployed to a fail-closed Railway staging service with isolated Postgres and public HTTPS. Telnyx is the single voice, number, recording, transfer, webhook, and SMS provider; Google Calendar is the solo-mode scheduling bridge. It is not approved for customer traffic until the Telnyx account/messaging campaign, Google OAuth, owner destination, recording-consent language, and live smoke matrix pass the launch gate. Jobber remains the intended primary system of record after its registered-app mutations are validated in Jobber GraphiQL.
 
 ## Product rules
 
@@ -45,20 +45,20 @@ Open `http://127.0.0.1:8787/admin` and sign in with `ADMIN_TOKEN`.
 2. Provision Postgres and run `npm run migrate` once.
 3. Start the server with `npm start` or `docker compose up --build`.
 4. Put the service behind public HTTPS and verify `/healthz` and `/readyz`. `/activationz` must remain `503` until real provider proof is recorded.
-5. In Retell, paste the prompt from `/admin/prompt`, configure every authenticated custom tool with `TOOL_TOKEN`, configure provider-native warm transfer, and point signed webhooks to `/webhooks/retell`.
+5. Configure `TELNYX_*`, run `npm run configure:telnyx` to inspect the generated update, then `npm run configure:telnyx -- --apply`. It installs the signed dynamic-variable/tool webhook, full-history end webhook, transfer, hangup, and dual-channel recording settings.
 6. Connect Google Calendar through `/admin/config` or inject a refresh token server-side.
-7. Configure Twilio sender credentials and named owner destinations.
+7. Configure named owner destinations and keep `TELNYX_MESSAGING_APPROVED=false` until the account and applicable US A2P campaign are approved.
 8. Keep the service paused, run `npm run simulate:launch`, then use `PROVIDER_TEST_MODE=true` for the live smoke matrix in `docs/LAUNCH-CHECKLIST.md`.
 9. Only after the live smoke matrix passes: record its ISO timestamp in `LIVE_PROVIDER_PROOF_AT`, disable provider-test mode, unpause, and require `/activationz=200` before forwarding the shop's line.
 
 ## Architecture
 
 ```text
-caller -> Retell/Twilio -> signed webhook + authenticated tools
+caller -> Telnyx number/assistant -> Ed25519-signed webhook + tools
                          -> deterministic triage
                          -> confirm mode OR Google booking + read-back
                          -> encrypted Postgres record + callback task
-                         -> durable SMS outbox -> Twilio -> owner/caller
+                         -> durable idempotent SMS outbox -> Telnyx -> owner/caller
                          -> authenticated admin evidence surface
 ```
 
@@ -66,13 +66,13 @@ The application ports isolate the voice provider, calendar/system of record, not
 
 ## Known limitations
 
-- Staging is live at `https://ai-front-office-production.up.railway.app`; it is intentionally paused and returns `503` from `/activationz`. No real provider call, SMS, transfer, or calendar write has been performed because live provider credentials and an approved test destination were not provided.
+- Staging is live at `https://ai-front-office-production.up.railway.app`; `/activationz` remains `503` until every live gate passes. A Telnyx number and assistant exist, but no production call, compliant SMS campaign, transfer, or Google write is claimed until the smoke evidence is recorded.
 - Jobber write operations are not implemented. Do not guess its GraphQL mutations; validate them in the registered app's versioned GraphiQL schema first.
 - Housecall Pro is not implemented.
 - Legal recording/consent language is configurable but must be reviewed for every launch jurisdiction.
-- Retell warm transfer is provider-native; this service creates the callback safety net but cannot prove transfer behavior without a configured agent and test call.
-- Twilio's documented Programmable Messaging create endpoint does not expose a client idempotency key. The durable outbox prevents duplicate jobs inside this service, but an accepted request followed by a lost HTTP response can still produce a duplicate SMS when retried. Validate this failure mode with a provisioned sender and keep messages safe to receive twice.
-- Coverage schedules and ring-delay/overflow routing must also be configured at the carrier, Twilio, or Retell layer; the admin mode records the desired policy but cannot force an upstream phone carrier to forward a call.
+- Telnyx transfer and interruption quality still require real calls. Every failed transfer retains the owner alert and callback task.
+- Telnyx Messages receives the outbox notification UUID as its API idempotency key; delivery status and STOP/compliance behavior still require a provisioned, approved sender test.
+- Coverage schedules and ring-delay/overflow routing must also be configured on the Telnyx number or upstream carrier; the admin mode records the desired policy but cannot force upstream forwarding.
 - Flat product pricing is configuration only; subscriptions and usage enforcement are not implemented. The beta must be billed manually.
 
 The service is paused by default. The authenticated admin provides **Readiness**, **Simulator**, configuration, call history, and permanent call deletion; public `/privacy` and `/terms` pages describe the current beta boundaries.

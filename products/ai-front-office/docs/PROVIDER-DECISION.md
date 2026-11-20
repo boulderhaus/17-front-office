@@ -2,13 +2,12 @@
 
 ## Chosen v1 stack
 
-- Voice orchestration: Retell behind the HTTP/tool adapter.
-- Number ownership and SMS: Twilio-owned number where practical; retain portability and avoid locking the business identity to the voice vendor.
+- Voice, number, recording, transfer, and SMS: Telnyx behind the HTTP/tool adapter.
 - Solo scheduling bridge: Google Calendar free/busy + deterministic event ID + serialized recheck + read-back verification.
 - Durable state: Postgres.
 - Admin: server-rendered authenticated UI in this service.
 
-Retell was selected for low-latency voice tooling, signed webhook support, and provider-native transfer capability. The implementation keeps provider semantics outside the domain so Vapi or Bland can be evaluated without rewriting booking, triage, evidence, outbox, or admin logic.
+Telnyx replaces the former two-vendor voice/SMS plan. One provider now owns the number path, assistant, Ed25519-signed webhooks/tools, recording, transfer, and idempotent Messages API. Provider semantics remain outside the domain so the booking, triage, evidence, outbox, and admin logic stay portable.
 
 ## Jobber boundary
 
@@ -26,13 +25,11 @@ We intentionally do not ship guessed scheduling mutations.
 
 ## Primary sources
 
-- Retell voice API: https://www.retellai.com/features/voice-ai-api
-- Retell pricing: https://www.retellai.com/pricing
-- Retell/SIP number ownership: https://www.retellai.com/learn/how-to-keep-your-existing-phone-number-using-a-sip-connection
-- Twilio porting: https://www.twilio.com/docs/numbers-and-senders/port-host
-- Twilio messaging API: https://www.twilio.com/docs/messaging/api
-- Twilio Messages resource (no documented client idempotency parameter on create): https://www.twilio.com/docs/messaging/api/message-resource
-- Twilio webhook security: https://www.twilio.com/docs/usage/webhooks/webhooks-security
+- Telnyx AI Assistants: https://developers.telnyx.com/docs/inference/ai-assistants
+- Telnyx dynamic variables and signed tools: https://developers.telnyx.com/docs/inference/ai-assistants/dynamic-variables
+- Telnyx webhook signatures: https://developers.telnyx.com/docs/development/api-fundamentals/webhooks/receiving-webhooks
+- Telnyx Messages API: https://developers.telnyx.com/api-reference/messages/send-a-message
+- Telnyx call recordings: https://developers.telnyx.com/api-reference/call-recordings/list-call-recordings
 - Google free/busy: https://developers.google.com/workspace/calendar/api/v3/reference/freebusy/query
 - Google event creation: https://developers.google.com/workspace/calendar/api/guides/create-events
 - Google OAuth: https://developers.google.com/workspace/calendar/api/auth

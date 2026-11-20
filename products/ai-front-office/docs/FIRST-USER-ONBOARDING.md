@@ -5,8 +5,8 @@
 1. Keep the service paused and use confirm-first booking.
 2. Configure identity/greeting, timezone, hours, weekends/holidays, overflow rings, service area, categories, emergency rules, exact fee language, notification phone, support email, disclosure, retention, and plan price.
 3. Connect Google Calendar and confirm the intended calendar account.
-4. Read the generated Retell prompt; configure all authenticated tools and provider-native transfer.
-5. Configure carrier/Retell after-hours or overflow forwarding to match the admin policy.
+4. Review the generated Telnyx update; apply it with `npm run configure:telnyx -- --apply`.
+5. Configure carrier/Telnyx after-hours or overflow forwarding to match the admin policy.
 
 ## Test session
 

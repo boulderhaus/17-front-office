@@ -1,4 +1,5 @@
 import { createServer, type Server } from "node:http";
+import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
 import { demoEnvironment, loadEnvironment } from "../src/config/environment.js";
@@ -63,27 +64,106 @@ describe("HTTP boundary", () => {
     expect((await response.json() as { severity: string }).severity).toBe("life_safety");
   });
 
-  it("accepts a demo-authenticated Retell call-ended webhook", async () => {
-    const response = await fetch(`${baseUrl}/webhooks/retell`, {
+  it("accepts a demo-authenticated Telnyx conversation-ended webhook", async () => {
+    const response = await fetch(`${baseUrl}/webhooks/telnyx`, {
       method: "POST",
       headers: { authorization: `Bearer ${toolToken}`, "content-type": "application/json" },
       body: JSON.stringify({
-        event: "call_ended",
-        event_id: "evt-1",
-        call: {
-          call_id: "retell-call",
-          from_number: "+15555550110",
-          start_timestamp: 1_768_438_800_000,
-          end_timestamp: 1_768_438_920_000,
-          duration_ms: 120_000,
-          transcript: "Routine maintenance",
-          recording_url: "https://example.invalid/recording",
-          call_analysis: { custom_analysis_data: { caller_name: "Caller", service_address: "100 Main St, Springfield", problem_description: "Routine maintenance", recording_disclosure_given: true } },
+        data: {
+          record_type: "event",
+          event_type: "call.conversation.ended",
+          id: "evt-1",
+          occurred_at: "2026-01-15T08:02:00.000Z",
+          payload: {
+            assistant_id: "assistant-synthetic",
+            call_control_id: "telnyx-call",
+            from: "+15555550110",
+            duration_sec: 120,
+            messages: [
+              { role: "user", content: "Routine maintenance", timestamp: "2026-01-15T08:00:10.000Z" },
+              {
+                role: "assistant",
+                timestamp: "2026-01-15T08:00:30.000Z",
+                tool_calls: [{
+                  id: "tool-1",
+                  type: "function",
+                  function: {
+                    name: "save_intake",
+                    arguments: JSON.stringify({
+                      caller_name: "Caller",
+                      callback_number: "+15555550110",
+                      service_address: "100 Main St, Springfield",
+                      service_category: "HVAC maintenance",
+                      problem_description: "Routine maintenance",
+                      recording_disclosure_given: true,
+                    }),
+                  },
+                }],
+              },
+            ],
+          },
         },
       }),
     });
     expect(response.status).toBe(200);
-    expect((await store.getCallByProviderId("retell-call"))?.outcome).toBe("pending_confirmation");
+    expect((await store.getCallByProviderId("telnyx-call"))?.outcome).toBe("pending_confirmation");
+  });
+
+  it("accepts signed Telnyx initialization and tool webhooks in provider-test mode", async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const rawPublicKey = (publicKey.export({ type: "spki", format: "der" }) as Buffer).subarray(-32).toString("base64");
+    store = new InMemoryStore();
+    await store.saveConfig({ ...createDemoConfig(), paused: false, ownerNotificationRefs: ["owner-primary"], ownerTransferNumberRef: "owner-primary" });
+    await store.saveIntegrationSecret("demo", "notifications", "owner-primary", "+15555550100");
+    const env = loadEnvironment({
+      NODE_ENV: "production", DEMO_MODE: "false", PROVIDER_TEST_MODE: "true",
+      PUBLIC_BASE_URL: "https://front-office.example", ADMIN_TOKEN: adminToken, TOOL_TOKEN: toolToken,
+      DATABASE_URL: "postgresql://synthetic", DATA_ENCRYPTION_KEY: syntheticEncryptionKey,
+      TELNYX_API_KEY: "synthetic", TELNYX_PUBLIC_KEY: rawPublicKey, TELNYX_FROM_NUMBER: "+15555550199",
+      TELNYX_MESSAGING_PROFILE_ID: "00000000-0000-4000-8000-000000000001", TELNYX_ASSISTANT_ID: "assistant-synthetic",
+      GOOGLE_CLIENT_ID: "synthetic", GOOGLE_CLIENT_SECRET: "synthetic",
+      OWNER_DESTINATIONS_JSON: "{\"owner-primary\":\"+15555550100\"}",
+    });
+    server = createServer(createRequestHandler({ env, store, calendar: new InMemoryCalendar(), clock, integrations: {}, logger: () => undefined }));
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Test server did not bind");
+    baseUrl = `http://127.0.0.1:${address.port}`;
+    const initialization = JSON.stringify({
+      data: {
+        record_type: "event", event_type: "assistant.initialization", id: "event-initialization",
+        occurred_at: "2026-01-15T08:00:00.000Z",
+        payload: {
+          telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+15555550199",
+          telnyx_end_user_target: "+15555550110", call_control_id: "v3:signed-call", assistant_id: "assistant-synthetic",
+        },
+      },
+    });
+    const initResponse = await fetch(`${baseUrl}/webhooks/telnyx`, {
+      method: "POST", headers: signedHeaders(initialization, privateKey, clock.now()), body: initialization,
+    });
+    expect(initResponse.status).toBe(200);
+    expect((await initResponse.json() as { dynamic_variables: { owner_transfer_targets: unknown[] } }).dynamic_variables.owner_transfer_targets).toHaveLength(1);
+    expect(await store.getCallByProviderId("v3:signed-call")).not.toBeNull();
+
+    const intake = JSON.stringify({
+      provider_call_id: "v3:signed-call", from_number: "+15555550110", caller_name: "Signed Caller",
+      callback_number: "+15555550110", service_address: "100 Main St, Springfield",
+      service_category: "HVAC maintenance", problem_description: "Routine maintenance", recording_disclosure_given: true,
+    });
+    const intakeResponse = await fetch(`${baseUrl}/tools/save-intake`, {
+      method: "POST", headers: { ...signedHeaders(intake, privateKey, clock.now()), "x-telnyx-call-control-id": "v3:signed-call" }, body: intake,
+    });
+    expect(intakeResponse.status).toBe(200);
+    expect((await store.getCallByProviderId("v3:signed-call"))?.fields.callerName).toBe("Signed Caller");
+    const mismatchResponse = await fetch(`${baseUrl}/tools/save-intake`, {
+      method: "POST", headers: { ...signedHeaders(intake, privateKey, clock.now()), "x-telnyx-call-control-id": "v3:other-call" }, body: intake,
+    });
+    expect(mismatchResponse.status).toBe(401);
   });
 
   it("uses an HttpOnly admin session and rejects a forged CSRF token", async () => {
@@ -204,6 +284,15 @@ describe("HTTP boundary", () => {
     expect((await invoke()).status).toBe(503);
     await store.saveConfig({ ...createDemoConfig(), paused: false });
     expect((await invoke()).status).toBe(503);
-    expect((await fetch(`${baseUrl}/webhooks/retell`, { method: "POST", body: "{}" })).status).toBe(503);
+    expect((await fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", body: "{}" })).status).toBe(503);
   });
 });
+
+function signedHeaders(body: string, privateKey: KeyObject, now: Date): Record<string, string> {
+  const timestamp = String(Math.floor(now.getTime() / 1_000));
+  return {
+    "content-type": "application/json",
+    "telnyx-timestamp": timestamp,
+    "telnyx-signature-ed25519": sign(null, Buffer.from(`${timestamp}|${body}`), privateKey).toString("base64"),
+  };
+}

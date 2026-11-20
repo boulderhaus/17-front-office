@@ -12,13 +12,12 @@
 ## Provider gate
 
 - Public HTTPS URL and stable DNS.
-- Retell signed webhook rejects bad signatures.
-- Every custom tool rejects missing/wrong bearer token.
+- Telnyx Ed25519-signed webhook and every tool reject bad, missing, and stale signatures.
 - Warm transfer succeeds; forced transfer failure creates a callback task.
-- Twilio sends owner and caller SMS; forced provider failure retries then raises owner alert; an accepted-request/lost-response drill confirms duplicate-safe message copy and operator handling.
+- Telnyx sends owner and caller SMS with a stable idempotency key; forced provider failure retries then raises owner alert; opt-out and campaign-compliance behavior are verified.
 - Google OAuth reconnects; conflict race yields exactly one write; created event is read back.
 - Forwarding/overflow timing works from the real shop number.
-- Carrier/Twilio/Retell coverage hours and ring delay match the admin policy; test business-hours pickup, after-hours pickup, owner-busy overflow, and forwarding failure.
+- Carrier/Telnyx coverage hours and ring delay match the admin policy; test business-hours pickup, after-hours pickup, owner-busy overflow, and forwarding failure.
 
 ## Scenario gate
 

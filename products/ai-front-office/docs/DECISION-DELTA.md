@@ -36,5 +36,5 @@ Source packet (read-only provenance): `research/muse-avoca-2026-11-19/smb-ai-mar
 
 - Jurisdiction-specific call recording/AI disclosure language needs legal review.
 - Jobber app credentials, scopes, test account, exact scheduling mutation, OAuth rotation, and disconnect handling need live verification.
-- Real Retell warm-transfer behavior, latency, interruption quality, and failure callbacks need provider test calls.
-- Real Twilio deliverability and STOP/compliance behavior need a provisioned sender.
+- Real Telnyx warm-transfer behavior, latency, interruption quality, recording delivery, and failure callbacks need provider test calls.
+- Real Telnyx deliverability, STOP behavior, and US messaging compliance need an approved sender/campaign.

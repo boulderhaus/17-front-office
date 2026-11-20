@@ -54,14 +54,15 @@ describe("operational safety", () => {
   });
 
   it("keeps activation at NO-GO until production dependencies and live proof exist", () => {
-    const config = { ...createDemoConfig(), paused: false, priceSnippets: [{ label: "Diagnostic", text: "The diagnostic visit is $89." }] };
+    const config = { ...createDemoConfig(), paused: false, businessName: "Synthetic Heating", greeting: "Thanks for calling Synthetic Heating. I am the owner's AI assistant.", priceSnippets: [{ label: "Diagnostic", text: "The diagnostic visit is $89." }] };
     const env = loadEnvironment({
       NODE_ENV: "production", DEMO_MODE: "false", PROVIDER_TEST_MODE: "false",
       PUBLIC_BASE_URL: "https://front-office.example", ADMIN_TOKEN: "admin-token-abcdefghijklmnopqrstuvwxyz",
       TOOL_TOKEN: "tool-token-abcdefghijklmnopqrstuvwxyz", DATABASE_URL: "postgresql://synthetic",
-      DATA_ENCRYPTION_KEY: syntheticEncryptionKey, RETELL_API_KEY: "synthetic", GOOGLE_CLIENT_ID: "synthetic",
-      GOOGLE_CLIENT_SECRET: "synthetic", TWILIO_ACCOUNT_SID: "AC00000000000000000000000000000000",
-      TWILIO_AUTH_SECRET: "synthetic", TWILIO_FROM_NUMBER: "+15555550199",
+      DATA_ENCRYPTION_KEY: syntheticEncryptionKey, TELNYX_API_KEY: "synthetic", TELNYX_PUBLIC_KEY: Buffer.alloc(32, 1).toString("base64"),
+      TELNYX_ASSISTANT_ID: "assistant-synthetic", TELNYX_FROM_NUMBER: "+15555550199",
+      TELNYX_MESSAGING_PROFILE_ID: "00000000-0000-4000-8000-000000000001", TELNYX_MESSAGING_APPROVED: "true", RECORDING_CONSENT_APPROVED: "true",
+      GOOGLE_CLIENT_ID: "synthetic", GOOGLE_CLIENT_SECRET: "synthetic",
       OWNER_DESTINATIONS_JSON: "{\"owner-primary\":\"+15555550100\"}",
     });
     const blocked = buildActivationReport({ env, config, googleConnected: true, ownerPhoneConfigured: true });
@@ -80,7 +81,7 @@ describe("operational safety", () => {
     const env = loadEnvironment(base);
     const report = buildActivationReport({ env, config: createDemoConfig(), googleConnected: false, ownerPhoneConfigured: false });
     expect(report.go).toBe(false);
-    expect(report.blocking.map((item) => item.id)).toEqual(expect.arrayContaining(["retell", "twilio", "calendar", "owner_phone", "live_proof"]));
+    expect(report.blocking.map((item) => item.id)).toEqual(expect.arrayContaining(["telnyx_voice", "telnyx_sms", "sms_compliance", "calendar", "owner_phone", "live_proof"]));
     expect(() => loadEnvironment({ ...base, PROVIDER_TEST_MODE: "true" })).toThrow("PROVIDER_TEST_MODE requires");
     expect(() => loadEnvironment({ ...base, DATA_ENCRYPTION_KEY: "wrong-format" })).toThrow("DATA_ENCRYPTION_KEY must decode to exactly 32 bytes");
   });

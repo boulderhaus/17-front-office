@@ -59,6 +59,33 @@ export class CallService {
     });
   }
 
+  async saveIntake(input: {
+    tenantId: string;
+    providerCallId: string;
+    fromNumber: string;
+    fields: Partial<CollectedCallFields>;
+    recordingDisclosureGiven?: boolean;
+  }): Promise<{ status: "saved"; missing: string[] }> {
+    const existing = await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
+    const fields = mergeCollectedFields(existing.fields, completePartialFields(input.fields));
+    const call: CallRecord = {
+      ...existing,
+      fromNumber: input.fromNumber === "unknown" ? existing.fromNumber : input.fromNumber,
+      fields,
+      consentState: input.recordingDisclosureGiven ? "disclosed" : existing.consentState,
+      updatedAt: this.clock.now().toISOString(),
+    };
+    await this.store.saveCall(call);
+    const missing = [
+      !fields.callerName?.trim() ? "caller_name" : null,
+      !/^\+[1-9]\d{7,14}$/.test(fields.callbackNumber ?? call.fromNumber) ? "callback_number" : null,
+      !fields.address?.trim() ? "service_address" : null,
+      !fields.problemDescription.trim() ? "problem_description" : null,
+      !fields.serviceCategory?.trim() ? "service_category" : null,
+    ].filter((value): value is string => value !== null);
+    return { status: "saved", missing };
+  }
+
   async checkAvailability(input: {
     tenantId: string;
     providerCallId: string;
@@ -600,6 +627,25 @@ function mergeCollectedFields(existing: CollectedCallFields, incoming: Collected
     diagnosticFeeAccepted: existing.diagnosticFeeAccepted || incoming.diagnosticFeeAccepted,
     humanRequested: existing.humanRequested || incoming.humanRequested,
     confidence: Math.max(existing.confidence, incoming.confidence),
+  };
+}
+
+function completePartialFields(fields: Partial<CollectedCallFields>): CollectedCallFields {
+  return {
+    callerName: fields.callerName ?? null,
+    companyName: fields.companyName ?? null,
+    callbackNumber: fields.callbackNumber ?? null,
+    address: fields.address ?? null,
+    serviceCategory: fields.serviceCategory ?? null,
+    serviceCategoryConfidence: fields.serviceCategoryConfidence ?? 0,
+    problemDescription: fields.problemDescription ?? "",
+    equipmentDetails: fields.equipmentDetails ?? null,
+    accessNotes: fields.accessNotes ?? null,
+    requestedStart: fields.requestedStart ?? null,
+    explicitSlotConfirmation: fields.explicitSlotConfirmation ?? false,
+    diagnosticFeeAccepted: fields.diagnosticFeeAccepted ?? false,
+    humanRequested: fields.humanRequested ?? false,
+    confidence: fields.confidence ?? 0,
   };
 }
 

@@ -9,7 +9,15 @@ import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import type { BusinessConfig } from "../domain/models.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
-import { parseRetellEnvelope, toCallSummary, verifyRetellWebhook } from "../adapters/retell.js";
+import {
+  asTelnyxConversationEnded,
+  asTelnyxInitialization,
+  parseTelnyxEnvelope,
+  TelnyxRecordingClient,
+  telnyxEventId,
+  toTelnyxCallSummary,
+  verifyTelnyxWebhook,
+} from "../adapters/telnyx.js";
 import {
   adminCookie,
   bearerMatches,
@@ -63,6 +71,24 @@ const handoffSchema = baseToolSchema.extend({
   caller_name: z.string().max(120).optional(),
   problem_description: z.string().max(2_000).optional(),
 });
+const intakeSchema = baseToolSchema.extend({
+  from_number: z.string().min(3).max(40),
+  caller_name: z.string().max(120).optional(),
+  company_name: z.string().max(120).optional(),
+  callback_number: z.string().max(40).optional(),
+  service_address: z.string().max(500).optional(),
+  service_category: z.string().max(120).optional(),
+  service_category_confidence: z.number().min(0).max(1).optional(),
+  problem_description: z.string().min(1).max(2_000),
+  equipment_details: z.string().max(1_000).optional(),
+  access_notes: z.string().max(1_000).optional(),
+  requested_start: dateTime.optional(),
+  explicit_slot_confirmation: z.boolean().optional(),
+  diagnostic_fee_accepted: z.boolean().optional(),
+  human_requested: z.boolean().optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  recording_disclosure_given: z.boolean().optional(),
+});
 
 export interface AppDependencies {
   env: Environment;
@@ -75,6 +101,7 @@ export interface AppDependencies {
 
 export function createRequestHandler(dependencies: AppDependencies): RequestListener {
   const service = new CallService(dependencies.store, dependencies.calendar, dependencies.clock, dependencies.env.PUBLIC_BASE_URL);
+  const recordingClient = dependencies.env.TELNYX_API_KEY ? new TelnyxRecordingClient(dependencies.env.TELNYX_API_KEY) : null;
   const limiter = new RateLimiter();
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));
 
@@ -121,7 +148,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (method === "GET" && url.pathname === "/terms") {
       return sendHtml(response, 200, renderTerms(await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID)));
     }
-    if (method === "POST" && url.pathname === "/webhooks/retell") return handleRetell(request, response);
+    if (method === "POST" && url.pathname === "/webhooks/telnyx") return handleTelnyx(request, response);
+    if (method === "POST" && url.pathname === "/tools/save-intake") return handleIntake(request, response);
     if (method === "POST" && url.pathname === "/tools/check-availability") return handleAvailability(request, response);
     if (method === "POST" && url.pathname === "/tools/triage") return handleTriage(request, response);
     if (method === "POST" && url.pathname === "/tools/book") return handleBooking(request, response);
@@ -130,34 +158,88 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     throw new HttpError(404, "Not found");
   }
 
-  async function handleRetell(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  async function handleTelnyx(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const rawBody = await readBody(request);
-    const signature = singleHeader(request.headers["x-retell-signature"]);
-    if (!dependencies.env.DEMO_MODE && !dependencies.env.RETELL_API_KEY) throw new HttpError(503, "Retell is not configured");
-    const verified = dependencies.env.DEMO_MODE
-      ? bearerMatches(request, dependencies.env.TOOL_TOKEN)
-      : await verifyRetellWebhook(rawBody, dependencies.env.RETELL_API_KEY!, signature);
-    if (!verified) throw new HttpError(401, "Invalid webhook signature");
+    requireProviderAuth(request, rawBody);
     await requireOperational();
-    const envelope = parseRetellEnvelope(rawBody);
-    if (envelope.event === "call_started") {
+    const envelope = parseTelnyxEnvelope(rawBody);
+    if (envelope.data.event_type === "assistant.initialization") {
+      const initialization = asTelnyxInitialization(envelope);
+      requireExpectedAssistant(initialization.data.payload.assistant_id);
       await service.recordStarted({
-        eventId: `${envelope.event}:${envelope.event_id ?? envelope.call.call_id}`,
+        eventId: telnyxEventId(envelope, rawBody),
         tenantId: dependencies.env.DEFAULT_TENANT_ID,
-        providerCallId: envelope.call.call_id,
-        fromNumber: envelope.call.from_number ?? "unknown",
-        startedAt: providerTimestamp(envelope.call.start_timestamp, dependencies.clock.now()),
+        providerCallId: initialization.data.payload.call_control_id,
+        fromNumber: initialization.data.payload.telnyx_end_user_target ?? "unknown",
+        startedAt: initialization.data.occurred_at ?? dependencies.clock.now().toISOString(),
       });
-    } else if (envelope.event === "call_ended" || envelope.event === "call_analyzed") {
-      await service.finalize(toCallSummary(envelope, rawBody, dependencies.env.DEFAULT_TENANT_ID, dependencies.clock.now()));
+      const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
+      const transferNumber = config.ownerTransferNumberRef
+        ? await dependencies.store.getIntegrationSecret(config.tenantId, "notifications", config.ownerTransferNumberRef)
+        : null;
+      return sendJson(response, 200, {
+        dynamic_variables: {
+          tenant_id: config.tenantId,
+          business_name: config.businessName,
+          owner_transfer_targets: transferNumber
+            ? [{ name: "Owner", to: transferNumber, message: "Your AI front office has a caller who requested immediate human help." }]
+            : [],
+        },
+        conversation: { metadata: { tenant_id: config.tenantId } },
+      });
+    }
+    if (envelope.data.event_type === "call.conversation.ended") {
+      const ended = asTelnyxConversationEnded(envelope);
+      requireExpectedAssistant(ended.data.payload.assistant_id);
+      const recordingUrl = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/admin/provider/telnyx/recordings/${encodeURIComponent(ended.data.payload.call_control_id)}`;
+      await service.finalize(toTelnyxCallSummary(
+        ended,
+        rawBody,
+        dependencies.env.DEFAULT_TENANT_ID,
+        dependencies.clock.now(),
+        recordingUrl,
+      ));
     }
     sendJson(response, 200, { received: true });
   }
 
-  async function handleAvailability(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    requireToolAuth(request);
+  async function handleIntake(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const rawBody = await readBody(request);
+    requireProviderAuth(request, rawBody);
     await requireOperational();
-    const input = availabilitySchema.parse(unwrapToolPayload(parseJson<unknown>(await readBody(request))));
+    const input = intakeSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
+    requireMatchingCallHeader(request, input.provider_call_id);
+    const result = await service.saveIntake({
+      tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
+      providerCallId: input.provider_call_id,
+      fromNumber: input.from_number,
+      fields: {
+        problemDescription: input.problem_description,
+        ...(input.caller_name === undefined ? {} : { callerName: input.caller_name }),
+        ...(input.company_name === undefined ? {} : { companyName: input.company_name }),
+        ...(input.callback_number === undefined ? {} : { callbackNumber: input.callback_number }),
+        ...(input.service_address === undefined ? {} : { address: input.service_address }),
+        ...(input.service_category === undefined ? {} : { serviceCategory: input.service_category }),
+        ...(input.service_category_confidence === undefined ? {} : { serviceCategoryConfidence: input.service_category_confidence }),
+        ...(input.equipment_details === undefined ? {} : { equipmentDetails: input.equipment_details }),
+        ...(input.access_notes === undefined ? {} : { accessNotes: input.access_notes }),
+        ...(input.requested_start === undefined ? {} : { requestedStart: input.requested_start }),
+        ...(input.explicit_slot_confirmation === undefined ? {} : { explicitSlotConfirmation: input.explicit_slot_confirmation }),
+        ...(input.diagnostic_fee_accepted === undefined ? {} : { diagnosticFeeAccepted: input.diagnostic_fee_accepted }),
+        ...(input.human_requested === undefined ? {} : { humanRequested: input.human_requested }),
+        ...(input.confidence === undefined ? {} : { confidence: input.confidence }),
+      },
+      ...(input.recording_disclosure_given === undefined ? {} : { recordingDisclosureGiven: input.recording_disclosure_given }),
+    });
+    sendJson(response, 200, result);
+  }
+
+  async function handleAvailability(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const rawBody = await readBody(request);
+    requireProviderAuth(request, rawBody);
+    await requireOperational();
+    const input = availabilitySchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
+    requireMatchingCallHeader(request, input.provider_call_id);
     const result = await service.checkAvailability({
       tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
       providerCallId: input.provider_call_id,
@@ -168,9 +250,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   }
 
   async function handleTriage(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    requireToolAuth(request);
+    const rawBody = await readBody(request);
+    requireProviderAuth(request, rawBody);
     await requireOperational();
-    const input = triageSchema.parse(unwrapToolPayload(parseJson<unknown>(await readBody(request))));
+    const input = triageSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
+    requireMatchingCallHeader(request, input.provider_call_id);
     const result = await service.triageCall({
       tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
       providerCallId: input.provider_call_id,
@@ -184,9 +268,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   }
 
   async function handleBooking(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    requireToolAuth(request);
+    const rawBody = await readBody(request);
+    requireProviderAuth(request, rawBody);
     await requireOperational();
-    const input = bookingSchema.parse(unwrapToolPayload(parseJson<unknown>(await readBody(request))));
+    const input = bookingSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
+    requireMatchingCallHeader(request, input.provider_call_id);
     const result = await service.bookConfirmedSlot({
       tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
       providerCallId: input.provider_call_id,
@@ -203,9 +289,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   }
 
   async function handleHandoff(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    requireToolAuth(request);
+    const rawBody = await readBody(request);
+    requireProviderAuth(request, rawBody);
     await requireOperational();
-    const input = handoffSchema.parse(unwrapToolPayload(parseJson<unknown>(await readBody(request))));
+    const input = handoffSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
+    requireMatchingCallHeader(request, input.provider_call_id);
     const result = await service.queueHumanHandoff({
       tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
       providerCallId: input.provider_call_id,
@@ -329,7 +417,24 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (method === "GET" && url.pathname === "/admin/prompt") {
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
-      return sendHtml(response, 200, renderPrompt(config));
+      return sendHtml(response, 200, renderPrompt(config, dependencies.env.PUBLIC_BASE_URL));
+    }
+    const recordingMatch = /^\/admin\/provider\/telnyx\/recordings\/(.+)$/.exec(url.pathname);
+    if (method === "GET" && recordingMatch?.[1]) {
+      if (!recordingClient) throw new HttpError(503, "Telnyx recordings are not configured");
+      let providerCallId: string;
+      try {
+        providerCallId = decodeURIComponent(recordingMatch[1]);
+      } catch {
+        throw new HttpError(400, "Invalid recording identifier");
+      }
+      const call = await dependencies.store.getCallByProviderId(providerCallId);
+      if (!call || call.tenantId !== dependencies.env.DEFAULT_TENANT_ID) throw new HttpError(404, "Recording not found");
+      const downloadUrl = await recordingClient.getDownloadUrl(providerCallId);
+      if (!downloadUrl) throw new HttpError(404, "Recording is not available yet");
+      response.writeHead(302, { location: downloadUrl, "cache-control": "no-store" });
+      response.end();
+      return;
     }
     const deleteCallMatch = /^\/admin\/calls\/([0-9a-f-]+)\/delete$/i.exec(url.pathname);
     if (method === "POST" && deleteCallMatch?.[1]) {
@@ -355,8 +460,31 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     throw new HttpError(404, "Not found");
   }
 
-  function requireToolAuth(request: IncomingMessage): void {
-    if (!bearerMatches(request, dependencies.env.TOOL_TOKEN)) throw new HttpError(401, "Invalid tool credentials");
+  function requireProviderAuth(request: IncomingMessage, rawBody: string): void {
+    if (bearerMatches(request, dependencies.env.TOOL_TOKEN)) return;
+    if (!dependencies.env.TELNYX_PUBLIC_KEY) {
+      throw new HttpError(dependencies.env.DEMO_MODE ? 401 : 503, dependencies.env.DEMO_MODE ? "Invalid tool credentials" : "Telnyx webhook verification is not configured");
+    }
+    const verified = verifyTelnyxWebhook(
+      rawBody,
+      singleHeader(request.headers["telnyx-timestamp"]),
+      singleHeader(request.headers["telnyx-signature-ed25519"]),
+      dependencies.env.TELNYX_PUBLIC_KEY,
+      dependencies.clock.now().getTime(),
+    );
+    if (!verified) throw new HttpError(401, "Invalid Telnyx webhook signature");
+  }
+
+  function requireExpectedAssistant(assistantId: string): void {
+    if (dependencies.env.TELNYX_ASSISTANT_ID && assistantId !== dependencies.env.TELNYX_ASSISTANT_ID) {
+      throw new HttpError(403, "Webhook assistant does not match this deployment");
+    }
+  }
+
+  function requireMatchingCallHeader(request: IncomingMessage, providerCallId: string): void {
+    if (bearerMatches(request, dependencies.env.TOOL_TOKEN)) return;
+    const headerCallId = singleHeader(request.headers["x-telnyx-call-control-id"]);
+    if (!headerCallId || headerCallId !== providerCallId) throw new HttpError(401, "Telnyx call identifier does not match the signed tool payload");
   }
 
   async function getActivationReport(): Promise<ActivationReport> {
@@ -390,17 +518,10 @@ function unwrapToolPayload(value: unknown): unknown {
 }
 
 function routeKey(pathname: string): string {
-  if (pathname === "/webhooks/retell") return "webhook:retell";
+  if (pathname === "/webhooks/telnyx") return "webhook:telnyx";
   if (pathname.startsWith("/tools/")) return `tool:${pathname.slice(7)}`;
   if (pathname.startsWith("/admin/calls/")) return "admin:call";
   return pathname;
-}
-
-function providerTimestamp(value: number | undefined, fallback: Date): string {
-  if (value === undefined) return fallback.toISOString();
-  const milliseconds = value < 10_000_000_000 ? value * 1_000 : value;
-  const date = new Date(milliseconds);
-  return Number.isNaN(date.getTime()) ? fallback.toISOString() : date.toISOString();
 }
 
 function singleHeader(value: string | string[] | undefined): string | undefined {

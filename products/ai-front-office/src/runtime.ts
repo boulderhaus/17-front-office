@@ -1,7 +1,7 @@
 import { CapturingNotificationSender, InMemoryCalendar, InMemoryStore } from "./adapters/in-memory.js";
 import { GoogleCalendarAdapter } from "./adapters/google-calendar.js";
 import { PostgresStore } from "./adapters/postgres-store.js";
-import { TwilioSmsAdapter } from "./adapters/twilio-sms.js";
+import { TelnyxSmsAdapter } from "./adapters/telnyx.js";
 import { UnavailableCalendar, UnavailableNotificationSender } from "./adapters/unavailable.js";
 import { parseOwnerDestinations, type Environment } from "./config/environment.js";
 import { createDemoConfig } from "./domain/config.js";
@@ -28,7 +28,7 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
       store,
       calendar: new InMemoryCalendar(),
       sender: new CapturingNotificationSender(),
-      integrations: { Retell: false, "Google Calendar": false, "Twilio SMS": false, "Demo simulator": true },
+      integrations: { "Telnyx Voice": false, "Google Calendar": false, "Telnyx SMS": false, "Demo simulator": true },
       close: async () => undefined,
     };
   }
@@ -54,7 +54,8 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
     }
   }
   const googleConfigured = Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET);
-  const twilioConfigured = Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_SECRET && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID));
+  const telnyxVoiceConfigured = Boolean(env.TELNYX_API_KEY && env.TELNYX_PUBLIC_KEY && env.TELNYX_ASSISTANT_ID);
+  const telnyxSmsConfigured = Boolean(env.TELNYX_API_KEY && env.TELNYX_FROM_NUMBER && env.TELNYX_MESSAGING_PROFILE_ID);
   const calendar = googleConfigured
     ? new GoogleCalendarAdapter({
         clientId: env.GOOGLE_CLIENT_ID!,
@@ -63,21 +64,19 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
         calendarId: env.GOOGLE_CALENDAR_ID,
       })
     : new UnavailableCalendar();
-  const sender = twilioConfigured
-    ? new TwilioSmsAdapter({
-        accountSid: env.TWILIO_ACCOUNT_SID!,
-        authUser: env.TWILIO_AUTH_USER || env.TWILIO_ACCOUNT_SID!,
-        authSecret: env.TWILIO_AUTH_SECRET!,
+  const sender = telnyxSmsConfigured
+    ? new TelnyxSmsAdapter({
+        apiKey: env.TELNYX_API_KEY!,
+        fromNumber: env.TELNYX_FROM_NUMBER!,
+        messagingProfileId: env.TELNYX_MESSAGING_PROFILE_ID!,
         resolveDestination: (reference) => store.getIntegrationSecret(env.DEFAULT_TENANT_ID, "notifications", reference),
-        ...(env.TWILIO_FROM_NUMBER ? { fromNumber: env.TWILIO_FROM_NUMBER } : {}),
-        ...(env.TWILIO_MESSAGING_SERVICE_SID ? { messagingServiceSid: env.TWILIO_MESSAGING_SERVICE_SID } : {}),
       })
     : new UnavailableNotificationSender();
   return {
     store,
     calendar,
     sender,
-    integrations: { Retell: Boolean(env.RETELL_API_KEY), "Google Calendar": googleConfigured, "Twilio SMS": twilioConfigured },
+    integrations: { "Telnyx Voice": telnyxVoiceConfigured, "Google Calendar": googleConfigured, "Telnyx SMS": telnyxSmsConfigured },
     close: () => store.close(),
   };
 }

@@ -19,16 +19,20 @@ const schema = z.object({
   ),
   ADMIN_TOKEN: z.string().min(20),
   TOOL_TOKEN: z.string().min(20),
-  RETELL_API_KEY: z.string().optional(),
+  TELNYX_API_KEY: z.string().optional(),
+  TELNYX_PUBLIC_KEY: z.preprocess(
+    (value) => value === "" ? undefined : value,
+    z.string().refine((value) => Buffer.from(value, "base64").length === 32, "TELNYX_PUBLIC_KEY must decode to exactly 32 bytes").optional(),
+  ),
+  TELNYX_FROM_NUMBER: z.string().optional(),
+  TELNYX_MESSAGING_PROFILE_ID: z.string().uuid().optional(),
+  TELNYX_ASSISTANT_ID: z.string().min(1).optional(),
+  TELNYX_MESSAGING_APPROVED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  RECORDING_CONSENT_APPROVED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_REFRESH_TOKEN: z.string().optional(),
   GOOGLE_CALENDAR_ID: z.string().default("primary"),
-  TWILIO_ACCOUNT_SID: z.string().optional(),
-  TWILIO_AUTH_USER: z.string().optional(),
-  TWILIO_AUTH_SECRET: z.string().optional(),
-  TWILIO_FROM_NUMBER: z.string().optional(),
-  TWILIO_MESSAGING_SERVICE_SID: z.string().optional(),
   OWNER_DESTINATIONS_JSON: z.string().default("{}"),
 });
 
@@ -46,11 +50,11 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
     for (const key of ["DATABASE_URL", "DATA_ENCRYPTION_KEY"] as const) {
       if (!parsed[key]) throw new Error(`${key} is required outside demo mode`);
     }
-    if (parsed.TWILIO_FROM_NUMBER && !/^\+[1-9]\d{7,14}$/.test(parsed.TWILIO_FROM_NUMBER)) throw new Error("TWILIO_FROM_NUMBER must use E.164 format");
+    if (parsed.TELNYX_FROM_NUMBER && !/^\+[1-9]\d{7,14}$/.test(parsed.TELNYX_FROM_NUMBER)) throw new Error("TELNYX_FROM_NUMBER must use E.164 format");
     if (!parsed.PUBLIC_BASE_URL.startsWith("https://")) throw new Error("PUBLIC_BASE_URL must use HTTPS outside demo mode");
     parseOwnerDestinations(parsed.OWNER_DESTINATIONS_JSON, false);
     if (parsed.PROVIDER_TEST_MODE && !hasProviderTestConfiguration(parsed)) {
-      throw new Error("PROVIDER_TEST_MODE requires Retell, Google, Twilio, sender, and owner destination configuration");
+      throw new Error("PROVIDER_TEST_MODE requires Telnyx voice/SMS, Google, sender, and owner destination configuration");
     }
   }
   return parsed;
@@ -58,12 +62,13 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
 
 function hasProviderTestConfiguration(env: Environment): boolean {
   return Boolean(
-    env.RETELL_API_KEY
+    env.TELNYX_API_KEY
+    && env.TELNYX_PUBLIC_KEY
+    && env.TELNYX_FROM_NUMBER
+    && env.TELNYX_MESSAGING_PROFILE_ID
+    && env.TELNYX_ASSISTANT_ID
     && env.GOOGLE_CLIENT_ID
     && env.GOOGLE_CLIENT_SECRET
-    && env.TWILIO_ACCOUNT_SID
-    && env.TWILIO_AUTH_SECRET
-    && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID)
     && Object.keys(parseOwnerDestinations(env.OWNER_DESTINATIONS_JSON, false)).length > 0,
   );
 }

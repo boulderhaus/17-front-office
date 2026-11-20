@@ -15,11 +15,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "demo": "node --import tsx scripts/run-simulated-call.ts",
-    "simulate:launch": "node --import tsx scripts/run-launch-simulations.ts"
+    "simulate:launch": "node --import tsx scripts/run-launch-simulations.ts",
+    "configure:telnyx": "node --import tsx scripts/configure-telnyx.ts"
   },
   "dependencies": {
     "pg": "8.23.1",
-    "retell-sdk": "6.2.22",
     "zod": "4.6.7"
   },
   "devDependencies": {
