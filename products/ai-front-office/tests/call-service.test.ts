@@ -1,0 +1,311 @@
+import { beforeEach, describe, expect, it } from "vitest";
+import { CapturingNotificationSender, InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
+import { CallService } from "../src/application/call-service.js";
+import { OutboxWorker } from "../src/application/outbox-worker.js";
+import { createDemoConfig } from "../src/domain/config.js";
+import type { CallSummaryInput, CollectedCallFields } from "../src/domain/models.js";
+import type { Clock } from "../src/ports.js";
+
+class MutableClock implements Clock {
+  constructor(private value: Date) {}
+  now(): Date { return new Date(this.value); }
+  advance(milliseconds: number): void { this.value = new Date(this.value.getTime() + milliseconds); }
+}
+
+const baseFields: CollectedCallFields = {
+  callerName: "Test Caller",
+  companyName: null,
+  callbackNumber: "+15555550100",
+  address: "100 Main St, Springfield",
+  serviceCategory: "HVAC maintenance",
+  serviceCategoryConfidence: 0.95,
+  problemDescription: "Routine maintenance",
+  equipmentDetails: "Residential forced-air system",
+  accessNotes: null,
+  requestedStart: null,
+  explicitSlotConfirmation: false,
+  diagnosticFeeAccepted: true,
+  humanRequested: false,
+  confidence: 0.95,
+};
+
+describe("call outcomes", () => {
+  let store: InMemoryStore;
+  let calendar: InMemoryCalendar;
+  let sender: CapturingNotificationSender;
+  let clock: MutableClock;
+  let service: CallService;
+
+  beforeEach(async () => {
+    store = new InMemoryStore();
+    calendar = new InMemoryCalendar();
+    sender = new CapturingNotificationSender();
+    clock = new MutableClock(new Date("2026-01-15T08:00:00.000Z"));
+    await store.saveConfig(createDemoConfig());
+    service = new CallService(store, calendar, clock, "https://front-office.example");
+  });
+
+  it("routes a 2 a.m. no-heat emergency to the owner without booking", async () => {
+    await start("emergency");
+    const triage = await service.triageCall({ tenantId: "demo", providerCallId: "emergency", fromNumber: "+15555550100", callerName: "Test Caller", problemDescription: "No heat and an infant is in the house" });
+    expect(triage.severity).toBe("urgent");
+    const call = await service.finalize(summary("emergency", {
+      problemDescription: "No heat and an infant is in the house",
+      serviceCategory: "HVAC repair",
+    }));
+    expect(call.emergency?.severity).toBe("urgent");
+    expect(call.outcome).toBe("handoff_queued");
+    expect(calendar.events).toHaveLength(0);
+    expect((await new OutboxWorker(store, sender, clock).runOnce()).sent).toBe(2);
+    expect(sender.sent[0]?.priority).toBe("high");
+    expect(sender.sent[0]?.body).toContain("URGENT CALL");
+  });
+
+  it("alerts on an emergency before confirmation or fee gates", async () => {
+    await start("emergency-booking");
+    const result = await service.bookConfirmedSlot({
+      tenantId: "demo", providerCallId: "emergency-booking", slotStart: "2026-01-15T15:00:00Z",
+      callerName: "Test Caller", callbackNumber: "+15555550100", address: "100 Main St, Springfield",
+      serviceCategory: "HVAC repair", problemDescription: "No heat and an infant is in the house",
+      explicitConfirmation: false, diagnosticFeeAccepted: false,
+    });
+    expect(result.status).toBe("pending");
+    expect(calendar.events).toHaveLength(0);
+    await new OutboxWorker(store, sender, clock).runOnce();
+    expect(sender.sent[0]?.body).toContain("URGENT CALL");
+  });
+
+  it("counts a direct booking only after read-back, complete evidence, and customer confirmation queue", async () => {
+    await enableDirectBooking();
+    await start("verified");
+    const slot = "2026-01-15T15:00:00.000Z";
+    expect((await book("verified", slot)).status).toBe("confirmed");
+    const call = await service.finalize(summary("verified", { requestedStart: slot, explicitSlotConfirmation: true }));
+    expect(call.outcome).toBe("booked");
+    expect(call.qualityFlags).toEqual([]);
+    const booking = await store.getBookingForCall(call.id);
+    expect(booking?.writeVerifiedAt).not.toBeNull();
+    expect(booking?.confirmationNotificationId).not.toBeNull();
+  });
+
+  it("keeps routine maintenance routine", async () => {
+    await start("routine");
+    const call = await service.finalize(summary("routine"));
+    expect(call.emergency?.emergency).toBe(false);
+    expect(call.outcome).toBe("pending_confirmation");
+  });
+
+  it("defaults to owner-confirmation mode instead of promising an appointment", async () => {
+    await configureApprovedFee();
+    await start("confirm-mode");
+    const result = await book("confirm-mode", "2026-01-15T15:00:00Z");
+    expect(result.status).toBe("pending");
+    expect(calendar.events).toHaveLength(0);
+    const call = await store.getCallByProviderId("confirm-mode");
+    expect((await store.getCallbackTaskForCall(call!.id))?.reason).toContain("Confirm requested appointment");
+  });
+
+  it("refuses fee-gated booking when no owner-approved price exists", async () => {
+    await start("missing-fee");
+    const result = await book("missing-fee", "2026-01-15T15:00:00Z");
+    expect(result.status).toBe("pending");
+    expect(result.message).toContain("No owner-approved diagnostic fee");
+    expect(calendar.events).toHaveLength(0);
+  });
+
+  it("queues and alerts on an immediate human request", async () => {
+    const result = await service.queueHumanHandoff({ tenantId: "demo", providerCallId: "human", fromNumber: "+15555550101", callerName: "Angry Caller", problemDescription: "I need a person now" });
+    expect(result.transferAvailable).toBe(true);
+    await new OutboxWorker(store, sender, clock).runOnce();
+    expect(sender.sent[0]?.body).toContain("REQUESTED A HUMAN");
+  });
+
+  it("delivers a later urgent alert before an earlier routine alert", async () => {
+    await start("routine-priority");
+    await service.finalize(summary("routine-priority"));
+    await service.triageCall({ tenantId: "demo", providerCallId: "urgent-priority", fromNumber: "+15555550101", problemDescription: "No heat and an infant is in the house" });
+    expect((await new OutboxWorker(store, sender, clock).runOnce(1)).sent).toBe(1);
+    expect(sender.sent[0]?.priority).toBe("high");
+    expect(sender.sent[0]?.body).toContain("URGENT CALL");
+  });
+
+  it("does not book an address outside the configured service area", async () => {
+    await configureApprovedFee();
+    await start("address");
+    const result = await service.bookConfirmedSlot({ tenantId: "demo", providerCallId: "address", slotStart: "2026-01-15T15:00:00Z", callerName: "Caller", callbackNumber: "+15555550102", address: "Unknown rural route", serviceCategory: "HVAC repair", problemDescription: "Hard-to-parse location", explicitConfirmation: true, diagnosticFeeAccepted: true });
+    expect(result.status).toBe("pending");
+    expect(result.message).toContain("outside the service area");
+    expect(calendar.events).toHaveLength(0);
+  });
+
+  it("serializes two callers competing for overlapping slots", async () => {
+    await enableDirectBooking();
+    await Promise.all([start("race-a"), start("race-b")]);
+    const slot = "2026-01-15T15:00:00Z";
+    const results = await Promise.all([book("race-a", slot), book("race-b", "2026-01-15T15:30:00Z")]);
+    expect(results.map((result) => result.status).sort()).toEqual(["confirmed", "conflict"]);
+    expect(calendar.events).toHaveLength(1);
+  });
+
+  it("still alerts the owner when the calendar fails mid-call", async () => {
+    await enableDirectBooking();
+    await start("failure");
+    calendar.failAvailability = true;
+    const booking = await book("failure", "2026-01-15T15:00:00Z");
+    expect(booking.status).toBe("pending");
+    await service.finalize(summary("failure", { requestedStart: "2026-01-15T15:00:00Z", explicitSlotConfirmation: true }));
+    await new OutboxWorker(store, sender, clock).runOnce();
+    expect(sender.sent).toHaveLength(1);
+  });
+
+  it("fails closed when a calendar write cannot be read back", async () => {
+    await enableDirectBooking();
+    await start("readback");
+    calendar.failVerify = true;
+    const slot = "2026-01-15T15:00:00Z";
+    expect((await book("readback", slot)).status).toBe("unknown");
+    const call = await service.finalize(summary("readback", { requestedStart: slot, explicitSlotConfirmation: true }));
+    expect(call.outcome).toBe("pending_confirmation");
+    expect(call.qualityFlags).toContain("system_write_not_verified");
+  });
+
+  it("deduplicates repeated call-end webhooks and owner alerts", async () => {
+    await start("duplicate");
+    const input = summary("duplicate");
+    await service.finalize(input);
+    await service.finalize(input);
+    expect((await store.listNotifications((await store.getCallByProviderId("duplicate"))!.id))).toHaveLength(1);
+  });
+
+  it("creates one call record when provider events arrive concurrently", async () => {
+    await Promise.all([
+      service.recordStarted({ eventId: "start:concurrent:a", tenantId: "demo", providerCallId: "concurrent", fromNumber: "+15555550100", startedAt: clock.now().toISOString() }),
+      service.recordStarted({ eventId: "start:concurrent:b", tenantId: "demo", providerCallId: "concurrent", fromNumber: "+15555550100", startedAt: clock.now().toISOString() }),
+    ]);
+    expect(await store.listCalls("demo", 10)).toHaveLength(1);
+  });
+
+  it("does not let a delayed sparse provider event erase richer call evidence", async () => {
+    await start("out-of-order");
+    await service.finalize(summary("out-of-order"));
+    const sparse: CollectedCallFields = {
+      callerName: null, companyName: null, callbackNumber: null, address: null, serviceCategory: null,
+      serviceCategoryConfidence: 0, problemDescription: "", equipmentDetails: null, accessNotes: null,
+      requestedStart: null, explicitSlotConfirmation: false, diagnosticFeeAccepted: false,
+      humanRequested: false, confidence: 0,
+    };
+    const call = await service.finalize({
+      ...summary("out-of-order"), webhookEventId: "ended:out-of-order:retry", fields: sparse,
+      transcript: null, recordingUrl: null, consentState: "unknown",
+    });
+    expect(call.fields.callerName).toBe("Test Caller");
+    expect(call.fields.serviceCategory).toBe("HVAC maintenance");
+    expect(call.transcript).toBe("Synthetic transcript");
+    expect(call.recordingUrl).toBe("https://example.invalid/recording");
+    expect(call.consentState).toBe("disclosed");
+  });
+
+  it("does not let a sparse retry downgrade an earlier model-assisted emergency", async () => {
+    await start("emergency-replay");
+    await service.finalize({ ...summary("emergency-replay"), llmEmergencyScore: 0.9, llmEmergencyReason: "Caller reports immediate property danger" });
+    const sparse: CollectedCallFields = {
+      callerName: null, companyName: null, callbackNumber: null, address: null, serviceCategory: null,
+      serviceCategoryConfidence: 0, problemDescription: "", equipmentDetails: null, accessNotes: null,
+      requestedStart: null, explicitSlotConfirmation: false, diagnosticFeeAccepted: false,
+      humanRequested: false, confidence: 0,
+    };
+    const call = await service.finalize({
+      ...summary("emergency-replay"), webhookEventId: "ended:emergency-replay:retry", fields: sparse,
+      transcript: null, recordingUrl: null, consentState: "unknown",
+    });
+    expect(call.emergency?.emergency).toBe(true);
+    expect(call.emergency?.severity).toBe("urgent");
+    expect(call.outcome).toBe("handoff_queued");
+  });
+
+  it.each([
+    { transcript: null, recordingUrl: "https://example.invalid/recording", flag: "transcript_missing" },
+    { transcript: "Synthetic transcript", recordingUrl: null, flag: "recording_missing" },
+  ])("does not count a booking when required evidence is incomplete", async ({ transcript, recordingUrl, flag }) => {
+    await enableDirectBooking();
+    await start("evidence");
+    const slot = "2026-01-15T15:00:00Z";
+    await book("evidence", slot);
+    const call = await service.finalize({ ...summary("evidence", { requestedStart: slot, explicitSlotConfirmation: true }), transcript, recordingUrl });
+    expect(call.outcome).toBe("pending_confirmation");
+    expect(call.qualityFlags).toContain(flag);
+  });
+
+  it("excludes provider-classified spam from billing", async () => {
+    await start("spam");
+    const call = await service.finalize({ ...summary("spam"), isSpam: true });
+    expect(call.billingDisposition).toBe("spam_excluded");
+    expect(call.outcome).toBe("ignored_spam");
+    expect(await store.listNotifications(call.id)).toHaveLength(0);
+  });
+
+  it("recovers a dropped call with an owner task and caller text", async () => {
+    await start("dropped");
+    clock.advance(15 * 60_000 + 1);
+    expect(await service.recoverStaleCalls("demo")).toBe(1);
+    const call = await store.getCallByProviderId("dropped");
+    expect(call?.outcome).toBe("handoff_queued");
+    expect((await store.getCallbackTaskForCall(call!.id))?.status).toBe("open");
+    expect((await store.listNotifications(call!.id)).map((item) => item.idempotencyKey)).toContain(`missed-call-text:${call!.id}`);
+  });
+
+  it("turns a dead customer confirmation into an explicit owner failure alert", async () => {
+    await enableDirectBooking();
+    await start("sms-failure");
+    const slot = "2026-01-15T15:00:00Z";
+    await book("sms-failure", slot);
+    const call = await service.finalize(summary("sms-failure", { requestedStart: slot, explicitSlotConfirmation: true }));
+    sender.fail = true;
+    const worker = new OutboxWorker(store, sender, clock);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await worker.runOnce();
+      clock.advance(301_000);
+    }
+    const keys = (await store.listNotifications(call.id)).map((item) => item.idempotencyKey);
+    expect(keys.some((key) => key.startsWith("customer-sms-failure:"))).toBe(true);
+  });
+
+  async function start(providerCallId: string): Promise<void> {
+    await service.recordStarted({ eventId: `start:${providerCallId}`, tenantId: "demo", providerCallId, fromNumber: "+15555550100", startedAt: clock.now().toISOString() });
+  }
+
+  async function book(providerCallId: string, slotStart: string): Promise<{ status: "confirmed" | "pending" | "conflict" | "unknown"; message: string }> {
+    return service.bookConfirmedSlot({ tenantId: "demo", providerCallId, slotStart, callerName: "Test Caller", callbackNumber: "+15555550100", address: "100 Main St, Springfield", serviceCategory: "HVAC maintenance", problemDescription: "Routine service needed", explicitConfirmation: true, diagnosticFeeAccepted: true });
+  }
+
+  async function enableDirectBooking(): Promise<void> {
+    await store.saveConfig({
+      ...createDemoConfig(),
+      bookingMode: "direct",
+      priceSnippets: [{ label: "Diagnostic", text: "The diagnostic visit is $89." }],
+    });
+  }
+
+  async function configureApprovedFee(): Promise<void> {
+    await store.saveConfig({
+      ...createDemoConfig(),
+      priceSnippets: [{ label: "Diagnostic", text: "The diagnostic visit is $89." }],
+    });
+  }
+
+  function summary(providerCallId: string, fields: Partial<CollectedCallFields> = {}): CallSummaryInput {
+    return {
+      webhookEventId: `end:${providerCallId}`,
+      tenantId: "demo",
+      providerCallId,
+      fromNumber: "+15555550100",
+      startedAt: "2026-01-15T08:00:00.000Z",
+      endedAt: clock.now().toISOString(),
+      durationSeconds: 120,
+      fields: { ...baseFields, ...fields },
+      transcript: "Synthetic transcript",
+      recordingUrl: "https://example.invalid/recording",
+      consentState: "disclosed",
+    };
+  }
+});
