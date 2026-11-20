@@ -17,4 +17,4 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/migrations ./migrations
 USER node
 EXPOSE 8787
-CMD ["node", "dist/src/server.js"]
+CMD ["sh", "-c", "node dist/scripts/migrate.js && exec node dist/src/server.js"]

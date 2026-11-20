@@ -20,6 +20,7 @@ const worker = new OutboxWorker(runtime.store, runtime.sender, systemClock);
 const recovery = new CallService(runtime.store, runtime.calendar, systemClock, env.PUBLIC_BASE_URL);
 let workerActive = false;
 let nextRecoveryAt = 0;
+let nextRetentionAt = 0;
 const runWorker = async (): Promise<void> => {
   if (workerActive) return;
   workerActive = true;
@@ -30,6 +31,13 @@ const runWorker = async (): Promise<void> => {
       nextRecoveryAt = Date.now() + 30_000;
       const recovered = await recovery.recoverStaleCalls(env.DEFAULT_TENANT_ID);
       if (recovered > 0) logger({ level: "warn", event: "stale_calls_recovered", recovered });
+    }
+    if (Date.now() >= nextRetentionAt) {
+      nextRetentionAt = Date.now() + 60 * 60_000;
+      const config = await runtime.store.getConfig(env.DEFAULT_TENANT_ID);
+      const cutoff = new Date(Date.now() - config.dataRetentionDays * 24 * 60 * 60_000).toISOString();
+      const deleted = await runtime.store.deleteExpiredCalls(env.DEFAULT_TENANT_ID, cutoff);
+      if (deleted > 0) logger({ level: "info", event: "retention_calls_deleted", deleted, retentionDays: config.dataRetentionDays });
     }
   } catch (error) {
     logger({ level: "error", event: "outbox_failed", error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });

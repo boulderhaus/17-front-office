@@ -223,6 +223,15 @@ describe("call outcomes", () => {
     expect(call.outcome).toBe("handoff_queued");
   });
 
+  it("deletes expired call data and dependent records", async () => {
+    await start("retention");
+    const call = await service.finalize(summary("retention"));
+    expect(await store.deleteExpiredCalls("demo", "2027-01-01T00:00:00.000Z")).toBe(1);
+    expect(await store.getCall(call.id)).toBeNull();
+    expect(await store.listNotifications(call.id)).toEqual([]);
+    expect(await store.getCallbackTaskForCall(call.id)).toBeNull();
+  });
+
   it.each([
     { transcript: null, recordingUrl: "https://example.invalid/recording", flag: "transcript_missing" },
     { transcript: "Synthetic transcript", recordingUrl: null, flag: "recording_missing" },

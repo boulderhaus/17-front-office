@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { z } from "zod";
-import { renderCallDetail, renderConfig, renderDashboard, renderLogin, renderPrompt } from "../admin/render.js";
+import { renderCallDetail, renderConfig, renderDashboard, renderLogin, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderTerms } from "../admin/render.js";
+import { buildActivationReport, type ActivationReport } from "../application/readiness.js";
+import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService } from "../application/call-service.js";
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
@@ -109,6 +111,16 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       await dependencies.store.ping();
       return sendJson(response, 200, { status: "ready" });
     }
+    if (method === "GET" && url.pathname === "/activationz") {
+      const report = await getActivationReport();
+      return sendJson(response, report.go ? 200 : 503, { status: report.go ? "go" : "no_go", mode: report.mode, blocking_count: report.blocking.length });
+    }
+    if (method === "GET" && url.pathname === "/privacy") {
+      return sendHtml(response, 200, renderPrivacy(await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID)));
+    }
+    if (method === "GET" && url.pathname === "/terms") {
+      return sendHtml(response, 200, renderTerms(await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID)));
+    }
     if (method === "POST" && url.pathname === "/webhooks/retell") return handleRetell(request, response);
     if (method === "POST" && url.pathname === "/tools/check-availability") return handleAvailability(request, response);
     if (method === "POST" && url.pathname === "/tools/triage") return handleTriage(request, response);
@@ -121,10 +133,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   async function handleRetell(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const rawBody = await readBody(request);
     const signature = singleHeader(request.headers["x-retell-signature"]);
+    if (!dependencies.env.DEMO_MODE && !dependencies.env.RETELL_API_KEY) throw new HttpError(503, "Retell is not configured");
     const verified = dependencies.env.DEMO_MODE
       ? bearerMatches(request, dependencies.env.TOOL_TOKEN)
       : await verifyRetellWebhook(rawBody, dependencies.env.RETELL_API_KEY!, signature);
     if (!verified) throw new HttpError(401, "Invalid webhook signature");
+    await requireOperational();
     const envelope = parseRetellEnvelope(rawBody);
     if (envelope.event === "call_started") {
       await service.recordStarted({
@@ -142,6 +156,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
 
   async function handleAvailability(request: IncomingMessage, response: ServerResponse): Promise<void> {
     requireToolAuth(request);
+    await requireOperational();
     const input = availabilitySchema.parse(unwrapToolPayload(parseJson<unknown>(await readBody(request))));
     const result = await service.checkAvailability({
       tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
@@ -154,6 +169,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
 
   async function handleTriage(request: IncomingMessage, response: ServerResponse): Promise<void> {
     requireToolAuth(request);
+    await requireOperational();
     const input = triageSchema.parse(unwrapToolPayload(parseJson<unknown>(await readBody(request))));
     const result = await service.triageCall({
       tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
@@ -169,6 +185,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
 
   async function handleBooking(request: IncomingMessage, response: ServerResponse): Promise<void> {
     requireToolAuth(request);
+    await requireOperational();
     const input = bookingSchema.parse(unwrapToolPayload(parseJson<unknown>(await readBody(request))));
     const result = await service.bookConfirmedSlot({
       tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
@@ -187,6 +204,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
 
   async function handleHandoff(request: IncomingMessage, response: ServerResponse): Promise<void> {
     requireToolAuth(request);
+    await requireOperational();
     const input = handoffSchema.parse(unwrapToolPayload(parseJson<unknown>(await readBody(request))));
     const result = await service.queueHumanHandoff({
       tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
@@ -233,6 +251,26 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (!bearer && !sessionAuthorized) return sendHtml(response, 401, renderLogin());
     const csrf = session ? csrfForSession(session, dependencies.env.ADMIN_TOKEN) : "bearer-auth";
 
+    if (method === "GET" && url.pathname === "/admin/readiness") {
+      const [report, config] = await Promise.all([
+        getActivationReport(),
+        dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID),
+      ]);
+      return sendHtml(response, 200, renderReadiness(report, config));
+    }
+    if (method === "GET" && url.pathname === "/admin/simulator") {
+      return sendHtml(response, 200, renderSimulator(null, csrf));
+    }
+    if (method === "POST" && url.pathname === "/admin/simulator") {
+      const form = parseForm(await readBody(request, 16_000));
+      if (!bearer && (!session || !verifyCsrf(session, form.get("csrf"), dependencies.env.ADMIN_TOKEN))) throw new HttpError(403, "Invalid CSRF token");
+      const selected = form.get("scenario");
+      const valid = SIMULATION_SCENARIOS.some(([id]) => id === selected);
+      if (selected !== "all" && !valid) throw new HttpError(400, "Unknown simulator scenario");
+      const results = selected === "all" ? await runAllSimulations() : [await runSimulation(selected as SimulationScenarioId)];
+      return sendHtml(response, 200, renderSimulator(results, csrf));
+    }
+
     if (method === "GET" && url.pathname === "/admin/integrations/google/start") {
       if (!dependencies.env.GOOGLE_CLIENT_ID || !dependencies.env.GOOGLE_CLIENT_SECRET) throw new HttpError(503, "Google OAuth is not configured on the server");
       const attempt = createGoogleOAuthAttempt(dependencies.env.ADMIN_TOKEN, dependencies.env.NODE_ENV === "production");
@@ -254,12 +292,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
 
     if (method === "GET" && url.pathname === "/admin") {
-      const [config, calls, googleConnected] = await Promise.all([
+      const [config, calls, googleConnected, activation] = await Promise.all([
         dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID),
         dependencies.store.listCalls(dependencies.env.DEFAULT_TENANT_ID, 50),
         isGoogleConnected(dependencies.env, dependencies.store),
+        getActivationReport(),
       ]);
-      return sendHtml(response, 200, renderDashboard({ config, calls, csrf, integrations: { ...dependencies.integrations, "Google Calendar": googleConnected } }));
+      return sendHtml(response, 200, renderDashboard({ config, calls, csrf, activation, integrations: { ...dependencies.integrations, "Google Calendar": googleConnected } }));
     }
     if (method === "GET" && url.pathname === "/admin/config") {
       const [config, googleConnected, ownerPhone] = await Promise.all([
@@ -292,6 +331,14 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
       return sendHtml(response, 200, renderPrompt(config));
     }
+    const deleteCallMatch = /^\/admin\/calls\/([0-9a-f-]+)\/delete$/i.exec(url.pathname);
+    if (method === "POST" && deleteCallMatch?.[1]) {
+      const form = parseForm(await readBody(request, 16_000));
+      if (!bearer && (!session || !verifyCsrf(session, form.get("csrf"), dependencies.env.ADMIN_TOKEN))) throw new HttpError(403, "Invalid CSRF token");
+      if (form.get("confirm") !== "delete") throw new HttpError(400, "Deletion confirmation is required");
+      if (!await dependencies.store.deleteCall(dependencies.env.DEFAULT_TENANT_ID, deleteCallMatch[1])) throw new HttpError(404, "Call not found");
+      return redirect(response, "/admin");
+    }
     const callMatch = /^\/admin\/calls\/([0-9a-f-]+)$/i.exec(url.pathname);
     if (method === "GET" && callMatch?.[1]) {
       const call = await dependencies.store.getCall(callMatch[1]);
@@ -303,13 +350,36 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         dependencies.store.listToolEvents(call.id),
         dependencies.store.listNotifications(call.id),
       ]);
-      return sendHtml(response, 200, renderCallDetail({ config, call, booking, callbackTask, events, notifications }));
+      return sendHtml(response, 200, renderCallDetail({ config, call, booking, callbackTask, events, notifications, csrf }));
     }
     throw new HttpError(404, "Not found");
   }
 
   function requireToolAuth(request: IncomingMessage): void {
     if (!bearerMatches(request, dependencies.env.TOOL_TOKEN)) throw new HttpError(401, "Invalid tool credentials");
+  }
+
+  async function getActivationReport(): Promise<ActivationReport> {
+    const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
+    const [googleConnected, ownerDestinations] = await Promise.all([
+      isGoogleConnected(dependencies.env, dependencies.store),
+      Promise.all(config.ownerNotificationRefs.map((reference) => dependencies.store.getIntegrationSecret(config.tenantId, "notifications", reference))),
+    ]);
+    return buildActivationReport({
+      env: dependencies.env,
+      config,
+      googleConnected,
+      ownerPhoneConfigured: ownerDestinations.some(Boolean),
+    });
+  }
+
+  async function requireOperational(): Promise<void> {
+    if (dependencies.env.DEMO_MODE) return;
+    const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
+    if (config.paused) throw new HttpError(503, "Service is paused");
+    if (dependencies.env.PROVIDER_TEST_MODE) return;
+    const report = await getActivationReport();
+    if (!report.go) throw new HttpError(503, "Commercial activation gate is not satisfied");
   }
 }
 
@@ -368,6 +438,14 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
   if (bookingMode !== "confirm" && bookingMode !== "direct") throw new HttpError(400, "Invalid booking mode");
   const monthlyDollars = Number(form.get("flatMonthlyPrice") ?? "0");
   if (!Number.isFinite(monthlyDollars) || monthlyDollars < 49 || monthlyDollars > 99) throw new HttpError(400, "Flat monthly price must be between $49 and $99");
+  const serviceState = required("serviceState");
+  if (serviceState !== "paused" && serviceState !== "active") throw new HttpError(400, "Invalid service state");
+  const answerAfterRings = Number(form.get("answerAfterRings") ?? "0");
+  if (!Number.isInteger(answerAfterRings) || answerAfterRings < 2 || answerAfterRings > 12) throw new HttpError(400, "Answer-after-rings must be between 2 and 12");
+  const dataRetentionDays = Number(form.get("dataRetentionDays") ?? "0");
+  if (!Number.isInteger(dataRetentionDays) || dataRetentionDays < 7 || dataRetentionDays > 365) throw new HttpError(400, "Data retention must be 7–365 days");
+  const supportEmail = form.get("supportEmail")?.trim() || null;
+  if (supportEmail && !z.string().email().safeParse(supportEmail).success) throw new HttpError(400, "Support email is invalid");
   const list = (name: string): string[] => (form.get(name) ?? "").split(",").map((item) => item.trim()).filter(Boolean).slice(0, 100);
   const defaultServiceDurationMinutes = Number(form.get("defaultServiceDurationMinutes") ?? "0");
   if (!Number.isInteger(defaultServiceDurationMinutes) || defaultServiceDurationMinutes < 15 || defaultServiceDurationMinutes > 480) throw new HttpError(400, "Default service duration must be 15–480 minutes");
@@ -380,10 +458,12 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
   if (holidayDates.some((value) => !isIsoDate(value))) throw new HttpError(400, "Holiday dates must use valid YYYY-MM-DD values");
   return {
     ...current,
+    paused: serviceState === "paused",
     businessName: required("businessName").slice(0, 120),
     greeting: required("greeting").slice(0, 1_000),
     timezone,
     operationMode: operationMode as BusinessConfig["operationMode"],
+    answerAfterRings,
     bookingMode,
     serviceAreaTerms: list("serviceAreaTerms"),
     emergencyKeywords: list("emergencyKeywords"),
@@ -404,6 +484,8 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
     }).filter((item) => item.term && item.spokenAs),
     requireDiagnosticFeeAcceptance: form.has("requireDiagnosticFeeAcceptance"),
     recordingDisclosure: required("recordingDisclosure").slice(0, 1_000),
+    dataRetentionDays,
+    supportEmail,
     flatMonthlyPriceCents: Math.round(monthlyDollars * 100),
     afterHours: {
       ...current.afterHours,

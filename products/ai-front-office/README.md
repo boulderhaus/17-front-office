@@ -4,7 +4,7 @@ A narrow, supervised AI receptionist for solo and 1–10-person home-service sho
 
 ## Honest status
 
-The application is buildable, tested, containerized, and deployable to staging. It is not a proven live production service until real Retell, Google, Twilio, Postgres, public HTTPS, recording-consent language, and a target shop's routing configuration complete the launch checklist below. Jobber is the intended primary system of record; Google Calendar is the working solo-mode bridge because Jobber mutations require a registered app, OAuth credentials, scopes, and schema validation in Jobber GraphiQL.
+The application is buildable, tested, containerized, and deployed to a fail-closed Railway staging service with isolated Postgres and public HTTPS. It is not a proven customer service until real Retell, Google, and Twilio accounts, recording-consent approval, and a target shop's routing configuration complete the launch checklist below. Jobber is the intended primary system of record; Google Calendar is the working solo-mode bridge because Jobber mutations require a registered app, OAuth credentials, scopes, and schema validation in Jobber GraphiQL.
 
 ## Product rules
 
@@ -24,6 +24,7 @@ npm ci
 npm run build
 npm run check
 npm run demo
+npm run simulate:launch
 ```
 
 The deterministic demo needs no external credentials. For the admin UI:
@@ -43,11 +44,12 @@ Open `http://127.0.0.1:8787/admin` and sign in with `ADMIN_TOKEN`.
 1. Copy `.env.example` to a private environment store; never commit it.
 2. Provision Postgres and run `npm run migrate` once.
 3. Start the server with `npm start` or `docker compose up --build`.
-4. Put the service behind public HTTPS and verify `/healthz` and `/readyz`.
+4. Put the service behind public HTTPS and verify `/healthz` and `/readyz`. `/activationz` must remain `503` until real provider proof is recorded.
 5. In Retell, paste the prompt from `/admin/prompt`, configure every authenticated custom tool with `TOOL_TOKEN`, configure provider-native warm transfer, and point signed webhooks to `/webhooks/retell`.
 6. Connect Google Calendar through `/admin/config` or inject a refresh token server-side.
 7. Configure Twilio sender credentials and named owner destinations.
-8. Run every acceptance scenario in `docs/LAUNCH-CHECKLIST.md` with a test number before forwarding the shop's line.
+8. Keep the service paused, run `npm run simulate:launch`, then use `PROVIDER_TEST_MODE=true` for the live smoke matrix in `docs/LAUNCH-CHECKLIST.md`.
+9. Only after the live smoke matrix passes: record its ISO timestamp in `LIVE_PROVIDER_PROOF_AT`, disable provider-test mode, unpause, and require `/activationz=200` before forwarding the shop's line.
 
 ## Architecture
 
@@ -64,13 +66,15 @@ The application ports isolate the voice provider, calendar/system of record, not
 
 ## Known limitations
 
-- No real provider call, SMS, or deployment has been performed in this repository because credentials and a live destination were not provided.
+- Staging is live at `https://ai-front-office-production.up.railway.app`; it is intentionally paused and returns `503` from `/activationz`. No real provider call, SMS, transfer, or calendar write has been performed because live provider credentials and an approved test destination were not provided.
 - Jobber write operations are not implemented. Do not guess its GraphQL mutations; validate them in the registered app's versioned GraphiQL schema first.
 - Housecall Pro is not implemented.
 - Legal recording/consent language is configurable but must be reviewed for every launch jurisdiction.
 - Retell warm transfer is provider-native; this service creates the callback safety net but cannot prove transfer behavior without a configured agent and test call.
 - Twilio's documented Programmable Messaging create endpoint does not expose a client idempotency key. The durable outbox prevents duplicate jobs inside this service, but an accepted request followed by a lost HTTP response can still produce a duplicate SMS when retried. Validate this failure mode with a provisioned sender and keep messages safe to receive twice.
 - Coverage schedules and ring-delay/overflow routing must also be configured at the carrier, Twilio, or Retell layer; the admin mode records the desired policy but cannot force an upstream phone carrier to forward a call.
-- Flat product pricing is configuration only; subscriptions and usage enforcement are not implemented.
+- Flat product pricing is configuration only; subscriptions and usage enforcement are not implemented. The beta must be billed manually.
 
-See `docs/REQUIREMENTS.md`, `docs/DECISION-DELTA.md`, `docs/REA-METHOD.md`, `docs/PROVIDER-DECISION.md`, `docs/PRODUCT-STRATEGY.md`, and `docs/LAUNCH-CHECKLIST.md`.
+The service is paused by default. The authenticated admin provides **Readiness**, **Simulator**, configuration, call history, and permanent call deletion; public `/privacy` and `/terms` pages describe the current beta boundaries.
+
+See `docs/RELEASE-PACKET.md`, `docs/FIRST-USER-ONBOARDING.md`, `docs/REQUIREMENTS.md`, `docs/DECISION-DELTA.md`, `docs/REA-METHOD.md`, `docs/PROVIDER-DECISION.md`, `docs/PRODUCT-STRATEGY.md`, and `docs/LAUNCH-CHECKLIST.md`.

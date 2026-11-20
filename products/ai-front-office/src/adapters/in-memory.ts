@@ -11,6 +11,7 @@ import type {
   OutboxNotification,
   ToolEvent,
 } from "../domain/models.js";
+import { normalizeBusinessConfig } from "../domain/config.js";
 
 class KeyedMutex {
   readonly #tails = new Map<string, Promise<void>>();
@@ -60,7 +61,7 @@ export class InMemoryStore implements Store {
   async getConfig(tenantId: string): Promise<BusinessConfig> {
     const config = this.configs.get(tenantId);
     if (!config) throw new Error(`No business configuration for tenant ${tenantId}`);
-    return structuredClone(config);
+    return structuredClone(normalizeBusinessConfig(config));
   }
 
   async saveConfig(config: BusinessConfig): Promise<void> {
@@ -93,6 +94,26 @@ export class InMemoryStore implements Store {
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
       .slice(0, limit)
       .map((call) => structuredClone(call));
+  }
+
+  async deleteCall(tenantId: string, callId: string): Promise<boolean> {
+    const call = this.calls.get(callId);
+    if (!call || call.tenantId !== tenantId) return false;
+    this.calls.delete(callId);
+    for (const [id, booking] of this.bookings) if (booking.callId === callId) this.bookings.delete(id);
+    for (const [id, task] of this.callbackTasks) if (task.callId === callId) this.callbackTasks.delete(id);
+    this.toolEvents.delete(callId);
+    for (const [id, notification] of this.notifications) if (notification.callId === callId) this.notifications.delete(id);
+    for (const [key, customer] of this.customers) if (customer.lastCallId === callId) this.customers.delete(key);
+    return true;
+  }
+
+  async deleteExpiredCalls(tenantId: string, endedBefore: string): Promise<number> {
+    const ids = [...this.calls.values()]
+      .filter((call) => call.tenantId === tenantId && call.endedAt !== null && call.endedAt < endedBefore)
+      .map((call) => call.id);
+    for (const id of ids) await this.deleteCall(tenantId, id);
+    return ids.length;
   }
 
   async upsertCustomer(customer: CustomerRecord): Promise<void> {

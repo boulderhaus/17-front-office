@@ -127,6 +127,7 @@ export interface OutboxNotification {
 
 export interface BusinessConfig {
   tenantId: string;
+  paused: boolean;
   businessName: string;
   greeting: string;
   timezone: string;
@@ -139,6 +140,7 @@ export interface BusinessConfig {
   calendarConnectionRef: string | null;
   bookingMode: "confirm" | "direct";
   operationMode: "after_hours" | "overflow" | "always";
+  answerAfterRings: number;
   afterHours: {
     weekdayStart: string;
     weekdayEnd: string;
@@ -151,6 +153,8 @@ export interface BusinessConfig {
   serviceCategories: string[];
   requireDiagnosticFeeAcceptance: boolean;
   recordingDisclosure: string;
+  dataRetentionDays: number;
+  supportEmail: string | null;
   flatMonthlyPriceCents: number;
 }
 

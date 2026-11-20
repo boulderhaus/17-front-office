@@ -6,6 +6,7 @@
 - `npm audit --audit-level=high`
 - `npm run check`
 - `npm run demo`
+- `npm run simulate:launch` returns 15/15 PASS.
 - Build container and apply migration to a disposable Postgres database.
 
 ## Provider gate
@@ -29,7 +30,9 @@
 
 ## Human launch gate
 
+- The service starts paused; `/readyz=200` is not customer approval. `/activationz` must remain `503` until the complete provider gate is proven.
 - Owner approves greeting, knowledge, pronunciation, service area, emergency rules, fee language, schedule, destination numbers, and callback SLA.
 - Counsel/qualified reviewer approves disclosure and recording consent for operating jurisdictions.
+- Use `PROVIDER_TEST_MODE=true` only on the dedicated test number. Record `LIVE_PROVIDER_PROOF_AT`, disable test mode, and require `/activationz=200` before customer forwarding.
 - Start in confirmation mode for the first 14 days; review transcripts daily; record every correction in the approved knowledge/rules.
 - Only enable direct booking after the owner signs off on observed calls.

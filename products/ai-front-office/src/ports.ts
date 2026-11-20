@@ -22,6 +22,8 @@ export interface Store {
   getCall(callId: string): Promise<CallRecord | null>;
   saveCall(call: CallRecord): Promise<void>;
   listCalls(tenantId: string, limit: number): Promise<CallRecord[]>;
+  deleteCall(tenantId: string, callId: string): Promise<boolean>;
+  deleteExpiredCalls(tenantId: string, endedBefore: string): Promise<number>;
   upsertCustomer(customer: CustomerRecord): Promise<void>;
   getBookingForCall(callId: string): Promise<BookingRecord | null>;
   saveBooking(booking: BookingRecord): Promise<void>;

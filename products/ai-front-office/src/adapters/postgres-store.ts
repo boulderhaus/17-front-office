@@ -2,6 +2,7 @@ import pg from "pg";
 import type { Store } from "../ports.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, CustomerRecord, OutboxNotification, ToolEvent } from "../domain/models.js";
 import { CryptoBox } from "../security/crypto-box.js";
+import { normalizeBusinessConfig } from "../domain/config.js";
 
 const { Pool } = pg;
 
@@ -49,7 +50,7 @@ export class PostgresStore implements Store {
   async getConfig(tenantId: string): Promise<BusinessConfig> {
     const result = await this.#pool.query("SELECT config FROM business_configs WHERE tenant_id = $1", [tenantId]);
     if (!result.rows[0]) throw new Error(`No business configuration for tenant ${tenantId}`);
-    return result.rows[0].config as BusinessConfig;
+    return normalizeBusinessConfig(result.rows[0].config as Partial<BusinessConfig> & Pick<BusinessConfig, "tenantId">);
   }
 
   async saveConfig(config: BusinessConfig): Promise<void> {
@@ -136,6 +137,19 @@ export class PostgresStore implements Store {
   async listCalls(tenantId: string, limit: number): Promise<CallRecord[]> {
     const result = await this.#pool.query("SELECT * FROM calls WHERE tenant_id = $1 ORDER BY started_at DESC LIMIT $2", [tenantId, limit]);
     return result.rows.map((row) => this.mapCall(row as Row));
+  }
+
+  async deleteCall(tenantId: string, callId: string): Promise<boolean> {
+    const result = await this.#pool.query("DELETE FROM calls WHERE tenant_id=$1 AND id=$2", [tenantId, callId]);
+    return result.rowCount === 1;
+  }
+
+  async deleteExpiredCalls(tenantId: string, endedBefore: string): Promise<number> {
+    const result = await this.#pool.query(
+      "DELETE FROM calls WHERE tenant_id=$1 AND ended_at IS NOT NULL AND ended_at < $2",
+      [tenantId, endedBefore],
+    );
+    return result.rowCount ?? 0;
   }
 
   async upsertCustomer(customer: CustomerRecord): Promise<void> {

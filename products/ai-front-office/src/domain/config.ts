@@ -3,6 +3,7 @@ import type { BusinessConfig } from "./models.js";
 export function createDemoConfig(tenantId = "demo"): BusinessConfig {
   return {
     tenantId,
+    paused: true,
     businessName: "North Star Heating",
     greeting: "Thanks for calling North Star Heating. I’m the owner’s AI assistant. How can I help?",
     timezone: "America/Chicago",
@@ -15,6 +16,7 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     calendarConnectionRef: "google-primary",
     bookingMode: "confirm",
     operationMode: "after_hours",
+    answerAfterRings: 4,
     afterHours: {
       weekdayStart: "17:00",
       weekdayEnd: "08:00",
@@ -27,7 +29,18 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     serviceCategories: ["HVAC repair", "HVAC maintenance", "plumbing", "electrical", "other"],
     requireDiagnosticFeeAcceptance: true,
     recordingDisclosure: "This call may be recorded and handled by an AI assistant.",
+    dataRetentionDays: 30,
+    supportEmail: null,
     flatMonthlyPriceCents: 4900,
+  };
+}
+
+export function normalizeBusinessConfig(value: Partial<BusinessConfig> & Pick<BusinessConfig, "tenantId">): BusinessConfig {
+  const defaults = createDemoConfig(value.tenantId);
+  return {
+    ...defaults,
+    ...value,
+    afterHours: { ...defaults.afterHours, ...value.afterHours },
   };
 }
 

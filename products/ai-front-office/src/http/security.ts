@@ -28,10 +28,12 @@ export function parseForm(raw: string): URLSearchParams {
 }
 
 export function setSecurityHeaders(response: ServerResponse): void {
+  response.setHeader("cache-control", "no-store");
   response.setHeader("x-content-type-options", "nosniff");
   response.setHeader("x-frame-options", "DENY");
   response.setHeader("referrer-policy", "no-referrer");
   response.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=()");
+  response.setHeader("strict-transport-security", "max-age=31536000; includeSubDomains");
   response.setHeader("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
 }
 

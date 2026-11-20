@@ -10,8 +10,13 @@ const schema = z.object({
   DEFAULT_BUSINESS_NAME: z.string().min(1).max(120).default("Your Service Business"),
   DEFAULT_TIMEZONE: z.string().min(1).default("America/Chicago"),
   DEMO_MODE: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  PROVIDER_TEST_MODE: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  LIVE_PROVIDER_PROOF_AT: z.preprocess((value) => value === "" ? undefined : value, z.string().datetime({ offset: true }).optional()),
   DATABASE_URL: z.string().optional(),
-  DATA_ENCRYPTION_KEY: z.string().optional(),
+  DATA_ENCRYPTION_KEY: z.preprocess(
+    (value) => value === "" ? undefined : value,
+    z.string().refine((value) => Buffer.from(value, "base64").length === 32, "DATA_ENCRYPTION_KEY must decode to exactly 32 bytes").optional(),
+  ),
   ADMIN_TOKEN: z.string().min(20),
   TOOL_TOKEN: z.string().min(20),
   RETELL_API_KEY: z.string().optional(),
@@ -38,23 +43,29 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
   }
   if (parsed.ADMIN_TOKEN === parsed.TOOL_TOKEN) throw new Error("ADMIN_TOKEN and TOOL_TOKEN must be different");
   if (!parsed.DEMO_MODE) {
-    for (const key of [
-      "DATABASE_URL",
-      "DATA_ENCRYPTION_KEY",
-      "RETELL_API_KEY",
-      "GOOGLE_CLIENT_ID",
-      "GOOGLE_CLIENT_SECRET",
-      "TWILIO_ACCOUNT_SID",
-      "TWILIO_AUTH_SECRET",
-    ] as const) {
+    for (const key of ["DATABASE_URL", "DATA_ENCRYPTION_KEY"] as const) {
       if (!parsed[key]) throw new Error(`${key} is required outside demo mode`);
     }
-    if (!parsed.TWILIO_FROM_NUMBER && !parsed.TWILIO_MESSAGING_SERVICE_SID) throw new Error("TWILIO_FROM_NUMBER or TWILIO_MESSAGING_SERVICE_SID is required outside demo mode");
     if (parsed.TWILIO_FROM_NUMBER && !/^\+[1-9]\d{7,14}$/.test(parsed.TWILIO_FROM_NUMBER)) throw new Error("TWILIO_FROM_NUMBER must use E.164 format");
     if (!parsed.PUBLIC_BASE_URL.startsWith("https://")) throw new Error("PUBLIC_BASE_URL must use HTTPS outside demo mode");
-    parseOwnerDestinations(parsed.OWNER_DESTINATIONS_JSON, true);
+    parseOwnerDestinations(parsed.OWNER_DESTINATIONS_JSON, false);
+    if (parsed.PROVIDER_TEST_MODE && !hasProviderTestConfiguration(parsed)) {
+      throw new Error("PROVIDER_TEST_MODE requires Retell, Google, Twilio, sender, and owner destination configuration");
+    }
   }
   return parsed;
+}
+
+function hasProviderTestConfiguration(env: Environment): boolean {
+  return Boolean(
+    env.RETELL_API_KEY
+    && env.GOOGLE_CLIENT_ID
+    && env.GOOGLE_CLIENT_SECRET
+    && env.TWILIO_ACCOUNT_SID
+    && env.TWILIO_AUTH_SECRET
+    && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID)
+    && Object.keys(parseOwnerDestinations(env.OWNER_DESTINATIONS_JSON, false)).length > 0,
+  );
 }
 
 export function parseOwnerDestinations(value: string, requireAtLeastOne: boolean): Record<string, string> {

@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
-import { demoEnvironment } from "../src/config/environment.js";
+import { demoEnvironment, loadEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
 import { createRequestHandler } from "../src/http/app.js";
 import type { Clock } from "../src/ports.js";
@@ -14,6 +14,7 @@ describe("HTTP boundary", () => {
   const adminToken = "admin-token-abcdefghijklmnopqrstuvwxyz";
   const toolToken = "tool-token-abcdefghijklmnopqrstuvwxyz";
   const clock: Clock = { now: () => new Date("2026-01-15T08:00:00.000Z") };
+  const syntheticEncryptionKey = Buffer.alloc(32).toString("base64");
 
   beforeEach(async () => {
     store = new InMemoryStore();
@@ -35,7 +36,9 @@ describe("HTTP boundary", () => {
   });
 
   it("exposes health and rejects unauthenticated tools", async () => {
-    expect((await fetch(`${baseUrl}/healthz`)).status).toBe(200);
+    const health = await fetch(`${baseUrl}/healthz`);
+    expect(health.status).toBe(200);
+    expect(health.headers.get("cache-control")).toBe("no-store");
     expect((await fetch(`${baseUrl}/tools/check-availability`, { method: "POST", body: "{}" })).status).toBe(401);
     expect(logs.some((entry) => entry.event === "request_completed" && entry.status === 401)).toBe(true);
   });
@@ -123,9 +126,13 @@ describe("HTTP boundary", () => {
         businessName: "Synthetic Heating",
         timezone: "America/New_York",
         greeting: "Thanks for calling. I am the owner's AI assistant.",
+        serviceState: "active",
         bookingMode: "confirm",
         operationMode: "after_hours",
+        answerAfterRings: "5",
         flatMonthlyPrice: "49",
+        dataRetentionDays: "45",
+        supportEmail: "support@example.com",
         defaultServiceDurationMinutes: "60",
         emergencyThreshold: "0.8",
         serviceAreaTerms: "Albany, 122",
@@ -148,5 +155,55 @@ describe("HTTP boundary", () => {
     expect(config.afterHours.holidayDates).toEqual(["2026-12-25", "2027-01-01"]);
     expect(config.defaultServiceDurationMinutes).toBe(60);
     expect(config.emergencyThreshold).toBe(0.8);
+    expect(config.paused).toBe(false);
+    expect(config.answerAfterRings).toBe(5);
+    expect(config.dataRetentionDays).toBe(45);
+    expect(config.supportEmail).toBe("support@example.com");
+  });
+
+  it("exposes honest activation, public policy pages, and the isolated simulator", async () => {
+    expect((await fetch(`${baseUrl}/activationz`)).status).toBe(503);
+    expect((await fetch(`${baseUrl}/privacy`)).status).toBe(200);
+    expect((await fetch(`${baseUrl}/terms`)).status).toBe(200);
+    const simulator = await fetch(`${baseUrl}/admin/simulator`, { headers: { authorization: `Bearer ${adminToken}` } });
+    expect(simulator.status).toBe(200);
+    expect(await simulator.text()).toContain("Run all 15 launch scenarios");
+    const run = await fetch(`${baseUrl}/admin/simulator`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${adminToken}`, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ scenario: "all" }),
+    });
+    const body = await run.text();
+    expect(run.status).toBe(200);
+    expect(body).toContain("All selected scenarios passed");
+    expect((body.match(/>PASS</g) ?? [])).toHaveLength(15);
+  });
+
+  it("rejects production provider traffic while paused or commercially unproven", async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store = new InMemoryStore();
+    await store.saveConfig(createDemoConfig());
+    const env = loadEnvironment({
+      NODE_ENV: "production", DEMO_MODE: "false", PROVIDER_TEST_MODE: "false",
+      PUBLIC_BASE_URL: "https://front-office.example", ADMIN_TOKEN: adminToken, TOOL_TOKEN: toolToken,
+      DATABASE_URL: "postgresql://synthetic", DATA_ENCRYPTION_KEY: syntheticEncryptionKey, OWNER_DESTINATIONS_JSON: "{}",
+    });
+    server = createServer(createRequestHandler({ env, store, calendar: new InMemoryCalendar(), clock, integrations: {}, logger: () => undefined }));
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Test server did not bind");
+    baseUrl = `http://127.0.0.1:${address.port}`;
+    const invoke = () => fetch(`${baseUrl}/tools/check-availability`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${toolToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ provider_call_id: "gate", window_start: "2026-01-15T15:00:00Z", window_end: "2026-01-15T18:00:00Z" }),
+    });
+    expect((await invoke()).status).toBe(503);
+    await store.saveConfig({ ...createDemoConfig(), paused: false });
+    expect((await invoke()).status).toBe(503);
+    expect((await fetch(`${baseUrl}/webhooks/retell`, { method: "POST", body: "{}" })).status).toBe(503);
   });
 });

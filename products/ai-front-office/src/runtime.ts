@@ -2,6 +2,7 @@ import { CapturingNotificationSender, InMemoryCalendar, InMemoryStore } from "./
 import { GoogleCalendarAdapter } from "./adapters/google-calendar.js";
 import { PostgresStore } from "./adapters/postgres-store.js";
 import { TwilioSmsAdapter } from "./adapters/twilio-sms.js";
+import { UnavailableCalendar, UnavailableNotificationSender } from "./adapters/unavailable.js";
 import { parseOwnerDestinations, type Environment } from "./config/environment.js";
 import { createDemoConfig } from "./domain/config.js";
 import type { CalendarPort, NotificationPort, Store } from "./ports.js";
@@ -32,7 +33,7 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
     };
   }
 
-  const destinations = parseOwnerDestinations(env.OWNER_DESTINATIONS_JSON, true);
+  const destinations = parseOwnerDestinations(env.OWNER_DESTINATIONS_JSON, false);
   const store = new PostgresStore(env.DATABASE_URL!, new CryptoBox(env.DATA_ENCRYPTION_KEY!));
   await store.ping();
   try {
@@ -52,25 +53,31 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
       await store.saveIntegrationSecret(env.DEFAULT_TENANT_ID, "notifications", reference, phone);
     }
   }
-  const calendar = new GoogleCalendarAdapter({
-    clientId: env.GOOGLE_CLIENT_ID!,
-    clientSecret: env.GOOGLE_CLIENT_SECRET!,
-    getRefreshToken: async () => env.GOOGLE_REFRESH_TOKEN || await store.getIntegrationSecret(env.DEFAULT_TENANT_ID, "google", "refresh_token"),
-    calendarId: env.GOOGLE_CALENDAR_ID,
-  });
-  const sender = new TwilioSmsAdapter({
-    accountSid: env.TWILIO_ACCOUNT_SID!,
-    authUser: env.TWILIO_AUTH_USER || env.TWILIO_ACCOUNT_SID!,
-    authSecret: env.TWILIO_AUTH_SECRET!,
-    resolveDestination: (reference) => store.getIntegrationSecret(env.DEFAULT_TENANT_ID, "notifications", reference),
-    ...(env.TWILIO_FROM_NUMBER ? { fromNumber: env.TWILIO_FROM_NUMBER } : {}),
-    ...(env.TWILIO_MESSAGING_SERVICE_SID ? { messagingServiceSid: env.TWILIO_MESSAGING_SERVICE_SID } : {}),
-  });
+  const googleConfigured = Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET);
+  const twilioConfigured = Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_SECRET && (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID));
+  const calendar = googleConfigured
+    ? new GoogleCalendarAdapter({
+        clientId: env.GOOGLE_CLIENT_ID!,
+        clientSecret: env.GOOGLE_CLIENT_SECRET!,
+        getRefreshToken: async () => env.GOOGLE_REFRESH_TOKEN || await store.getIntegrationSecret(env.DEFAULT_TENANT_ID, "google", "refresh_token"),
+        calendarId: env.GOOGLE_CALENDAR_ID,
+      })
+    : new UnavailableCalendar();
+  const sender = twilioConfigured
+    ? new TwilioSmsAdapter({
+        accountSid: env.TWILIO_ACCOUNT_SID!,
+        authUser: env.TWILIO_AUTH_USER || env.TWILIO_ACCOUNT_SID!,
+        authSecret: env.TWILIO_AUTH_SECRET!,
+        resolveDestination: (reference) => store.getIntegrationSecret(env.DEFAULT_TENANT_ID, "notifications", reference),
+        ...(env.TWILIO_FROM_NUMBER ? { fromNumber: env.TWILIO_FROM_NUMBER } : {}),
+        ...(env.TWILIO_MESSAGING_SERVICE_SID ? { messagingServiceSid: env.TWILIO_MESSAGING_SERVICE_SID } : {}),
+      })
+    : new UnavailableNotificationSender();
   return {
     store,
     calendar,
     sender,
-    integrations: { Retell: true, "Twilio SMS": true },
+    integrations: { Retell: Boolean(env.RETELL_API_KEY), "Google Calendar": googleConfigured, "Twilio SMS": twilioConfigured },
     close: () => store.close(),
   };
 }

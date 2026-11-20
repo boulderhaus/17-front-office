@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS customers (
   phone_ciphertext text NOT NULL,
   name_ciphertext text,
   address_ciphertext text,
-  last_call_id uuid NOT NULL REFERENCES calls(id) ON DELETE RESTRICT,
+  last_call_id uuid NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
   UNIQUE(tenant_id, phone_hash)
