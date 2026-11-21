@@ -3,9 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   asTelnyxConversationEnded,
   parseTelnyxEnvelope,
+  parseTelnyxTexmlCallback,
   TelnyxRecordingClient,
   TelnyxSmsAdapter,
   toTelnyxCallSummary,
+  toTelnyxTexmlCallSummary,
   verifyTelnyxWebhook,
 } from "../src/adapters/telnyx.js";
 import { createDemoConfig } from "../src/domain/config.js";
@@ -71,6 +73,34 @@ describe("Telnyx provider boundary", () => {
     expect(summary.fields.address).toBe("100 Main St, Springfield");
     expect(summary.transcript).toContain("Caller: My furnace stopped.");
     expect(summary.consentState).toBe("disclosed");
+  });
+
+  it("normalizes TeXML form conversation callbacks into durable call evidence", () => {
+    const rawBody = new URLSearchParams({
+      CallStatus: "conversation_ended",
+      CallSid: "v3:texml-call",
+      CallSessionId: "session-test",
+      ConversationId: "conversation-test",
+      DurationSec: "42",
+      Messages: JSON.stringify([
+        { role: "user", content: "The furnace stopped.", timestamp: "2026-11-20T17:00:10.000Z" },
+        {
+          role: "assistant",
+          timestamp: "2026-11-20T17:00:30.000Z",
+          tool_calls: [{
+            id: "tool-intake",
+            type: "function",
+            function: { name: "save_intake", arguments: JSON.stringify({ caller_name: "Synthetic Caller", problem_description: "Furnace stopped" }) },
+          }],
+        },
+      ]),
+    }).toString();
+    expect(parseTelnyxTexmlCallback(rawBody)).toEqual({ callStatus: "conversation_ended", providerCallId: "v3:texml-call" });
+    const summary = toTelnyxTexmlCallSummary(rawBody, "demo", new Date("2026-11-20T17:01:00.000Z"), "https://front-office.example/admin/recording");
+    expect(summary.providerCallId).toBe("v3:texml-call");
+    expect(summary.durationSeconds).toBe(42);
+    expect(summary.fields.callerName).toBe("Synthetic Caller");
+    expect(summary.transcript).toContain("Caller: The furnace stopped.");
   });
 
   it("sends idempotent SMS through the Telnyx Messages API", async () => {

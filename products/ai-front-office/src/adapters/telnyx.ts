@@ -68,6 +68,11 @@ export type TelnyxEnvelope = z.infer<typeof envelopeBaseSchema>;
 export type TelnyxInitializationEnvelope = z.infer<typeof initializationSchema>;
 export type TelnyxConversationEndedEnvelope = z.infer<typeof conversationEndedSchema>;
 
+export interface TelnyxTexmlCallback {
+  callStatus: string | null;
+  providerCallId: string | null;
+}
+
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
 export function verifyTelnyxWebhook(
@@ -98,6 +103,14 @@ export function verifyTelnyxWebhook(
 
 export function parseTelnyxEnvelope(rawBody: string): TelnyxEnvelope {
   return envelopeBaseSchema.parse(JSON.parse(rawBody));
+}
+
+export function parseTelnyxTexmlCallback(rawBody: string): TelnyxTexmlCallback {
+  const form = new URLSearchParams(rawBody);
+  return {
+    callStatus: form.get("CallStatus"),
+    providerCallId: form.get("CallSid"),
+  };
 }
 
 export function asTelnyxInitialization(envelope: TelnyxEnvelope): TelnyxInitializationEnvelope {
@@ -164,6 +177,46 @@ export function toTelnyxCallSummary(
     ...(llmEmergencyScore === undefined ? {} : { llmEmergencyScore }),
     ...(llmEmergencyReason === null ? {} : { llmEmergencyReason }),
   };
+}
+
+export function toTelnyxTexmlCallSummary(
+  rawBody: string,
+  tenantId: string,
+  receivedAt: Date,
+  recordingUrl: string,
+): CallSummaryInput {
+  const form = new URLSearchParams(rawBody);
+  const callStatus = form.get("CallStatus");
+  const providerCallId = form.get("CallSid");
+  if (callStatus !== "conversation_ended" || !providerCallId) {
+    throw new Error("Not a Telnyx TeXML conversation-ended callback");
+  }
+  let messages: unknown;
+  try {
+    messages = JSON.parse(form.get("Messages") ?? "[]");
+  } catch {
+    throw new Error("Telnyx TeXML conversation history is invalid JSON");
+  }
+  const duration = form.get("DurationSec");
+  const eventId = createHash("sha256").update("texml:conversation_ended\0").update(rawBody).digest("hex");
+  const envelope = conversationEndedSchema.parse({
+    data: {
+      record_type: "event",
+      event_type: "call.conversation.ended",
+      id: eventId,
+      occurred_at: receivedAt.toISOString(),
+      payload: {
+        assistant_id: "texml-callback",
+        call_control_id: providerCallId,
+        call_session_id: form.get("CallSessionId") ?? undefined,
+        conversation_id: form.get("ConversationId") ?? undefined,
+        duration_sec: duration && /^\d+$/.test(duration) ? Number(duration) : undefined,
+        reason: form.get("Reason") || undefined,
+        messages,
+      },
+    },
+  });
+  return toTelnyxCallSummary(envelope, rawBody, tenantId, receivedAt, recordingUrl);
 }
 
 function collectToolArguments(messages: TelnyxConversationEndedEnvelope["data"]["payload"]["messages"]): Record<string, unknown> {

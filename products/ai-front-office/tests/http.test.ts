@@ -164,6 +164,28 @@ describe("HTTP boundary", () => {
       method: "POST", headers: { ...signedHeaders(intake, privateKey, clock.now()), "x-telnyx-call-control-id": "v3:other-call" }, body: intake,
     });
     expect(mismatchResponse.status).toBe(401);
+
+    const conversationEnded = new URLSearchParams({
+      CallStatus: "conversation_ended",
+      CallSid: "v3:signed-call",
+      CallSessionId: "session-synthetic",
+      ConversationId: "conversation-synthetic",
+      DurationSec: "120",
+      Messages: JSON.stringify([
+        { role: "assistant", content: "How can I help?", timestamp: "2026-01-15T08:00:00.000Z" },
+        { role: "user", content: "Routine maintenance", timestamp: "2026-01-15T08:00:10.000Z" },
+      ]),
+    }).toString();
+    const endedResponse = await fetch(`${baseUrl}/webhooks/telnyx`, {
+      method: "POST",
+      headers: { ...signedHeaders(conversationEnded, privateKey, clock.now()), "content-type": "application/x-www-form-urlencoded" },
+      body: conversationEnded,
+    });
+    expect(endedResponse.status).toBe(200);
+    const completedCall = await store.getCallByProviderId("v3:signed-call");
+    expect(completedCall?.endedAt).toBe(clock.now().toISOString());
+    expect(completedCall?.transcript).toContain("Caller: Routine maintenance");
+    expect(completedCall?.outcome).toBe("pending_confirmation");
   });
 
   it("uses an HttpOnly admin session and rejects a forged CSRF token", async () => {

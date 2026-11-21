@@ -13,9 +13,11 @@ import {
   asTelnyxConversationEnded,
   asTelnyxInitialization,
   parseTelnyxEnvelope,
+  parseTelnyxTexmlCallback,
   TelnyxRecordingClient,
   telnyxEventId,
   toTelnyxCallSummary,
+  toTelnyxTexmlCallSummary,
   verifyTelnyxWebhook,
 } from "../adapters/telnyx.js";
 import {
@@ -164,6 +166,22 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   async function handleTelnyx(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const rawBody = await readBody(request);
     requireProviderAuth(request, rawBody);
+    if (request.headers["content-type"]?.toLowerCase().startsWith("application/x-www-form-urlencoded")) {
+      const callback = parseTelnyxTexmlCallback(rawBody);
+      if (callback.callStatus === "conversation_ended" && callback.providerCallId) {
+        const existing = await dependencies.store.getCallByProviderId(callback.providerCallId);
+        if (existing) {
+          const recordingUrl = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/admin/provider/telnyx/recordings/${encodeURIComponent(callback.providerCallId)}`;
+          await service.finalize(toTelnyxTexmlCallSummary(
+            rawBody,
+            dependencies.env.DEFAULT_TENANT_ID,
+            dependencies.clock.now(),
+            recordingUrl,
+          ));
+        }
+      }
+      return sendJson(response, 200, { received: true });
+    }
     await requireOperational();
     const envelope = parseTelnyxEnvelope(rawBody);
     if (envelope.data.event_type === "assistant.initialization") {
