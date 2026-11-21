@@ -1,6 +1,6 @@
 import pg from "pg";
 import type { Store } from "../ports.js";
-import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, CustomerRecord, OutboxNotification, ToolEvent } from "../domain/models.js";
+import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, CustomerRecord, OutboxNotification, PilotSignup, ToolEvent } from "../domain/models.js";
 import { CryptoBox } from "../security/crypto-box.js";
 import { normalizeBusinessConfig } from "../domain/config.js";
 
@@ -335,6 +335,57 @@ export class PostgresStore implements Store {
     return result.rows[0]?.opted_out === true;
   }
 
+  async savePilotSignup(signup: PilotSignup): Promise<void> {
+    await this.#pool.query(
+      `INSERT INTO pilot_signups(
+         id,owner_name_ciphertext,business_name_ciphertext,email_hash,email_ciphertext,phone_hash,phone_ciphertext,
+         website_ciphertext,trade,service_area_ciphertext,desired_mode,missed_calls_per_week,calendar_provider,
+         notes_ciphertext,status,source,consented_at,created_at,updated_at
+       ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+       ON CONFLICT (email_hash) DO UPDATE SET
+         owner_name_ciphertext=EXCLUDED.owner_name_ciphertext,
+         business_name_ciphertext=EXCLUDED.business_name_ciphertext,
+         email_ciphertext=EXCLUDED.email_ciphertext,
+         phone_hash=EXCLUDED.phone_hash,
+         phone_ciphertext=EXCLUDED.phone_ciphertext,
+         website_ciphertext=EXCLUDED.website_ciphertext,
+         trade=EXCLUDED.trade,
+         service_area_ciphertext=EXCLUDED.service_area_ciphertext,
+         desired_mode=EXCLUDED.desired_mode,
+         missed_calls_per_week=EXCLUDED.missed_calls_per_week,
+         calendar_provider=EXCLUDED.calendar_provider,
+         notes_ciphertext=EXCLUDED.notes_ciphertext,
+         consented_at=EXCLUDED.consented_at,
+         updated_at=EXCLUDED.updated_at`,
+      [
+        signup.id,
+        this.cryptoBox.encrypt(signup.ownerName),
+        this.cryptoBox.encrypt(signup.businessName),
+        this.cryptoBox.hashLookup(signup.email),
+        this.cryptoBox.encrypt(signup.email),
+        this.cryptoBox.hashLookup(signup.phone),
+        this.cryptoBox.encrypt(signup.phone),
+        this.cryptoBox.encrypt(signup.website),
+        signup.trade,
+        this.cryptoBox.encrypt(signup.serviceArea),
+        signup.desiredMode,
+        signup.missedCallsPerWeek,
+        signup.calendarProvider,
+        this.cryptoBox.encrypt(signup.notes),
+        signup.status,
+        signup.source,
+        signup.consentedAt,
+        signup.createdAt,
+        signup.updatedAt,
+      ],
+    );
+  }
+
+  async listPilotSignups(limit: number): Promise<PilotSignup[]> {
+    const result = await this.#pool.query("SELECT * FROM pilot_signups ORDER BY created_at DESC LIMIT $1", [limit]);
+    return result.rows.map((row) => mapPilotSignup(row as Row, this.cryptoBox));
+  }
+
   async purgeWebhookEvents(before: string): Promise<number> {
     const result = await this.#pool.query("DELETE FROM webhook_events WHERE received_at < $1", [before]);
     return result.rowCount ?? 0;
@@ -406,5 +457,27 @@ function mapNotification(row: Row, cryptoBox: CryptoBox): OutboxNotification {
     state: row.state as OutboxNotification["state"], attempts: Number(row.attempts), nextAttemptAt: iso(row.next_attempt_at),
     idempotencyKey: String(row.idempotency_key), providerReceipt: row.provider_receipt ? String(row.provider_receipt) : null,
     lastError: row.last_error ? String(row.last_error) : null, createdAt: iso(row.created_at), sentAt: row.sent_at ? iso(row.sent_at) : null,
+  };
+}
+
+function mapPilotSignup(row: Row, cryptoBox: CryptoBox): PilotSignup {
+  return {
+    id: String(row.id),
+    ownerName: cryptoBox.decrypt(String(row.owner_name_ciphertext)) ?? "",
+    businessName: cryptoBox.decrypt(String(row.business_name_ciphertext)) ?? "",
+    email: cryptoBox.decrypt(String(row.email_ciphertext)) ?? "",
+    phone: cryptoBox.decrypt(String(row.phone_ciphertext)) ?? "",
+    website: cryptoBox.decrypt(row.website_ciphertext === null ? null : String(row.website_ciphertext)),
+    trade: row.trade as PilotSignup["trade"],
+    serviceArea: cryptoBox.decrypt(String(row.service_area_ciphertext)) ?? "",
+    desiredMode: row.desired_mode as PilotSignup["desiredMode"],
+    missedCallsPerWeek: row.missed_calls_per_week === null ? null : Number(row.missed_calls_per_week),
+    calendarProvider: row.calendar_provider as PilotSignup["calendarProvider"],
+    notes: cryptoBox.decrypt(row.notes_ciphertext === null ? null : String(row.notes_ciphertext)),
+    status: row.status as PilotSignup["status"],
+    source: row.source as PilotSignup["source"],
+    consentedAt: iso(row.consented_at),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
   };
 }

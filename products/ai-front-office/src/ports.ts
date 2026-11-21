@@ -7,6 +7,7 @@ import type {
   CallRecord,
   CustomerRecord,
   OutboxNotification,
+  PilotSignup,
   ToolEvent,
 } from "./domain/models.js";
 
@@ -42,6 +43,8 @@ export interface Store {
   listNotifications(callId: string): Promise<OutboxNotification[]>;
   setSmsOptOut(tenantId: string, phone: string, optedOut: boolean): Promise<void>;
   isSmsOptedOut(tenantId: string, phone: string): Promise<boolean>;
+  savePilotSignup(signup: PilotSignup): Promise<void>;
+  listPilotSignups(limit: number): Promise<PilotSignup[]>;
   purgeWebhookEvents(before: string): Promise<number>;
 }
 

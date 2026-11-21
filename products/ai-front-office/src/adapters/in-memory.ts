@@ -9,6 +9,7 @@ import type {
   CallRecord,
   CustomerRecord,
   OutboxNotification,
+  PilotSignup,
   ToolEvent,
 } from "../domain/models.js";
 import { normalizeBusinessConfig } from "../domain/config.js";
@@ -46,6 +47,7 @@ export class InMemoryStore implements Store {
   readonly deletedProviderCalls = new Set<string>();
   readonly integrationSecrets = new Map<string, string>();
   readonly smsOptOuts = new Map<string, boolean>();
+  readonly pilotSignups = new Map<string, PilotSignup>();
   readonly #mutex = new KeyedMutex();
 
   async ping(): Promise<void> {}
@@ -218,6 +220,21 @@ export class InMemoryStore implements Store {
 
   async isSmsOptedOut(tenantId: string, phone: string): Promise<boolean> {
     return this.smsOptOuts.get(`${tenantId}:${phone}`) === true;
+  }
+
+  async savePilotSignup(signup: PilotSignup): Promise<void> {
+    const key = signup.email.toLowerCase();
+    const existing = this.pilotSignups.get(key);
+    this.pilotSignups.set(key, structuredClone(existing
+      ? { ...signup, id: existing.id, status: existing.status, createdAt: existing.createdAt }
+      : signup));
+  }
+
+  async listPilotSignups(limit: number): Promise<PilotSignup[]> {
+    return [...this.pilotSignups.values()]
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, limit)
+      .map((signup) => structuredClone(signup));
   }
 
   async purgeWebhookEvents(before: string): Promise<number> {

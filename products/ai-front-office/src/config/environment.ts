@@ -35,6 +35,10 @@ const schema = z.object({
   GOOGLE_REFRESH_TOKEN: z.string().optional(),
   GOOGLE_CALENDAR_ID: z.string().default("primary"),
   OWNER_DESTINATIONS_JSON: z.string().default("{}"),
+  FOUNDING_CHECKOUT_URL: z.preprocess(
+    (value) => value === "" ? undefined : value,
+    z.string().url().refine((value) => value.startsWith("https://"), "FOUNDING_CHECKOUT_URL must use HTTPS").optional(),
+  ),
 });
 
 export type Environment = z.infer<typeof schema>;

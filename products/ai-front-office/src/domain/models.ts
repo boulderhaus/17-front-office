@@ -174,6 +174,26 @@ export interface BusinessConfig {
   maxCallsPerCallerPerDay: number;
 }
 
+export interface PilotSignup {
+  id: string;
+  ownerName: string;
+  businessName: string;
+  email: string;
+  phone: string;
+  website: string | null;
+  trade: "hvac" | "plumbing" | "electrical" | "other";
+  serviceArea: string;
+  desiredMode: "after_hours" | "overflow" | "always";
+  missedCallsPerWeek: number | null;
+  calendarProvider: "google" | "none" | "other";
+  notes: string | null;
+  status: "new" | "contacted" | "approved" | "declined" | "activated";
+  source: "website";
+  consentedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface CallSummaryInput {
   webhookEventId: string;
   tenantId: string;

@@ -1,14 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { z } from "zod";
-import { renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderTerms } from "../admin/render.js";
+import { renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms } from "../admin/render.js";
 import { buildActivationReport, type ActivationReport } from "../application/readiness.js";
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService } from "../application/call-service.js";
 import { DataDeletionService } from "../application/data-deletion.js";
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
-import type { BusinessConfig } from "../domain/models.js";
+import type { BusinessConfig, PilotSignup } from "../domain/models.js";
 import { buildTelnyxGreeting } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import {
@@ -100,6 +100,20 @@ const intakeSchema = baseToolSchema.extend({
   recording_disclosure_given: z.boolean().optional(),
   recording_disclosure_declined: z.boolean().optional(),
 });
+const pilotSignupSchema = z.object({
+  ownerName: z.string().trim().min(2).max(120),
+  businessName: z.string().trim().min(2).max(120),
+  email: z.string().trim().toLowerCase().email().max(254),
+  phone: z.string().trim().min(7).max(30),
+  website: z.string().trim().max(300).optional(),
+  trade: z.enum(["hvac", "plumbing", "electrical", "other"]),
+  serviceArea: z.string().trim().min(2).max(500),
+  desiredMode: z.enum(["after_hours", "overflow", "always"]),
+  missedCallsPerWeek: z.string().trim().max(4).optional(),
+  calendarProvider: z.enum(["google", "none", "other"]),
+  notes: z.string().trim().max(1_500).optional(),
+  consent: z.literal("yes"),
+});
 
 export interface AppDependencies {
   env: Environment;
@@ -149,7 +163,45 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
 
     if (method === "GET" && url.pathname === "/") {
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
-      return sendHtml(response, 200, renderLanding(config, dependencies.env.TELNYX_FROM_NUMBER ?? null));
+      return sendHtml(response, 200, renderLanding(config));
+    }
+    if (method === "GET" && url.pathname === "/start") return sendHtml(response, 200, renderStart());
+    if (method === "POST" && url.pathname === "/start") {
+      if (!limiter.allow(`${ip}:pilot-signup`, 5, 60 * 60_000)) throw new HttpError(429, "Too many applications from this connection");
+      const form = parseForm(await readBody(request, 32_000));
+      if (form.get("faxNumber")?.trim()) return sendHtml(response, 200, renderStartReceived(null));
+      const values = Object.fromEntries(form.entries());
+      const parsed = pilotSignupSchema.safeParse(values);
+      if (!parsed.success) return sendHtml(response, 400, renderStart("Check the required fields and try again.", values));
+      const phone = normalizeUsPhone(parsed.data.phone);
+      if (!phone) return sendHtml(response, 400, renderStart("Enter a valid US mobile number.", values));
+      const website = normalizeOptionalUrl(parsed.data.website);
+      if (parsed.data.website && !website) return sendHtml(response, 400, renderStart("Enter a complete website address beginning with https://", values));
+      const missedCallsPerWeek = parseOptionalCount(parsed.data.missedCallsPerWeek);
+      if (missedCallsPerWeek === undefined) return sendHtml(response, 400, renderStart("Missed calls must be a whole number from 0 to 500.", values));
+      const now = dependencies.clock.now().toISOString();
+      const signup: PilotSignup = {
+        id: randomUUID(),
+        ownerName: parsed.data.ownerName,
+        businessName: parsed.data.businessName,
+        email: parsed.data.email,
+        phone,
+        website,
+        trade: parsed.data.trade,
+        serviceArea: parsed.data.serviceArea,
+        desiredMode: parsed.data.desiredMode,
+        missedCallsPerWeek,
+        calendarProvider: parsed.data.calendarProvider,
+        notes: parsed.data.notes || null,
+        status: "new",
+        source: "website",
+        consentedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await dependencies.store.savePilotSignup(signup);
+      log({ level: "info", event: "pilot_signup_received", signupId: signup.id, trade: signup.trade });
+      return sendHtml(response, 200, renderStartReceived(dependencies.env.FOUNDING_CHECKOUT_URL ?? null));
     }
     if (method === "GET" && url.pathname === "/healthz") return sendJson(response, 200, { status: "ok" });
     if (method === "GET" && url.pathname === "/readyz") {
@@ -506,6 +558,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       ]);
       return sendHtml(response, 200, renderDashboard({ config, calls, csrf, activation, integrations: { ...dependencies.integrations, "Google Calendar": googleConnected } }));
     }
+    if (method === "GET" && url.pathname === "/admin/signups") {
+      return sendHtml(response, 200, renderPilotSignups(await dependencies.store.listPilotSignups(200)));
+    }
     if (method === "GET" && url.pathname === "/admin/config") {
       const [config, googleConnected, ownerPhone] = await Promise.all([
         dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID),
@@ -661,10 +716,16 @@ function unwrapToolPayload(value: unknown): unknown {
 
 function isExplicitHumanRequest(callerQuote: string): boolean {
   const quote = callerQuote.toLowerCase().replace(/\s+/g, " ").trim();
-  const namesPerson = /\b(human|person|owner|representative|operator|technician|someone|somebody)\b/.test(quote);
-  const requestsContact = /\b(speak|talk|connect|transfer|reach|get|want|need|call|put)\b/.test(quote);
-  const directRequest = /\b(human|person|representative|operator)\s*(?:please|now)?[.!?]*$/.test(quote);
-  return namesPerson && (requestsContact || directRequest);
+  const person = "(?:human|person|owner|representative|operator|technician|someone|somebody)";
+  if (new RegExp(`\\b(?:do not|don't|dont|never|no need to|not trying to|not asking to|do not want to|don't want to)\\b.{0,40}\\b${person}\\b`).test(quote)) return false;
+  return [
+    new RegExp(`\\b(?:i|we)\\s+(?:want|need|would like|have to)\\s+(?:to\\s+)?(?:speak|talk|connect|transfer|reach|get|call|be connected)?\\s*(?:with|to)?\\s*(?:a|the|your)?\\s*${person}\\b`),
+    new RegExp(`\\b(?:can|could|would|will)\\s+(?:i|you)\\s+(?:please\\s+)?(?:speak|talk|connect|transfer|put|get|reach)\\b.{0,30}\\b${person}\\b`),
+    new RegExp(`\\b(?:connect|transfer|put|get)\\s+me\\b.{0,30}\\b${person}\\b`),
+    new RegExp(`\\b(?:let me|please)\\s+(?:speak|talk)\\b.{0,30}\\b${person}\\b`),
+    /\b(?:have|ask)\s+(?:the\s+)?(?:owner|technician|someone|somebody)\s+(?:to\s+)?call\s+me(?:\s+back)?\b/,
+    /\b(?:human|person|representative|operator)\s*(?:please|now)?[.!?]*$/,
+  ].some((pattern) => pattern.test(quote));
 }
 
 function formatLocalCallContext(now: Date, timeZone: string): { date: string; time: string } {
@@ -679,6 +740,28 @@ function routeKey(pathname: string): string {
   if (pathname.startsWith("/tools/")) return `tool:${pathname.slice(7)}`;
   if (pathname.startsWith("/admin/calls/")) return "admin:call";
   return pathname;
+}
+
+function normalizeUsPhone(value: string): string | null {
+  const digits = value.replace(/\D/g, "");
+  const national = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+  return /^[2-9]\d{2}[2-9]\d{6}$/.test(national) ? `+1${national}` : null;
+}
+
+function normalizeOptionalUrl(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseOptionalCount(value: string | undefined): number | null | undefined {
+  if (!value) return null;
+  const count = Number(value);
+  return Number.isInteger(count) && count >= 0 && count <= 500 ? count : undefined;
 }
 
 function singleHeader(value: string | string[] | undefined): string | undefined {

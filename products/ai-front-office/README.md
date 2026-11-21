@@ -77,4 +77,6 @@ The application ports isolate the voice provider, calendar/system of record, not
 
 The service is paused by default. The authenticated admin provides **Readiness**, **Simulator**, configuration, call history, and permanent call deletion; public `/privacy` and `/terms` pages describe the current beta boundaries.
 
-See `docs/RELEASE-PACKET.md`, `docs/FIRST-USER-ONBOARDING.md`, `docs/REQUIREMENTS.md`, `docs/DECISION-DELTA.md`, `docs/REA-METHOD.md`, `docs/PROVIDER-DECISION.md`, `docs/PRODUCT-STRATEGY.md`, and `docs/LAUNCH-CHECKLIST.md`.
+The public `/start` flow collects an encrypted founding-pilot application and shows it only at `/admin/signups`. Set `FOUNDING_CHECKOUT_URL` only after the commercial activation gate and checkout terms are approved; otherwise the confirmation page promises no charge and hands payment off manually.
+
+See `docs/COMMERCIAL-POSITIONING.md`, `docs/RELEASE-PACKET.md`, `docs/FIRST-USER-ONBOARDING.md`, `docs/REQUIREMENTS.md`, `docs/DECISION-DELTA.md`, `docs/REA-METHOD.md`, `docs/PROVIDER-DECISION.md`, `docs/PRODUCT-STRATEGY.md`, and `docs/LAUNCH-CHECKLIST.md`.
