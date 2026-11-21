@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { createDemoConfig, isCoverageActive } from "../src/domain/config.js";
+import { createDemoConfig, evaluateServiceArea, isCoverageActive } from "../src/domain/config.js";
 import { triageEmergency } from "../src/domain/triage.js";
-import { buildTelnyxAssistantUpdate, buildTelnyxTools, buildVoiceSystemPrompt } from "../src/voice/system-prompt.js";
+import { buildTelnyxAssistantUpdate, buildTelnyxOutboundTestCall, buildTelnyxTools, buildVoiceSystemPrompt } from "../src/voice/system-prompt.js";
 import { redactError } from "../src/application/retry.js";
 import { buildActivationReport } from "../src/application/readiness.js";
 import { runAllSimulations } from "../src/application/simulator.js";
@@ -37,6 +37,38 @@ describe("coverage and voice policy", () => {
     expect(prompt).toContain("Quote only these approved snippets");
     expect(prompt).toContain("read the exact approved diagnostic fee");
     expect(prompt).toContain("The booking mode is confirm");
+    expect(prompt).toContain("caller ID as {{caller_phone}}");
+    expect(prompt).toContain("Default to one or two short sentences");
+    expect(prompt).toContain("spokenSummary once");
+    expect(prompt).toContain("call check_service_area before checking availability");
+  });
+
+  it("matches only owner-configured city and ZIP boundaries and fails closed without configuration", () => {
+    const config = { ...createDemoConfig(), serviceAreaTerms: ["Springfield", "12207", "627"] };
+    expect(evaluateServiceArea("100 Main St, Springfield, IL", config)).toMatchObject({ status: "covered", matchedTerm: "Springfield" });
+    expect(evaluateServiceArea("100 Main St, Albany, NY 12207", config)).toMatchObject({ status: "covered", matchedTerm: "12207" });
+    expect(evaluateServiceArea("100 Main St, IL 62704", config)).toMatchObject({ status: "covered", matchedTerm: "627" });
+    expect(evaluateServiceArea("100 Main St, Springfield Gardens, NY 11413", config).status).toBe("outside");
+    expect(evaluateServiceArea("100 Main St, Albany, NY 12208", config).status).toBe("outside");
+    expect(evaluateServiceArea("100 Main St", { ...config, serviceAreaTerms: [] }).status).toBe("unconfigured");
+  });
+
+  it("uses a direction-specific greeting for outbound test calls", () => {
+    const config = createDemoConfig();
+    const update = buildTelnyxAssistantUpdate(config, "https://front-office.example") as {
+      greeting: string;
+      dynamic_variables: { call_direction: string; opening_greeting: string };
+    };
+    expect(update.greeting).toBe("{{opening_greeting}}");
+    expect(update.dynamic_variables.call_direction).toBe("inbound");
+    expect(update.dynamic_variables.opening_greeting).toContain("Thanks for calling");
+    const outbound = buildTelnyxOutboundTestCall({
+      from: "+15555550199", to: "+15555550100", assistantId: "assistant-synthetic",
+      businessName: "Synthetic Heating", recordingDisclosure: "This call may be recorded.",
+    }) as { AIAssistantDynamicVariables: { call_direction: string; opening_greeting: string } };
+    expect(outbound.AIAssistantDynamicVariables.call_direction).toBe("outbound_test");
+    expect(outbound.AIAssistantDynamicVariables.opening_greeting).toContain("this is a test call");
+    expect(outbound.AIAssistantDynamicVariables.opening_greeting).not.toContain("Thanks for calling");
   });
 
   it("requires explicit human requests and refuses price guesses when no script is approved", () => {
@@ -51,10 +83,22 @@ describe("coverage and voice policy", () => {
     const prompt = buildVoiceSystemPrompt(config);
     expect(prompt).toContain("invoke the built-in hangup tool in the same turn");
     expect(prompt).toContain("Never say \"goodbye\" without immediately invoking");
+    expect(prompt).toContain("That is the natural closing pause");
     const hangup = buildTelnyxTools(config, "https://front-office.example").find((tool) => tool.type === "hangup") as { hangup: { description: string } };
     expect(hangup.hangup.description).toContain("Immediately terminate");
     const update = buildTelnyxAssistantUpdate(config, "https://front-office.example") as { telephony_settings: { user_idle_timeout_secs: number; user_idle_reply_secs: number } };
     expect(update.telephony_settings).toMatchObject({ user_idle_timeout_secs: 30, user_idle_reply_secs: 8 });
+  });
+
+  it("tunes transcription for service terms, numbers, and ordinal addresses", () => {
+    const update = buildTelnyxAssistantUpdate(createDemoConfig(), "https://front-office.example") as {
+      transcription: { model: string; language: string; settings: { smart_format: boolean; numerals: boolean; keyterm: string } };
+    };
+    expect(update.transcription.model).toBe("deepgram/flux");
+    expect(update.transcription.language).toBe("en");
+    expect(update.transcription.settings).toMatchObject({ smart_format: true, numerals: true });
+    expect(update.transcription.settings.keyterm).toContain("eightieth");
+    expect(update.transcription.settings.keyterm).toContain("heating");
   });
 
   it("requires a reason and exact caller quote for the handoff tool", () => {

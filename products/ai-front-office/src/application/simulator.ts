@@ -167,6 +167,12 @@ async function start(rig: Rig, id: string): Promise<void> {
 }
 
 async function book(rig: Rig, id: string, address: string): Promise<{ status: "confirmed" | "pending" | "conflict" | "unknown"; message: string }> {
+  await rig.service.checkAvailability({
+    tenantId: "demo",
+    providerCallId: id,
+    windowStart: "2026-01-15T15:00:00.000Z",
+    windowEnd: "2026-01-15T18:00:00.000Z",
+  });
   return rig.service.bookConfirmedSlot({ tenantId: "demo", providerCallId: id, slotStart: "2026-01-15T15:00:00.000Z", callerName: "Synthetic Caller", callbackNumber: "+15555550100", address, serviceCategory: "HVAC maintenance", problemDescription: "Routine HVAC maintenance", explicitConfirmation: true, diagnosticFeeAccepted: true });
 }
 

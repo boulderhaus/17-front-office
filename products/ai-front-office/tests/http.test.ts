@@ -54,6 +54,31 @@ describe("HTTP boundary", () => {
     expect((await response.json() as { status: string }).status).toBe("available");
   });
 
+  it("checks a complete address against owner-configured coverage", async () => {
+    const response = await fetch(`${baseUrl}/tools/check-service-area`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${toolToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ provider_call_id: "coverage-call", address: "100 Main St, Springfield, IL 62701" }),
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json() as { status: string }).status).toBe("covered");
+  });
+
+  it("rejects a past requested time at the intake boundary", async () => {
+    const response = await fetch(`${baseUrl}/tools/save-intake`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${toolToken}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        provider_call_id: "past-intake",
+        from_number: "+15555550110",
+        problem_description: "Routine maintenance",
+        requested_start: "2025-06-09T00:00:00.000Z",
+      }),
+    });
+    expect(response.status).toBe(409);
+    expect(await store.getCallByProviderId("past-intake")).toBeNull();
+  });
+
   it("applies deterministic emergency triage through an authenticated tool", async () => {
     const response = await fetch(`${baseUrl}/tools/triage`, {
       method: "POST",
@@ -214,7 +239,14 @@ describe("HTTP boundary", () => {
       method: "POST", headers: signedHeaders(initialization, privateKey, clock.now()), body: initialization,
     });
     expect(initResponse.status).toBe(200);
-    expect((await initResponse.json() as { dynamic_variables: { owner_transfer_targets: unknown[] } }).dynamic_variables.owner_transfer_targets).toHaveLength(1);
+    const initBody = await initResponse.json() as { dynamic_variables: Record<string, unknown> & { owner_transfer_targets: unknown[] } };
+    expect(initBody.dynamic_variables.owner_transfer_targets).toHaveLength(1);
+    expect(initBody.dynamic_variables.call_direction).toBe("inbound");
+    expect(initBody.dynamic_variables.opening_greeting).toContain("Thanks for calling");
+    expect(initBody.dynamic_variables.caller_phone).toBe("+15555550110");
+    expect(initBody.dynamic_variables.business_timezone).toBe("America/Chicago");
+    expect(initBody.dynamic_variables.current_local_date).toBe("Thursday, January 15, 2026");
+    expect(initBody.dynamic_variables.current_local_time).toBe("2:00 AM CST");
     expect(await store.getCallByProviderId("v3:signed-call")).not.toBeNull();
 
     const intake = JSON.stringify({
@@ -266,7 +298,9 @@ describe("HTTP boundary", () => {
     expect(cookie).toContain("HttpOnly");
     const configPage = await fetch(`${baseUrl}/admin/config`, { headers: { cookie: cookie!.split(";")[0]! } });
     expect(configPage.status).toBe(200);
-    expect(await configPage.text()).toContain("Owner alert phone");
+    const configHtml = await configPage.text();
+    expect(configHtml).toContain("Owner alert phone");
+    expect(configHtml).toContain("Covered cities and ZIP codes");
     const response = await fetch(`${baseUrl}/admin/config`, {
       method: "POST",
       headers: { cookie: cookie!.split(";")[0]!, "content-type": "application/x-www-form-urlencoded" },

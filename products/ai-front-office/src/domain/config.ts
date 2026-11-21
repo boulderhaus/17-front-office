@@ -45,9 +45,41 @@ export function normalizeBusinessConfig(value: Partial<BusinessConfig> & Pick<Bu
 }
 
 export function isInServiceArea(address: string | null, config: BusinessConfig): boolean {
-  if (!address || config.serviceAreaTerms.length === 0) return true;
-  const normalized = address.toLowerCase();
-  return config.serviceAreaTerms.some((term) => normalized.includes(term.toLowerCase()));
+  return evaluateServiceArea(address, config).status === "covered";
+}
+
+export type ServiceAreaStatus = "covered" | "outside" | "unconfigured" | "incomplete";
+
+export function evaluateServiceArea(address: string | null, config: BusinessConfig): {
+  status: ServiceAreaStatus;
+  matchedTerm: string | null;
+} {
+  const terms = config.serviceAreaTerms.map((term) => term.trim()).filter(Boolean);
+  if (terms.length === 0) return { status: "unconfigured", matchedTerm: null };
+  if (!address?.trim()) return { status: "incomplete", matchedTerm: null };
+
+  const normalizedAddress = normalizeCoverageText(address);
+  const addressComponents = address.split(",").map(normalizeCoverageText).filter(Boolean);
+  const postalCodes: string[] = normalizedAddress.match(/\b\d{5}(?:-\d{4})?\b/g) ?? [];
+  for (const term of terms) {
+    const normalizedTerm = normalizeCoverageText(term);
+    if (/^\d{5}(?:-\d{4})?$/.test(normalizedTerm)) {
+      if (postalCodes.includes(normalizedTerm)) return { status: "covered", matchedTerm: term };
+      continue;
+    }
+    if (/^\d{3}$/.test(normalizedTerm)) {
+      if (postalCodes.some((postalCode) => postalCode.startsWith(normalizedTerm))) return { status: "covered", matchedTerm: term };
+      continue;
+    }
+    if (normalizedTerm && addressComponents.includes(normalizedTerm)) {
+      return { status: "covered", matchedTerm: term };
+    }
+  }
+  return { status: "outside", matchedTerm: null };
+}
+
+function normalizeCoverageText(value: string): string {
+  return value.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9-]+/g, " ").trim();
 }
 
 export function isCoverageActive(config: BusinessConfig, at: Date, ownerBusy: boolean): boolean {

@@ -10,7 +10,7 @@ import type {
   EmergencyDecision,
   OutboxNotification,
 } from "../domain/models.js";
-import { isInServiceArea } from "../domain/config.js";
+import { evaluateServiceArea, isInServiceArea } from "../domain/config.js";
 import { triageEmergency } from "../domain/triage.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import { BookingCoordinator } from "./booking-coordinator.js";
@@ -91,9 +91,19 @@ export class CallService {
     providerCallId: string;
     windowStart: string;
     windowEnd: string;
-  }): Promise<{ slots: AvailabilitySlot[]; status: "available" | "pending"; message: string }> {
+  }): Promise<{ slots: AvailabilitySlot[]; status: "available" | "pending" | "invalid_window"; message: string; spokenSummary: string | null; timezone: string }> {
     const config = await this.store.getConfig(input.tenantId);
     const call = await this.ensureCall(input.tenantId, input.providerCallId, "unknown", this.clock.now().toISOString());
+    const windowError = validateAvailabilityWindow(input.windowStart, input.windowEnd, this.clock.now());
+    if (windowError) {
+      return {
+        slots: [],
+        status: "invalid_window",
+        message: `${windowError} Recalculate the window from the authoritative current date and call check_availability again. Do not offer a time yet.`,
+        spokenSummary: null,
+        timezone: config.timezone,
+      };
+    }
     const started = this.clock.now();
     try {
       const slots = await withRetry(
@@ -106,14 +116,35 @@ export class CallService {
         }),
         { attempts: 2, baseDelayMs: 50, maxDelayMs: 100, timeoutMs: 2_500 },
       );
-      await this.audit(call, "calendar.availability", started, "success", { count: slots.length }, null);
+      const spokenSummary = slots.length > 0 ? formatSpokenSlots(slots, config.timezone, this.clock.now()) : null;
+      await this.audit(call, "calendar.availability", started, "success", { count: slots.length, offeredStarts: slots.map((slot) => slot.start) }, null);
       return slots.length > 0
-        ? { slots, status: "available", message: "Offer one of these exact slots and ask the caller to confirm it." }
-        : { slots: [], status: "pending", message: "No confirmed slot is available. Tell the caller the owner will follow up." };
+        ? { slots, status: "available", message: "Read spokenSummary exactly once, then ask the caller to choose one of these exact slots.", spokenSummary, timezone: config.timezone }
+        : { slots: [], status: "pending", message: "No confirmed slot is available. Tell the caller the owner will follow up.", spokenSummary: null, timezone: config.timezone };
     } catch (error) {
       await this.audit(call, "calendar.availability", started, "failed", {}, redactError(error));
-      return { slots: [], status: "pending", message: "The calendar could not be confirmed. Tell the caller the owner will follow up." };
+      return { slots: [], status: "pending", message: "The calendar could not be confirmed. Tell the caller the owner will follow up.", spokenSummary: null, timezone: config.timezone };
     }
+  }
+
+  async checkServiceArea(input: {
+    tenantId: string;
+    providerCallId: string;
+    address: string;
+  }): Promise<{ status: "covered" | "outside" | "unconfigured" | "incomplete"; message: string }> {
+    const config = await this.store.getConfig(input.tenantId);
+    const call = await this.ensureCall(input.tenantId, input.providerCallId, "unknown", this.clock.now().toISOString());
+    const started = this.clock.now();
+    const result = evaluateServiceArea(input.address, config);
+    await this.audit(call, "coverage.check", started, "success", { status: result.status, matched: Boolean(result.matchedTerm) }, null);
+    const message = result.status === "covered"
+      ? "The address is inside the owner-configured service area. Continue intake."
+      : result.status === "unconfigured"
+        ? "The owner has not configured a service area. Do not promise service or book; queue owner confirmation."
+        : result.status === "incomplete"
+          ? "The address is incomplete. Ask for the city or ZIP code, then check the service area again."
+          : "The address is not inside the owner-configured service area. Do not promise service or book; queue owner confirmation.";
+    return { status: result.status, message };
   }
 
   async triageCall(input: {
@@ -170,8 +201,8 @@ export class CallService {
         serviceCategory: input.serviceCategory,
         serviceCategoryConfidence: 1,
         problemDescription: input.problemDescription,
-        requestedStart: input.slotStart,
-        explicitSlotConfirmation: input.explicitConfirmation,
+        requestedStart: call.fields.requestedStart,
+        explicitSlotConfirmation: false,
         diagnosticFeeAccepted: input.diagnosticFeeAccepted,
       },
       updatedAt: this.clock.now().toISOString(),
@@ -190,6 +221,29 @@ export class CallService {
       return { status: "pending", message: "This is an emergency. Do not book it; follow the safety instruction and transfer or queue the owner now." };
     }
     if (!input.explicitConfirmation) return { status: "pending", message: "Do not book until the caller explicitly confirms the offered slot." };
+    if (!/^\+[1-9]\d{7,14}$/.test(input.callbackNumber)) return { status: "pending", message: "The callback number is not confirmed. Queue owner follow-up instead of booking." };
+    if (!isConfiguredServiceCategory(input.serviceCategory, config)) return { status: "pending", message: "The requested service is not an owner-approved category. Queue owner confirmation." };
+    if (!isInServiceArea(input.address, config)) return { status: "pending", message: "The address may be outside the service area. Queue owner confirmation." };
+    const slotStart = Date.parse(input.slotStart);
+    if (!Number.isFinite(slotStart) || slotStart < this.clock.now().getTime()) {
+      return { status: "pending", message: "That time is invalid or in the past. Do not save or promise it; check current availability again." };
+    }
+    const availabilityEvents = (await this.store.listToolEvents(call.id))
+      .filter((event) => event.tool === "calendar.availability" && event.result === "success")
+      .sort((left, right) => Date.parse(right.completedAt) - Date.parse(left.completedAt));
+    const offeredStarts = Array.isArray(availabilityEvents[0]?.metadata.offeredStarts)
+      ? availabilityEvents[0]!.metadata.offeredStarts.filter((value): value is string => typeof value === "string")
+      : [];
+    const wasOffered = offeredStarts.some((offered) => Date.parse(offered) === slotStart);
+    if (!wasOffered) {
+      return { status: "pending", message: "That time was not in the latest verified availability result. Check availability again and offer only returned slots." };
+    }
+    call = {
+      ...call,
+      fields: { ...call.fields, requestedStart: input.slotStart, explicitSlotConfirmation: input.explicitConfirmation },
+      updatedAt: this.clock.now().toISOString(),
+    };
+    await this.store.saveCall(call);
     if (config.requireDiagnosticFeeAcceptance && config.priceSnippets.length === 0) {
       await this.queuePendingBooking(call, input.slotStart, config, "No owner-approved diagnostic fee is configured");
       return { status: "pending", message: "No owner-approved diagnostic fee is configured. Queue owner confirmation instead of booking." };
@@ -198,9 +252,6 @@ export class CallService {
       await this.queuePendingBooking(call, input.slotStart, config, "Diagnostic fee was not explicitly accepted");
       return { status: "pending", message: "Do not book until the caller explicitly accepts the owner-approved diagnostic fee." };
     }
-    if (!/^\+[1-9]\d{7,14}$/.test(input.callbackNumber)) return { status: "pending", message: "The callback number is not confirmed. Queue owner follow-up instead of booking." };
-    if (!isConfiguredServiceCategory(input.serviceCategory, config)) return { status: "pending", message: "The requested service is not an owner-approved category. Queue owner confirmation." };
-    if (!isInServiceArea(input.address, config)) return { status: "pending", message: "The address may be outside the service area. Queue owner confirmation." };
     if (config.bookingMode === "confirm") {
       await this.queuePendingBooking(call, input.slotStart, config, "Owner confirmation mode is active");
       await this.ensureCallbackTask(call, config, "Confirm requested appointment", false);
@@ -669,4 +720,35 @@ function mergeEmergencyDecision(existing: EmergencyDecision | null, incoming: Em
     evidence: [...new Set([...existing.evidence, ...incoming.evidence])],
     immediateInstruction: incoming.immediateInstruction ?? existing.immediateInstruction,
   };
+}
+
+function validateAvailabilityWindow(windowStart: string, windowEnd: string, now: Date): string | null {
+  const start = Date.parse(windowStart);
+  const end = Date.parse(windowEnd);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return "The availability window is invalid.";
+  if (start < now.getTime()) return "The availability window starts in the past.";
+  if (end - start > 14 * 24 * 60 * 60_000) return "The availability window is longer than 14 days.";
+  if (start > now.getTime() + 90 * 24 * 60 * 60_000) return "The availability window starts more than 90 days from now.";
+  return null;
+}
+
+function formatSpokenSlots(slots: AvailabilitySlot[], timeZone: string, now: Date): string {
+  const dateKey = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+  const date = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "long", month: "long", day: "numeric" });
+  const time = new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit" });
+  const zone = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "short" })
+    .formatToParts(slots[0] ? new Date(slots[0].start) : now)
+    .find((part) => part.type === "timeZoneName")?.value ?? timeZone;
+  const groups = new Map<string, { label: string; times: string[] }>();
+  const today = dateKey.format(now);
+  for (const slot of slots) {
+    const value = new Date(slot.start);
+    const key = dateKey.format(value);
+    const group = groups.get(key) ?? { label: key === today ? `Today, ${date.format(value)}` : date.format(value), times: [] };
+    group.times.push(time.format(value));
+    groups.set(key, group);
+  }
+  return [...groups.values()]
+    .map((group) => `${group.label}: ${new Intl.ListFormat("en-US", { style: "long", type: "disjunction" }).format(group.times)} ${zone}`)
+    .join("; ");
 }

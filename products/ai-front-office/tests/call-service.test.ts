@@ -105,6 +105,47 @@ describe("call outcomes", () => {
     expect((await store.getCallbackTaskForCall(call!.id))?.reason).toContain("Confirm requested appointment");
   });
 
+  it("rejects past availability windows and produces one concise same-day slot summary", async () => {
+    await start("availability-language");
+    const past = await service.checkAvailability({
+      tenantId: "demo", providerCallId: "availability-language",
+      windowStart: "2025-06-08T20:00:00.000Z", windowEnd: "2025-06-08T23:00:00.000Z",
+    });
+    expect(past.status).toBe("invalid_window");
+    expect(past.message).toContain("starts in the past");
+    calendar.listAvailableSlots = async () => [
+      { start: "2026-01-15T15:00:00.000Z", end: "2026-01-15T16:30:00.000Z" },
+      { start: "2026-01-15T15:30:00.000Z", end: "2026-01-15T17:00:00.000Z" },
+      { start: "2026-01-15T16:00:00.000Z", end: "2026-01-15T17:30:00.000Z" },
+    ];
+    const future = await service.checkAvailability({
+      tenantId: "demo", providerCallId: "availability-language",
+      windowStart: "2026-01-15T15:00:00.000Z", windowEnd: "2026-01-15T18:00:00.000Z",
+    });
+    expect(future.status).toBe("available");
+    expect(future.spokenSummary).toBe("Today, Thursday, January 15: 9:00 AM, 9:30 AM, or 10:00 AM CST");
+    expect(future.spokenSummary?.match(/January 15/g)).toHaveLength(1);
+  });
+
+  it("rejects past or unoffered booking times without storing them", async () => {
+    await configureApprovedFee();
+    await start("slot-guard");
+    const past = await service.bookConfirmedSlot({
+      tenantId: "demo", providerCallId: "slot-guard", slotStart: "2025-06-09T00:00:00.000Z",
+      callerName: "Caller", callbackNumber: "+15555550102", address: "100 Main St, Springfield",
+      serviceCategory: "HVAC repair", problemDescription: "Routine repair", explicitConfirmation: true, diagnosticFeeAccepted: true,
+    });
+    expect(past.message).toContain("in the past");
+    expect((await store.getCallByProviderId("slot-guard"))?.fields.requestedStart).toBeNull();
+    const unoffered = await service.bookConfirmedSlot({
+      tenantId: "demo", providerCallId: "slot-guard", slotStart: "2026-01-15T20:00:00.000Z",
+      callerName: "Caller", callbackNumber: "+15555550102", address: "100 Main St, Springfield",
+      serviceCategory: "HVAC repair", problemDescription: "Routine repair", explicitConfirmation: true, diagnosticFeeAccepted: true,
+    });
+    expect(unoffered.message).toContain("not in the latest verified availability");
+    expect((await store.getCallByProviderId("slot-guard"))?.fields.requestedStart).toBeNull();
+  });
+
   it("refuses fee-gated booking when no owner-approved price exists", async () => {
     await start("missing-fee");
     const result = await book("missing-fee", "2026-01-15T15:00:00Z");
@@ -136,6 +177,17 @@ describe("call outcomes", () => {
     expect(result.status).toBe("pending");
     expect(result.message).toContain("outside the service area");
     expect(calendar.events).toHaveLength(0);
+  });
+
+  it("checks service coverage before availability and fails closed when coverage is unconfigured", async () => {
+    const covered = await service.checkServiceArea({ tenantId: "demo", providerCallId: "coverage", address: "100 Main St, Springfield, IL 62701" });
+    expect(covered.status).toBe("covered");
+    const outside = await service.checkServiceArea({ tenantId: "demo", providerCallId: "coverage", address: "100 Main St, Albany, NY 12207" });
+    expect(outside.status).toBe("outside");
+    await store.saveConfig({ ...createDemoConfig(), serviceAreaTerms: [] });
+    const unconfigured = await service.checkServiceArea({ tenantId: "demo", providerCallId: "coverage", address: "100 Main St, Springfield, IL 62701" });
+    expect(unconfigured.status).toBe("unconfigured");
+    expect(unconfigured.message).toContain("Do not promise service or book");
   });
 
   it("serializes two callers competing for overlapping slots", async () => {
@@ -284,6 +336,13 @@ describe("call outcomes", () => {
   }
 
   async function book(providerCallId: string, slotStart: string): Promise<{ status: "confirmed" | "pending" | "conflict" | "unknown"; message: string }> {
+    const start = new Date(slotStart);
+    await service.checkAvailability({
+      tenantId: "demo",
+      providerCallId,
+      windowStart: start.toISOString(),
+      windowEnd: new Date(start.getTime() + 3 * 60 * 60_000).toISOString(),
+    });
     return service.bookConfirmedSlot({ tenantId: "demo", providerCallId, slotStart, callerName: "Test Caller", callbackNumber: "+15555550100", address: "100 Main St, Springfield", serviceCategory: "HVAC maintenance", problemDescription: "Routine service needed", explicitConfirmation: true, diagnosticFeeAccepted: true });
   }
 

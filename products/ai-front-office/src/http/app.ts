@@ -8,6 +8,7 @@ import { CallService } from "../application/call-service.js";
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import type { BusinessConfig } from "../domain/models.js";
+import { buildTelnyxGreeting } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import {
   asTelnyxConversationEnded,
@@ -50,6 +51,9 @@ const baseToolSchema = z.object({
 const availabilitySchema = baseToolSchema.extend({
   window_start: dateTime,
   window_end: dateTime,
+});
+const serviceAreaSchema = baseToolSchema.extend({
+  address: z.string().min(3).max(500),
 });
 const triageSchema = baseToolSchema.extend({
   from_number: z.string().min(3).max(40),
@@ -157,6 +161,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (method === "POST" && url.pathname === "/webhooks/telnyx") return handleTelnyx(request, response);
     if (method === "POST" && url.pathname === "/tools/save-intake") return handleIntake(request, response);
+    if (method === "POST" && url.pathname === "/tools/check-service-area") return handleServiceArea(request, response);
     if (method === "POST" && url.pathname === "/tools/check-availability") return handleAvailability(request, response);
     if (method === "POST" && url.pathname === "/tools/triage") return handleTriage(request, response);
     if (method === "POST" && url.pathname === "/tools/book") return handleBooking(request, response);
@@ -197,6 +202,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         startedAt: initialization.data.occurred_at ?? dependencies.clock.now().toISOString(),
       });
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
+      const localContext = formatLocalCallContext(dependencies.clock.now(), config.timezone);
       const transferNumber = config.ownerTransferNumberRef
         ? await dependencies.store.getIntegrationSecret(config.tenantId, "notifications", config.ownerTransferNumberRef)
         : null;
@@ -204,6 +210,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         dynamic_variables: {
           tenant_id: config.tenantId,
           business_name: config.businessName,
+          call_direction: "inbound",
+          opening_greeting: buildTelnyxGreeting(config),
+          caller_phone: initialization.data.payload.telnyx_end_user_target ?? "unknown",
+          current_local_date: localContext.date,
+          current_local_time: localContext.time,
+          business_timezone: config.timezone,
           owner_transfer_targets: transferNumber
             ? [{ name: "Owner", to: transferNumber, message: "Your AI front office has a caller who requested immediate human help." }]
             : [],
@@ -232,6 +244,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     await requireOperational();
     const input = intakeSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
+    if (input.requested_start && Date.parse(input.requested_start) < dependencies.clock.now().getTime()) {
+      throw new HttpError(409, "Requested appointment time is in the past; check current availability again");
+    }
     const result = await service.saveIntake({
       tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
       providerCallId: input.provider_call_id,
@@ -268,6 +283,20 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       providerCallId: input.provider_call_id,
       windowStart: input.window_start,
       windowEnd: input.window_end,
+    });
+    sendJson(response, 200, result);
+  }
+
+  async function handleServiceArea(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const rawBody = await readBody(request);
+    requireProviderAuth(request, rawBody);
+    await requireOperational();
+    const input = serviceAreaSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
+    requireMatchingCallHeader(request, input.provider_call_id);
+    const result = await service.checkServiceArea({
+      tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
+      providerCallId: input.provider_call_id,
+      address: input.address,
     });
     sendJson(response, 200, result);
   }
@@ -557,6 +586,13 @@ function isExplicitHumanRequest(callerQuote: string): boolean {
   const requestsContact = /\b(speak|talk|connect|transfer|reach|get|want|need|call|put)\b/.test(quote);
   const directRequest = /\b(human|person|representative|operator)\s*(?:please|now)?[.!?]*$/.test(quote);
   return namesPerson && (requestsContact || directRequest);
+}
+
+function formatLocalCallContext(now: Date, timeZone: string): { date: string; time: string } {
+  return {
+    date: new Intl.DateTimeFormat("en-US", { timeZone, weekday: "long", year: "numeric", month: "long", day: "numeric" }).format(now),
+    time: new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(now),
+  };
 }
 
 function routeKey(pathname: string): string {
