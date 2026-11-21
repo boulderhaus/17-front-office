@@ -60,7 +60,10 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
     ? new GoogleCalendarAdapter({
         clientId: env.GOOGLE_CLIENT_ID!,
         clientSecret: env.GOOGLE_CLIENT_SECRET!,
-        getRefreshToken: async () => env.GOOGLE_REFRESH_TOKEN || await store.getIntegrationSecret(env.DEFAULT_TENANT_ID, "google", "refresh_token"),
+        getRefreshToken: async () =>
+          (await store.getIntegrationSecret(env.DEFAULT_TENANT_ID, "google", "refresh_token"))
+          ?? env.GOOGLE_REFRESH_TOKEN
+          ?? null,
         calendarId: env.GOOGLE_CALENDAR_ID,
       })
     : new UnavailableCalendar();
@@ -69,7 +72,11 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
         apiKey: env.TELNYX_API_KEY!,
         fromNumber: env.TELNYX_FROM_NUMBER!,
         messagingProfileId: env.TELNYX_MESSAGING_PROFILE_ID!,
-        resolveDestination: (reference) => store.getIntegrationSecret(env.DEFAULT_TENANT_ID, "notifications", reference),
+        resolveDestination: async (reference) =>
+          (await store.getIntegrationSecret(env.DEFAULT_TENANT_ID, "notifications", reference)) ?? null,
+        isOptedOut: (phone) => store.isSmsOptedOut(env.DEFAULT_TENANT_ID, phone),
+        webhookUrl: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx`,
+        ...(env.PROVIDER_TEST_MODE ? { allowedDirectDestinations: new Set(Object.values(destinations)) } : {}),
       })
     : new UnavailableNotificationSender();
   return {

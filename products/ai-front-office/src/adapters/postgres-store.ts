@@ -13,11 +13,11 @@ export class PostgresStore implements Store {
   readonly #lockPool: pg.Pool;
 
   constructor(databaseUrl: string, private readonly cryptoBox: CryptoBox) {
-    this.#pool = new Pool({ connectionString: databaseUrl, max: 10, idleTimeoutMillis: 30_000 });
+    this.#pool = new Pool({ connectionString: databaseUrl, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 3_000 });
     // Advisory locks must not consume the same pool used by the work inside the
     // critical section. A burst of lock holders would otherwise starve their
     // own queries and deadlock at the pool limit.
-    this.#lockPool = new Pool({ connectionString: databaseUrl, max: 5, idleTimeoutMillis: 30_000 });
+    this.#lockPool = new Pool({ connectionString: databaseUrl, max: 5, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 3_000 });
   }
 
   async close(): Promise<void> {
@@ -30,12 +30,19 @@ export class PostgresStore implements Store {
 
   async withLock<T>(key: string, task: () => Promise<T>): Promise<T> {
     const client = await this.#lockPool.connect();
+    let destroy = false;
     try {
-      await client.query("SELECT pg_advisory_lock(hashtext($1))", [key]);
+      await client.query("SET lock_timeout = '3000ms'");
+      await client.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [key]);
       return await task();
     } finally {
-      await client.query("SELECT pg_advisory_unlock(hashtext($1))", [key]).catch(() => undefined);
-      client.release();
+      try {
+        const unlocked = await client.query("SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS unlocked", [key]);
+        destroy = unlocked.rows[0]?.unlocked !== true;
+      } catch {
+        destroy = true;
+      }
+      client.release(destroy);
     }
   }
 
@@ -84,6 +91,11 @@ export class PostgresStore implements Store {
     return result.rows[0] ? this.mapCall(result.rows[0] as Row) : null;
   }
 
+  async isProviderCallDeleted(providerCallId: string): Promise<boolean> {
+    const result = await this.#pool.query("SELECT 1 FROM deleted_provider_calls WHERE provider_call_id=$1", [providerCallId]);
+    return result.rowCount === 1;
+  }
+
   async getCall(callId: string): Promise<CallRecord | null> {
     const result = await this.#pool.query("SELECT * FROM calls WHERE id = $1", [callId]);
     return result.rows[0] ? this.mapCall(result.rows[0] as Row) : null;
@@ -92,13 +104,14 @@ export class PostgresStore implements Store {
   async saveCall(call: CallRecord): Promise<void> {
     await this.#pool.query(
       `INSERT INTO calls(
-         id, tenant_id, provider_call_id, from_number_hash, from_number_ciphertext, started_at, ended_at,
+         id, tenant_id, provider_call_id, from_number_hash, from_number_ciphertext, from_number_verified, started_at, ended_at,
          duration_seconds, fields_ciphertext, emergency, outcome, transcript_ciphertext,
          recording_url_ciphertext, consent_state, billing_disposition, quality_flags, created_at, updated_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
        ON CONFLICT (id) DO UPDATE SET
          from_number_hash = EXCLUDED.from_number_hash,
          from_number_ciphertext = EXCLUDED.from_number_ciphertext,
+         from_number_verified = EXCLUDED.from_number_verified,
          started_at = EXCLUDED.started_at,
          ended_at = EXCLUDED.ended_at,
          duration_seconds = EXCLUDED.duration_seconds,
@@ -117,6 +130,7 @@ export class PostgresStore implements Store {
         call.providerCallId,
         this.cryptoBox.hashLookup(call.fromNumber),
         this.cryptoBox.encrypt(call.fromNumber),
+        call.fromNumberVerified,
         call.startedAt,
         call.endedAt,
         call.durationSeconds,
@@ -139,17 +153,51 @@ export class PostgresStore implements Store {
     return result.rows.map((row) => this.mapCall(row as Row));
   }
 
+  async countCallsFromNumberSince(tenantId: string, phone: string, since: string): Promise<number> {
+    const result = await this.#pool.query(
+      "SELECT count(*)::int AS count FROM calls WHERE tenant_id=$1 AND from_number_hash=$2 AND started_at >= $3",
+      [tenantId, this.cryptoBox.hashLookup(phone), since],
+    );
+    return Number(result.rows[0]?.count ?? 0);
+  }
+
+  async listExpiredCalls(tenantId: string, endedBefore: string, limit: number): Promise<CallRecord[]> {
+    const result = await this.#pool.query(
+      "SELECT * FROM calls WHERE tenant_id=$1 AND ended_at IS NOT NULL AND ended_at < $2 ORDER BY ended_at LIMIT $3",
+      [tenantId, endedBefore, limit],
+    );
+    return result.rows.map((row) => this.mapCall(row as Row));
+  }
+
   async deleteCall(tenantId: string, callId: string): Promise<boolean> {
-    const result = await this.#pool.query("DELETE FROM calls WHERE tenant_id=$1 AND id=$2", [tenantId, callId]);
-    return result.rowCount === 1;
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      const selected = await client.query("SELECT provider_call_id FROM calls WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [tenantId, callId]);
+      if (!selected.rows[0]) {
+        await client.query("ROLLBACK");
+        return false;
+      }
+      await client.query(
+        "INSERT INTO deleted_provider_calls(provider_call_id,tenant_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
+        [selected.rows[0].provider_call_id, tenantId],
+      );
+      await client.query("DELETE FROM calls WHERE tenant_id=$1 AND id=$2", [tenantId, callId]);
+      await client.query("COMMIT");
+      return true;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async deleteExpiredCalls(tenantId: string, endedBefore: string): Promise<number> {
-    const result = await this.#pool.query(
-      "DELETE FROM calls WHERE tenant_id=$1 AND ended_at IS NOT NULL AND ended_at < $2",
-      [tenantId, endedBefore],
-    );
-    return result.rowCount ?? 0;
+    const calls = await this.listExpiredCalls(tenantId, endedBefore, 1_000);
+    let deleted = 0;
+    for (const call of calls) if (await this.deleteCall(tenantId, call.id)) deleted += 1;
+    return deleted;
   }
 
   async upsertCustomer(customer: CustomerRecord): Promise<void> {
@@ -263,9 +311,33 @@ export class PostgresStore implements Store {
     );
   }
 
+  async getNotificationByProviderReceipt(providerReceipt: string): Promise<OutboxNotification | null> {
+    const result = await this.#pool.query("SELECT * FROM notification_outbox WHERE provider_receipt=$1", [providerReceipt]);
+    return result.rows[0] ? mapNotification(result.rows[0] as Row, this.cryptoBox) : null;
+  }
+
   async listNotifications(callId: string): Promise<OutboxNotification[]> {
     const result = await this.#pool.query("SELECT * FROM notification_outbox WHERE call_id=$1 ORDER BY created_at", [callId]);
     return result.rows.map((row) => mapNotification(row as Row, this.cryptoBox));
+  }
+
+
+  async setSmsOptOut(tenantId: string, phone: string, optedOut: boolean): Promise<void> {
+    await this.#pool.query(
+      `INSERT INTO sms_opt_outs(tenant_id,phone_hash,opted_out,updated_at) VALUES($1,$2,$3,now())
+       ON CONFLICT (tenant_id,phone_hash) DO UPDATE SET opted_out=EXCLUDED.opted_out,updated_at=now()`,
+      [tenantId, this.cryptoBox.hashLookup(phone), optedOut],
+    );
+  }
+
+  async isSmsOptedOut(tenantId: string, phone: string): Promise<boolean> {
+    const result = await this.#pool.query("SELECT opted_out FROM sms_opt_outs WHERE tenant_id=$1 AND phone_hash=$2", [tenantId, this.cryptoBox.hashLookup(phone)]);
+    return result.rows[0]?.opted_out === true;
+  }
+
+  async purgeWebhookEvents(before: string): Promise<number> {
+    const result = await this.#pool.query("DELETE FROM webhook_events WHERE received_at < $1", [before]);
+    return result.rowCount ?? 0;
   }
 
   private mapCall(row: Row): CallRecord {
@@ -274,6 +346,7 @@ export class PostgresStore implements Store {
       tenantId: String(row.tenant_id),
       providerCallId: String(row.provider_call_id),
       fromNumber: this.cryptoBox.decrypt(String(row.from_number_ciphertext)) ?? "",
+      fromNumberVerified: row.from_number_verified === true,
       startedAt: iso(row.started_at),
       endedAt: row.ended_at ? iso(row.ended_at) : null,
       durationSeconds: row.duration_seconds === null ? null : Number(row.duration_seconds),

@@ -51,10 +51,10 @@ export class BookingCoordinator {
 
       try {
         const free = await withRetry(() => this.calendar.isFree({ tenantId: input.tenantId, slot }), {
-          attempts: 2,
-          baseDelayMs: 50,
-          maxDelayMs: 100,
-          timeoutMs: 2_500,
+          attempts: 1,
+          baseDelayMs: 0,
+          maxDelayMs: 0,
+          timeoutMs: 900,
         });
         if (!free) {
           const conflict = { ...booking, status: "conflict" as const, failureReason: "Requested slot is no longer free", updatedAt: this.clock.now().toISOString() };
@@ -75,17 +75,17 @@ export class BookingCoordinator {
           idempotencyKey: `calendar:${input.tenantId}:${input.callId}:${slot.start}`,
         };
         const created = await withRetry(() => this.calendar.createEvent(attempt), {
-          attempts: 2,
-          baseDelayMs: 100,
-          maxDelayMs: 250,
-          timeoutMs: 4_000,
+          attempts: 1,
+          baseDelayMs: 0,
+          maxDelayMs: 0,
+          timeoutMs: 1_500,
         });
         const writeVerified = created.status === "confirmed" && created.providerEventId
           ? await withRetry(() => this.calendar.verifyEvent({ tenantId: input.tenantId, providerEventId: created.providerEventId!, slot }), {
-              attempts: 2,
-              baseDelayMs: 100,
-              maxDelayMs: 250,
-              timeoutMs: 4_000,
+              attempts: 1,
+              baseDelayMs: 0,
+              maxDelayMs: 0,
+              timeoutMs: 1_200,
             })
           : false;
         const verifiedStatus = created.status === "confirmed" && writeVerified ? "confirmed" as const : "unknown" as const;

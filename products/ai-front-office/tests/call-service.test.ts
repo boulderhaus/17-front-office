@@ -16,7 +16,7 @@ const baseFields: CollectedCallFields = {
   callerName: "Test Caller",
   companyName: null,
   callbackNumber: "+15555550100",
-  address: "100 Main St, Springfield",
+  address: "100 Main St, Springfield, IL",
   serviceCategory: "HVAC maintenance",
   serviceCategoryConfidence: 0.95,
   problemDescription: "Routine maintenance",
@@ -65,7 +65,7 @@ describe("call outcomes", () => {
     await start("emergency-booking");
     const result = await service.bookConfirmedSlot({
       tenantId: "demo", providerCallId: "emergency-booking", slotStart: "2026-01-15T15:00:00Z",
-      callerName: "Test Caller", callbackNumber: "+15555550100", address: "100 Main St, Springfield",
+      callerName: "Test Caller", callbackNumber: "+15555550100", address: "100 Main St, Springfield, IL",
       serviceCategory: "HVAC repair", problemDescription: "No heat and an infant is in the house",
       explicitConfirmation: false, diagnosticFeeAccepted: false,
     });
@@ -132,14 +132,14 @@ describe("call outcomes", () => {
     await start("slot-guard");
     const past = await service.bookConfirmedSlot({
       tenantId: "demo", providerCallId: "slot-guard", slotStart: "2025-06-09T00:00:00.000Z",
-      callerName: "Caller", callbackNumber: "+15555550102", address: "100 Main St, Springfield",
+      callerName: "Caller", callbackNumber: "+15555550102", address: "100 Main St, Springfield, IL",
       serviceCategory: "HVAC repair", problemDescription: "Routine repair", explicitConfirmation: true, diagnosticFeeAccepted: true,
     });
     expect(past.message).toContain("in the past");
     expect((await store.getCallByProviderId("slot-guard"))?.fields.requestedStart).toBeNull();
     const unoffered = await service.bookConfirmedSlot({
       tenantId: "demo", providerCallId: "slot-guard", slotStart: "2026-01-15T20:00:00.000Z",
-      callerName: "Caller", callbackNumber: "+15555550102", address: "100 Main St, Springfield",
+      callerName: "Caller", callbackNumber: "+15555550102", address: "100 Main St, Springfield, IL",
       serviceCategory: "HVAC repair", problemDescription: "Routine repair", explicitConfirmation: true, diagnosticFeeAccepted: true,
     });
     expect(unoffered.message).toContain("not in the latest verified availability");
@@ -156,7 +156,7 @@ describe("call outcomes", () => {
 
   it("queues and alerts on an immediate human request", async () => {
     const result = await service.queueHumanHandoff({ tenantId: "demo", providerCallId: "human", fromNumber: "+15555550101", callerName: "Angry Caller", problemDescription: "I need a person now" });
-    expect(result.transferAvailable).toBe(true);
+    expect(result.transferAvailable).toBe(false);
     await new OutboxWorker(store, sender, clock).runOnce();
     expect(sender.sent[0]?.body).toContain("REQUESTED A HUMAN");
   });
@@ -307,7 +307,7 @@ describe("call outcomes", () => {
 
   it("recovers a dropped call with an owner task and caller text", async () => {
     await start("dropped");
-    clock.advance(15 * 60_000 + 1);
+    clock.advance(35 * 60_000 + 1);
     expect(await service.recoverStaleCalls("demo")).toBe(1);
     const call = await store.getCallByProviderId("dropped");
     expect(call?.outcome).toBe("handoff_queued");
@@ -343,7 +343,7 @@ describe("call outcomes", () => {
       windowStart: start.toISOString(),
       windowEnd: new Date(start.getTime() + 3 * 60 * 60_000).toISOString(),
     });
-    return service.bookConfirmedSlot({ tenantId: "demo", providerCallId, slotStart, callerName: "Test Caller", callbackNumber: "+15555550100", address: "100 Main St, Springfield", serviceCategory: "HVAC maintenance", problemDescription: "Routine service needed", explicitConfirmation: true, diagnosticFeeAccepted: true });
+    return service.bookConfirmedSlot({ tenantId: "demo", providerCallId, slotStart, callerName: "Test Caller", callbackNumber: "+15555550100", address: "100 Main St, Springfield, IL", serviceCategory: "HVAC maintenance", problemDescription: "Routine service needed", explicitConfirmation: true, diagnosticFeeAccepted: true });
   }
 
   async function enableDirectBooking(): Promise<void> {

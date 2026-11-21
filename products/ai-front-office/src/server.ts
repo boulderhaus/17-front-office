@@ -1,6 +1,8 @@
 import { createServer } from "node:http";
 import { OutboxWorker } from "./application/outbox-worker.js";
 import { CallService } from "./application/call-service.js";
+import { DataDeletionService } from "./application/data-deletion.js";
+import { TelnyxRecordingClient } from "./adapters/telnyx.js";
 import { loadEnvironment } from "./config/environment.js";
 import { createRequestHandler } from "./http/app.js";
 import { systemClock } from "./ports.js";
@@ -18,6 +20,11 @@ server.maxRequestsPerSocket = 1_000;
 
 const worker = new OutboxWorker(runtime.store, runtime.sender, systemClock);
 const recovery = new CallService(runtime.store, runtime.calendar, systemClock, env.PUBLIC_BASE_URL);
+const deletion = new DataDeletionService(
+  runtime.store,
+  runtime.calendar,
+  env.TELNYX_API_KEY ? new TelnyxRecordingClient(env.TELNYX_API_KEY) : null,
+);
 let workerActive = false;
 let nextRecoveryAt = 0;
 let nextRetentionAt = 0;
@@ -36,8 +43,10 @@ const runWorker = async (): Promise<void> => {
       nextRetentionAt = Date.now() + 60 * 60_000;
       const config = await runtime.store.getConfig(env.DEFAULT_TENANT_ID);
       const cutoff = new Date(Date.now() - config.dataRetentionDays * 24 * 60 * 60_000).toISOString();
-      const deleted = await runtime.store.deleteExpiredCalls(env.DEFAULT_TENANT_ID, cutoff);
-      if (deleted > 0) logger({ level: "info", event: "retention_calls_deleted", deleted, retentionDays: config.dataRetentionDays });
+      const result = await deletion.deleteExpired(env.DEFAULT_TENANT_ID, cutoff);
+      if (result.deleted > 0 || result.failed > 0) logger({ level: result.failed > 0 ? "error" : "info", event: "retention_cycle", ...result, retentionDays: config.dataRetentionDays });
+      const purgedWebhooks = await runtime.store.purgeWebhookEvents(new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString());
+      if (purgedWebhooks > 0) logger({ level: "info", event: "webhook_retention_cycle", purged: purgedWebhooks });
     }
   } catch (error) {
     logger({ level: "error", event: "outbox_failed", error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });

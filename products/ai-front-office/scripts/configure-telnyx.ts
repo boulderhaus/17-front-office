@@ -13,7 +13,9 @@ try {
   if (!apply) {
     console.log(JSON.stringify({ mode: "dry_run", assistantId: env.TELNYX_ASSISTANT_ID ?? null, update }, null, 2));
   } else {
-    if (!env.TELNYX_API_KEY || !env.TELNYX_ASSISTANT_ID) throw new Error("TELNYX_API_KEY and TELNYX_ASSISTANT_ID are required with --apply");
+    if (!env.TELNYX_API_KEY || !env.TELNYX_ASSISTANT_ID || !env.TELNYX_MESSAGING_PROFILE_ID) {
+      throw new Error("TELNYX_API_KEY, TELNYX_ASSISTANT_ID, and TELNYX_MESSAGING_PROFILE_ID are required with --apply");
+    }
     const current = await telnyxRequest<Record<string, unknown>>(
       env.TELNYX_API_KEY,
       `/ai/assistants/${encodeURIComponent(env.TELNYX_ASSISTANT_ID)}`,
@@ -37,10 +39,22 @@ try {
         }),
       },
     );
+    await telnyxRequest(
+      env.TELNYX_API_KEY,
+      `/messaging_profiles/${encodeURIComponent(env.TELNYX_MESSAGING_PROFILE_ID)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          webhook_api_version: "2",
+          webhook_url: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx`,
+        }),
+      },
+    );
     console.log(JSON.stringify({
       mode: "applied",
       assistantId: env.TELNYX_ASSISTANT_ID,
       texmlAppId,
+      messagingProfileId: env.TELNYX_MESSAGING_PROFILE_ID,
       webhookUrl: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx`,
     }));
   }

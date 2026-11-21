@@ -19,6 +19,7 @@ const schema = z.object({
   ),
   ADMIN_TOKEN: z.string().min(20),
   TOOL_TOKEN: z.string().min(20),
+  SESSION_SIGNING_KEY: z.string().min(32).optional(),
   TELNYX_API_KEY: z.string().optional(),
   TELNYX_PUBLIC_KEY: z.preprocess(
     (value) => value === "" ? undefined : value,
@@ -46,8 +47,11 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
     throw new Error("DEFAULT_TIMEZONE must be a valid IANA timezone");
   }
   if (parsed.ADMIN_TOKEN === parsed.TOOL_TOKEN) throw new Error("ADMIN_TOKEN and TOOL_TOKEN must be different");
+  if (parsed.SESSION_SIGNING_KEY && (parsed.SESSION_SIGNING_KEY === parsed.ADMIN_TOKEN || parsed.SESSION_SIGNING_KEY === parsed.TOOL_TOKEN)) {
+    throw new Error("SESSION_SIGNING_KEY must be distinct from ADMIN_TOKEN and TOOL_TOKEN");
+  }
   if (!parsed.DEMO_MODE) {
-    for (const key of ["DATABASE_URL", "DATA_ENCRYPTION_KEY"] as const) {
+    for (const key of ["DATABASE_URL", "DATA_ENCRYPTION_KEY", "SESSION_SIGNING_KEY"] as const) {
       if (!parsed[key]) throw new Error(`${key} is required outside demo mode`);
     }
     if (parsed.TELNYX_FROM_NUMBER && !/^\+[1-9]\d{7,14}$/.test(parsed.TELNYX_FROM_NUMBER)) throw new Error("TELNYX_FROM_NUMBER must use E.164 format");
@@ -91,6 +95,7 @@ export function demoEnvironment(overrides: Partial<NodeJS.ProcessEnv> = {}): Env
     DEMO_MODE: "true",
     ADMIN_TOKEN: randomBytes(24).toString("base64url"),
     TOOL_TOKEN: randomBytes(24).toString("base64url"),
+    SESSION_SIGNING_KEY: randomBytes(32).toString("base64url"),
     ...overrides,
   });
 }

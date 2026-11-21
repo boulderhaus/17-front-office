@@ -64,9 +64,37 @@ const conversationEndedSchema = z.object({
   }).passthrough(),
 }).passthrough();
 
+const messageFinalizedSchema = z.object({
+  data: z.object({
+    event_type: z.literal("message.finalized"),
+    id: z.string(),
+    occurred_at: z.string().datetime({ offset: true }).optional(),
+    payload: z.object({
+      id: z.string(),
+      errors: z.array(z.object({ code: z.string().optional(), title: z.string().optional(), detail: z.string().optional() }).passthrough()).default([]),
+      to: z.array(z.object({ phone_number: z.string(), status: z.string() }).passthrough()).min(1),
+    }).passthrough(),
+  }).passthrough(),
+}).passthrough();
+
+const messageReceivedSchema = z.object({
+  data: z.object({
+    event_type: z.literal("message.received"),
+    id: z.string(),
+    occurred_at: z.string().datetime({ offset: true }).optional(),
+    payload: z.object({
+      autoresponse_type: z.string().nullable().optional(),
+      from: z.object({ phone_number: z.string() }).passthrough(),
+      to: z.array(z.object({ phone_number: z.string() }).passthrough()).default([]),
+    }).passthrough(),
+  }).passthrough(),
+}).passthrough();
+
 export type TelnyxEnvelope = z.infer<typeof envelopeBaseSchema>;
 export type TelnyxInitializationEnvelope = z.infer<typeof initializationSchema>;
 export type TelnyxConversationEndedEnvelope = z.infer<typeof conversationEndedSchema>;
+export type TelnyxMessageFinalizedEnvelope = z.infer<typeof messageFinalizedSchema>;
+export type TelnyxMessageReceivedEnvelope = z.infer<typeof messageReceivedSchema>;
 
 export interface TelnyxTexmlCallback {
   callStatus: string | null;
@@ -121,6 +149,14 @@ export function asTelnyxConversationEnded(envelope: TelnyxEnvelope): TelnyxConve
   return conversationEndedSchema.parse(envelope);
 }
 
+export function asTelnyxMessageFinalized(envelope: TelnyxEnvelope): TelnyxMessageFinalizedEnvelope {
+  return messageFinalizedSchema.parse(envelope);
+}
+
+export function asTelnyxMessageReceived(envelope: TelnyxEnvelope): TelnyxMessageReceivedEnvelope {
+  return messageReceivedSchema.parse(envelope);
+}
+
 export function telnyxEventId(envelope: TelnyxEnvelope, rawBody: string): string {
   return envelope.data.id || createHash("sha256").update(envelope.data.event_type).update("\0").update(rawBody).digest("hex");
 }
@@ -130,7 +166,7 @@ export function toTelnyxCallSummary(
   rawBody: string,
   tenantId: string,
   receivedAt: Date,
-  recordingUrl: string,
+  recordingUrl: string | null,
 ): CallSummaryInput {
   const payload = envelope.data.payload;
   const toolArguments = collectToolArguments(payload.messages);
@@ -173,7 +209,7 @@ export function toTelnyxCallSummary(
     fields,
     transcript: readableTranscript(payload.messages),
     recordingUrl,
-    consentState: bool("recording_disclosure_given") ? "disclosed" : "unknown",
+    consentState: bool("recording_disclosure_declined") ? "declined" : bool("recording_disclosure_given") ? "disclosed" : "unknown",
     ...(llmEmergencyScore === undefined ? {} : { llmEmergencyScore }),
     ...(llmEmergencyReason === null ? {} : { llmEmergencyReason }),
   };
@@ -183,7 +219,7 @@ export function toTelnyxTexmlCallSummary(
   rawBody: string,
   tenantId: string,
   receivedAt: Date,
-  recordingUrl: string,
+  recordingUrl: string | null,
 ): CallSummaryInput {
   const form = new URLSearchParams(rawBody);
   const callStatus = form.get("CallStatus");
@@ -257,6 +293,9 @@ interface TelnyxSmsOptions {
   fromNumber: string;
   messagingProfileId?: string;
   resolveDestination: (reference: string) => Promise<string | null>;
+  allowedDirectDestinations?: ReadonlySet<string>;
+  isOptedOut?: (phone: string) => Promise<boolean>;
+  webhookUrl?: string;
   fetcher?: typeof fetch;
 }
 
@@ -265,13 +304,18 @@ export class TelnyxSmsAdapter implements NotificationPort {
 
   async send(notification: OutboxNotification): Promise<{ providerReceipt: string }> {
     const direct = notification.destinationRef.startsWith("tel:") ? notification.destinationRef.slice(4) : null;
+    if (direct && this.options.allowedDirectDestinations && !this.options.allowedDirectDestinations.has(direct)) {
+      throw new Error("Direct SMS destination is not allowlisted in provider test mode");
+    }
     const to = direct ?? await this.options.resolveDestination(notification.destinationRef);
-    if (!to || !/^\+[1-9]\d{7,14}$/.test(to)) throw new Error(`No valid E.164 phone number is configured for destination reference ${notification.destinationRef}`);
+    if (!to || !isAllowedUsNumber(to)) throw new Error(`No valid US phone number is configured for destination reference ${notification.destinationRef}`);
+    if (await this.options.isOptedOut?.(to)) throw new Error("Destination has opted out of SMS");
     const body = {
       from: this.options.fromNumber,
       to,
       text: notification.body,
       ...(this.options.messagingProfileId ? { messaging_profile_id: this.options.messagingProfileId } : {}),
+      ...(this.options.webhookUrl ? { webhook_url: this.options.webhookUrl } : {}),
     };
     const response = await withTimeout((this.options.fetcher ?? fetch)("https://api.telnyx.com/v2/messages", {
       method: "POST",
@@ -292,6 +336,72 @@ export class TelnyxSmsAdapter implements NotificationPort {
   }
 }
 
+interface TelnyxVoiceRoutingOptions {
+  apiKey: string;
+  phoneNumber: string;
+  assistantId: string;
+  fetcher?: typeof fetch;
+}
+
+export class TelnyxVoiceRoutingClient {
+  constructor(private readonly options: TelnyxVoiceRoutingOptions) {}
+
+  async setPaused(paused: boolean): Promise<{ changed: boolean; numberId: string }> {
+    const assistant = await this.request<Record<string, unknown>>(`/ai/assistants/${encodeURIComponent(this.options.assistantId)}`);
+    const assistantData = objectData(assistant);
+    const telephony = objectData(assistantData.telephony_settings);
+    const assistantConnectionId = typeof telephony.default_texml_app_id === "string" ? telephony.default_texml_app_id : null;
+    if (!assistantConnectionId) throw new Error("Telnyx assistant has no default TeXML application");
+
+    const url = new URL("https://api.telnyx.com/v2/phone_numbers");
+    url.searchParams.set("filter[phone_number]", this.options.phoneNumber);
+    const response = await this.request<{ data?: Array<Record<string, unknown>> }>(url.toString(), undefined, true);
+    const number = response.data?.find((candidate) => candidate.phone_number === this.options.phoneNumber) ?? response.data?.[0];
+    const numberId = typeof number?.id === "string" ? number.id : null;
+    if (!numberId) throw new Error("Telnyx phone number was not found");
+    const currentConnectionId = typeof number?.connection_id === "string" ? number.connection_id : null;
+    const desiredConnectionId = paused ? null : assistantConnectionId;
+    if (currentConnectionId === desiredConnectionId) return { changed: false, numberId };
+    if (currentConnectionId && currentConnectionId !== assistantConnectionId) {
+      throw new Error("Telnyx phone number is assigned to an unexpected voice connection");
+    }
+
+    const updated = await this.request<Record<string, unknown>>(`/phone_numbers/${encodeURIComponent(numberId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ connection_id: desiredConnectionId }),
+    });
+    const updatedConnectionId = objectData(updated).connection_id;
+    if ((typeof updatedConnectionId === "string" ? updatedConnectionId : null) !== desiredConnectionId) {
+      throw new Error("Telnyx did not persist the requested voice-routing state");
+    }
+    return { changed: true, numberId };
+  }
+
+  private async request<T>(path: string, init?: RequestInit, absolute = false): Promise<T> {
+    const target = absolute ? path : `https://api.telnyx.com/v2${path}`;
+    const response = await withTimeout((this.options.fetcher ?? fetch)(target, {
+      ...init,
+      headers: { authorization: `Bearer ${this.options.apiKey}`, "content-type": "application/json", ...init?.headers },
+    }), 5_000);
+    const payload = await response.json().catch(() => ({})) as T & { errors?: Array<{ detail?: string }> };
+    if (!response.ok) throw new Error(`Telnyx routing request failed with HTTP ${response.status}${payload.errors?.[0]?.detail ? `: ${payload.errors[0].detail}` : ""}`);
+    return payload;
+  }
+}
+
+function objectData(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const object = value as Record<string, unknown>;
+  return object.data && typeof object.data === "object" && !Array.isArray(object.data)
+    ? object.data as Record<string, unknown>
+    : object;
+}
+
+function isAllowedUsNumber(value: string): boolean {
+  const match = /^\+1([2-9]\d{2})[2-9]\d{6}$/.exec(value);
+  return Boolean(match && match[1] !== "900");
+}
+
 export class TelnyxRecordingClient {
   constructor(private readonly apiKey: string, private readonly fetcher: typeof fetch = fetch) {}
 
@@ -309,5 +419,24 @@ export class TelnyxRecordingClient {
     if (!response.ok) throw new Error(`Telnyx recordings lookup failed with HTTP ${response.status}${payload.errors?.[0]?.detail ? `: ${payload.errors[0].detail}` : ""}`);
     const candidate = payload.data?.[0]?.download_urls?.mp3 ?? payload.data?.[0]?.download_urls?.wav;
     return candidate && /^https:\/\//i.test(candidate) ? candidate : null;
+  }
+
+  async deleteForCall(callControlId: string): Promise<void> {
+    const url = new URL("https://api.telnyx.com/v2/recordings");
+    url.searchParams.set("filter[call_control_id]", callControlId);
+    url.searchParams.set("page[size]", "100");
+    const response = await withTimeout(this.fetcher(url, {
+      headers: { authorization: `Bearer ${this.apiKey}` },
+    }), 4_000);
+    const payload = await response.json().catch(() => ({})) as { data?: Array<{ id?: string }> };
+    if (!response.ok) throw new Error(`Telnyx recordings lookup failed with HTTP ${response.status}`);
+    for (const record of payload.data ?? []) {
+      if (!record.id) continue;
+      const deletion = await withTimeout(this.fetcher(`https://api.telnyx.com/v2/recordings/${encodeURIComponent(record.id)}`, {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${this.apiKey}` },
+      }), 4_000);
+      if (deletion.status !== 404 && !deletion.ok) throw new Error(`Telnyx recording delete failed with HTTP ${deletion.status}`);
+    }
   }
 }

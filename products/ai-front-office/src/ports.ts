@@ -19,9 +19,12 @@ export interface Store {
   getIntegrationSecret(tenantId: string, provider: string, key: string): Promise<string | null>;
   saveIntegrationSecret(tenantId: string, provider: string, key: string, value: string): Promise<void>;
   getCallByProviderId(providerCallId: string): Promise<CallRecord | null>;
+  isProviderCallDeleted(providerCallId: string): Promise<boolean>;
   getCall(callId: string): Promise<CallRecord | null>;
   saveCall(call: CallRecord): Promise<void>;
   listCalls(tenantId: string, limit: number): Promise<CallRecord[]>;
+  countCallsFromNumberSince(tenantId: string, phone: string, since: string): Promise<number>;
+  listExpiredCalls(tenantId: string, endedBefore: string, limit: number): Promise<CallRecord[]>;
   deleteCall(tenantId: string, callId: string): Promise<boolean>;
   deleteExpiredCalls(tenantId: string, endedBefore: string): Promise<number>;
   upsertCustomer(customer: CustomerRecord): Promise<void>;
@@ -35,7 +38,11 @@ export interface Store {
   claimDueNotifications(now: string, limit: number): Promise<OutboxNotification[]>;
   requeueStaleNotifications(staleBefore: string, now: string): Promise<number>;
   saveNotification(notification: OutboxNotification): Promise<void>;
+  getNotificationByProviderReceipt(providerReceipt: string): Promise<OutboxNotification | null>;
   listNotifications(callId: string): Promise<OutboxNotification[]>;
+  setSmsOptOut(tenantId: string, phone: string, optedOut: boolean): Promise<void>;
+  isSmsOptedOut(tenantId: string, phone: string): Promise<boolean>;
+  purgeWebhookEvents(before: string): Promise<number>;
 }
 
 export interface CalendarPort {
@@ -45,10 +52,14 @@ export interface CalendarPort {
     windowEnd: string;
     durationMinutes: number;
     timezone: string;
+    bookableHours: BusinessConfig["bookableHours"];
+    minimumLeadTimeMinutes: number;
+    now: string;
   }): Promise<AvailabilitySlot[]>;
   isFree(input: { tenantId: string; slot: AvailabilitySlot }): Promise<boolean>;
   createEvent(attempt: BookingAttempt): Promise<{ status: "confirmed" | "unknown"; providerEventId: string | null }>;
   verifyEvent(input: { tenantId: string; providerEventId: string; slot: AvailabilitySlot }): Promise<boolean>;
+  deleteEvent(input: { tenantId: string; providerEventId: string }): Promise<void>;
 }
 
 export interface NotificationPort {

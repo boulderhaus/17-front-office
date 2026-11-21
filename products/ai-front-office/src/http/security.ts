@@ -129,7 +129,15 @@ export function clearGoogleOAuthCookie(secure: boolean): string {
 export class RateLimiter {
   readonly #buckets = new Map<string, { count: number; resetAt: number }>();
 
+  constructor(private readonly maxBuckets = 10_000) {}
+
   allow(key: string, limit: number, windowMs: number, now = Date.now()): boolean {
+    if (this.#buckets.size >= this.maxBuckets) {
+      for (const [bucketKey, bucket] of this.#buckets) {
+        if (bucket.resetAt <= now) this.#buckets.delete(bucketKey);
+      }
+      if (this.#buckets.size >= this.maxBuckets && !this.#buckets.has(key)) return false;
+    }
     const current = this.#buckets.get(key);
     if (!current || current.resetAt <= now) {
       this.#buckets.set(key, { count: 1, resetAt: now + windowMs });
@@ -138,6 +146,12 @@ export class RateLimiter {
     current.count += 1;
     return current.count <= limit;
   }
+}
+
+export function requestIp(request: IncomingMessage): string {
+  const forwarded = request.headers["x-forwarded-for"];
+  const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(",")[0]?.trim();
+  return first || request.socket.remoteAddress || "unknown";
 }
 
 export class HttpError extends Error {

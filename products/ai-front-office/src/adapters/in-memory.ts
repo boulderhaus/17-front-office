@@ -42,8 +42,10 @@ export class InMemoryStore implements Store {
   readonly notifications = new Map<string, OutboxNotification>();
   readonly configs = new Map<string, BusinessConfig>();
   readonly customers = new Map<string, CustomerRecord>();
-  readonly webhookEvents = new Set<string>();
+  readonly webhookEvents = new Map<string, string>();
+  readonly deletedProviderCalls = new Set<string>();
   readonly integrationSecrets = new Map<string, string>();
+  readonly smsOptOuts = new Map<string, boolean>();
   readonly #mutex = new KeyedMutex();
 
   async ping(): Promise<void> {}
@@ -54,7 +56,7 @@ export class InMemoryStore implements Store {
 
   async claimWebhook(eventId: string): Promise<boolean> {
     if (this.webhookEvents.has(eventId)) return false;
-    this.webhookEvents.add(eventId);
+    this.webhookEvents.set(eventId, new Date().toISOString());
     return true;
   }
 
@@ -80,6 +82,10 @@ export class InMemoryStore implements Store {
     return structuredClone([...this.calls.values()].find((call) => call.providerCallId === providerCallId) ?? null);
   }
 
+  async isProviderCallDeleted(providerCallId: string): Promise<boolean> {
+    return this.deletedProviderCalls.has(providerCallId);
+  }
+
   async getCall(callId: string): Promise<CallRecord | null> {
     return structuredClone(this.calls.get(callId) ?? null);
   }
@@ -96,9 +102,22 @@ export class InMemoryStore implements Store {
       .map((call) => structuredClone(call));
   }
 
+  async countCallsFromNumberSince(tenantId: string, phone: string, since: string): Promise<number> {
+    return [...this.calls.values()].filter((call) => call.tenantId === tenantId && call.fromNumber === phone && call.startedAt >= since).length;
+  }
+
+  async listExpiredCalls(tenantId: string, endedBefore: string, limit: number): Promise<CallRecord[]> {
+    return [...this.calls.values()]
+      .filter((call) => call.tenantId === tenantId && call.endedAt !== null && call.endedAt < endedBefore)
+      .sort((a, b) => (a.endedAt ?? "").localeCompare(b.endedAt ?? ""))
+      .slice(0, limit)
+      .map((call) => structuredClone(call));
+  }
+
   async deleteCall(tenantId: string, callId: string): Promise<boolean> {
     const call = this.calls.get(callId);
     if (!call || call.tenantId !== tenantId) return false;
+    this.deletedProviderCalls.add(call.providerCallId);
     this.calls.delete(callId);
     for (const [id, booking] of this.bookings) if (booking.callId === callId) this.bookings.delete(id);
     for (const [id, task] of this.callbackTasks) if (task.callId === callId) this.callbackTasks.delete(id);
@@ -182,10 +201,33 @@ export class InMemoryStore implements Store {
     this.notifications.set(notification.id, structuredClone(notification));
   }
 
+  async getNotificationByProviderReceipt(providerReceipt: string): Promise<OutboxNotification | null> {
+    return structuredClone([...this.notifications.values()].find((item) => item.providerReceipt === providerReceipt) ?? null);
+  }
+
   async listNotifications(callId: string): Promise<OutboxNotification[]> {
     return [...this.notifications.values()]
       .filter((item) => item.callId === callId)
       .map((item) => structuredClone(item));
+  }
+
+
+  async setSmsOptOut(tenantId: string, phone: string, optedOut: boolean): Promise<void> {
+    this.smsOptOuts.set(`${tenantId}:${phone}`, optedOut);
+  }
+
+  async isSmsOptedOut(tenantId: string, phone: string): Promise<boolean> {
+    return this.smsOptOuts.get(`${tenantId}:${phone}`) === true;
+  }
+
+  async purgeWebhookEvents(before: string): Promise<number> {
+    let purged = 0;
+    for (const [eventId, receivedAt] of this.webhookEvents) {
+      if (receivedAt >= before) continue;
+      this.webhookEvents.delete(eventId);
+      purged += 1;
+    }
+    return purged;
   }
 }
 
@@ -199,13 +241,20 @@ export class InMemoryCalendar implements CalendarPort {
     windowStart: string;
     windowEnd: string;
     durationMinutes: number;
+    timezone: string;
+    bookableHours: BusinessConfig["bookableHours"];
+    minimumLeadTimeMinutes: number;
+    now: string;
   }): Promise<AvailabilitySlot[]> {
     if (this.failAvailability) throw new Error("Calendar unavailable");
-    const start = new Date(input.windowStart);
+    const earliest = Date.parse(input.now) + input.minimumLeadTimeMinutes * 60_000;
+    const start = new Date(Math.max(Date.parse(input.windowStart), earliest));
     const end = new Date(start.getTime() + input.durationMinutes * 60_000);
     if (end.toISOString() > input.windowEnd) return [];
     const slot = { start: start.toISOString(), end: end.toISOString() };
-    return (await this.isFree({ tenantId: "demo", slot })) ? [slot] : [];
+    const available = isWithinBookableHours(slot.start, input.timezone, input.bookableHours)
+      && await this.isFree({ tenantId: "demo", slot });
+    return available ? [slot] : [];
   }
 
   async isFree(input: { tenantId: string; slot: AvailabilitySlot }): Promise<boolean> {
@@ -228,6 +277,24 @@ export class InMemoryCalendar implements CalendarPort {
     if (this.failVerify) return false;
     return this.events.some((event) => event.eventId === input.providerEventId && event.slot.start === input.slot.start && event.slot.end === input.slot.end);
   }
+
+  async deleteEvent(input: { tenantId: string; providerEventId: string }): Promise<void> {
+    const index = this.events.findIndex((event) => event.eventId === input.providerEventId);
+    if (index >= 0) this.events.splice(index, 1);
+  }
+}
+
+function isWithinBookableHours(start: string, timeZone: string, hours: BusinessConfig["bookableHours"]): boolean {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(start));
+  const read = (type: Intl.DateTimeFormatPartTypes): string => parts.find((part) => part.type === type)?.value ?? "";
+  const weekday = read("weekday");
+  if ((weekday === "Sat" || weekday === "Sun") && !hours.weekends) return false;
+  const minute = Number(read("hour")) * 60 + Number(read("minute"));
+  const toMinute = (value: string): number => {
+    const [h = "0", m = "0"] = value.split(":");
+    return Number(h) * 60 + Number(m);
+  };
+  return minute >= toMinute(hours.weekdayStart) && minute < toMinute(hours.weekdayEnd);
 }
 
 export class CapturingNotificationSender implements NotificationPort {

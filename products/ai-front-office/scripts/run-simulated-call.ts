@@ -17,7 +17,7 @@ await store.saveConfig({
 const service = new CallService(store, calendar, clock, "http://127.0.0.1:8787");
 const call = await service.recordStarted({ eventId: "demo-start", tenantId: "demo", providerCallId: "demo-call", fromNumber: "+15555550100", startedAt: now.toISOString() });
 const slot = "2026-01-15T15:00:00.000Z";
-await service.bookConfirmedSlot({ tenantId: "demo", providerCallId: call.providerCallId, slotStart: slot, callerName: "Demo Caller", callbackNumber: "+15555550100", address: "100 Main St, Springfield", serviceCategory: "HVAC maintenance", problemDescription: "Routine HVAC maintenance", explicitConfirmation: true, diagnosticFeeAccepted: true });
+await service.bookConfirmedSlot({ tenantId: "demo", providerCallId: call.providerCallId, slotStart: slot, callerName: "Demo Caller", callbackNumber: "+15555550100", address: "100 Main St, Springfield, IL", serviceCategory: "HVAC maintenance", problemDescription: "Routine HVAC maintenance", explicitConfirmation: true, diagnosticFeeAccepted: true });
 now.setUTCMinutes(now.getUTCMinutes() + 4);
 const finalized = await service.finalize({
   webhookEventId: "demo-ended",
@@ -31,7 +31,7 @@ const finalized = await service.finalize({
     callerName: "Demo Caller",
     companyName: null,
     callbackNumber: "+15555550100",
-    address: "100 Main St, Springfield",
+    address: "100 Main St, Springfield, IL",
     serviceCategory: "HVAC maintenance",
     serviceCategoryConfidence: 0.98,
     problemDescription: "Routine HVAC maintenance",

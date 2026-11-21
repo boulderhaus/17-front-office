@@ -7,7 +7,7 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     businessName: "North Star Heating",
     greeting: "Thanks for calling North Star Heating. I’m the owner’s AI assistant. How can I help?",
     timezone: "America/Chicago",
-    serviceAreaTerms: ["Springfield", "627"],
+    serviceAreaTerms: ["Springfield IL", "627"],
     emergencyKeywords: ["frozen pipes", "no heat", "gas"],
     emergencyThreshold: 0.7,
     defaultServiceDurationMinutes: 90,
@@ -23,6 +23,12 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
       weekends: true,
       holidayDates: [],
     },
+    bookableHours: {
+      weekdayStart: "08:00",
+      weekdayEnd: "17:00",
+      weekends: false,
+    },
+    minimumLeadTimeMinutes: 120,
     priceSnippets: [],
     approvedKnowledge: [],
     pronunciations: [],
@@ -32,6 +38,7 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     dataRetentionDays: 30,
     supportEmail: null,
     flatMonthlyPriceCents: 4900,
+    maxCallsPerCallerPerDay: 5,
   };
 }
 
@@ -41,6 +48,7 @@ export function normalizeBusinessConfig(value: Partial<BusinessConfig> & Pick<Bu
     ...defaults,
     ...value,
     afterHours: { ...defaults.afterHours, ...value.afterHours },
+    bookableHours: { ...defaults.bookableHours, ...value.bookableHours },
   };
 }
 
@@ -58,9 +66,11 @@ export function evaluateServiceArea(address: string | null, config: BusinessConf
   if (terms.length === 0) return { status: "unconfigured", matchedTerm: null };
   if (!address?.trim()) return { status: "incomplete", matchedTerm: null };
 
-  const normalizedAddress = normalizeCoverageText(address);
-  const addressComponents = address.split(",").map(normalizeCoverageText).filter(Boolean);
-  const postalCodes: string[] = normalizedAddress.match(/\b\d{5}(?:-\d{4})?\b/g) ?? [];
+  const rawComponents = address.split(",").map((component) => component.trim()).filter(Boolean);
+  const addressComponents = rawComponents.map(normalizeCoverageText);
+  const localityComponents = addressComponents.slice(1);
+  const lastComponent = rawComponents.at(-1) ?? "";
+  const postalCodes: string[] = lastComponent.match(/\b\d{5}(?:-\d{4})?\b/g) ?? [];
   for (const term of terms) {
     const normalizedTerm = normalizeCoverageText(term);
     if (/^\d{5}(?:-\d{4})?$/.test(normalizedTerm)) {
@@ -71,7 +81,8 @@ export function evaluateServiceArea(address: string | null, config: BusinessConf
       if (postalCodes.some((postalCode) => postalCode.startsWith(normalizedTerm))) return { status: "covered", matchedTerm: term };
       continue;
     }
-    if (normalizedTerm && addressComponents.includes(normalizedTerm)) {
+    const locality = localityComponents.join(" ");
+    if (normalizedTerm && normalizedTerm.includes(" ") && (locality === normalizedTerm || locality.startsWith(`${normalizedTerm} `))) {
       return { status: "covered", matchedTerm: term };
     }
   }

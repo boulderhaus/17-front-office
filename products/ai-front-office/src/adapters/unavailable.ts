@@ -1,8 +1,8 @@
-import type { AvailabilitySlot, BookingAttempt, OutboxNotification } from "../domain/models.js";
+import type { AvailabilitySlot, BookingAttempt, BusinessConfig, OutboxNotification } from "../domain/models.js";
 import type { CalendarPort, NotificationPort } from "../ports.js";
 
 export class UnavailableCalendar implements CalendarPort {
-  async listAvailableSlots(_input: { tenantId: string; windowStart: string; windowEnd: string; durationMinutes: number; timezone: string }): Promise<AvailabilitySlot[]> {
+  async listAvailableSlots(_input: { tenantId: string; windowStart: string; windowEnd: string; durationMinutes: number; timezone: string; bookableHours: BusinessConfig["bookableHours"]; minimumLeadTimeMinutes: number; now: string }): Promise<AvailabilitySlot[]> {
     throw new Error("Calendar integration is not configured");
   }
 
@@ -15,6 +15,10 @@ export class UnavailableCalendar implements CalendarPort {
   }
 
   async verifyEvent(_input: { tenantId: string; providerEventId: string; slot: AvailabilitySlot }): Promise<boolean> {
+    throw new Error("Calendar integration is not configured");
+  }
+
+  async deleteEvent(_input: { tenantId: string; providerEventId: string }): Promise<void> {
     throw new Error("Calendar integration is not configured");
   }
 }

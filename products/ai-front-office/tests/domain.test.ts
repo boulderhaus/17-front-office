@@ -44,8 +44,10 @@ describe("coverage and voice policy", () => {
   });
 
   it("matches only owner-configured city and ZIP boundaries and fails closed without configuration", () => {
-    const config = { ...createDemoConfig(), serviceAreaTerms: ["Springfield", "12207", "627"] };
-    expect(evaluateServiceArea("100 Main St, Springfield, IL", config)).toMatchObject({ status: "covered", matchedTerm: "Springfield" });
+    const config = { ...createDemoConfig(), serviceAreaTerms: ["Springfield IL", "12207", "627"] };
+    expect(evaluateServiceArea("100 Main St, Springfield, IL", config)).toMatchObject({ status: "covered", matchedTerm: "Springfield IL" });
+    expect(evaluateServiceArea("1200 Main St, Springfield, MO 65802", config).status).toBe("outside");
+    expect(evaluateServiceArea("62704 North Lake Shore Dr, Chicago, IL 60611", config).status).toBe("outside");
     expect(evaluateServiceArea("100 Main St, Albany, NY 12207", config)).toMatchObject({ status: "covered", matchedTerm: "12207" });
     expect(evaluateServiceArea("100 Main St, IL 62704", config)).toMatchObject({ status: "covered", matchedTerm: "627" });
     expect(evaluateServiceArea("100 Main St, Springfield Gardens, NY 11413", config).status).toBe("outside");
@@ -124,6 +126,7 @@ describe("operational safety", () => {
       NODE_ENV: "production", DEMO_MODE: "false", PROVIDER_TEST_MODE: "false",
       PUBLIC_BASE_URL: "https://front-office.example", ADMIN_TOKEN: "admin-token-abcdefghijklmnopqrstuvwxyz",
       TOOL_TOKEN: "tool-token-abcdefghijklmnopqrstuvwxyz", DATABASE_URL: "postgresql://synthetic",
+      SESSION_SIGNING_KEY: "session-signing-key-abcdefghijklmnopqrstuvwxyz",
       DATA_ENCRYPTION_KEY: syntheticEncryptionKey, TELNYX_API_KEY: "synthetic", TELNYX_PUBLIC_KEY: Buffer.alloc(32, 1).toString("base64"),
       TELNYX_ASSISTANT_ID: "assistant-synthetic", TELNYX_FROM_NUMBER: "+15555550199",
       TELNYX_MESSAGING_PROFILE_ID: "00000000-0000-4000-8000-000000000001", TELNYX_MESSAGING_APPROVED: "true", RECORDING_CONSENT_APPROVED: "true",
@@ -141,6 +144,7 @@ describe("operational safety", () => {
     const base = {
       NODE_ENV: "production", DEMO_MODE: "false", PUBLIC_BASE_URL: "https://front-office.example",
       ADMIN_TOKEN: "admin-token-abcdefghijklmnopqrstuvwxyz", TOOL_TOKEN: "tool-token-abcdefghijklmnopqrstuvwxyz",
+      SESSION_SIGNING_KEY: "session-signing-key-abcdefghijklmnopqrstuvwxyz",
       DATABASE_URL: "postgresql://synthetic", DATA_ENCRYPTION_KEY: syntheticEncryptionKey, OWNER_DESTINATIONS_JSON: "{}",
     };
     const env = loadEnvironment(base);

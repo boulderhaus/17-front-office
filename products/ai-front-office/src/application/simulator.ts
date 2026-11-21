@@ -110,7 +110,7 @@ async function execute(id: SimulationScenarioId): Promise<Omit<SimulationResult,
   if (id === "double_book") {
     await configure(rig, { bookingMode: "direct", priceSnippets: approvedFee() });
     await Promise.all([start(rig, `${id}-a`), start(rig, `${id}-b`)]);
-    const [left, right] = await Promise.all([book(rig, `${id}-a`, "100 Main St, Springfield"), book(rig, `${id}-b`, "100 Main St, Springfield")]);
+    const [left, right] = await Promise.all([book(rig, `${id}-a`, "100 Main St, Springfield, IL"), book(rig, `${id}-b`, "100 Main St, Springfield, IL")]);
     const statuses = [left.status, right.status].sort().join(",");
     return verdict(statuses === "confirmed,conflict" && rig.calendar.events.length === 1, "Exactly one confirmed event", `${statuses}; ${rig.calendar.events.length} event(s)`);
   }
@@ -118,7 +118,7 @@ async function execute(id: SimulationScenarioId): Promise<Omit<SimulationResult,
     await configure(rig, { bookingMode: "direct", priceSnippets: approvedFee() });
     await start(rig, id);
     rig.calendar.failAvailability = true;
-    const booking = await book(rig, id, "100 Main St, Springfield");
+    const booking = await book(rig, id, "100 Main St, Springfield, IL");
     const call = await rig.service.finalize(summary(id, { requestedStart: "2026-01-15T15:00:00.000Z", explicitSlotConfirmation: true }));
     await new OutboxWorker(rig.store, rig.sender, rig.clock).runOnce();
     return verdict(booking.status === "pending" && call.outcome === "pending_confirmation" && rig.sender.sent.length === 1, "Pending outcome and owner alert despite calendar failure", `${booking.status}; ${call.outcome}; ${rig.sender.sent.length} alert(s)`);
@@ -126,7 +126,7 @@ async function execute(id: SimulationScenarioId): Promise<Omit<SimulationResult,
   if (id === "sms_failure") {
     await configure(rig, { bookingMode: "direct", priceSnippets: approvedFee() });
     await start(rig, id);
-    await book(rig, id, "100 Main St, Springfield");
+    await book(rig, id, "100 Main St, Springfield, IL");
     const call = await rig.service.finalize(summary(id, { requestedStart: "2026-01-15T15:00:00.000Z", explicitSlotConfirmation: true }));
     rig.sender.fail = true;
     const worker = new OutboxWorker(rig.store, rig.sender, rig.clock);
@@ -139,7 +139,7 @@ async function execute(id: SimulationScenarioId): Promise<Omit<SimulationResult,
   }
   if (id === "system_drop") {
     await start(rig, id);
-    rig.clock.advance(15 * 60_000 + 1);
+    rig.clock.advance(35 * 60_000 + 1);
     const recovered = await rig.service.recoverStaleCalls("demo");
     const call = await rig.store.getCallByProviderId(id);
     const task = call ? await rig.store.getCallbackTaskForCall(call.id) : null;
@@ -181,7 +181,7 @@ function summary(id: string, fields: Partial<CollectedCallFields> = {}): CallSum
     webhookEventId: `end:${id}`, tenantId: "demo", providerCallId: id, fromNumber: "+15555550100",
     startedAt: "2026-01-15T08:00:00.000Z", endedAt: "2026-01-15T08:04:00.000Z", durationSeconds: 240,
     fields: {
-      callerName: "Synthetic Caller", companyName: null, callbackNumber: "+15555550100", address: "100 Main St, Springfield",
+      callerName: "Synthetic Caller", companyName: null, callbackNumber: "+15555550100", address: "100 Main St, Springfield, IL",
       serviceCategory: "HVAC maintenance", serviceCategoryConfidence: 0.98, problemDescription: "Routine HVAC maintenance",
       equipmentDetails: "Synthetic system", accessNotes: null, requestedStart: null, explicitSlotConfirmation: false,
       diagnosticFeeAccepted: true, humanRequested: false, confidence: 0.96, ...fields,

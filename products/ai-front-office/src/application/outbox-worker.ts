@@ -33,7 +33,8 @@ export class OutboxWorker {
         result.sent += 1;
       } catch (error) {
         notification.lastError = redactError(error);
-        if (notification.attempts >= 5) {
+        const maxAttempts = notification.priority === "high" ? 12 : 5;
+        if (notification.attempts >= maxAttempts) {
           notification.state = "dead";
           result.dead += 1;
           if (notification.idempotencyKey.startsWith("customer-confirmation:") || notification.idempotencyKey.startsWith("missed-call-text:")) {

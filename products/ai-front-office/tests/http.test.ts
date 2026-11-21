@@ -64,7 +64,7 @@ describe("HTTP boundary", () => {
     expect((await response.json() as { status: string }).status).toBe("covered");
   });
 
-  it("rejects a past requested time at the intake boundary", async () => {
+  it("does not let save-intake inject a requested booking time", async () => {
     const response = await fetch(`${baseUrl}/tools/save-intake`, {
       method: "POST",
       headers: { authorization: `Bearer ${toolToken}`, "content-type": "application/json" },
@@ -75,8 +75,8 @@ describe("HTTP boundary", () => {
         requested_start: "2025-06-09T00:00:00.000Z",
       }),
     });
-    expect(response.status).toBe(409);
-    expect(await store.getCallByProviderId("past-intake")).toBeNull();
+    expect(response.status).toBe(200);
+    expect((await store.getCallByProviderId("past-intake"))?.fields.requestedStart).toBeNull();
   });
 
   it("applies deterministic emergency triage through an authenticated tool", async () => {
@@ -211,6 +211,7 @@ describe("HTTP boundary", () => {
     const env = loadEnvironment({
       NODE_ENV: "production", DEMO_MODE: "false", PROVIDER_TEST_MODE: "true",
       PUBLIC_BASE_URL: "https://front-office.example", ADMIN_TOKEN: adminToken, TOOL_TOKEN: toolToken,
+      SESSION_SIGNING_KEY: "session-signing-key-abcdefghijklmnopqrstuvwxyz",
       DATABASE_URL: "postgresql://synthetic", DATA_ENCRYPTION_KEY: syntheticEncryptionKey,
       TELNYX_API_KEY: "synthetic", TELNYX_PUBLIC_KEY: rawPublicKey, TELNYX_FROM_NUMBER: "+15555550199",
       TELNYX_MESSAGING_PROFILE_ID: "00000000-0000-4000-8000-000000000001", TELNYX_ASSISTANT_ID: "assistant-synthetic",
@@ -240,7 +241,7 @@ describe("HTTP boundary", () => {
     });
     expect(initResponse.status).toBe(200);
     const initBody = await initResponse.json() as { dynamic_variables: Record<string, unknown> & { owner_transfer_targets: unknown[] } };
-    expect(initBody.dynamic_variables.owner_transfer_targets).toHaveLength(1);
+    expect(initBody.dynamic_variables.owner_transfer_targets).toHaveLength(0);
     expect(initBody.dynamic_variables.call_direction).toBe("inbound");
     expect(initBody.dynamic_variables.opening_greeting).toContain("Thanks for calling");
     expect(initBody.dynamic_variables.caller_phone).toBe("+15555550110");
@@ -285,6 +286,53 @@ describe("HTTP boundary", () => {
     expect(completedCall?.endedAt).toBe(clock.now().toISOString());
     expect(completedCall?.transcript).toContain("Caller: Routine maintenance");
     expect(completedCall?.outcome).toBe("pending_confirmation");
+
+    await store.saveNotification({
+      id: "8a8a3d6a-fb2e-4c37-b5a3-95117a9f9026", tenantId: "demo", callId: completedCall!.id,
+      channel: "sms", destinationRef: "owner-primary", body: "Synthetic alert", priority: "high",
+      state: "sent", attempts: 1, nextAttemptAt: clock.now().toISOString(), idempotencyKey: "receipt-test",
+      providerReceipt: "message-synthetic", lastError: null, createdAt: clock.now().toISOString(), sentAt: clock.now().toISOString(),
+    });
+    const finalized = JSON.stringify({
+      data: {
+        record_type: "event", event_type: "message.finalized", id: "event-message-finalized",
+        occurred_at: clock.now().toISOString(),
+        payload: { id: "message-synthetic", errors: [], to: [{ phone_number: "+15555550100", status: "delivered" }] },
+      },
+    });
+    expect((await fetch(`${baseUrl}/webhooks/telnyx`, {
+      method: "POST", headers: signedHeaders(finalized, privateKey, clock.now()), body: finalized,
+    })).status).toBe(200);
+    expect((await store.getNotificationByProviderReceipt("message-synthetic"))?.state).toBe("delivered");
+
+    const stop = JSON.stringify({
+      data: {
+        record_type: "event", event_type: "message.received", id: "event-message-stop",
+        occurred_at: clock.now().toISOString(),
+        payload: { autoresponse_type: "STOP", from: { phone_number: "+15555550100" }, to: [{ phone_number: "+15555550199" }] },
+      },
+    });
+    expect((await fetch(`${baseUrl}/webhooks/telnyx`, {
+      method: "POST", headers: signedHeaders(stop, privateKey, clock.now()), body: stop,
+    })).status).toBe(200);
+    expect(await store.isSmsOptedOut("demo", "+15555550100")).toBe(true);
+
+    await store.saveConfig({ ...await store.getConfig("demo"), maxCallsPerCallerPerDay: 1 });
+    const limitedInitialization = JSON.stringify({
+      data: {
+        record_type: "event", event_type: "assistant.initialization", id: "event-initialization-limited",
+        occurred_at: "2026-01-15T08:03:00.000Z",
+        payload: {
+          telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+15555550199",
+          telnyx_end_user_target: "+15555550110", call_control_id: "v3:limited-call", assistant_id: "assistant-synthetic",
+        },
+      },
+    });
+    const limitedResponse = await fetch(`${baseUrl}/webhooks/telnyx`, {
+      method: "POST", headers: signedHeaders(limitedInitialization, privateKey, clock.now()), body: limitedInitialization,
+    });
+    expect(limitedResponse.status).toBe(200);
+    expect((await limitedResponse.json() as { dynamic_variables: { call_access: string } }).dynamic_variables.call_access).toBe("blocked_daily_limit");
   });
 
   it("uses an HttpOnly admin session and rejects a forged CSRF token", async () => {
@@ -300,7 +348,7 @@ describe("HTTP boundary", () => {
     expect(configPage.status).toBe(200);
     const configHtml = await configPage.text();
     expect(configHtml).toContain("Owner alert phone");
-    expect(configHtml).toContain("Covered cities and ZIP codes");
+    expect(configHtml).toContain("Covered city + state pairs and ZIP codes");
     const response = await fetch(`${baseUrl}/admin/config`, {
       method: "POST",
       headers: { cookie: cookie!.split(";")[0]!, "content-type": "application/x-www-form-urlencoded" },
@@ -338,7 +386,8 @@ describe("HTTP boundary", () => {
         supportEmail: "support@example.com",
         defaultServiceDurationMinutes: "60",
         emergencyThreshold: "0.8",
-        serviceAreaTerms: "Albany, 122",
+        maxCallsPerCallerPerDay: "7",
+        serviceAreaTerms: "Albany NY, 122",
         emergencyKeywords: "no heat, burst pipe",
         serviceCategories: "HVAC repair, maintenance",
         priceSnippets: "Diagnostic: The diagnostic visit is $89.",
@@ -346,6 +395,9 @@ describe("HTTP boundary", () => {
         pronunciations: "HVAC: H V A C",
         weekdayStart: "17:30",
         weekdayEnd: "07:30",
+        bookableWeekdayStart: "08:00",
+        bookableWeekdayEnd: "17:00",
+        minimumLeadTimeMinutes: "120",
         holidayDates: "2026-12-25, 2027-01-01",
         weekends: "on",
         requireDiagnosticFeeAcceptance: "on",
@@ -358,6 +410,7 @@ describe("HTTP boundary", () => {
     expect(config.afterHours.holidayDates).toEqual(["2026-12-25", "2027-01-01"]);
     expect(config.defaultServiceDurationMinutes).toBe(60);
     expect(config.emergencyThreshold).toBe(0.8);
+    expect(config.maxCallsPerCallerPerDay).toBe(7);
     expect(config.paused).toBe(false);
     expect(config.answerAfterRings).toBe(5);
     expect(config.dataRetentionDays).toBe(45);
@@ -392,6 +445,7 @@ describe("HTTP boundary", () => {
     const env = loadEnvironment({
       NODE_ENV: "production", DEMO_MODE: "false", PROVIDER_TEST_MODE: "false",
       PUBLIC_BASE_URL: "https://front-office.example", ADMIN_TOKEN: adminToken, TOOL_TOKEN: toolToken,
+      SESSION_SIGNING_KEY: "session-signing-key-abcdefghijklmnopqrstuvwxyz",
       DATABASE_URL: "postgresql://synthetic", DATA_ENCRYPTION_KEY: syntheticEncryptionKey, OWNER_DESTINATIONS_JSON: "{}",
     });
     server = createServer(createRequestHandler({ env, store, calendar: new InMemoryCalendar(), clock, integrations: {}, logger: () => undefined }));

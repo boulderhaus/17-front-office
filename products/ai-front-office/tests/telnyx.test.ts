@@ -6,6 +6,7 @@ import {
   parseTelnyxTexmlCallback,
   TelnyxRecordingClient,
   TelnyxSmsAdapter,
+  TelnyxVoiceRoutingClient,
   toTelnyxCallSummary,
   toTelnyxTexmlCallSummary,
   verifyTelnyxWebhook,
@@ -113,6 +114,7 @@ describe("Telnyx provider boundary", () => {
       fromNumber: "+15555550199",
       messagingProfileId: "00000000-0000-4000-8000-000000000001",
       resolveDestination: async () => "+15555550100",
+      webhookUrl: "https://front-office.example/webhooks/telnyx",
       fetcher,
     });
     const notification: OutboxNotification = {
@@ -139,7 +141,66 @@ describe("Telnyx provider boundary", () => {
       authorization: "Bearer synthetic-key",
       "idempotency-key": notification.id,
     });
-    expect(JSON.parse(String((init as RequestInit).body))).toMatchObject({ from: "+15555550199", to: "+15555550100", text: "Synthetic alert" });
+    expect(JSON.parse(String((init as RequestInit).body))).toMatchObject({
+      from: "+15555550199",
+      to: "+15555550100",
+      text: "Synthetic alert",
+      webhook_url: "https://front-office.example/webhooks/telnyx",
+    });
+  });
+
+  it("refuses SMS to a destination that opted out", async () => {
+    const fetcher = vi.fn() as unknown as typeof fetch;
+    const adapter = new TelnyxSmsAdapter({
+      apiKey: "synthetic-key",
+      fromNumber: "+15555550199",
+      resolveDestination: async () => "+15555550100",
+      isOptedOut: async () => true,
+      fetcher,
+    });
+    const notification = syntheticNotification();
+    await expect(adapter.send(notification)).rejects.toThrow("opted out");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("disconnects and reconnects only the expected Telnyx voice route", async () => {
+    let connectionId: string | null = "texml-app";
+    const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/ai/assistants/assistant-test")) {
+        return jsonResponse({ data: { telephony_settings: { default_texml_app_id: "texml-app" } } });
+      }
+      if (url.includes("/phone_numbers?")) {
+        return jsonResponse({ data: [{ id: "number-test", phone_number: "+15555550199", connection_id: connectionId }] });
+      }
+      if (url.endsWith("/phone_numbers/number-test") && init?.method === "PATCH") {
+        connectionId = (JSON.parse(String(init.body)) as { connection_id: string | null }).connection_id;
+        return jsonResponse({ data: { id: "number-test", connection_id: connectionId } });
+      }
+      return jsonResponse({}, 404);
+    }) as unknown as typeof fetch;
+    const client = new TelnyxVoiceRoutingClient({
+      apiKey: "synthetic-key",
+      phoneNumber: "+15555550199",
+      assistantId: "assistant-test",
+      fetcher,
+    });
+    await expect(client.setPaused(true)).resolves.toMatchObject({ changed: true, numberId: "number-test" });
+    expect(connectionId).toBeNull();
+    await expect(client.setPaused(false)).resolves.toMatchObject({ changed: true, numberId: "number-test" });
+    expect(connectionId).toBe("texml-app");
+  });
+
+  it("does not take over a Telnyx number assigned elsewhere", async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/ai/assistants/assistant-test")) return jsonResponse({ data: { telephony_settings: { default_texml_app_id: "texml-app" } } });
+      if (url.includes("/phone_numbers?")) return jsonResponse({ data: [{ id: "number-test", phone_number: "+15555550199", connection_id: "someone-elses-app" }] });
+      return jsonResponse({}, 500);
+    }) as unknown as typeof fetch;
+    const client = new TelnyxVoiceRoutingClient({ apiKey: "synthetic-key", phoneNumber: "+15555550199", assistantId: "assistant-test", fetcher });
+    await expect(client.setPaused(true)).rejects.toThrow("unexpected voice connection");
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
   it("retrieves a short-lived recording URL by call-control ID", async () => {
@@ -160,9 +221,33 @@ describe("Telnyx provider boundary", () => {
     expect(serialized).toContain("/webhooks/telnyx");
     expect(serialized).toContain("/tools/save-intake");
     expect(serialized).toContain("{{call_control_id}}");
-    expect(serialized).toContain("{{owner_transfer_targets}}");
+    expect(serialized).not.toContain('"type":"transfer"');
     expect(serialized).not.toContain("TOOL_TOKEN");
     expect(serialized).not.toContain("Retell");
     expect(serialized).not.toContain("Twilio");
   });
 });
+
+function syntheticNotification(): OutboxNotification {
+  return {
+    id: "8a8a3d6a-fb2e-4c37-b5a3-95117a9f9026",
+    tenantId: "demo",
+    callId: "call-test",
+    channel: "sms",
+    destinationRef: "owner-primary",
+    body: "Synthetic alert",
+    priority: "high",
+    state: "pending",
+    attempts: 0,
+    nextAttemptAt: "2026-11-20T17:00:00.000Z",
+    idempotencyKey: "call-summary:call-test",
+    providerReceipt: null,
+    lastError: null,
+    createdAt: "2026-11-20T17:00:00.000Z",
+    sentAt: null,
+  };
+}
+
+function jsonResponse(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), { status, headers: { "content-type": "application/json" } });
+}

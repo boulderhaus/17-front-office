@@ -50,12 +50,20 @@ export class CallService {
     tenantId: string;
     providerCallId: string;
     fromNumber: string;
+    fromNumberVerified?: boolean;
     startedAt: string;
   }): Promise<CallRecord> {
-    await this.store.claimWebhook(input.eventId);
+    const claimed = await this.store.claimWebhook(input.eventId);
+    if (!claimed) {
+      const duplicate = await this.store.getCallByProviderId(input.providerCallId);
+      if (!duplicate) throw new Error("Duplicate start webhook refers to a deleted or unknown call");
+      return duplicate;
+    }
     return this.store.withLock(`call:${input.providerCallId}`, async () => {
+      if (await this.store.isProviderCallDeleted(input.providerCallId)) throw new Error("Provider call was deleted and cannot be recreated");
       const existing = await this.store.getCallByProviderId(input.providerCallId);
-      return existing ?? this.createCall(input.tenantId, input.providerCallId, input.fromNumber, input.startedAt);
+      if (existing && existing.tenantId !== input.tenantId) throw new Error("Provider call belongs to a different tenant");
+      return existing ?? this.createCall(input.tenantId, input.providerCallId, input.fromNumber, input.startedAt, input.fromNumberVerified === true);
     });
   }
 
@@ -65,14 +73,17 @@ export class CallService {
     fromNumber: string;
     fields: Partial<CollectedCallFields>;
     recordingDisclosureGiven?: boolean;
+    recordingDisclosureDeclined?: boolean;
   }): Promise<{ status: "saved"; missing: string[] }> {
     const existing = await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
-    const fields = mergeCollectedFields(existing.fields, completePartialFields(input.fields));
+    const incoming = completePartialFields(input.fields);
+    if (incoming.callbackNumber && !isAllowedCustomerNumber(incoming.callbackNumber)) incoming.callbackNumber = null;
+    const fields = mergeCollectedFields(existing.fields, incoming);
     const call: CallRecord = {
       ...existing,
-      fromNumber: input.fromNumber === "unknown" ? existing.fromNumber : input.fromNumber,
+      fromNumber: existing.fromNumber === "unknown" && isAllowedCustomerNumber(input.fromNumber) ? input.fromNumber : existing.fromNumber,
       fields,
-      consentState: input.recordingDisclosureGiven ? "disclosed" : existing.consentState,
+      consentState: input.recordingDisclosureDeclined ? "declined" : input.recordingDisclosureGiven ? "disclosed" : existing.consentState,
       updatedAt: this.clock.now().toISOString(),
     };
     await this.store.saveCall(call);
@@ -113,6 +124,9 @@ export class CallService {
           windowEnd: input.windowEnd,
           durationMinutes: config.defaultServiceDurationMinutes,
           timezone: config.timezone,
+          bookableHours: config.bookableHours,
+          minimumLeadTimeMinutes: config.minimumLeadTimeMinutes,
+          now: this.clock.now().toISOString(),
         }),
         { attempts: 2, baseDelayMs: 50, maxDelayMs: 100, timeoutMs: 2_500 },
       );
@@ -192,11 +206,10 @@ export class CallService {
     let call = await this.ensureCall(input.tenantId, input.providerCallId, input.callbackNumber, this.clock.now().toISOString());
     call = {
       ...call,
-      fromNumber: input.callbackNumber,
       fields: {
         ...call.fields,
         callerName: input.callerName,
-        callbackNumber: input.callbackNumber,
+        callbackNumber: isAllowedCustomerNumber(input.callbackNumber) ? input.callbackNumber : call.fields.callbackNumber,
         address: input.address,
         serviceCategory: input.serviceCategory,
         serviceCategoryConfidence: 1,
@@ -208,20 +221,22 @@ export class CallService {
       updatedAt: this.clock.now().toISOString(),
     };
     await this.store.saveCall(call);
-    const emergency = triageEmergency(input.problemDescription, config);
-    if (emergency.emergency) {
-      await this.queueHumanHandoff({
-        tenantId: input.tenantId,
-        providerCallId: input.providerCallId,
-        fromNumber: input.callbackNumber,
-        callerName: input.callerName,
-        problemDescription: input.problemDescription,
-        urgent: emergency,
-      });
-      return { status: "pending", message: "This is an emergency. Do not book it; follow the safety instruction and transfer or queue the owner now." };
+    const emergency = mergeEmergencyDecision(call.emergency, triageEmergency(input.problemDescription, config));
+    if (call.fields.humanRequested || emergency.emergency) {
+      if (emergency.emergency) {
+        await this.queueHumanHandoff({
+          tenantId: input.tenantId,
+          providerCallId: input.providerCallId,
+          fromNumber: input.callbackNumber,
+          callerName: input.callerName,
+          problemDescription: input.problemDescription,
+          urgent: emergency,
+        });
+      }
+      return { status: "pending", message: emergency.emergency ? "This is an emergency. Do not book it; follow the safety instruction and transfer or queue the owner now." : "A human callback was requested. Do not book automatically." };
     }
     if (!input.explicitConfirmation) return { status: "pending", message: "Do not book until the caller explicitly confirms the offered slot." };
-    if (!/^\+[1-9]\d{7,14}$/.test(input.callbackNumber)) return { status: "pending", message: "The callback number is not confirmed. Queue owner follow-up instead of booking." };
+    if (!isAllowedCustomerNumber(input.callbackNumber)) return { status: "pending", message: "The callback number is not confirmed. Queue owner follow-up instead of booking." };
     if (!isConfiguredServiceCategory(input.serviceCategory, config)) return { status: "pending", message: "The requested service is not an owner-approved category. Queue owner confirmation." };
     if (!isInServiceArea(input.address, config)) return { status: "pending", message: "The address may be outside the service area. Queue owner confirmation." };
     const slotStart = Date.parse(input.slotStart);
@@ -269,7 +284,7 @@ export class CallService {
       problemDescription: input.problemDescription,
     });
     const message = booking.status === "confirmed"
-      ? `The appointment is confirmed for ${booking.requestedStart}.`
+      ? `The appointment is confirmed for ${formatLocalDateTime(booking.requestedStart!, config.timezone)}.`
       : booking.status === "conflict"
         ? "That time is no longer available. Do not promise it; offer another slot or queue owner follow-up."
         : "The calendar result could not be confirmed. Tell the caller the owner will follow up.";
@@ -289,11 +304,13 @@ export class CallService {
     const now = this.clock.now().toISOString();
     const call: CallRecord = {
       ...existing,
-      fromNumber: input.fromNumber,
+      fromNumber: existing.fromNumber === "unknown" && isAllowedCustomerNumber(input.fromNumber) ? input.fromNumber : existing.fromNumber,
       fields: {
         ...existing.fields,
         callerName: input.callerName ?? existing.fields.callerName,
-        callbackNumber: input.fromNumber,
+        callbackNumber: isAllowedCustomerNumber(existing.fields.callbackNumber ?? "")
+          ? existing.fields.callbackNumber
+          : isAllowedCustomerNumber(input.fromNumber) ? input.fromNumber : null,
         problemDescription: input.problemDescription ?? existing.fields.problemDescription,
         humanRequested: true,
       },
@@ -312,7 +329,7 @@ export class CallService {
         destinationRef,
         body: [
           input.urgent?.severity === "life_safety" ? "LIFE-SAFETY CALL" : input.urgent?.emergency ? "URGENT CALL" : "CALLER REQUESTED A HUMAN",
-          `${call.fields.callerName ?? "Unknown caller"} · ${input.fromNumber}`,
+          `${call.fields.callerName ?? "Unknown caller"} · ${call.fields.callbackNumber ?? call.fromNumber}`,
           `Problem: ${call.fields.problemDescription || "not captured"}`,
           ...(input.urgent?.immediateInstruction ? [`Safety: ${input.urgent.immediateInstruction}`] : []),
           `Review: ${this.publicBaseUrl.replace(/\/$/, "")}/admin/calls/${encodeURIComponent(call.id)}`,
@@ -328,30 +345,42 @@ export class CallService {
         sentAt: null,
       });
     }
-    const transferAvailable = config.ownerTransferNumberRef !== null;
+    // Provider-native transfer is intentionally disabled until the server can
+    // authorize the exact destination and call-control action itself.
+    const transferAvailable = false;
     return {
       status: "handoff_queued",
       transferAvailable,
-      message: transferAvailable
-        ? "An immediate owner alert was queued. Use the configured provider transfer tool now; if it fails, promise only a callback."
-        : "An immediate owner alert was queued. Tell the caller the owner will call back; do not promise an exact time.",
+      message: "An immediate owner alert was queued. Tell the caller the owner will call back; do not promise an exact time.",
     };
   }
 
   async finalize(input: CallSummaryInput): Promise<CallRecord> {
-    await this.store.claimWebhook(input.webhookEventId);
+    const claimed = await this.store.claimWebhook(input.webhookEventId);
+    if (!claimed) {
+      const duplicate = await this.store.getCallByProviderId(input.providerCallId);
+      if (!duplicate) throw new Error("Duplicate final webhook refers to a deleted or unknown call");
+      return duplicate;
+    }
+    return this.store.withLock(`call:${input.providerCallId}`, () => this.finalizeClaimed(input));
+  }
+
+  private async finalizeClaimed(input: CallSummaryInput): Promise<CallRecord> {
+    if (await this.store.isProviderCallDeleted(input.providerCallId)) throw new Error("Provider call was deleted and cannot be recreated");
     const existing = await this.store.getCallByProviderId(input.providerCallId);
+    if (existing && existing.tenantId !== input.tenantId) throw new Error("Provider call belongs to a different tenant");
     const config = await this.store.getConfig(input.tenantId);
-    let call = existing ?? await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, input.startedAt);
+    let call = existing ?? await this.createCall(input.tenantId, input.providerCallId, input.fromNumber, input.startedAt, false);
     const fields = mergeCollectedFields(call.fields, input.fields);
+    const rawSafetyText = [fields.problemDescription, input.transcript ?? call.transcript ?? ""].filter(Boolean).join("\n");
     const emergency = mergeEmergencyDecision(
       call.emergency,
-      triageEmergency(fields.problemDescription, config, input.llmEmergencyScore, input.llmEmergencyReason),
+      triageEmergency(rawSafetyText, config, input.llmEmergencyScore, input.llmEmergencyReason),
     );
     const spamExcluded = call.billingDisposition === "spam_excluded" || input.isSpam === true;
     call = {
       ...call,
-      fromNumber: input.fromNumber === "unknown" ? call.fromNumber : input.fromNumber,
+      fromNumber: call.fromNumber === "unknown" && isAllowedCustomerNumber(input.fromNumber) ? input.fromNumber : call.fromNumber,
       startedAt: earlierIso(call.startedAt, input.startedAt),
       endedAt: call.endedAt ? laterIso(call.endedAt, input.endedAt) : input.endedAt,
       durationSeconds: Math.max(call.durationSeconds ?? 0, input.durationSeconds ?? 0) || null,
@@ -371,7 +400,7 @@ export class CallService {
     }
     await this.store.saveCall(call);
     const customerPhone = call.fields.callbackNumber ?? call.fromNumber;
-    if (customerPhone !== "unknown") {
+    if (isAllowedCustomerNumber(customerPhone)) {
       await this.store.upsertCustomer({
         id: randomUUID(),
         tenantId: call.tenantId,
@@ -385,14 +414,19 @@ export class CallService {
     }
 
     let booking = await this.store.getBookingForCall(call.id);
+    const latestOffered = call.fields.requestedStart
+      ? await this.wasLatestOffered(call.id, call.fields.requestedStart)
+      : false;
     const canAttemptDirectBooking = config.bookingMode === "direct"
       && !emergency.emergency
       && !call.fields.humanRequested
       && Boolean(call.fields.requestedStart)
+      && Date.parse(call.fields.requestedStart ?? "") >= this.clock.now().getTime()
+      && latestOffered
       && call.fields.explicitSlotConfirmation
       && (!config.requireDiagnosticFeeAcceptance || (config.priceSnippets.length > 0 && call.fields.diagnosticFeeAccepted))
       && Boolean(call.fields.callerName?.trim())
-      && /^\+[1-9]\d{7,14}$/.test(call.fields.callbackNumber ?? call.fromNumber)
+      && isAllowedCustomerNumber(call.fields.callbackNumber ?? call.fromNumber)
       && Boolean(call.fields.address?.trim())
       && isInServiceArea(call.fields.address, config)
       && isConfiguredServiceCategory(call.fields.serviceCategory, config)
@@ -449,11 +483,11 @@ export class CallService {
     return call;
   }
 
-  async recoverStaleCalls(tenantId: string, staleAfterMs = 15 * 60_000): Promise<number> {
+  async recoverStaleCalls(tenantId: string, staleAfterMs = 35 * 60_000): Promise<number> {
     const config = await this.store.getConfig(tenantId);
     const cutoff = this.clock.now().getTime() - staleAfterMs;
     const candidates = (await this.store.listCalls(tenantId, 200))
-      .filter((call) => call.outcome === "in_progress" && Date.parse(call.startedAt) <= cutoff);
+      .filter((call) => call.outcome === "in_progress" && Date.parse(call.updatedAt) <= cutoff);
     let recovered = 0;
     for (const candidate of candidates) {
       await this.store.withLock(`call:${candidate.providerCallId}`, async () => {
@@ -473,7 +507,7 @@ export class CallService {
         await this.store.saveCall(call);
         await this.ensureCallbackTask(call, config, "Provider call ended without a final payload", emergency.emergency);
         const callerNumber = call.fields.callbackNumber ?? call.fromNumber;
-        if (/^\+[1-9]\d{7,14}$/.test(callerNumber)) {
+        if (isAllowedCustomerNumber(callerNumber)) {
           await this.store.enqueueNotification({
             id: randomUUID(), tenantId: call.tenantId, callId: call.id, channel: "sms", destinationRef: `tel:${callerNumber}`,
             body: `${config.businessName}: We may have been disconnected. Your request was saved and the owner will follow up. Reply STOP to opt out.`,
@@ -481,7 +515,7 @@ export class CallService {
             idempotencyKey: `missed-call-text:${call.id}`, providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
           });
         }
-        await this.enqueueOwnerNotifications(call, call.fields.requestedStart, config);
+        await this.enqueueOwnerNotifications(call, call.fields.requestedStart, config, "recovery-summary");
         recovered += 1;
       });
     }
@@ -510,7 +544,7 @@ export class CallService {
     if (!call.transcript?.trim()) flags.push("transcript_missing");
     if (!call.recordingUrl) flags.push("recording_missing");
     if (!call.fields.callerName?.trim()) flags.push("caller_name_missing");
-    if (!/^\+[1-9]\d{7,14}$/.test(call.fields.callbackNumber ?? call.fromNumber)) flags.push("callback_number_invalid");
+    if (!isAllowedCustomerNumber(call.fields.callbackNumber ?? call.fromNumber)) flags.push("callback_number_invalid");
     if (!call.fields.address?.trim()) flags.push("service_address_missing");
     if (!call.fields.problemDescription.trim()) flags.push("problem_description_missing");
     if (!call.fields.serviceCategory?.trim()) flags.push("service_category_missing");
@@ -524,21 +558,21 @@ export class CallService {
     const flags: string[] = [];
     if (!call.transcript?.trim()) flags.push("transcript_missing");
     if (!call.recordingUrl) flags.push("recording_missing");
-    if (!/^\+[1-9]\d{7,14}$/.test(call.fields.callbackNumber ?? call.fromNumber)) flags.push("callback_number_invalid");
+    if (!isAllowedCustomerNumber(call.fields.callbackNumber ?? call.fromNumber)) flags.push("callback_number_invalid");
     if (!call.fields.problemDescription.trim()) flags.push("problem_description_missing");
     return flags;
   }
 
   private async enqueueCustomerConfirmation(call: CallRecord, booking: BookingRecord, config: BusinessConfig): Promise<string | null> {
     const number = call.fields.callbackNumber ?? call.fromNumber;
-    if (!/^\+[1-9]\d{7,14}$/.test(number) || !booking.requestedStart || booking.status !== "confirmed") return null;
+    if (!isAllowedCustomerNumber(number) || !booking.requestedStart || booking.status !== "confirmed") return null;
     const existing = (await this.store.listNotifications(call.id)).find((item) => item.idempotencyKey === `customer-confirmation:${call.id}`);
     if (existing) return existing.id;
     const now = this.clock.now().toISOString();
     const id = randomUUID();
     const queued = await this.store.enqueueNotification({
       id, tenantId: call.tenantId, callId: call.id, channel: "sms", destinationRef: `tel:${number}`,
-      body: `${config.businessName}: Your service visit is confirmed for ${booking.requestedStart}. Reply to this message or call the business if anything changes. Reply STOP to opt out.`,
+      body: `${config.businessName}: Your service visit is confirmed for ${formatLocalDateTime(booking.requestedStart, config.timezone)}. Reply to this message or call the business if anything changes. Reply STOP to opt out.`,
       priority: "normal", state: "pending", attempts: 0, nextAttemptAt: now,
       idempotencyKey: `customer-confirmation:${call.id}`, providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
     });
@@ -563,7 +597,12 @@ export class CallService {
     return task;
   }
 
-  private async enqueueOwnerNotifications(call: CallRecord, proposedTime: string | null, config: BusinessConfig): Promise<void> {
+  private async enqueueOwnerNotifications(
+    call: CallRecord,
+    proposedTime: string | null,
+    config: BusinessConfig,
+    keyPrefix = "call-summary",
+  ): Promise<void> {
     if (call.billingDisposition === "spam_excluded") return;
     const now = this.clock.now().toISOString();
     const link = `${this.publicBaseUrl.replace(/\/$/, "")}/admin/calls/${encodeURIComponent(call.id)}`;
@@ -574,7 +613,7 @@ export class CallService {
       `Address: ${call.fields.address ?? "not confirmed"}`,
       `Problem: ${summary}`,
       `Emergency: ${call.emergency?.severity ?? "unknown"}`,
-      `Outcome: ${call.outcome}${proposedTime ? ` · ${proposedTime}` : ""}`,
+      `Outcome: ${call.outcome}${proposedTime ? ` · ${formatLocalDateTime(proposedTime, config.timezone)}` : ""}`,
       ...(call.qualityFlags.length > 0 ? [`Needs attention: ${call.qualityFlags.join(", ")}`] : []),
       `Review: ${link}`,
     ];
@@ -590,7 +629,7 @@ export class CallService {
         state: "pending",
         attempts: 0,
         nextAttemptAt: now,
-        idempotencyKey: `call-summary:${call.id}:sms:${destinationRef}`,
+        idempotencyKey: `${keyPrefix}:${call.id}:sms:${destinationRef}`,
         providerReceipt: null,
         lastError: null,
         createdAt: now,
@@ -602,18 +641,21 @@ export class CallService {
 
   private async ensureCall(tenantId: string, providerCallId: string, fromNumber: string, startedAt: string): Promise<CallRecord> {
     return this.store.withLock(`call:${providerCallId}`, async () => {
+      if (await this.store.isProviderCallDeleted(providerCallId)) throw new Error("Provider call was deleted and cannot be recreated");
       const existing = await this.store.getCallByProviderId(providerCallId);
-      return existing ?? this.createCall(tenantId, providerCallId, fromNumber, startedAt);
+      if (existing && existing.tenantId !== tenantId) throw new Error("Provider call belongs to a different tenant");
+      return existing ?? this.createCall(tenantId, providerCallId, fromNumber, startedAt, false);
     });
   }
 
-  private async createCall(tenantId: string, providerCallId: string, fromNumber: string, startedAt: string): Promise<CallRecord> {
+  private async createCall(tenantId: string, providerCallId: string, fromNumber: string, startedAt: string, fromNumberVerified: boolean): Promise<CallRecord> {
     const now = this.clock.now().toISOString();
     const call: CallRecord = {
       id: randomUUID(),
       tenantId,
       providerCallId,
       fromNumber,
+      fromNumberVerified,
       startedAt,
       endedAt: null,
       durationSeconds: null,
@@ -653,6 +695,16 @@ export class CallService {
       metadata,
       redactedError: error,
     });
+  }
+
+  private async wasLatestOffered(callId: string, requestedStart: string): Promise<boolean> {
+    const latest = (await this.store.listToolEvents(callId))
+      .filter((event) => event.tool === "calendar.availability" && event.result === "success")
+      .sort((left, right) => Date.parse(right.completedAt) - Date.parse(left.completedAt))[0];
+    const offered = Array.isArray(latest?.metadata.offeredStarts)
+      ? latest.metadata.offeredStarts.filter((value): value is string => typeof value === "string")
+      : [];
+    return offered.some((value) => Date.parse(value) === Date.parse(requestedStart));
   }
 }
 
@@ -732,23 +784,40 @@ function validateAvailabilityWindow(windowStart: string, windowEnd: string, now:
   return null;
 }
 
+function isAllowedCustomerNumber(value: string): boolean {
+  const match = /^\+1([2-9]\d{2})([2-9]\d{6})$/.exec(value.trim());
+  return Boolean(match && match[1] !== "900");
+}
+
+function formatLocalDateTime(value: string, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(new Date(value));
+}
+
 function formatSpokenSlots(slots: AvailabilitySlot[], timeZone: string, now: Date): string {
   const dateKey = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
   const date = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "long", month: "long", day: "numeric" });
   const time = new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit" });
-  const zone = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "short" })
-    .formatToParts(slots[0] ? new Date(slots[0].start) : now)
-    .find((part) => part.type === "timeZoneName")?.value ?? timeZone;
-  const groups = new Map<string, { label: string; times: string[] }>();
+  const groups = new Map<string, { label: string; times: string[]; zone: string }>();
   const today = dateKey.format(now);
   for (const slot of slots) {
     const value = new Date(slot.start);
     const key = dateKey.format(value);
-    const group = groups.get(key) ?? { label: key === today ? `Today, ${date.format(value)}` : date.format(value), times: [] };
+    const zone = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "short" })
+      .formatToParts(value)
+      .find((part) => part.type === "timeZoneName")?.value ?? timeZone;
+    const group = groups.get(key) ?? { label: key === today ? `Today, ${date.format(value)}` : date.format(value), times: [], zone };
     group.times.push(time.format(value));
     groups.set(key, group);
   }
   return [...groups.values()]
-    .map((group) => `${group.label}: ${new Intl.ListFormat("en-US", { style: "long", type: "disjunction" }).format(group.times)} ${zone}`)
+    .map((group) => `${group.label}: ${new Intl.ListFormat("en-US", { style: "long", type: "disjunction" }).format(group.times)} ${group.zone}`)
     .join("; ");
 }

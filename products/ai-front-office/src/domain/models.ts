@@ -7,7 +7,15 @@ export type CallOutcome =
   | "failed";
 
 export type BookingStatus = "checking" | "confirmed" | "pending" | "conflict" | "unknown";
-export type NotificationState = "pending" | "sending" | "sent" | "retry" | "dead";
+export type NotificationState =
+  | "pending"
+  | "sending"
+  | "sent"
+  | "delivered"
+  | "delivery_failed"
+  | "delivery_unconfirmed"
+  | "retry"
+  | "dead";
 
 export interface CollectedCallFields {
   callerName: string | null;
@@ -39,6 +47,7 @@ export interface CallRecord {
   tenantId: string;
   providerCallId: string;
   fromNumber: string;
+  fromNumberVerified: boolean;
   startedAt: string;
   endedAt: string | null;
   durationSeconds: number | null;
@@ -147,6 +156,12 @@ export interface BusinessConfig {
     weekends: boolean;
     holidayDates: string[];
   };
+  bookableHours: {
+    weekdayStart: string;
+    weekdayEnd: string;
+    weekends: boolean;
+  };
+  minimumLeadTimeMinutes: number;
   priceSnippets: Array<{ label: string; text: string }>;
   approvedKnowledge: Array<{ topic: string; text: string }>;
   pronunciations: Array<{ term: string; spokenAs: string }>;
@@ -156,6 +171,7 @@ export interface BusinessConfig {
   dataRetentionDays: number;
   supportEmail: string | null;
   flatMonthlyPriceCents: number;
+  maxCallsPerCallerPerDay: number;
 }
 
 export interface CallSummaryInput {

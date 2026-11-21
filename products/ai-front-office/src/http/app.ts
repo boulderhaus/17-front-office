@@ -5,6 +5,7 @@ import { renderCallDetail, renderConfig, renderDashboard, renderLanding, renderL
 import { buildActivationReport, type ActivationReport } from "../application/readiness.js";
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService } from "../application/call-service.js";
+import { DataDeletionService } from "../application/data-deletion.js";
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import type { BusinessConfig } from "../domain/models.js";
@@ -13,9 +14,12 @@ import type { CalendarPort, Clock, Store } from "../ports.js";
 import {
   asTelnyxConversationEnded,
   asTelnyxInitialization,
+  asTelnyxMessageFinalized,
+  asTelnyxMessageReceived,
   parseTelnyxEnvelope,
   parseTelnyxTexmlCallback,
   TelnyxRecordingClient,
+  TelnyxVoiceRoutingClient,
   telnyxEventId,
   toTelnyxCallSummary,
   toTelnyxTexmlCallSummary,
@@ -34,6 +38,7 @@ import {
   RateLimiter,
   readBody,
   readCookie,
+  requestIp,
   redirect,
   sendHtml,
   sendJson,
@@ -43,9 +48,8 @@ import {
   verifyGoogleOAuthAttempt,
 } from "./security.js";
 
-const dateTime = z.string().refine((value) => Number.isFinite(Date.parse(value)), "Must be an ISO date-time");
+const dateTime = z.string().datetime({ offset: true });
 const baseToolSchema = z.object({
-  tenant_id: z.string().min(1).optional(),
   provider_call_id: z.string().min(1),
 });
 const availabilitySchema = baseToolSchema.extend({
@@ -90,12 +94,11 @@ const intakeSchema = baseToolSchema.extend({
   problem_description: z.string().min(1).max(2_000),
   equipment_details: z.string().max(1_000).optional(),
   access_notes: z.string().max(1_000).optional(),
-  requested_start: dateTime.optional(),
-  explicit_slot_confirmation: z.boolean().optional(),
   diagnostic_fee_accepted: z.boolean().optional(),
   human_requested: z.boolean().optional(),
   confidence: z.number().min(0).max(1).optional(),
   recording_disclosure_given: z.boolean().optional(),
+  recording_disclosure_declined: z.boolean().optional(),
 });
 
 export interface AppDependencies {
@@ -110,6 +113,10 @@ export interface AppDependencies {
 export function createRequestHandler(dependencies: AppDependencies): RequestListener {
   const service = new CallService(dependencies.store, dependencies.calendar, dependencies.clock, dependencies.env.PUBLIC_BASE_URL);
   const recordingClient = dependencies.env.TELNYX_API_KEY ? new TelnyxRecordingClient(dependencies.env.TELNYX_API_KEY) : null;
+  const routingClient = dependencies.env.TELNYX_API_KEY && dependencies.env.TELNYX_FROM_NUMBER && dependencies.env.TELNYX_ASSISTANT_ID
+    ? new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: dependencies.env.TELNYX_FROM_NUMBER, assistantId: dependencies.env.TELNYX_ASSISTANT_ID })
+    : null;
+  const deletionService = new DataDeletionService(dependencies.store, dependencies.calendar, recordingClient);
   const limiter = new RateLimiter();
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));
 
@@ -132,11 +139,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const url = new URL(request.url ?? "/", "http://localhost");
     const method = request.method ?? "GET";
     const route = routeKey(url.pathname);
-    const ip = request.socket.remoteAddress ?? "unknown";
+    const ip = requestIp(request);
     response.once("finish", () => {
       log({ level: "info", event: "request_completed", requestId, method, route, status: response.statusCode, latencyMs: Date.now() - started });
     });
-    if (!limiter.allow(`${ip}:${route}`, route.startsWith("webhook") ? 180 : 90, 60_000)) {
+    if (!route.startsWith("webhook") && !route.startsWith("tool:") && !limiter.allow(`${ip}:${route}`, 90, 60_000)) {
       throw new HttpError(429, "Too many requests");
     }
 
@@ -173,6 +180,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   async function handleTelnyx(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const rawBody = await readBody(request);
     requireProviderAuth(request, rawBody);
+    enforceProviderRate(request, "webhook:telnyx");
     if (request.headers["content-type"]?.toLowerCase().startsWith("application/x-www-form-urlencoded")) {
       const callback = parseTelnyxTexmlCallback(rawBody);
       if (callback.callStatus === "conversation_ended" && callback.providerCallId) {
@@ -189,23 +197,57 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       }
       return sendJson(response, 200, { received: true });
     }
-    await requireOperational();
     const envelope = parseTelnyxEnvelope(rawBody);
+    if (envelope.data.event_type === "message.finalized") {
+      const finalized = asTelnyxMessageFinalized(envelope);
+      if (!await dependencies.store.claimWebhook(telnyxEventId(envelope, rawBody))) return sendJson(response, 200, { received: true, duplicate: true });
+      const notification = await dependencies.store.getNotificationByProviderReceipt(finalized.data.payload.id);
+      if (notification) {
+        const statuses = finalized.data.payload.to.map((destination) => destination.status);
+        notification.state = statuses.every((status) => status === "delivered")
+          ? "delivered"
+          : statuses.some((status) => status === "sending_failed" || status === "delivery_failed")
+            ? "delivery_failed"
+            : statuses.some((status) => status === "delivery_unconfirmed")
+              ? "delivery_unconfirmed"
+              : "sent";
+        notification.lastError = notification.state === "delivery_failed"
+          ? finalized.data.payload.errors.map((error) => [error.code, error.title].filter(Boolean).join(": ")).filter(Boolean).join("; ").slice(0, 500) || "Carrier delivery failed"
+          : null;
+        await dependencies.store.saveNotification(notification);
+        log({ level: notification.state === "delivery_failed" ? "error" : "info", event: "notification_finalized", notificationId: notification.id, state: notification.state });
+      }
+      return sendJson(response, 200, { received: true });
+    }
+    if (envelope.data.event_type === "message.received") {
+      const received = asTelnyxMessageReceived(envelope);
+      if (!await dependencies.store.claimWebhook(telnyxEventId(envelope, rawBody))) return sendJson(response, 200, { received: true, duplicate: true });
+      const action = received.data.payload.autoresponse_type?.toUpperCase();
+      if ((action === "STOP" || action === "START") && /^\+1[2-9]\d{9}$/.test(received.data.payload.from.phone_number)) {
+        await dependencies.store.setSmsOptOut(dependencies.env.DEFAULT_TENANT_ID, received.data.payload.from.phone_number, action === "STOP");
+        log({ level: "info", event: "sms_consent_changed", action });
+      }
+      return sendJson(response, 200, { received: true });
+    }
     if (envelope.data.event_type === "assistant.initialization") {
+      await requireOperational();
       const initialization = asTelnyxInitialization(envelope);
       requireExpectedAssistant(initialization.data.payload.assistant_id);
+      const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
+      const callerPhone = initialization.data.payload.telnyx_end_user_target ?? "unknown";
+      const recentCalls = /^\+1[2-9]\d{9}$/.test(callerPhone)
+        ? await dependencies.store.countCallsFromNumberSince(config.tenantId, callerPhone, new Date(dependencies.clock.now().getTime() - 24 * 60 * 60_000).toISOString())
+        : 0;
+      const callAccess = recentCalls >= config.maxCallsPerCallerPerDay ? "blocked_daily_limit" : "allowed";
       await service.recordStarted({
         eventId: telnyxEventId(envelope, rawBody),
         tenantId: dependencies.env.DEFAULT_TENANT_ID,
         providerCallId: initialization.data.payload.call_control_id,
-        fromNumber: initialization.data.payload.telnyx_end_user_target ?? "unknown",
+        fromNumber: callerPhone,
+        fromNumberVerified: initialization.data.payload.telnyx_end_user_target_verified === true,
         startedAt: initialization.data.occurred_at ?? dependencies.clock.now().toISOString(),
       });
-      const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
       const localContext = formatLocalCallContext(dependencies.clock.now(), config.timezone);
-      const transferNumber = config.ownerTransferNumberRef
-        ? await dependencies.store.getIntegrationSecret(config.tenantId, "notifications", config.ownerTransferNumberRef)
-        : null;
       return sendJson(response, 200, {
         dynamic_variables: {
           tenant_id: config.tenantId,
@@ -216,9 +258,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           current_local_date: localContext.date,
           current_local_time: localContext.time,
           business_timezone: config.timezone,
-          owner_transfer_targets: transferNumber
-            ? [{ name: "Owner", to: transferNumber, message: "Your AI front office has a caller who requested immediate human help." }]
-            : [],
+          call_access: callAccess,
+          owner_transfer_targets: [],
         },
         conversation: { metadata: { tenant_id: config.tenantId } },
       });
@@ -226,14 +267,26 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (envelope.data.event_type === "call.conversation.ended") {
       const ended = asTelnyxConversationEnded(envelope);
       requireExpectedAssistant(ended.data.payload.assistant_id);
-      const recordingUrl = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/admin/provider/telnyx/recordings/${encodeURIComponent(ended.data.payload.call_control_id)}`;
-      await service.finalize(toTelnyxCallSummary(
+      const recordingAvailable = recordingClient
+        ? await recordingClient.getDownloadUrl(ended.data.payload.call_control_id).then(Boolean).catch(() => false)
+        : false;
+      const recordingUrl = recordingAvailable
+        ? `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/admin/provider/telnyx/recordings/${encodeURIComponent(ended.data.payload.call_control_id)}`
+        : null;
+      const summary = toTelnyxCallSummary(
         ended,
         rawBody,
         dependencies.env.DEFAULT_TENANT_ID,
         dependencies.clock.now(),
         recordingUrl,
-      ));
+      );
+      if (summary.consentState === "declined" && recordingClient) {
+        await recordingClient.deleteForCall(summary.providerCallId).catch((error) => {
+          log({ level: "error", event: "declined_recording_delete_failed", providerCallId: summary.providerCallId, error: safeError(error) });
+        });
+        summary.recordingUrl = null;
+      }
+      await service.finalize(summary);
     }
     sendJson(response, 200, { received: true });
   }
@@ -241,14 +294,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   async function handleIntake(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const rawBody = await readBody(request);
     requireProviderAuth(request, rawBody);
+    enforceProviderRate(request, "tool:save-intake");
     await requireOperational();
     const input = intakeSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
-    if (input.requested_start && Date.parse(input.requested_start) < dependencies.clock.now().getTime()) {
-      throw new HttpError(409, "Requested appointment time is in the past; check current availability again");
-    }
     const result = await service.saveIntake({
-      tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
+      tenantId: await tenantForCall(input.provider_call_id),
       providerCallId: input.provider_call_id,
       fromNumber: input.from_number,
       fields: {
@@ -261,13 +312,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         ...(input.service_category_confidence === undefined ? {} : { serviceCategoryConfidence: input.service_category_confidence }),
         ...(input.equipment_details === undefined ? {} : { equipmentDetails: input.equipment_details }),
         ...(input.access_notes === undefined ? {} : { accessNotes: input.access_notes }),
-        ...(input.requested_start === undefined ? {} : { requestedStart: input.requested_start }),
-        ...(input.explicit_slot_confirmation === undefined ? {} : { explicitSlotConfirmation: input.explicit_slot_confirmation }),
         ...(input.diagnostic_fee_accepted === undefined ? {} : { diagnosticFeeAccepted: input.diagnostic_fee_accepted }),
         ...(input.human_requested === undefined ? {} : { humanRequested: input.human_requested }),
         ...(input.confidence === undefined ? {} : { confidence: input.confidence }),
       },
       ...(input.recording_disclosure_given === undefined ? {} : { recordingDisclosureGiven: input.recording_disclosure_given }),
+      ...(input.recording_disclosure_declined === undefined ? {} : { recordingDisclosureDeclined: input.recording_disclosure_declined }),
     });
     sendJson(response, 200, result);
   }
@@ -275,11 +325,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   async function handleAvailability(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const rawBody = await readBody(request);
     requireProviderAuth(request, rawBody);
+    enforceProviderRate(request, "tool:check-availability");
     await requireOperational();
     const input = availabilitySchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
     const result = await service.checkAvailability({
-      tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
+      tenantId: await tenantForCall(input.provider_call_id),
       providerCallId: input.provider_call_id,
       windowStart: input.window_start,
       windowEnd: input.window_end,
@@ -290,11 +341,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   async function handleServiceArea(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const rawBody = await readBody(request);
     requireProviderAuth(request, rawBody);
+    enforceProviderRate(request, "tool:check-service-area");
     await requireOperational();
     const input = serviceAreaSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
     const result = await service.checkServiceArea({
-      tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
+      tenantId: await tenantForCall(input.provider_call_id),
       providerCallId: input.provider_call_id,
       address: input.address,
     });
@@ -304,11 +356,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   async function handleTriage(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const rawBody = await readBody(request);
     requireProviderAuth(request, rawBody);
+    enforceProviderRate(request, "tool:triage");
     await requireOperational();
     const input = triageSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
     const result = await service.triageCall({
-      tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
+      tenantId: await tenantForCall(input.provider_call_id),
       providerCallId: input.provider_call_id,
       fromNumber: input.from_number,
       problemDescription: input.problem_description,
@@ -322,11 +375,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   async function handleBooking(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const rawBody = await readBody(request);
     requireProviderAuth(request, rawBody);
+    enforceProviderRate(request, "tool:book");
     await requireOperational();
     const input = bookingSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
     const result = await service.bookConfirmedSlot({
-      tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
+      tenantId: await tenantForCall(input.provider_call_id),
       providerCallId: input.provider_call_id,
       slotStart: input.slot_start,
       callerName: input.caller_name,
@@ -343,10 +397,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   async function handleHandoff(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const rawBody = await readBody(request);
     requireProviderAuth(request, rawBody);
+    enforceProviderRate(request, "tool:request-human");
     await requireOperational();
     const input = handoffSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
-    const tenantId = input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID;
+    const tenantId = await tenantForCall(input.provider_call_id);
     if (input.reason === "explicit_request") {
       if (!isExplicitHumanRequest(input.caller_quote)) {
         throw new HttpError(409, "Human handoff requires the caller's explicit request for a person");
@@ -371,9 +426,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const method = request.method ?? "GET";
     if (method === "POST" && url.pathname === "/admin/login") {
       const form = parseForm(await readBody(request, 16_000));
-      if (!limiter.allow(`${request.socket.remoteAddress ?? "unknown"}:login`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
+      if (!limiter.allow(`${requestIp(request)}:login`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
       if (!safeTokenMatch(form.get("token"), dependencies.env.ADMIN_TOKEN)) return sendHtml(response, 401, renderLogin("Invalid admin token."));
-      const session = mintAdminSession(dependencies.env.ADMIN_TOKEN);
+      const session = mintAdminSession(dependencies.env.SESSION_SIGNING_KEY!);
       response.setHeader("set-cookie", adminCookie(session, dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/admin");
     }
@@ -383,7 +438,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (method === "GET" && url.pathname === "/admin/integrations/google/callback") {
       if (!dependencies.env.GOOGLE_CLIENT_ID || !dependencies.env.GOOGLE_CLIENT_SECRET) throw new HttpError(503, "Google OAuth is not configured on the server");
-      const verifier = verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, "afo_google_pkce"), dependencies.env.ADMIN_TOKEN);
+      const verifier = verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, "afo_google_pkce"), dependencies.env.SESSION_SIGNING_KEY!);
       if (!verifier) throw new HttpError(400, "Google OAuth state is invalid or expired");
       if (url.searchParams.has("error")) throw new HttpError(400, "Google authorization was declined");
       const code = url.searchParams.get("code");
@@ -398,9 +453,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
 
     const session = readCookie(request, "afo_admin");
     const bearer = bearerMatches(request, dependencies.env.ADMIN_TOKEN);
-    const sessionAuthorized = verifyAdminSession(session, dependencies.env.ADMIN_TOKEN);
+    const sessionAuthorized = verifyAdminSession(session, dependencies.env.SESSION_SIGNING_KEY!);
     if (!bearer && !sessionAuthorized) return sendHtml(response, 401, renderLogin());
-    const csrf = session ? csrfForSession(session, dependencies.env.ADMIN_TOKEN) : "bearer-auth";
+    const csrf = session ? csrfForSession(session, dependencies.env.SESSION_SIGNING_KEY!) : "bearer-auth";
 
     if (method === "GET" && url.pathname === "/admin/readiness") {
       const [report, config] = await Promise.all([
@@ -414,7 +469,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (method === "POST" && url.pathname === "/admin/simulator") {
       const form = parseForm(await readBody(request, 16_000));
-      if (!bearer && (!session || !verifyCsrf(session, form.get("csrf"), dependencies.env.ADMIN_TOKEN))) throw new HttpError(403, "Invalid CSRF token");
+      if (!bearer && (!session || !verifyCsrf(session, form.get("csrf"), dependencies.env.SESSION_SIGNING_KEY!))) throw new HttpError(403, "Invalid CSRF token");
       const selected = form.get("scenario");
       const valid = SIMULATION_SCENARIOS.some(([id]) => id === selected);
       if (selected !== "all" && !valid) throw new HttpError(400, "Unknown simulator scenario");
@@ -424,7 +479,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
 
     if (method === "GET" && url.pathname === "/admin/integrations/google/start") {
       if (!dependencies.env.GOOGLE_CLIENT_ID || !dependencies.env.GOOGLE_CLIENT_SECRET) throw new HttpError(503, "Google OAuth is not configured on the server");
-      const attempt = createGoogleOAuthAttempt(dependencies.env.ADMIN_TOKEN, dependencies.env.NODE_ENV === "production");
+      const attempt = createGoogleOAuthAttempt(dependencies.env.SESSION_SIGNING_KEY!, dependencies.env.NODE_ENV === "production");
       const callback = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/admin/integrations/google/callback`;
       const authorization = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       authorization.search = new URLSearchParams({
@@ -465,7 +520,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (method === "POST" && url.pathname === "/admin/config") {
       const form = parseForm(await readBody(request, 64_000));
-      if (!bearer && (!session || !verifyCsrf(session, form.get("csrf"), dependencies.env.ADMIN_TOKEN))) throw new HttpError(403, "Invalid CSRF token");
+      if (!bearer && (!session || !verifyCsrf(session, form.get("csrf"), dependencies.env.SESSION_SIGNING_KEY!))) throw new HttpError(403, "Invalid CSRF token");
       const current = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
       const updated = configFromForm(current, form);
       const ownerPhone = form.get("ownerPhone")?.trim();
@@ -474,6 +529,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         await dependencies.store.saveIntegrationSecret(dependencies.env.DEFAULT_TENANT_ID, "notifications", "owner-primary", ownerPhone);
         updated.ownerNotificationRefs = ["owner-primary"];
         updated.ownerTransferNumberRef = "owner-primary";
+      }
+      if (!dependencies.env.DEMO_MODE) {
+        if (!routingClient) throw new HttpError(503, "Telnyx voice routing is not configured");
+        await routingClient.setPaused(updated.paused).catch((error) => {
+          log({ level: "error", event: "voice_routing_update_failed", error: safeError(error) });
+          throw new HttpError(502, "Telnyx voice routing could not be updated; configuration was not changed");
+        });
       }
       await dependencies.store.saveConfig(updated);
       return redirect(response, "/admin/config");
@@ -502,9 +564,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const deleteCallMatch = /^\/admin\/calls\/([0-9a-f-]+)\/delete$/i.exec(url.pathname);
     if (method === "POST" && deleteCallMatch?.[1]) {
       const form = parseForm(await readBody(request, 16_000));
-      if (!bearer && (!session || !verifyCsrf(session, form.get("csrf"), dependencies.env.ADMIN_TOKEN))) throw new HttpError(403, "Invalid CSRF token");
+      if (!bearer && (!session || !verifyCsrf(session, form.get("csrf"), dependencies.env.SESSION_SIGNING_KEY!))) throw new HttpError(403, "Invalid CSRF token");
       if (form.get("confirm") !== "delete") throw new HttpError(400, "Deletion confirmation is required");
-      if (!await dependencies.store.deleteCall(dependencies.env.DEFAULT_TENANT_ID, deleteCallMatch[1])) throw new HttpError(404, "Call not found");
+      const deleted = await deletionService.deleteCall(dependencies.env.DEFAULT_TENANT_ID, deleteCallMatch[1])
+        .catch(() => { throw new HttpError(502, "Provider deletion failed. The local record was retained so deletion can be retried."); });
+      if (!deleted) throw new HttpError(404, "Call not found");
       return redirect(response, "/admin");
     }
     const callMatch = /^\/admin\/calls\/([0-9a-f-]+)$/i.exec(url.pathname);
@@ -524,7 +588,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   }
 
   function requireProviderAuth(request: IncomingMessage, rawBody: string): void {
-    if (bearerMatches(request, dependencies.env.TOOL_TOKEN)) return;
+    if (dependencies.env.DEMO_MODE && bearerMatches(request, dependencies.env.TOOL_TOKEN)) return;
     if (!dependencies.env.TELNYX_PUBLIC_KEY) {
       throw new HttpError(dependencies.env.DEMO_MODE ? 401 : 503, dependencies.env.DEMO_MODE ? "Invalid tool credentials" : "Telnyx webhook verification is not configured");
     }
@@ -545,9 +609,21 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   }
 
   function requireMatchingCallHeader(request: IncomingMessage, providerCallId: string): void {
-    if (bearerMatches(request, dependencies.env.TOOL_TOKEN)) return;
+    if (dependencies.env.DEMO_MODE && bearerMatches(request, dependencies.env.TOOL_TOKEN)) return;
     const headerCallId = singleHeader(request.headers["x-telnyx-call-control-id"]);
     if (!headerCallId || headerCallId !== providerCallId) throw new HttpError(401, "Telnyx call identifier does not match the signed tool payload");
+  }
+
+  function enforceProviderRate(request: IncomingMessage, route: string): void {
+    const callId = singleHeader(request.headers["x-telnyx-call-control-id"]) ?? requestIp(request);
+    if (!limiter.allow(`provider:${callId}:${route}`, 240, 60_000)) throw new HttpError(429, "Too many authenticated provider requests");
+  }
+
+  async function tenantForCall(providerCallId: string): Promise<string> {
+    const call = await dependencies.store.getCallByProviderId(providerCallId);
+    if (!call && dependencies.env.DEMO_MODE) return dependencies.env.DEFAULT_TENANT_ID;
+    if (!call) throw new HttpError(409, "Call initialization has not been recorded");
+    return call.tenantId;
   }
 
   async function getActivationReport(): Promise<ActivationReport> {
@@ -577,7 +653,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
 function unwrapToolPayload(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   const record = value as Record<string, unknown>;
-  return record.args ?? record.arguments ?? value;
+  const nested = record.args ?? record.arguments;
+  if (!nested || typeof nested !== "object" || Array.isArray(nested)) return value;
+  const { args: _args, arguments: _arguments, ...outer } = record;
+  return { ...(nested as Record<string, unknown>), ...outer };
 }
 
 function isExplicitHumanRequest(callerQuote: string): boolean {
@@ -649,10 +728,17 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
   const defaultServiceDurationMinutes = Number(form.get("defaultServiceDurationMinutes") ?? "0");
   if (!Number.isInteger(defaultServiceDurationMinutes) || defaultServiceDurationMinutes < 15 || defaultServiceDurationMinutes > 480) throw new HttpError(400, "Default service duration must be 15–480 minutes");
   const emergencyThreshold = Number(form.get("emergencyThreshold") ?? "0");
-  if (!Number.isFinite(emergencyThreshold) || emergencyThreshold < 0.5 || emergencyThreshold > 1) throw new HttpError(400, "Emergency threshold must be between 0.5 and 1");
+  if (!Number.isFinite(emergencyThreshold) || emergencyThreshold < 0.5 || emergencyThreshold > 0.9) throw new HttpError(400, "Emergency threshold must be between 0.5 and 0.9");
   const weekdayStart = required("weekdayStart");
   const weekdayEnd = required("weekdayEnd");
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(weekdayStart) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(weekdayEnd)) throw new HttpError(400, "Coverage times must use HH:MM");
+  const bookableWeekdayStart = required("bookableWeekdayStart");
+  const bookableWeekdayEnd = required("bookableWeekdayEnd");
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(bookableWeekdayStart) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(bookableWeekdayEnd)) throw new HttpError(400, "Bookable hours must use HH:MM");
+  const minimumLeadTimeMinutes = Number(form.get("minimumLeadTimeMinutes") ?? "0");
+  if (!Number.isInteger(minimumLeadTimeMinutes) || minimumLeadTimeMinutes < 0 || minimumLeadTimeMinutes > 10_080) throw new HttpError(400, "Minimum lead time must be 0–10080 minutes");
+  const maxCallsPerCallerPerDay = Number(form.get("maxCallsPerCallerPerDay") ?? "0");
+  if (!Number.isInteger(maxCallsPerCallerPerDay) || maxCallsPerCallerPerDay < 1 || maxCallsPerCallerPerDay > 20) throw new HttpError(400, "Caller daily limit must be 1–20 calls");
   const holidayDates = list("holidayDates");
   if (holidayDates.some((value) => !isIsoDate(value))) throw new HttpError(400, "Holiday dates must use valid YYYY-MM-DD values");
   return {
@@ -667,6 +753,8 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
     serviceAreaTerms: list("serviceAreaTerms"),
     emergencyKeywords: list("emergencyKeywords"),
     emergencyThreshold,
+    minimumLeadTimeMinutes,
+    maxCallsPerCallerPerDay,
     defaultServiceDurationMinutes,
     serviceCategories: list("serviceCategories"),
     priceSnippets: parseLines(form.get("priceSnippets") ?? "", 50).map((line) => {
@@ -693,6 +781,11 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
       weekends: form.has("weekends"),
       holidayDates,
     },
+    bookableHours: {
+      weekdayStart: bookableWeekdayStart,
+      weekdayEnd: bookableWeekdayEnd,
+      weekends: form.has("bookableWeekends"),
+    },
   };
 }
 
@@ -713,7 +806,7 @@ function safeError(error: unknown): string {
 }
 
 async function isGoogleConnected(env: Environment, store: Store): Promise<boolean> {
-  return Boolean(env.GOOGLE_REFRESH_TOKEN || await store.getIntegrationSecret(env.DEFAULT_TENANT_ID, "google", "refresh_token"));
+  return Boolean(await store.getIntegrationSecret(env.DEFAULT_TENANT_ID, "google", "refresh_token") || env.GOOGLE_REFRESH_TOKEN);
 }
 
 async function exchangeGoogleCode(env: Environment, code: string, verifier: string): Promise<string> {
