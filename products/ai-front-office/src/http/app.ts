@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { z } from "zod";
-import { renderCallDetail, renderConfig, renderDashboard, renderLogin, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderTerms } from "../admin/render.js";
+import { renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderTerms } from "../admin/render.js";
 import { buildActivationReport, type ActivationReport } from "../application/readiness.js";
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService } from "../application/call-service.js";
@@ -132,7 +132,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       throw new HttpError(429, "Too many requests");
     }
 
-    if (method === "GET" && url.pathname === "/") return redirect(response, "/admin");
+    if (method === "GET" && url.pathname === "/") {
+      const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
+      return sendHtml(response, 200, renderLanding(config, dependencies.env.TELNYX_FROM_NUMBER ?? null));
+    }
     if (method === "GET" && url.pathname === "/healthz") return sendJson(response, 200, { status: "ok" });
     if (method === "GET" && url.pathname === "/readyz") {
       await dependencies.store.ping();

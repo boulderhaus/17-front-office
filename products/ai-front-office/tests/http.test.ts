@@ -242,6 +242,9 @@ describe("HTTP boundary", () => {
   });
 
   it("exposes honest activation, public policy pages, and the isolated simulator", async () => {
+    const landing = await fetch(`${baseUrl}/`);
+    expect(landing.status).toBe(200);
+    expect(await landing.text()).toContain("Stop losing jobs");
     expect((await fetch(`${baseUrl}/activationz`)).status).toBe(503);
     expect((await fetch(`${baseUrl}/privacy`)).status).toBe(200);
     expect((await fetch(`${baseUrl}/terms`)).status).toBe(200);
