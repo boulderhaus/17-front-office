@@ -246,6 +246,7 @@ export class CallService {
         problemDescription: input.problemDescription ?? existing.fields.problemDescription,
         humanRequested: true,
       },
+      emergency: input.urgent ? mergeEmergencyDecision(existing.emergency, input.urgent) : existing.emergency,
       outcome: "handoff_queued",
       updatedAt: now,
     };

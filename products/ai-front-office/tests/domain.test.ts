@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDemoConfig, isCoverageActive } from "../src/domain/config.js";
 import { triageEmergency } from "../src/domain/triage.js";
-import { buildVoiceSystemPrompt } from "../src/voice/system-prompt.js";
+import { buildTelnyxAssistantUpdate, buildTelnyxTools, buildVoiceSystemPrompt } from "../src/voice/system-prompt.js";
 import { redactError } from "../src/application/retry.js";
 import { buildActivationReport } from "../src/application/readiness.js";
 import { runAllSimulations } from "../src/application/simulator.js";
@@ -39,10 +39,31 @@ describe("coverage and voice policy", () => {
     expect(prompt).toContain("The booking mode is confirm");
   });
 
-  it("routes angry callers and refuses price guesses when no script is approved", () => {
+  it("requires explicit human requests and refuses price guesses when no script is approved", () => {
     const prompt = buildVoiceSystemPrompt({ ...createDemoConfig(), priceSnippets: [] });
-    expect(prompt).toContain("angry/confused");
+    expect(prompt).toContain("Anger, confusion, low confidence, or an unclear remark is not permission to escalate");
+    expect(prompt).toContain("Comments about loudness, volume, audio quality");
     expect(prompt).toContain("Never estimate a price");
+  });
+
+  it("hard-hangs up voicemail and closing turns without a long idle tail", () => {
+    const config = createDemoConfig();
+    const prompt = buildVoiceSystemPrompt(config);
+    expect(prompt).toContain("invoke the built-in hangup tool in the same turn");
+    expect(prompt).toContain("Never say \"goodbye\" without immediately invoking");
+    const hangup = buildTelnyxTools(config, "https://front-office.example").find((tool) => tool.type === "hangup") as { hangup: { description: string } };
+    expect(hangup.hangup.description).toContain("Immediately terminate");
+    const update = buildTelnyxAssistantUpdate(config, "https://front-office.example") as { telephony_settings: { user_idle_timeout_secs: number; user_idle_reply_secs: number } };
+    expect(update.telephony_settings).toMatchObject({ user_idle_timeout_secs: 30, user_idle_reply_secs: 8 });
+  });
+
+  it("requires a reason and exact caller quote for the handoff tool", () => {
+    const handoff = buildTelnyxTools(createDemoConfig(), "https://front-office.example")
+      .find((tool) => (tool.webhook as { name?: string } | undefined)?.name === "request_human") as {
+        webhook: { body_parameters: { required: string[]; properties: { reason: { enum: string[] } } } };
+      };
+    expect(handoff.webhook.body_parameters.required).toEqual(["reason", "caller_quote"]);
+    expect(handoff.webhook.body_parameters.properties.reason.enum).toEqual(["explicit_request", "emergency"]);
   });
 });
 

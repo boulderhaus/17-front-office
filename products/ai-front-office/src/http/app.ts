@@ -70,6 +70,8 @@ const bookingSchema = baseToolSchema.extend({
 });
 const handoffSchema = baseToolSchema.extend({
   from_number: z.string().min(3).max(40),
+  reason: z.enum(["explicit_request", "emergency"]),
+  caller_quote: z.string().min(1).max(500),
   caller_name: z.string().max(120).optional(),
   problem_description: z.string().max(2_000).optional(),
 });
@@ -315,8 +317,19 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     await requireOperational();
     const input = handoffSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
+    const tenantId = input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID;
+    if (input.reason === "explicit_request") {
+      if (!isExplicitHumanRequest(input.caller_quote)) {
+        throw new HttpError(409, "Human handoff requires the caller's explicit request for a person");
+      }
+    } else {
+      const call = await dependencies.store.getCallByProviderId(input.provider_call_id);
+      if (!call || call.tenantId !== tenantId || call.emergency?.emergency !== true) {
+        throw new HttpError(409, "Emergency handoff requires a prior deterministic emergency triage result");
+      }
+    }
     const result = await service.queueHumanHandoff({
-      tenantId: input.tenant_id ?? dependencies.env.DEFAULT_TENANT_ID,
+      tenantId,
       providerCallId: input.provider_call_id,
       fromNumber: input.from_number,
       ...(input.caller_name === undefined ? {} : { callerName: input.caller_name }),
@@ -536,6 +549,14 @@ function unwrapToolPayload(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   const record = value as Record<string, unknown>;
   return record.args ?? record.arguments ?? value;
+}
+
+function isExplicitHumanRequest(callerQuote: string): boolean {
+  const quote = callerQuote.toLowerCase().replace(/\s+/g, " ").trim();
+  const namesPerson = /\b(human|person|owner|representative|operator|technician|someone|somebody)\b/.test(quote);
+  const requestsContact = /\b(speak|talk|connect|transfer|reach|get|want|need|call|put)\b/.test(quote);
+  const directRequest = /\b(human|person|representative|operator)\s*(?:please|now)?[.!?]*$/.test(quote);
+  return namesPerson && (requestsContact || directRequest);
 }
 
 function routeKey(pathname: string): string {

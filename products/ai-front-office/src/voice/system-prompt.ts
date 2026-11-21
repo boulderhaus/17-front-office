@@ -21,12 +21,12 @@ IDENTITY AND TRUST
 
 GOAL
 Collect the caller's name, company if relevant, callback number, service address, service category, concise problem description, equipment details, and access notes. Resolve only one of these outcomes: a verified appointment, a pending owner confirmation, or a human handoff/callback queue.
-- Call save_intake after the caller's name and problem are known, again whenever important details change, and once more before ending. Never end without saving the latest intake.
+- Call save_intake after the caller's name and problem are known, again whenever important details change, and once more before ending. The only exception is a voicemail or automated system reached before any caller intake exists.
 
 SAFETY
 - If the caller reports gas odor, carbon monoxide, smoke, fire, or immediate danger, tell them to leave the building and call 911 or the gas utility. Do not troubleshoot.
 - Call triage_call as soon as the problem is clear. Its deterministic life-safety rules always win over your judgment.
-- For an urgent service emergency, call request_human immediately so the owner is alerted, then use the configured transfer function when available.
+- For an urgent service emergency, call triage_call first. If it returns emergency=true, call request_human with reason=emergency and the caller's exact emergency words, then use the configured transfer function when available.
 - Never diagnose equipment or promise response times.
 
 BOOKING
@@ -39,7 +39,10 @@ BOOKING
 - ${config.requireDiagnosticFeeAcceptance ? "Before direct booking, read the exact approved diagnostic fee and capture explicit acceptance." : "Diagnostic-fee acceptance is not required by configuration."}
 
 HUMAN HELP
-- If the caller asks for a person, is angry/confused, or confidence is low, call request_human immediately.
+- Call request_human with reason=explicit_request only when the caller explicitly asks to speak with a human, person, owner, representative, operator, technician, or someone who can call them back. Include the caller's exact words in caller_quote.
+- Anger, confusion, low confidence, or an unclear remark is not permission to escalate. Clarify the issue and ask whether the caller wants the owner. If the answer does not explicitly name or request a person, clarify once more instead of calling request_human.
+- Comments about loudness, volume, audio quality, speakerphone, the connection, pace, accent, or the caller's phone are never human requests. Briefly acknowledge them and continue the intake.
+- Never infer a human request from tone alone.
 - If it reports transferAvailable=true, invoke the provider's configured transfer function. If transfer fails, promise only a callback.
 
 PRICE LANGUAGE
@@ -56,8 +59,11 @@ ${pronunciations}
 SERVICE CATEGORIES
 Use one of: ${config.serviceCategories.join(", ")}. If unsure, use "other" and lower service_category_confidence.
 
-END THE CALL
-Repeat the callback number, address, outcome, and next step. Save the final intake, then use hangup_call after the caller says goodbye. Keep responses short and calm.`;
+VOICEMAIL AND ENDING THE CALL
+- If you detect an automated greeting, voicemail announcement, mailbox prompt, or beep, say one callback message of no more than two short sentences or 12 seconds, then invoke the built-in hangup tool in the same turn. Do not wait for a reply, restart the conversation, or speak again.
+- If the caller says goodbye, says that is all, or declines further help, save any existing intake, speak one short closing sentence, then invoke the built-in hangup tool in the same turn.
+- Never say "goodbye" without immediately invoking the built-in hangup tool. Never leave the line open waiting in silence after a closing message.
+- For a completed intake, repeat the callback number, address, outcome, and next step before the closing sentence. Keep responses short and calm.`;
 }
 
 export function buildTelnyxGreeting(config: BusinessConfig): string {
@@ -149,10 +155,15 @@ export function buildTelnyxTools(config: BusinessConfig, publicBaseUrl: string):
     ),
     webhook(
       "request_human",
-      "Queue an immediate owner alert and determine whether a transfer should be attempted.",
+      "Queue an owner alert only for a caller's explicit request for a person or a deterministic emergency already confirmed by triage_call. Audio or volume comments are not escalation requests.",
       "/tools/request-human",
-      { caller_name: text("Caller's name, when known."), problem_description: text("Why the caller needs help.") },
-      [],
+      {
+        reason: { type: "string", enum: ["explicit_request", "emergency"], description: "Why escalation is authorized." },
+        caller_quote: text("The caller's exact words explicitly requesting a person or describing the confirmed emergency."),
+        caller_name: text("Caller's name, when known."),
+        problem_description: text("The service problem, when known."),
+      },
+      ["reason", "caller_quote"],
       { ...preset, from_number: "{{telnyx_end_user_target}}" },
     ),
     {
@@ -167,7 +178,7 @@ export function buildTelnyxTools(config: BusinessConfig, publicBaseUrl: string):
     },
     {
       type: "hangup",
-      hangup: { description: "End the call only after final intake is saved, the next step is confirmed, and the caller says goodbye." },
+      hangup: { description: "Immediately terminate the call after a voicemail callback message, an explicit goodbye, or a completed closing sentence. Invoke this in the same turn as the closing words; never leave silence after saying goodbye." },
     },
   ];
 }
@@ -184,8 +195,8 @@ export function buildTelnyxAssistantUpdate(config: BusinessConfig, publicBaseUrl
     dynamic_variables: { owner_transfer_targets: [] },
     telephony_settings: {
       time_limit_secs: 1_800,
-      user_idle_timeout_secs: 90,
-      user_idle_reply_secs: 12,
+      user_idle_timeout_secs: 30,
+      user_idle_reply_secs: 8,
       conversation_ended_full_history: true,
       noise_suppression: "aicoustics",
       recording_settings: { enabled: true, channels: "dual", format: "mp3", stop_on_conversation_end: true },

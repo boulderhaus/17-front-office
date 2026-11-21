@@ -62,6 +62,73 @@ describe("HTTP boundary", () => {
     });
     expect(response.status).toBe(200);
     expect((await response.json() as { severity: string }).severity).toBe("life_safety");
+    expect((await store.getCallByProviderId("triage-call"))?.emergency?.severity).toBe("life_safety");
+  });
+
+  it("rejects audio complaints as handoff requests but accepts an explicit request for a person", async () => {
+    const headers = { authorization: `Bearer ${toolToken}`, "content-type": "application/json" };
+    const rejected = await fetch(`${baseUrl}/tools/request-human`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        provider_call_id: "volume-comment",
+        from_number: "+15555550110",
+        reason: "explicit_request",
+        caller_quote: "why is this so loud",
+        problem_description: "The phone audio is loud",
+      }),
+    });
+    expect(rejected.status).toBe(409);
+    expect(await store.getCallByProviderId("volume-comment")).toBeNull();
+
+    const accepted = await fetch(`${baseUrl}/tools/request-human`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        provider_call_id: "explicit-human",
+        from_number: "+15555550110",
+        reason: "explicit_request",
+        caller_quote: "I want to speak to the owner",
+        problem_description: "Routine maintenance",
+      }),
+    });
+    expect(accepted.status).toBe(200);
+    expect((await store.getCallByProviderId("explicit-human"))?.outcome).toBe("handoff_queued");
+  });
+
+  it("rejects an emergency handoff until deterministic triage confirms the emergency", async () => {
+    const headers = { authorization: `Bearer ${toolToken}`, "content-type": "application/json" };
+    const beforeTriage = await fetch(`${baseUrl}/tools/request-human`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        provider_call_id: "emergency-guard",
+        from_number: "+15555550110",
+        reason: "emergency",
+        caller_quote: "I smell gas",
+        problem_description: "The basement smells like gas",
+      }),
+    });
+    expect(beforeTriage.status).toBe(409);
+
+    const triage = await fetch(`${baseUrl}/tools/triage`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ provider_call_id: "emergency-guard", from_number: "+15555550110", problem_description: "The basement smells like gas" }),
+    });
+    expect(triage.status).toBe(200);
+    const afterTriage = await fetch(`${baseUrl}/tools/request-human`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        provider_call_id: "emergency-guard",
+        from_number: "+15555550110",
+        reason: "emergency",
+        caller_quote: "I smell gas",
+        problem_description: "The basement smells like gas",
+      }),
+    });
+    expect(afterTriage.status).toBe(200);
   });
 
   it("accepts a demo-authenticated Telnyx conversation-ended webhook", async () => {
