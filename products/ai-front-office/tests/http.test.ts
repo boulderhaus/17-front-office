@@ -68,10 +68,26 @@ describe("HTTP boundary", () => {
     expect(html).toContain("Jamie R.");
     expect(html).toContain("Suncoast Heating Demo");
     expect(html).toContain('class="mobile-app-nav"');
+    expect(html).toContain('class="app-sidebar"');
+    expect(html).toContain('aria-label="Dashboard views"');
+    expect(html).toContain("Next 7 days");
     expect(html).toContain('grid-template-areas:"inbox" "call" "recent" "activity" "usage"');
     expect(html.indexOf('id="inbox"')).toBeLessThan(html.indexOf('id="call-preview"'));
     expect(html).not.toContain("task/complete");
     expect(html).not.toContain('method="post"');
+
+    const pipeline = await fetch(`${baseUrl}/demo?view=pipeline`);
+    const pipelineHtml = await pipeline.text();
+    expect(pipelineHtml).toContain("Every job at a glance");
+    expect(pipelineHtml).toContain("Needs reply");
+    expect(pipelineHtml).toContain("Booked");
+    expect(pipelineHtml).toContain('class="active" href="/demo?view=pipeline"');
+
+    const calendar = await fetch(`${baseUrl}/demo?view=calendar`);
+    const calendarHtml = await calendar.text();
+    expect(calendarHtml).toContain("Next seven days");
+    expect(calendarHtml).toContain("Taylor S.");
+    expect(calendarHtml).toContain('class="active" href="/demo?view=calendar"');
   });
 
   it("accepts an authenticated availability tool call", async () => {

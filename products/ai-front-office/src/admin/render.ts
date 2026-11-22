@@ -3,6 +3,8 @@ import type { ActivationReport } from "../application/readiness.js";
 import { SIMULATION_SCENARIOS, type SimulationResult } from "../application/simulator.js";
 import { buildTelnyxAssistantUpdate } from "../voice/system-prompt.js";
 
+type OwnerDashboardView = "today" | "pipeline" | "calendar";
+
 export function renderLanding(config: BusinessConfig): string {
   const ticker = `YOUR NUMBER&nbsp;&nbsp;·&nbsp;&nbsp;YOUR HOURS&nbsp;&nbsp;·&nbsp;&nbsp;YOUR SERVICE AREA&nbsp;&nbsp;·&nbsp;&nbsp;YOUR RULES&nbsp;&nbsp;·&nbsp;&nbsp;NO ENTERPRISE RUNAROUND&nbsp;&nbsp;·&nbsp;&nbsp;`;
   return publicLayout("AI Front Office", `<div class="announcement">Built for solo HVAC owners and small crews</div>
@@ -44,9 +46,11 @@ export function renderOwnerDashboard(input: {
   now: string;
   selectedCallId?: string | null;
   recentlyCompletedCallId?: string | null;
+  view?: OwnerDashboardView;
   preview?: boolean;
 }): string {
   const preview = input.preview === true;
+  const view = input.view ?? "today";
   const nowMs = Date.parse(input.now);
   const used = input.usage.billedMinutes;
   const remaining = Math.max(0, input.config.includedMinutes - used);
@@ -64,6 +68,13 @@ export function renderOwnerDashboard(input: {
     ?? null;
   const recentlyCompleted = completedTasks.find((task) => task.callId === input.recentlyCompletedCallId);
   const base = preview ? "/demo" : "/app";
+  const dashboardLink = (targetView: OwnerDashboardView, callId?: string): string => {
+    const params = new URLSearchParams();
+    if (targetView !== "today") params.set("view", targetView);
+    if (callId) params.set("call", callId);
+    const query = params.toString();
+    return `${base}${query ? `?${query}` : ""}`;
+  };
   const setupSteps = [true, input.googleConnected, paid];
   const setupComplete = setupSteps.filter(Boolean).length;
   const phoneFor = (call: CallRecord): string | null => {
@@ -76,7 +87,7 @@ export function renderOwnerDashboard(input: {
       const call = callsById.get(task.callId);
       const phone = call ? phoneFor(call) : null;
       const overdue = Date.parse(task.dueAt) <= nowMs;
-      const rowLink = `${base}?call=${encodeURIComponent(task.callId)}#call-preview`;
+      const rowLink = `${dashboardLink(view, task.callId)}#call-preview`;
       const complete = preview
         ? `<button class="task-check" type="button" disabled aria-label="Read-only example">✓</button>`
         : `<form class="inline-form" method="post" action="/app/calls/${encodeURIComponent(task.callId)}/task/complete"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><button class="task-check" aria-label="Mark ${escapeHtml(call?.fields.callerName ?? "call")} handled">✓</button></form>`;
@@ -85,7 +96,7 @@ export function renderOwnerDashboard(input: {
     }).join("");
   const recentCalls = input.calls.slice(0, 8).map((call) => {
     const selected = selectedCall?.id === call.id;
-    return `<a class="recent-row ${selected ? "selected" : ""}" href="${base}?call=${encodeURIComponent(call.id)}#call-preview"><span><strong>${escapeHtml(call.fields.callerName ?? "Unknown caller")}</strong><small>${escapeHtml(call.fields.problemDescription || "No summary")}</small></span><time>${escapeHtml(formatCompactDate(call.startedAt, input.config.timezone))}</time></a>`;
+    return `<a class="recent-row ${selected ? "selected" : ""}" href="${dashboardLink("today", call.id)}#call-preview"><span><strong>${escapeHtml(call.fields.callerName ?? "Unknown caller")}</strong><small>${escapeHtml(call.fields.problemDescription || "No summary")}</small></span><time>${escapeHtml(formatCompactDate(call.startedAt, input.config.timezone))}</time></a>`;
   }).join("") || `<div class="queue-empty"><strong>No calls yet.</strong><span>Your first handled call will appear here.</span></div>`;
   const selectedPhone = selectedCall ? phoneFor(selectedCall) : null;
   const selectedAddress = selectedCall?.fields.address?.trim() || null;
@@ -101,15 +112,44 @@ export function renderOwnerDashboard(input: {
     })),
   ].sort((left, right) => right.at.localeCompare(left.at)).slice(0, 5);
   const activityRows = activities.map((activity) => `<li><span>${escapeHtml(activity.text)}</span><time>${escapeHtml(formatCompactDate(activity.at, input.config.timezone))}</time></li>`).join("") || `<li><span>No activity yet</span></li>`;
+  const upcomingAppointments = input.calls
+    .filter((call) => call.fields.requestedStart && Date.parse(call.fields.requestedStart) >= nowMs && Date.parse(call.fields.requestedStart) < nowMs + 7 * 24 * 60 * 60_000)
+    .sort((left, right) => left.fields.requestedStart!.localeCompare(right.fields.requestedStart!));
+  const bookedAppointmentCount = upcomingAppointments.filter((call) => call.outcome === "booked").length;
+  const proposedAppointmentCount = upcomingAppointments.length - bookedAppointmentCount;
+  const pipelineCard = (call: CallRecord | undefined, label: string, meta: string, urgent = false): string => {
+    if (!call) return "";
+    return `<a class="pipeline-card ${urgent ? "urgent" : ""}" href="${dashboardLink("pipeline", call.id)}#call-preview"><span class="pipeline-card-top"><strong>${escapeHtml(call.fields.callerName ?? "Unknown caller")}</strong><span class="pill ${urgent ? "danger" : ""}">${escapeHtml(label)}</span></span><span>${escapeHtml(call.fields.problemDescription || "No summary captured")}</span><small>${escapeHtml(meta)}</small></a>`;
+  };
+  const needsReplyCards = actionableTasks.map((task) => pipelineCard(callsById.get(task.callId), task.priority === "high" ? "Urgent" : "Follow up", task.reason, task.priority === "high")).join("");
+  const waitingCards = snoozedTasks.map((task) => pipelineCard(callsById.get(task.callId), "Waiting", `Returns ${formatCompactDate(task.dueAt, input.config.timezone)}`)).join("");
+  const bookedCards = upcomingAppointments.filter((call) => call.outcome === "booked").map((call) => pipelineCard(call, "Booked", formatDate(call.fields.requestedStart!, input.config.timezone))).join("");
+  const handledCards = completedTasks.filter((task) => callsById.get(task.callId)?.outcome !== "booked").slice(0, 8).map((task) => pipelineCard(callsById.get(task.callId), "Handled", formatCompactDate(task.completedAt ?? task.updatedAt, input.config.timezone))).join("");
+  const pipelineColumn = (title: string, count: number, cards: string, empty: string): string => `<section class="pipeline-column"><header><span>${escapeHtml(title)}</span><strong>${count}</strong></header><div>${cards || `<p class="pipeline-empty">${escapeHtml(empty)}</p>`}</div></section>`;
+  const pipelineBoard = `<section class="workspace-panel pipeline-panel"><div class="section-heading"><div><p class="eyebrow">Pipeline</p><h2>Every job at a glance</h2><p class="small">System-sorted from real call and follow-up status. Open a card to act on it.</p></div></div><div class="pipeline-board">${pipelineColumn("Needs reply", actionableTasks.length, needsReplyCards, "Nothing needs a response.")}${pipelineColumn("Waiting", snoozedTasks.length, waitingCards, "Nothing is snoozed.")}${pipelineColumn("Booked", upcomingAppointments.filter((call) => call.outcome === "booked").length, bookedCards, "No upcoming bookings.")}${pipelineColumn("Handled", completedTasks.filter((task) => callsById.get(task.callId)?.outcome !== "booked").length, handledCards, "No completed follow-ups yet.")}</div></section>`;
+  const dateKey = (value: string | Date): string => new Intl.DateTimeFormat("en-CA", { timeZone: input.config.timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(typeof value === "string" ? new Date(value) : value);
+  const calendarDays = Array.from({ length: 7 }, (_, index) => {
+    const day = new Date(nowMs + index * 24 * 60 * 60_000);
+    const key = dateKey(day);
+    const appointments = upcomingAppointments.filter((call) => dateKey(call.fields.requestedStart!) === key);
+    const dayLabel = new Intl.DateTimeFormat("en-US", { timeZone: input.config.timezone, weekday: "short" }).format(day);
+    const dateLabel = new Intl.DateTimeFormat("en-US", { timeZone: input.config.timezone, month: "short", day: "numeric" }).format(day);
+    const events = appointments.map((call) => `<a class="calendar-event" href="${dashboardLink("calendar", call.id)}#call-preview"><strong>${escapeHtml(new Intl.DateTimeFormat("en-US", { timeZone: input.config.timezone, hour: "numeric", minute: "2-digit" }).format(new Date(call.fields.requestedStart!)))}</strong><span>${escapeHtml(call.fields.callerName ?? "Unknown caller")}</span><small>${escapeHtml(call.outcome === "booked" ? "Booked" : "Awaiting confirmation")}</small></a>`).join("");
+    return `<section class="calendar-day ${index === 0 ? "today" : ""}"><header><span>${escapeHtml(dayLabel)}</span><strong>${escapeHtml(dateLabel)}</strong></header><div>${events || `<span class="calendar-empty">No appointments</span>`}</div></section>`;
+  }).join("");
+  const calendarBoard = `<section class="workspace-panel calendar-panel"><div class="section-heading"><div><p class="eyebrow">Calendar</p><h2>Next seven days</h2><p class="small">Booked and proposed appointment times from the calls Front Office handled.</p></div></div><div class="calendar-board">${calendarDays}</div></section>`;
   const billingAction = !preview && input.checkoutConfigured && !paid ? `<form class="inline-form" method="post" action="/app/billing/checkout"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><button>Start $${(input.config.flatMonthlyPriceCents / 100).toFixed(0)} plan</button></form>` : "";
-  const nav = preview
-    ? `<a href="#inbox">Today (${actionableTasks.length})</a><a href="#recent-calls">Calls</a><a href="/">Website</a><a class="button" href="/signup">Create my shop</a>`
-    : `<a href="#inbox">Today${actionableTasks.length ? ` (${actionableTasks.length})` : ""}</a><a href="#recent-calls">Calls</a><a href="/app/settings">Settings</a><a href="/logout">Sign out</a>`;
   const setupGuide = `<details class="setup-guide" ${setupComplete < 3 ? "open" : ""}><summary><span><strong>Setup ${setupComplete}/3 complete</strong><small>${setupComplete === 3 ? "Everything essential is connected" : "Finish these steps before customer traffic starts"}</small></span><span>${setupComplete === 3 ? "Ready" : "Continue"}</span></summary><div class="setup-steps"><span class="done">✓ Shop rules saved</span><span class="${input.googleConnected ? "done" : ""}">${input.googleConnected ? "✓" : "2"} ${input.googleConnected ? "Calendar connected" : preview ? "Connect calendar during setup" : '<a href="/app/integrations/google/start">Connect Google Calendar</a>'}</span><span class="${paid ? "done" : ""}">${paid ? "✓ Subscription active" : "3 Start subscription"}</span>${billingAction}</div></details>`;
   const undo = recentlyCompleted && !preview ? `<div class="toast" role="status"><span>Marked handled.</span><form class="inline-form" method="post" action="/app/calls/${encodeURIComponent(recentlyCompleted.callId)}/task/reopen"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><button>Undo</button></form></div>` : "";
   const demoNotice = preview ? `<div class="demo-notice"><strong>Read-only demo</strong><span>Synthetic calls only. Real owners can complete and snooze work.</span></div>` : "";
-  const mobileNav = `<nav class="mobile-app-nav" aria-label="Dashboard"><a href="#inbox"><span>✓</span>Today</a><a href="#recent-calls"><span>☎</span>Calls</a>${preview ? `<a href="/signup"><span>+</span>Start</a>` : `<a href="/app/settings"><span>⚙</span>Settings</a>`}</nav>`;
-  return layout("Owner dashboard", `<header class="app-header"><div><p class="eyebrow">${escapeHtml(input.config.businessName)}</p><h1>Front Office</h1></div><nav>${nav}</nav></header><main class="dashboard-main">${demoNotice}<div class="coverage-strip"><span class="coverage-state ${input.account.status === "active" && !input.config.paused ? "on" : ""}"><i></i>${input.account.status === "active" && !input.config.paused ? "AI coverage on" : "Activation pending"}</span><span>Calendar ${input.googleConnected ? "connected" : "not connected"}</span><span>${snoozedTasks.length} snoozed</span><span>${input.usage.excludedSpamCalls} spam excluded</span></div>${setupGuide}${undo}<details class="coach-tip" data-dashboard-tip><summary><strong>How Today works</strong><span>Tap for help</span></summary><p>Urgent and overdue work stays at the top. Check it off when handled or choose Later.</p></details><div class="dashboard-shell"><div class="dashboard-primary"><section id="inbox" class="inbox-panel"><div class="section-heading"><div><p class="eyebrow">Today</p><h2>Needs your attention</h2><p class="small">Front Office sorts this automatically. Nothing disappears until it is handled or safely snoozed.</p></div><strong>${actionableTasks.length}</strong></div><div class="inbox-list">${taskRows}</div></section><section id="recent-calls" class="recent-panel"><div class="section-heading"><div><p class="eyebrow">History</p><h2>Recent calls</h2></div><a href="#recent-calls">${input.calls.length} shown</a></div><div class="recent-list">${recentCalls}</div></section></div><aside class="dashboard-side">${callPreview}<section class="activity-panel"><div class="section-heading"><div><p class="eyebrow">Automatic record</p><h2>Recent activity</h2></div></div><ul>${activityRows}</ul></section><section class="usage-panel"><div><strong>${remaining}</strong><span>AI minutes left <details class="info-tip"><summary aria-label="What are AI minutes?">i</summary><p>Only connected AI call time counts. Provider-classified spam is excluded.</p></details></span></div><div><strong>${input.usage.billableCalls}</strong><span>handled calls</span></div><div><strong>$${(projectedOverage / 100).toFixed(2)}</strong><span>current overage</span></div></section></aside></div></main>${mobileNav}`);
+  const viewTabs = `<nav class="view-tabs" aria-label="Dashboard views"><a class="${view === "today" ? "active" : ""}" href="${dashboardLink("today")}">Today</a><a class="${view === "pipeline" ? "active" : ""}" href="${dashboardLink("pipeline")}">Pipeline</a><a class="${view === "calendar" ? "active" : ""}" href="${dashboardLink("calendar")}">Calendar</a></nav>`;
+  const sidebar = `<aside class="app-sidebar"><a class="app-mark" href="${dashboardLink("today")}"><span>FO</span><strong>Front Office</strong></a><nav aria-label="Main navigation"><a class="${view === "today" ? "active" : ""}" href="${dashboardLink("today")}">${dashboardIcon("today")}<span>Today</span>${actionableTasks.length ? `<b>${actionableTasks.length}</b>` : ""}</a><a class="${view === "pipeline" ? "active" : ""}" href="${dashboardLink("pipeline")}">${dashboardIcon("pipeline")}<span>Pipeline</span></a><a class="${view === "calendar" ? "active" : ""}" href="${dashboardLink("calendar")}">${dashboardIcon("calendar")}<span>Calendar</span></a><a href="${dashboardLink("today")}#recent-calls">${dashboardIcon("calls")}<span>Calls</span></a></nav><div class="sidebar-bottom">${preview ? `<a href="/">Website</a><a href="/signup">Create my shop</a>` : `<a href="/app/settings">${dashboardIcon("settings")}<span>Settings</span></a><a href="/logout">Sign out</a>`}</div></aside>`;
+  const overview = `<section class="overview-grid" aria-label="Shop overview"><article><span>Coverage</span><strong class="coverage-state ${input.account.status === "active" && !input.config.paused ? "on" : ""}"><i></i>${input.account.status === "active" && !input.config.paused ? "On" : "Pending"}</strong><small>AI line status</small></article><article><span>Needs attention</span><strong>${actionableTasks.length}</strong><small>${actionableTasks.filter((task) => task.priority === "high").length} urgent</small></article><article><span>Next 7 days</span><strong>${upcomingAppointments.length}</strong><small>${bookedAppointmentCount} booked${proposedAppointmentCount ? ` · ${proposedAppointmentCount} proposed` : ""}</small></article><article><span>AI minutes left</span><strong>${remaining}</strong><small>${input.usage.billableCalls} calls handled</small></article></section>`;
+  const todayView = `<div class="dashboard-shell"><div class="dashboard-primary"><section id="inbox" class="inbox-panel"><div class="section-heading"><div><p class="eyebrow">Today</p><h2>Needs your attention</h2><p class="small">Front Office sorts this automatically. Nothing disappears until it is handled or safely snoozed.</p></div><strong>${actionableTasks.length}</strong></div><div class="inbox-list">${taskRows}</div></section><section id="recent-calls" class="recent-panel"><div class="section-heading"><div><p class="eyebrow">History</p><h2>Recent calls</h2></div><span>${input.calls.length} shown</span></div><div class="recent-list">${recentCalls}</div></section></div><aside class="dashboard-side">${callPreview}<section class="activity-panel"><div class="section-heading"><div><p class="eyebrow">Automatic record</p><h2>Recent activity</h2></div></div><ul>${activityRows}</ul></section><section class="usage-panel"><div><strong>${remaining}</strong><span>AI minutes left <details class="info-tip"><summary aria-label="What are AI minutes?">i</summary><p>Only connected AI call time counts. Provider-classified spam is excluded.</p></details></span></div><div><strong>${input.usage.billableCalls}</strong><span>handled calls</span></div><div><strong>$${(projectedOverage / 100).toFixed(2)}</strong><span>current overage</span></div></section></aside></div>`;
+  const alternateView = `<div class="workspace-shell">${view === "pipeline" ? pipelineBoard : calendarBoard}<aside class="workspace-side">${callPreview}</aside></div>`;
+  const coach = view === "today" ? `<details class="coach-tip" data-dashboard-tip><summary><strong>How Today works</strong><span>Tap for help</span></summary><p>Urgent and overdue work stays at the top. Check it off when handled or choose Later.</p></details>` : "";
+  const mobileNav = `<nav class="mobile-app-nav" aria-label="Dashboard"><a class="${view === "today" ? "active" : ""}" href="${dashboardLink("today")}">${dashboardIcon("today")}<span>Today</span></a><a class="${view === "pipeline" ? "active" : ""}" href="${dashboardLink("pipeline")}">${dashboardIcon("pipeline")}<span>Pipeline</span></a><a class="${view === "calendar" ? "active" : ""}" href="${dashboardLink("calendar")}">${dashboardIcon("calendar")}<span>Calendar</span></a>${preview ? `<a href="/signup">${dashboardIcon("settings")}<span>Start</span></a>` : `<a href="/app/settings">${dashboardIcon("settings")}<span>Settings</span></a>`}</nav>`;
+  return layout("Owner dashboard", `<div class="owner-app">${sidebar}<div class="app-content"><header class="app-header"><div><p class="eyebrow">${escapeHtml(input.config.businessName)}</p><h1>${view === "today" ? "Today" : view === "pipeline" ? "Pipeline" : "Calendar"}</h1></div><div class="header-status"><span class="coverage-state ${input.account.status === "active" && !input.config.paused ? "on" : ""}"><i></i>${input.account.status === "active" && !input.config.paused ? "AI coverage on" : "Activation pending"}</span></div></header><main class="dashboard-main">${demoNotice}${overview}${viewTabs}${setupGuide}${undo}${coach}${view === "today" ? todayView : alternateView}</main></div></div>${mobileNav}`);
 }
 
 export function renderStart(error = "", values: Record<string, string> = {}): string {
@@ -246,10 +286,23 @@ function publicLayout(title: string, body: string): string {
 
 function layout(title: string, body: string): string {
   body = `<style>
-    .app-header,.dashboard-main{max-width:1280px}
+    .owner-app{display:grid;grid-template-columns:224px minmax(0,1fr);min-height:100dvh}
+    .app-content{min-width:0}
+    .app-sidebar{position:sticky;top:0;display:flex;flex-direction:column;height:100dvh;padding:18px 14px;border-right:1px solid var(--line);background:#fff}
+    .app-mark{display:flex;align-items:center;gap:10px;padding:4px 8px 22px;color:var(--ink);text-decoration:none}
+    .app-mark>span{display:grid;place-items:center;width:34px;height:34px;border-radius:9px;background:var(--ink);color:#fff;font-size:12px;font-weight:850;letter-spacing:.03em}
+    .app-mark>strong{font-size:16px}
+    .app-sidebar nav{display:grid;gap:4px}
+    .app-sidebar nav a,.sidebar-bottom a{display:flex;align-items:center;gap:10px;min-height:42px;padding:9px 10px;border-radius:8px;color:var(--muted);font-weight:650;text-decoration:none}
+    .app-sidebar nav a:hover,.app-sidebar nav a:focus-visible,.sidebar-bottom a:hover,.sidebar-bottom a:focus-visible{background:var(--paper);color:var(--ink)}
+    .app-sidebar nav a.active{background:#edf3ef;color:var(--ink)}
+    .app-sidebar nav a b{display:grid;place-items:center;min-width:22px;height:22px;margin-left:auto;border-radius:99px;background:var(--ink);color:white;font-size:11px}
+    .app-sidebar svg,.mobile-app-nav svg{width:19px;height:19px;flex:none}
+    .sidebar-bottom{display:grid;gap:4px;margin-top:auto;padding-top:16px;border-top:1px solid var(--line)}
+    .app-header,.dashboard-main{width:100%;max-width:1240px}
     .app-header{align-items:center;padding-block:20px;border-bottom:1px solid var(--line)}
     .app-header h1{font-size:30px}
-    .app-header nav{align-items:center}
+    .header-status{display:flex;align-items:center;padding:8px 11px;border:1px solid var(--line);border-radius:99px;background:#fff;font-size:13px}
     .dashboard-main{padding-top:16px}
     .demo-notice,.coverage-strip,.toast,.coach-tip{display:flex;align-items:center;gap:14px;border:1px solid var(--line);border-radius:10px;background:white;padding:10px 14px;margin-bottom:12px}
     .demo-notice{background:#f3f7ff;border-color:#b8cae8}
@@ -259,6 +312,14 @@ function layout(title: string, body: string): string {
     .coverage-state{font-weight:750}
     .coverage-state i{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--danger);margin-right:7px}
     .coverage-state.on i{background:#14804a}
+    .overview-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:0 0 12px!important}
+    .overview-grid article{display:grid;gap:2px;min-height:104px;margin:0;padding:14px;border-radius:11px;box-shadow:none}
+    .overview-grid article>span,.overview-grid small{color:var(--muted);font-size:12px}
+    .overview-grid article>strong{font-size:24px;line-height:1.2}
+    .overview-grid .coverage-state{font-size:18px}
+    .view-tabs{display:inline-flex;gap:3px;margin:0 0 12px;padding:3px;border:1px solid var(--line);border-radius:9px;background:#fff}
+    .view-tabs a{min-width:92px;padding:7px 12px;border-radius:6px;color:var(--muted);font-size:13px;font-weight:700;text-align:center;text-decoration:none}
+    .view-tabs a.active{background:var(--ink);color:#fff}
     .setup-guide{background:white;border:1px solid var(--line);border-radius:10px;margin-bottom:12px}
     .setup-guide summary{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:11px 14px;cursor:pointer;list-style:none}
     .setup-guide summary::-webkit-details-marker{display:none}
@@ -329,10 +390,36 @@ function layout(title: string, body: string): string {
     .info-tip{position:relative;display:inline}
     .info-tip summary{display:inline-grid;place-items:center;width:17px;height:17px;margin-left:3px;border:1px solid #9aaba0;border-radius:50%;cursor:pointer;list-style:none;font-size:11px;font-style:normal}
     .info-tip p{position:absolute;z-index:10;right:0;top:20px;width:220px;margin:0;padding:10px;border:1px solid var(--line);border-radius:8px;background:white;color:var(--ink);box-shadow:0 8px 22px rgba(20,34,27,.12)}
+    .workspace-shell{display:grid;grid-template-columns:minmax(0,1fr) minmax(290px,340px);gap:14px;align-items:start}
+    .workspace-panel{padding:0;overflow:hidden}
+    .workspace-side{display:grid;gap:14px}
+    .pipeline-board{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;padding:12px;background:#f9fbfa}
+    .pipeline-column{min-width:0;padding:0;border-radius:10px;background:#f3f6f4}
+    .pipeline-column>header,.calendar-day>header{display:flex;align-items:center;justify-content:space-between;gap:8px;max-width:none;margin:0;padding:10px 11px;border-bottom:1px solid var(--line);font-size:13px;font-weight:750}
+    .pipeline-column>header strong{display:grid;place-items:center;min-width:22px;height:22px;border-radius:99px;background:white;font-size:11px}
+    .pipeline-column>div{display:grid;gap:8px;padding:8px}
+    .pipeline-card{display:grid;gap:6px;padding:10px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--ink);text-decoration:none;box-shadow:0 1px 2px rgba(20,34,27,.04)}
+    .pipeline-card:hover,.pipeline-card:focus-visible{border-color:#9fb5a6;box-shadow:0 3px 10px rgba(20,34,27,.08)}
+    .pipeline-card.urgent{border-left:3px solid var(--danger)}
+    .pipeline-card-top{display:flex;align-items:center;justify-content:space-between;gap:6px}
+    .pipeline-card>span:not(.pipeline-card-top){display:-webkit-box;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+    .pipeline-card small,.pipeline-empty{color:var(--muted);font-size:12px}
+    .pipeline-empty{margin:4px;padding:8px}
+    .calendar-board{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:1px;background:var(--line);border-top:1px solid var(--line)}
+    .calendar-day{min-width:0;min-height:220px;padding:0;border:0;border-radius:0;background:#fff}
+    .calendar-day.today>header{box-shadow:inset 0 3px 0 var(--accent)}
+    .calendar-day>header{display:grid;gap:0;justify-items:start;background:#fafcfb}
+    .calendar-day>header span{color:var(--muted);font-size:11px;text-transform:uppercase}
+    .calendar-day>div{display:grid;gap:7px;padding:8px}
+    .calendar-event{display:grid;gap:1px;padding:8px;border-left:3px solid var(--accent);border-radius:5px;background:#eef6f1;color:var(--ink);font-size:12px;text-decoration:none}
+    .calendar-event span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .calendar-event small,.calendar-empty{color:var(--muted);font-size:11px}
+    .calendar-empty{padding:4px}
     .toast{position:sticky;top:8px;z-index:30;justify-content:space-between;border-color:#80b897;background:#f1fbf5}
     .mobile-app-nav{display:none}
-    @media(max-width:900px){.dashboard-shell{grid-template-columns:1fr;grid-template-areas:"inbox" "call" "recent" "activity" "usage"}}
-    @media(max-width:720px){body{padding-bottom:72px}.app-header{align-items:center;flex-direction:row;padding:12px 14px}.app-header h1{font-size:23px}.app-header .eyebrow{font-size:10px}.app-header>nav{display:none}.dashboard-main{padding:8px}.demo-notice{align-items:flex-start}.coverage-strip{flex-wrap:nowrap;overflow-x:auto;padding:8px 10px;scrollbar-width:none}.coverage-strip::-webkit-scrollbar{display:none}.coverage-strip>span{flex:0 0 auto}.coverage-strip>span:not(:last-child){border-right:1px solid var(--line)}.setup-guide summary{padding:10px}.setup-steps{display:grid;gap:8px}.section-heading{align-items:flex-start;padding:13px}.section-heading p{font-size:12px}.inbox-row{grid-template-columns:44px minmax(0,1fr);padding:12px 10px}.task-check{width:44px;height:44px}.row-actions{grid-column:2;justify-content:flex-start;flex-wrap:wrap;min-height:44px;gap:14px}.row-actions a,.row-actions summary{display:inline-flex;align-items:center;min-height:44px}.action-menu form{position:fixed;left:12px;right:12px;top:auto;bottom:78px;min-width:0}.action-menu form button{min-height:48px}.call-preview>p,.call-preview>dl,.call-preview>.quick-actions,.call-preview>.transcript{margin-inline:13px}.quick-actions a{display:inline-flex;align-items:center;min-height:44px}.recent-row{min-height:58px;padding:10px 13px}.recent-row small{max-width:24ch}.activity-panel li{padding:10px 13px}.usage-panel{grid-template-columns:repeat(3,1fr)}.usage-panel>div{padding:11px 8px;border-right:1px solid var(--line);border-bottom:0}.usage-panel strong{font-size:18px}.mobile-app-nav{position:fixed;z-index:60;display:grid;grid-template-columns:repeat(3,1fr);left:0;right:0;bottom:0;padding:6px max(8px,env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(8px,env(safe-area-inset-left));background:rgba(255,255,255,.96);border-top:1px solid var(--line);backdrop-filter:blur(12px)}.mobile-app-nav a{display:grid;place-items:center;gap:1px;min-height:52px;color:var(--muted);font-size:11px;font-weight:700;text-decoration:none}.mobile-app-nav span{font-size:18px;color:var(--accent)}}
+    @media(max-width:1100px){.dashboard-shell,.workspace-shell{grid-template-columns:1fr}.dashboard-shell{grid-template-areas:"inbox" "call" "recent" "activity" "usage"}.pipeline-board{grid-template-columns:repeat(2,minmax(0,1fr))}.calendar-board{grid-template-columns:repeat(4,minmax(0,1fr))}}
+    @media(max-width:900px){body{padding-bottom:76px}.owner-app{grid-template-columns:1fr}.app-sidebar{display:none}.mobile-app-nav{position:fixed;z-index:60;display:grid;grid-template-columns:repeat(4,1fr);left:0;right:0;bottom:0;padding:5px max(8px,env(safe-area-inset-right)) calc(5px + env(safe-area-inset-bottom)) max(8px,env(safe-area-inset-left));background:rgba(255,255,255,.97);border-top:1px solid var(--line);backdrop-filter:blur(12px)}.mobile-app-nav a{display:grid;place-items:center;gap:2px;min-height:54px;color:var(--muted);font-size:11px;font-weight:700;text-decoration:none}.mobile-app-nav a.active{color:var(--accent)}.mobile-app-nav span{line-height:1}}
+    @media(max-width:720px){.app-header{align-items:center;flex-direction:row;padding:12px 14px}.app-header h1{font-size:23px}.app-header .eyebrow{font-size:10px}.header-status{padding:6px 8px;font-size:11px}.dashboard-main{padding:8px}.demo-notice{align-items:flex-start}.overview-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.overview-grid article{min-height:88px;padding:11px}.overview-grid article>strong{font-size:21px}.view-tabs{display:grid;grid-template-columns:repeat(3,1fr);width:100%}.view-tabs a{min-width:0;padding:8px 4px}.setup-guide summary{padding:10px}.setup-steps{display:grid;gap:8px}.section-heading{align-items:flex-start;padding:13px}.section-heading p{font-size:12px}.inbox-row{grid-template-columns:44px minmax(0,1fr);padding:12px 10px}.task-check{width:44px;height:44px}.row-actions{grid-column:2;justify-content:flex-start;flex-wrap:wrap;min-height:44px;gap:14px}.row-actions a,.row-actions summary{display:inline-flex;align-items:center;min-height:44px}.action-menu form{position:fixed;left:12px;right:12px;top:auto;bottom:78px;min-width:0}.action-menu form button{min-height:48px}.call-preview>p,.call-preview>dl,.call-preview>.quick-actions,.call-preview>.transcript{margin-inline:13px}.quick-actions a{display:inline-flex;align-items:center;min-height:44px}.recent-row{min-height:58px;padding:10px 13px}.recent-row small{max-width:24ch}.activity-panel li{padding:10px 13px}.usage-panel{grid-template-columns:repeat(3,1fr)}.usage-panel>div{padding:11px 8px;border-right:1px solid var(--line);border-bottom:0}.usage-panel strong{font-size:18px}.pipeline-board,.calendar-board{grid-template-columns:1fr}.pipeline-column,.calendar-day{min-height:auto}.pipeline-column>div{padding:7px}.calendar-day>div:has(.calendar-empty){display:none}}
   </style>${body}`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · Front Office</title><style>:root{color-scheme:light;--ink:#14221b;--muted:#627067;--line:#dfe7e1;--paper:#f6f8f5;--accent:#176b45;--danger:#a42b2b}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif}header,main,.narrow{max-width:1120px;margin:auto;padding:28px}header{display:flex;align-items:end;justify-content:space-between;gap:20px}footer{display:flex;gap:18px;padding:12px 4px 40px}nav{display:flex;gap:16px;flex-wrap:wrap}a{color:var(--accent)}h1{font-size:clamp(28px,5vw,48px);line-height:1.05;margin:0}h2{font-size:clamp(18px,2.3vw,28px);line-height:1.2;margin:0 0 10px}.eyebrow{color:var(--muted);margin:0 0 4px;text-transform:uppercase;letter-spacing:.08em}.hero{padding:clamp(24px,6vw,64px)}.lede{font-size:clamp(18px,3vw,25px);max-width:820px}.actions{display:flex;gap:12px;flex-wrap:wrap;margin:24px 0}.button{display:inline-block;background:var(--accent);color:white;text-decoration:none;font-weight:750;padding:12px 18px;border-radius:10px}.button.secondary{background:var(--ink)}.small{color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:24px}.grid.two{grid-template-columns:repeat(2,1fr)}article,form,section{background:white;border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:18px}.status{border-width:2px}.goodbox{border-color:#74b58f;background:#f1fbf5}.badbox{border-color:#d99b9b;background:#fff6f6}.narrow{max-width:560px;padding-top:12vh}label{display:block;font-weight:650;margin-bottom:16px}input,textarea,select{display:block;width:100%;margin-top:7px;padding:11px;border:1px solid #aebbb2;border-radius:8px;font:inherit}input:disabled{opacity:.58}textarea{min-height:92px}button{background:var(--ink);color:white;border:0;border-radius:9px;padding:12px 18px;font-weight:700}.dangerbutton{background:var(--danger)}.check{display:flex;gap:8px;align-items:flex-start}.check input{width:auto;margin:5px 0 0}.notification-options{background:#f8fbf9;border:1px solid var(--line);padding:18px;margin:4px 0 22px}.notification-option{display:grid;grid-template-columns:24px 1fr;gap:10px;padding:12px 0;border-bottom:1px solid var(--line)}.notification-option input{width:20px;height:20px;margin:2px 0}.notification-option span{display:grid;gap:2px}.notification-option em{float:right;color:var(--accent);font-style:normal}.notification-option small{color:var(--muted);font-weight:400}.table{overflow:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--line);vertical-align:top}.pill{display:inline-block;background:#e7eee9;border-radius:99px;padding:2px 8px}.danger,.error,.formerror{color:var(--danger)}.formerror{max-width:1120px;margin:0 auto 18px;padding:14px 20px;background:#fff6f6;border:1px solid #d99b9b;border-radius:10px}.good{color:var(--accent)}.trap{position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#102019;color:#e9f4ed;border-radius:10px;padding:16px}dt{font-weight:700}dd{margin:0 0 10px}@media(max-width:720px){header{align-items:start;flex-direction:column}.grid,.grid.two{grid-template-columns:1fr}header,main{padding:14px}.notification-options{padding:14px}}</style></head><body>${body}</body></html>`;
 }
@@ -349,6 +436,17 @@ function safeHttpsUrl(value: string | null): string | null {
   } catch {
     return null;
   }
+}
+
+function dashboardIcon(name: "today" | "pipeline" | "calendar" | "calls" | "settings"): string {
+  const paths = {
+    today: '<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
+    pipeline: '<rect x="3" y="4" width="6" height="16" rx="2"/><rect x="15" y="4" width="6" height="10" rx="2"/>',
+    calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 11h18"/>',
+    calls: '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.69 2.8a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.33 1.84.56 2.8.69A2 2 0 0 1 22 16.92z"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.09A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.03H3v-4h.09A1.7 1.7 0 0 0 4.6 8.94a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06A1.7 1.7 0 0 0 8.97 4.6 1.7 1.7 0 0 0 10 3.04V3h4v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06L19.8 7l-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1.03H21v4h-.09A1.7 1.7 0 0 0 19.4 15z"/>',
+  } as const;
+  return `<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[name]}</svg>`;
 }
 
 function formatDate(value: string, timezone: string): string {

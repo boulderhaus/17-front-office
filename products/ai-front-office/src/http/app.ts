@@ -285,6 +285,10 @@ function publicOwnerDemo(now: Date): {
   };
 }
 
+function ownerDashboardView(value: string | null): "today" | "pipeline" | "calendar" {
+  return value === "pipeline" || value === "calendar" ? value : "today";
+}
+
 export function createRequestHandler(dependencies: AppDependencies): RequestListener {
   const service = new CallService(dependencies.store, dependencies.calendar, dependencies.clock, dependencies.env.PUBLIC_BASE_URL);
   const recordingClient = dependencies.env.TELNYX_API_KEY ? new TelnyxRecordingClient(dependencies.env.TELNYX_API_KEY) : null;
@@ -352,6 +356,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         checkoutUrl: null,
         now: dependencies.clock.now().toISOString(),
         selectedCallId: url.searchParams.get("call"),
+        view: ownerDashboardView(url.searchParams.get("view")),
         preview: true,
       }));
     }
@@ -552,6 +557,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         now: dependencies.clock.now().toISOString(),
         selectedCallId: url.searchParams.get("call"),
         recentlyCompletedCallId: url.searchParams.get("completed"),
+        view: ownerDashboardView(url.searchParams.get("view")),
       }));
     }
     if (method === "POST" && url.pathname === "/app/billing/checkout") {
