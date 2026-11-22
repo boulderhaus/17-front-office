@@ -288,6 +288,9 @@ export class CallService {
       : booking.status === "conflict"
         ? "That time is no longer available. Do not promise it; offer another slot or queue owner follow-up."
         : "The calendar result could not be confirmed. Tell the caller the owner will follow up.";
+    if (booking.status === "confirmed" && booking.writeVerifiedAt) {
+      await this.completeCallbackTask(call.id, "verified_booking");
+    }
     return { status: booking.status === "checking" ? "pending" : booking.status, message };
   }
 
@@ -479,6 +482,8 @@ export class CallService {
         emergency.emergency ? `Urgent ${emergency.severity} call` : qualityFlags.length > 0 ? `Resolve: ${qualityFlags.join(", ")}` : "Confirm requested service",
         emergency.emergency || call.fields.humanRequested,
       );
+    } else {
+      await this.completeCallbackTask(call.id, "verified_booking");
     }
     await this.enqueueOwnerNotifications(call, booking?.requestedStart ?? call.fields.requestedStart, config);
     return call;
@@ -590,12 +595,27 @@ export class CallService {
     const dueAt = existing && Date.parse(existing.dueAt) < Date.parse(proposedDue) ? existing.dueAt : proposedDue;
     const task: CallbackTask = {
       id: existing?.id ?? randomUUID(), tenantId: call.tenantId, callId: call.id, ownerRef,
-      reason, priority: highPriority || existing?.priority === "high" ? "high" : "normal", status: "open",
+      reason, priority: highPriority || existing?.priority === "high" ? "high" : "normal",
+      status: existing?.status === "snoozed" && !highPriority && Date.parse(existing.dueAt) > now.getTime() ? "snoozed" : "open",
       dueAt,
+      completedAt: null, completionSource: null,
       createdAt: existing?.createdAt ?? now.toISOString(), updatedAt: now.toISOString(),
     };
     await this.store.saveCallbackTask(task);
     return task;
+  }
+
+  private async completeCallbackTask(callId: string, source: "verified_booking"): Promise<void> {
+    const existing = await this.store.getCallbackTaskForCall(callId);
+    if (!existing || existing.status === "completed" || existing.status === "cancelled") return;
+    const now = this.clock.now().toISOString();
+    await this.store.saveCallbackTask({
+      ...existing,
+      status: "completed",
+      completedAt: now,
+      completionSource: source,
+      updatedAt: now,
+    });
   }
 
   private async enqueueOwnerNotifications(

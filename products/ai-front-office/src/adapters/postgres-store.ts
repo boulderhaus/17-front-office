@@ -253,13 +253,26 @@ export class PostgresStore implements Store {
     return result.rows.map((row) => mapCallbackTask(row as Row));
   }
 
+  async listCallbackTasks(tenantId: string, limit: number): Promise<CallbackTask[]> {
+    const result = await this.#pool.query(
+      `SELECT * FROM callback_tasks
+       WHERE tenant_id=$1
+       ORDER BY updated_at DESC
+       LIMIT $2`,
+      [tenantId, limit],
+    );
+    return result.rows.map((row) => mapCallbackTask(row as Row));
+  }
+
   async saveCallbackTask(task: CallbackTask): Promise<void> {
     await this.#pool.query(
-      `INSERT INTO callback_tasks(id,tenant_id,call_id,owner_ref,reason,priority,status,due_at,created_at,updated_at)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      `INSERT INTO callback_tasks(id,tenant_id,call_id,owner_ref,reason,priority,status,due_at,completed_at,completion_source,created_at,updated_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
        ON CONFLICT (call_id) DO UPDATE SET owner_ref=EXCLUDED.owner_ref,reason=EXCLUDED.reason,priority=EXCLUDED.priority,
-         status=EXCLUDED.status,due_at=EXCLUDED.due_at,updated_at=EXCLUDED.updated_at`,
-      [task.id, task.tenantId, task.callId, task.ownerRef, task.reason, task.priority, task.status, task.dueAt, task.createdAt, task.updatedAt],
+         status=EXCLUDED.status,due_at=EXCLUDED.due_at,completed_at=EXCLUDED.completed_at,
+         completion_source=EXCLUDED.completion_source,updated_at=EXCLUDED.updated_at`,
+      [task.id, task.tenantId, task.callId, task.ownerRef, task.reason, task.priority, task.status, task.dueAt,
+        task.completedAt, task.completionSource, task.createdAt, task.updatedAt],
     );
   }
 
@@ -605,7 +618,9 @@ function mapCallbackTask(row: Row): CallbackTask {
   return {
     id: String(row.id), tenantId: String(row.tenant_id), callId: String(row.call_id), ownerRef: String(row.owner_ref),
     reason: String(row.reason), priority: row.priority as CallbackTask["priority"], status: row.status as CallbackTask["status"],
-    dueAt: iso(row.due_at), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
+    dueAt: iso(row.due_at), completedAt: row.completed_at ? iso(row.completed_at) : null,
+    completionSource: row.completion_source ? row.completion_source as CallbackTask["completionSource"] : null,
+    createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
   };
 }
 

@@ -39,6 +39,7 @@ export interface Store {
   saveBooking(booking: BookingRecord): Promise<void>;
   getCallbackTaskForCall(callId: string): Promise<CallbackTask | null>;
   listOpenCallbackTasks(tenantId: string, limit: number): Promise<CallbackTask[]>;
+  listCallbackTasks(tenantId: string, limit: number): Promise<CallbackTask[]>;
   saveCallbackTask(task: CallbackTask): Promise<void>;
   addToolEvent(event: ToolEvent): Promise<void>;
   listToolEvents(callId: string): Promise<ToolEvent[]>;

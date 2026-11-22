@@ -97,8 +97,10 @@ export interface CallbackTask {
   ownerRef: string;
   reason: string;
   priority: "normal" | "high";
-  status: "open" | "completed" | "cancelled";
+  status: "open" | "snoozed" | "completed" | "cancelled";
   dueAt: string;
+  completedAt: string | null;
+  completionSource: "owner" | "verified_booking" | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -224,16 +224,47 @@ function publicOwnerDemo(now: Date): {
     createdAt: stamp(126),
     updatedAt: stamp(123),
   };
+  const bookedCall: CallRecord = {
+    id: "66666666-6666-4666-8666-666666666666",
+    tenantId,
+    providerCallId: "synthetic-booked-demo",
+    fromNumber: "+15555550133",
+    fromNumberVerified: true,
+    startedAt: stamp(310),
+    endedAt: stamp(306),
+    durationSeconds: 226,
+    fields: {
+      callerName: "Taylor S.", companyName: null, callbackNumber: "+15555550133",
+      address: "300 Orange Avenue, Sarasota, FL 34236", serviceCategory: "HVAC repair",
+      serviceCategoryConfidence: 0.97, problemDescription: "Thermostat is blank",
+      equipmentDetails: null, accessNotes: null, requestedStart: stamp(-1_500),
+      explicitSlotConfirmation: true, diagnosticFeeAccepted: true, humanRequested: false, confidence: 0.96,
+    },
+    emergency: { emergency: false, severity: "routine", score: 0.05, evidence: [], immediateInstruction: null },
+    outcome: "booked",
+    transcript: "Synthetic demonstration transcript.",
+    recordingUrl: null,
+    consentState: "disclosed",
+    billingDisposition: "billable",
+    qualityFlags: [],
+    createdAt: stamp(310),
+    updatedAt: stamp(306),
+  };
   const tasks: CallbackTask[] = [
     {
       id: "33333333-3333-4333-8333-333333333333", tenantId, callId: urgentCall.id,
       ownerRef: "owner-primary", reason: "Urgent callback requested", priority: "high", status: "open",
-      dueAt: stamp(9), createdAt: stamp(14), updatedAt: stamp(14),
+      dueAt: stamp(9), completedAt: null, completionSource: null, createdAt: stamp(14), updatedAt: stamp(14),
     },
     {
       id: "44444444-4444-4444-8444-444444444444", tenantId, callId: routineCall.id,
       ownerRef: "owner-primary", reason: "Confirm the proposed maintenance window", priority: "normal", status: "open",
-      dueAt: stamp(-45), createdAt: stamp(123), updatedAt: stamp(123),
+      dueAt: stamp(-45), completedAt: null, completionSource: null, createdAt: stamp(123), updatedAt: stamp(123),
+    },
+    {
+      id: "77777777-7777-4777-8777-777777777777", tenantId, callId: bookedCall.id,
+      ownerRef: "owner-primary", reason: "Confirm requested appointment", priority: "normal", status: "completed",
+      dueAt: stamp(280), completedAt: stamp(306), completionSource: "verified_booking", createdAt: stamp(310), updatedAt: stamp(306),
     },
   ];
   const [periodStart, periodEnd] = currentBillingPeriod(now);
@@ -244,7 +275,7 @@ function publicOwnerDemo(now: Date): {
       createdAt: stamp(43_200), updatedAt: stamp(14),
     },
     config,
-    calls: [urgentCall, routineCall],
+    calls: [urgentCall, routineCall, bookedCall],
     tasks,
     usage: { periodStart, periodEnd, billableCalls: 22, excludedSpamCalls: 5, billedMinutes: 87 },
     subscription: {
@@ -315,6 +346,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         csrf: "",
         checkoutConfigured: false,
         checkoutUrl: null,
+        now: dependencies.clock.now().toISOString(),
+        selectedCallId: url.searchParams.get("call"),
         preview: true,
       }));
     }
@@ -496,7 +529,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const [config, calls, tasks, usage, googleConnected, subscription] = await Promise.all([
         dependencies.store.getConfig(account.tenantId),
         dependencies.store.listCalls(account.tenantId, 50),
-        dependencies.store.listOpenCallbackTasks(account.tenantId, 50),
+        dependencies.store.listCallbackTasks(account.tenantId, 100),
         dependencies.store.getUsageSummary(account.tenantId, ...currentBillingPeriod(dependencies.clock.now())),
         isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
         dependencies.store.getSubscription(account.tenantId),
@@ -512,6 +545,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         csrf: session.csrf,
         checkoutConfigured: Boolean(stripeClient || dependencies.env.FOUNDING_CHECKOUT_URL),
         checkoutUrl: dependencies.env.FOUNDING_CHECKOUT_URL ?? null,
+        now: dependencies.clock.now().toISOString(),
+        selectedCallId: url.searchParams.get("call"),
+        recentlyCompletedCallId: url.searchParams.get("completed"),
       }));
     }
     if (method === "POST" && url.pathname === "/app/billing/checkout") {
@@ -648,9 +684,47 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       await dependencies.store.saveCallbackTask({
         ...task,
         status: "completed",
+        completedAt: dependencies.clock.now().toISOString(),
+        completionSource: "owner",
         updatedAt: dependencies.clock.now().toISOString(),
       });
-      return redirect(response, "/app");
+      return redirect(response, `/app?completed=${encodeURIComponent(task.callId)}#inbox`);
+    }
+    const reopenTaskMatch = /^\/app\/calls\/([0-9a-f-]+)\/task\/reopen$/i.exec(url.pathname);
+    if (method === "POST" && reopenTaskMatch?.[1]) {
+      const form = parseForm(await readBody(request, 8_000));
+      if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      const task = await dependencies.store.getCallbackTaskForCall(reopenTaskMatch[1]);
+      if (!task || task.tenantId !== account.tenantId || task.status !== "completed") throw new HttpError(404, "Completed task not found");
+      const now = dependencies.clock.now().toISOString();
+      await dependencies.store.saveCallbackTask({
+        ...task,
+        status: "open",
+        dueAt: now,
+        completedAt: null,
+        completionSource: null,
+        updatedAt: now,
+      });
+      return redirect(response, `/app?call=${encodeURIComponent(task.callId)}#inbox`);
+    }
+    const snoozeTaskMatch = /^\/app\/calls\/([0-9a-f-]+)\/task\/snooze$/i.exec(url.pathname);
+    if (method === "POST" && snoozeTaskMatch?.[1]) {
+      const form = parseForm(await readBody(request, 8_000));
+      if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      const task = await dependencies.store.getCallbackTaskForCall(snoozeTaskMatch[1]);
+      if (!task || task.tenantId !== account.tenantId || task.status === "completed" || task.status === "cancelled") throw new HttpError(404, "Task not found");
+      const minutes = Number(form.get("minutes"));
+      if (![60, 240, 1_440].includes(minutes)) throw new HttpError(400, "Choose a valid reminder time");
+      const now = dependencies.clock.now();
+      await dependencies.store.saveCallbackTask({
+        ...task,
+        status: "snoozed",
+        dueAt: new Date(now.getTime() + minutes * 60_000).toISOString(),
+        completedAt: null,
+        completionSource: null,
+        updatedAt: now.toISOString(),
+      });
+      return redirect(response, "/app#inbox");
     }
     const callMatch = /^\/app\/calls\/([0-9a-f-]+)$/i.exec(url.pathname);
     if (method === "GET" && callMatch?.[1]) {

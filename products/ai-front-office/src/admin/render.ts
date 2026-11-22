@@ -29,32 +29,85 @@ export function renderOwnerLogin(error = ""): string {
   return publicLayout("Owner sign in", `<header class="publicnav"><a class="brand smallbrand" href="/"><span>Front</span> Office</a><nav><a href="/signup">Create account</a></nav></header><main class="publicmain formpage"><section class="formintro"><p class="eyebrow">Owner sign in</p><h1>Your calls. Your rules.</h1></section>${error ? `<p class="formerror">${escapeHtml(error)}</p>` : ""}<form class="publicform" method="post" action="/login"><label>Email<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button>Sign in</button></form></main>`);
 }
 
-export function renderOwnerDashboard(input: { account: OwnerAccount; config: BusinessConfig; calls: CallRecord[]; tasks: CallbackTask[]; usage: UsageSummary; googleConnected: boolean; subscription: SubscriptionRecord | null; csrf: string; checkoutConfigured: boolean; checkoutUrl: string | null; preview?: boolean }): string {
+export function renderOwnerDashboard(input: {
+  account: OwnerAccount;
+  config: BusinessConfig;
+  calls: CallRecord[];
+  tasks: CallbackTask[];
+  usage: UsageSummary;
+  googleConnected: boolean;
+  subscription: SubscriptionRecord | null;
+  csrf: string;
+  checkoutConfigured: boolean;
+  checkoutUrl: string | null;
+  now: string;
+  selectedCallId?: string | null;
+  recentlyCompletedCallId?: string | null;
+  preview?: boolean;
+}): string {
   const preview = input.preview === true;
+  const nowMs = Date.parse(input.now);
   const used = input.usage.billedMinutes;
   const remaining = Math.max(0, input.config.includedMinutes - used);
   const projectedOverage = Math.max(0, used - input.config.includedMinutes) * input.config.overageCentsPerMinute;
-  const rows = input.calls.length === 0 ? `<tr><td colspan="4">No calls yet. Your assisted line activation is the next step.</td></tr>` : input.calls.map((call) => `<tr><td><a href="${preview ? "#demo-call-history" : `/app/calls/${encodeURIComponent(call.id)}`}">${escapeHtml(formatDate(call.startedAt, input.config.timezone))}</a></td><td>${escapeHtml(call.fields.callerName ?? "Unknown")}</td><td>${escapeHtml(call.fields.problemDescription || "No summary")}</td><td>${escapeHtml(call.outcome)}</td></tr>`).join("");
-  const callsById = new Map(input.calls.map((call) => [call.id, call]));
-  const taskRows = input.tasks.length === 0
-    ? `<div class="queue-empty"><strong>Nothing needs attention.</strong><span>New emergencies, callback requests, and unconfirmed appointments will appear here automatically.</span></div>`
-    : input.tasks.map((task) => {
-      const call = callsById.get(task.callId);
-      const actions = preview
-        ? `<span class="pill">Read-only example</span>`
-        : `<a href="/app/calls/${encodeURIComponent(task.callId)}">Open call</a><form method="post" action="/app/calls/${encodeURIComponent(task.callId)}/task/complete"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><button>Mark done</button></form>`;
-      return `<article class="queue-item ${task.priority === "high" ? "urgent" : ""}"><div><span class="pill ${task.priority === "high" ? "danger" : ""}">${task.priority === "high" ? "Urgent" : "Follow up"}</span><h3>${escapeHtml(call?.fields.callerName ?? "Unknown caller")}</h3><p>${escapeHtml(task.reason)}</p><p class="small">Due ${escapeHtml(formatDate(task.dueAt, input.config.timezone))}${call?.fields.callbackNumber || call?.fromNumber ? ` · ${escapeHtml(call?.fields.callbackNumber ?? call?.fromNumber ?? "")}` : ""}</p></div><div class="queue-actions">${actions}</div></article>`;
-    }).join("");
   const paid = input.subscription?.status === "active" || input.subscription?.status === "trialing";
-  const billingAction = !preview && input.checkoutConfigured && !paid ? `<form method="post" action="/app/billing/checkout"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><button>Start $${(input.config.flatMonthlyPriceCents / 100).toFixed(0)} plan</button></form>` : "";
+  const callsById = new Map(input.calls.map((call) => [call.id, call]));
+  const actionableTasks = input.tasks
+    .filter((task) => task.status === "open" || (task.status === "snoozed" && Date.parse(task.dueAt) <= nowMs))
+    .sort((left, right) => left.priority === right.priority ? left.dueAt.localeCompare(right.dueAt) : left.priority === "high" ? -1 : 1);
+  const snoozedTasks = input.tasks.filter((task) => task.status === "snoozed" && Date.parse(task.dueAt) > nowMs);
+  const completedTasks = input.tasks.filter((task) => task.status === "completed");
+  const selectedCall = callsById.get(input.selectedCallId ?? "")
+    ?? callsById.get(actionableTasks[0]?.callId ?? "")
+    ?? input.calls[0]
+    ?? null;
+  const recentlyCompleted = completedTasks.find((task) => task.callId === input.recentlyCompletedCallId);
+  const base = preview ? "/demo" : "/app";
+  const setupSteps = [true, input.googleConnected, paid];
+  const setupComplete = setupSteps.filter(Boolean).length;
+  const phoneFor = (call: CallRecord): string | null => {
+    const phone = call.fields.callbackNumber ?? call.fromNumber;
+    return /^\+[1-9]\d{7,14}$/.test(phone) ? phone : null;
+  };
+  const taskRows = actionableTasks.length === 0
+    ? `<div class="queue-empty"><strong>You’re caught up.</strong><span>New emergencies, callbacks, and unconfirmed appointments will appear here automatically.</span></div>`
+    : actionableTasks.map((task) => {
+      const call = callsById.get(task.callId);
+      const phone = call ? phoneFor(call) : null;
+      const overdue = Date.parse(task.dueAt) <= nowMs;
+      const rowLink = `${base}?call=${encodeURIComponent(task.callId)}#call-preview`;
+      const complete = preview
+        ? `<button class="task-check" type="button" disabled aria-label="Read-only example">✓</button>`
+        : `<form class="inline-form" method="post" action="/app/calls/${encodeURIComponent(task.callId)}/task/complete"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><button class="task-check" aria-label="Mark ${escapeHtml(call?.fields.callerName ?? "call")} handled">✓</button></form>`;
+      const snooze = preview ? "" : `<details class="action-menu"><summary>Later</summary><form method="post" action="/app/calls/${encodeURIComponent(task.callId)}/task/snooze"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><button name="minutes" value="60">In 1 hour</button><button name="minutes" value="240">In 4 hours</button><button name="minutes" value="1440">Tomorrow</button></form></details>`;
+      return `<article class="inbox-row ${task.priority === "high" ? "urgent" : ""}">${complete}<a class="inbox-copy" href="${rowLink}"><span class="inbox-title"><strong>${escapeHtml(call?.fields.callerName ?? "Unknown caller")}</strong><span class="pill ${task.priority === "high" ? "danger" : ""}">${task.priority === "high" ? "Urgent" : "Follow up"}</span></span><span>${escapeHtml(call?.fields.problemDescription || task.reason)}</span><span class="small">${escapeHtml(task.reason)} · ${overdue ? "Due now" : `Due ${formatCompactDate(task.dueAt, input.config.timezone)}`}</span></a><div class="row-actions">${phone ? `<a href="tel:${escapeHtml(phone)}">Call back</a>` : ""}${snooze}<a href="${rowLink}">Open</a></div></article>`;
+    }).join("");
+  const recentCalls = input.calls.slice(0, 8).map((call) => {
+    const selected = selectedCall?.id === call.id;
+    return `<a class="recent-row ${selected ? "selected" : ""}" href="${base}?call=${encodeURIComponent(call.id)}#call-preview"><span><strong>${escapeHtml(call.fields.callerName ?? "Unknown caller")}</strong><small>${escapeHtml(call.fields.problemDescription || "No summary")}</small></span><time>${escapeHtml(formatCompactDate(call.startedAt, input.config.timezone))}</time></a>`;
+  }).join("") || `<div class="queue-empty"><strong>No calls yet.</strong><span>Your first handled call will appear here.</span></div>`;
+  const selectedPhone = selectedCall ? phoneFor(selectedCall) : null;
+  const selectedAddress = selectedCall?.fields.address?.trim() || null;
+  const callPreview = selectedCall ? `<section id="call-preview" class="call-preview"><div class="section-heading"><div><p class="eyebrow">Selected call</p><h2>${escapeHtml(selectedCall.fields.callerName ?? "Unknown caller")}</h2></div><span class="pill ${selectedCall.emergency?.emergency ? "danger" : ""}">${escapeHtml(selectedCall.emergency?.severity ?? "routine")}</span></div><p class="call-problem">${escapeHtml(selectedCall.fields.problemDescription || "No problem summary captured")}</p><dl class="compact-details"><dt>Phone</dt><dd>${escapeHtml(selectedPhone ?? "Not confirmed")}</dd><dt>Address</dt><dd>${escapeHtml(selectedAddress ?? "Not confirmed")}</dd><dt>Outcome</dt><dd>${escapeHtml(selectedCall.outcome.replaceAll("_", " "))}</dd></dl><div class="quick-actions">${selectedPhone ? `<a class="button" href="tel:${escapeHtml(selectedPhone)}">Call back</a>` : ""}${selectedAddress ? `<a href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(selectedAddress)}" target="_blank" rel="noreferrer">Open Maps</a>` : ""}${preview ? "" : `<a href="/app/calls/${encodeURIComponent(selectedCall.id)}">Full record</a>`}</div><details class="transcript"><summary>Read transcript</summary><p>${escapeHtml(selectedCall.transcript ?? "Transcript unavailable")}</p></details></section>` : `<section class="call-preview"><h2>No call selected</h2><p>Calls will appear here after Front Office answers.</p></section>`;
+  const activities = [
+    ...input.calls.filter((call) => call.endedAt).map((call) => ({
+      at: call.endedAt!,
+      text: call.outcome === "booked" ? `Booked ${call.fields.callerName ?? "caller"}` : `Captured ${call.fields.callerName ?? "a caller"}`,
+    })),
+    ...completedTasks.map((task) => ({
+      at: task.completedAt ?? task.updatedAt,
+      text: task.completionSource === "verified_booking" ? "Follow-up closed after verified booking" : `Marked ${callsById.get(task.callId)?.fields.callerName ?? "call"} handled`,
+    })),
+  ].sort((left, right) => right.at.localeCompare(left.at)).slice(0, 5);
+  const activityRows = activities.map((activity) => `<li><span>${escapeHtml(activity.text)}</span><time>${escapeHtml(formatCompactDate(activity.at, input.config.timezone))}</time></li>`).join("") || `<li><span>No activity yet</span></li>`;
+  const billingAction = !preview && input.checkoutConfigured && !paid ? `<form class="inline-form" method="post" action="/app/billing/checkout"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><button>Start $${(input.config.flatMonthlyPriceCents / 100).toFixed(0)} plan</button></form>` : "";
   const nav = preview
-    ? `<a href="#inbox">Inbox (${input.tasks.length})</a><a href="#demo-call-history">Call history</a><a href="/">Back to website</a><a class="button" href="/signup">Create my shop</a>`
-    : `<a href="#inbox">Inbox${input.tasks.length ? ` (${input.tasks.length})` : ""}</a><a href="/app/settings">Shop settings</a><a href="/app/integrations/google/start">${input.googleConnected ? "Reconnect calendar" : "Connect calendar"}</a><a href="/logout">Sign out</a>`;
-  const status = preview
-    ? `<section class="status goodbox"><p class="eyebrow">Synthetic data only</p><h2>Read-only dashboard demo</h2><p>This is the real owner workspace filled with example calls. Nothing here touches a customer account or production data.</p></section>`
-    : `<section class="status ${input.account.status === "active" ? "goodbox" : "badbox"}"><h2>${input.account.status === "active" ? "Your line is active" : "Finish activation"}</h2><p>Your account and shop rules are saved. Customer traffic stays paused until the remaining checks pass.</p>${billingAction}</section>`;
-  const calendarCopy = input.googleConnected ? "Google Calendar connected." : preview ? "Connect Google Calendar during setup." : '<a href="/app/integrations/google/start">Connect Google Calendar</a>.';
-  return layout("Owner dashboard", `<header><div><p class="eyebrow">${escapeHtml(input.config.businessName)}</p><h1>Front Office</h1></div><nav>${nav}</nav></header><main>${status}<section id="inbox" class="queue"><div class="section-heading"><div><p class="eyebrow">Work queue</p><h2>Needs attention</h2></div><strong>${input.tasks.length} open</strong></div><div class="queue-list">${taskRows}</div></section><section><h2>Setup checklist</h2><div class="grid"><article><h2 class="good">Done</h2><p>Account, shop hours, service area, greeting, emergency rules, and alert number.</p></article><article><h2 class="${input.googleConnected ? "good" : "error"}">${input.googleConnected ? "Done" : "Next"}</h2><p>${calendarCopy}</p></article><article><h2 class="${paid ? "good" : "error"}">${paid ? "Done" : "Next"}</h2><p>${paid ? "Subscription active." : "Start billing when checkout is available."}</p></article></div><p class="small">Early shops receive hands-on carrier line activation and forwarding instructions. You do not need to re-enter any settings.</p></section><section class="grid"><article><h2>AI minutes</h2><p>${used} used · ${remaining} included minutes left</p></article><article><h2>Calls</h2><p>${input.usage.billableCalls} billable · ${input.usage.excludedSpamCalls} spam excluded</p></article><article><h2>Plan</h2><p>$${(input.config.flatMonthlyPriceCents / 100).toFixed(0)}/month · ${input.config.includedMinutes} included · $${(input.config.overageCentsPerMinute / 100).toFixed(2)}/minute after · $${(projectedOverage / 100).toFixed(2)} current overage · billing ${escapeHtml(input.subscription?.status ?? "not started")}</p><p class="small">Your usage is visible here before any additional invoice.</p></article></section><section id="demo-call-history"><h2>Recent calls</h2><p class="small">The inbox is for work. This is the permanent call record.</p><div class="table"><table><thead><tr><th>When</th><th>Caller</th><th>Problem</th><th>Outcome</th></tr></thead><tbody>${rows}</tbody></table></div></section></main>`);
+    ? `<a href="#inbox">Today (${actionableTasks.length})</a><a href="#recent-calls">Calls</a><a href="/">Website</a><a class="button" href="/signup">Create my shop</a>`
+    : `<a href="#inbox">Today${actionableTasks.length ? ` (${actionableTasks.length})` : ""}</a><a href="#recent-calls">Calls</a><a href="/app/settings">Settings</a><a href="/logout">Sign out</a>`;
+  const setupGuide = `<details class="setup-guide" ${setupComplete < 3 ? "open" : ""}><summary><span><strong>Setup ${setupComplete}/3 complete</strong><small>${setupComplete === 3 ? "Everything essential is connected" : "Finish these steps before customer traffic starts"}</small></span><span>${setupComplete === 3 ? "Ready" : "Continue"}</span></summary><div class="setup-steps"><span class="done">✓ Shop rules saved</span><span class="${input.googleConnected ? "done" : ""}">${input.googleConnected ? "✓" : "2"} ${input.googleConnected ? "Calendar connected" : preview ? "Connect calendar during setup" : '<a href="/app/integrations/google/start">Connect Google Calendar</a>'}</span><span class="${paid ? "done" : ""}">${paid ? "✓ Subscription active" : "3 Start subscription"}</span>${billingAction}</div></details>`;
+  const undo = recentlyCompleted && !preview ? `<div class="toast" role="status"><span>Marked handled.</span><form class="inline-form" method="post" action="/app/calls/${encodeURIComponent(recentlyCompleted.callId)}/task/reopen"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><button>Undo</button></form></div>` : "";
+  const demoNotice = preview ? `<div class="demo-notice"><strong>Read-only demo</strong><span>Synthetic calls only. Real owners can complete and snooze work.</span></div>` : "";
+  return layout("Owner dashboard", `<header class="app-header"><div><p class="eyebrow">${escapeHtml(input.config.businessName)}</p><h1>Front Office</h1></div><nav>${nav}</nav></header><main class="dashboard-main">${demoNotice}<div class="coverage-strip"><span class="coverage-state ${input.account.status === "active" && !input.config.paused ? "on" : ""}"><i></i>${input.account.status === "active" && !input.config.paused ? "AI coverage on" : "Activation pending"}</span><span>Calendar ${input.googleConnected ? "connected" : "not connected"}</span><span>${snoozedTasks.length} snoozed</span><span>${input.usage.excludedSpamCalls} spam calls excluded</span></div>${setupGuide}${undo}<div class="coach-tip" data-dashboard-tip><button type="button" aria-label="Dismiss tip" data-dismiss-tip>×</button><strong>Start with the first item.</strong><span>Urgent and overdue work stays at the top. Check it off when handled or choose Later.</span></div><div class="dashboard-shell"><div class="dashboard-primary"><section id="inbox" class="inbox-panel"><div class="section-heading"><div><p class="eyebrow">Today</p><h2>Needs your attention</h2><p class="small">Front Office sorts this automatically. Nothing disappears until it is handled or safely snoozed.</p></div><strong>${actionableTasks.length}</strong></div><div class="inbox-list">${taskRows}</div></section><section id="recent-calls" class="recent-panel"><div class="section-heading"><div><p class="eyebrow">History</p><h2>Recent calls</h2></div><a href="#recent-calls">${input.calls.length} shown</a></div><div class="recent-list">${recentCalls}</div></section></div><aside class="dashboard-side">${callPreview}<section class="activity-panel"><div class="section-heading"><div><p class="eyebrow">Automatic record</p><h2>Recent activity</h2></div></div><ul>${activityRows}</ul></section><section class="usage-panel"><div><strong>${remaining}</strong><span>AI minutes left <details class="info-tip"><summary aria-label="What are AI minutes?">i</summary><p>Only connected AI call time counts. Provider-classified spam is excluded.</p></details></span></div><div><strong>${input.usage.billableCalls}</strong><span>handled calls</span></div><div><strong>$${(projectedOverage / 100).toFixed(2)}</strong><span>current overage</span></div></section></aside></div></main><script>(()=>{const key="front-office-dashboard-tip-v1";const tip=document.querySelector("[data-dashboard-tip]");if(!tip)return;try{if(localStorage.getItem(key)==="hidden")tip.hidden=true}catch{}tip.querySelector("[data-dismiss-tip]")?.addEventListener("click",()=>{tip.hidden=true;try{localStorage.setItem(key,"hidden")}catch{}})})();</script>`);
 }
 
 export function renderStart(error = "", values: Record<string, string> = {}): string {
@@ -188,18 +241,90 @@ function publicLayout(title: string, body: string): string {
 
 function layout(title: string, body: string): string {
   body = `<style>
-    .section-heading{display:flex;align-items:end;justify-content:space-between;gap:20px;margin-bottom:14px}
-    .section-heading .eyebrow{margin-bottom:4px}
-    .queue-list{display:grid;gap:10px}
-    .queue-item{display:flex;align-items:center;justify-content:space-between;gap:20px;margin:0;border-left:5px solid var(--accent)}
-    .queue-item.urgent{border-left-color:var(--danger);background:#fff7f7}
-    .queue-item h3{margin:8px 0 4px;font-size:20px}
-    .queue-item p{margin:0 0 4px}
-    .queue-actions{display:flex;align-items:center;gap:12px;flex:none}
-    .queue-actions form{margin:0;padding:0;border:0;background:transparent}
-    .queue-actions button{white-space:nowrap}
+    .app-header,.dashboard-main{max-width:1280px}
+    .app-header{align-items:center;padding-block:20px;border-bottom:1px solid var(--line)}
+    .app-header h1{font-size:30px}
+    .app-header nav{align-items:center}
+    .dashboard-main{padding-top:16px}
+    .demo-notice,.coverage-strip,.toast,.coach-tip{display:flex;align-items:center;gap:14px;border:1px solid var(--line);border-radius:10px;background:white;padding:10px 14px;margin-bottom:12px}
+    .demo-notice{background:#f3f7ff;border-color:#b8cae8}
+    .demo-notice span,.coach-tip span{color:var(--muted)}
+    .coverage-strip{min-height:44px;font-size:13px;flex-wrap:wrap}
+    .coverage-strip>span:not(:last-child){padding-right:14px;border-right:1px solid var(--line)}
+    .coverage-state{font-weight:750}
+    .coverage-state i{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--danger);margin-right:7px}
+    .coverage-state.on i{background:#14804a}
+    .setup-guide{background:white;border:1px solid var(--line);border-radius:10px;margin-bottom:12px}
+    .setup-guide summary{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:11px 14px;cursor:pointer;list-style:none}
+    .setup-guide summary::-webkit-details-marker{display:none}
+    .setup-guide summary span:first-child{display:grid;gap:1px}
+    .setup-guide summary small{color:var(--muted);font-weight:400}
+    .setup-steps{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:0 14px 13px;border-top:1px solid var(--line);padding-top:12px}
+    .setup-steps>span{color:var(--muted)}
+    .setup-steps .done{color:var(--accent);font-weight:650}
+    .coach-tip{position:relative;background:#fffceb;border-color:#eadf9c;padding-right:44px}
+    .coach-tip button{position:absolute;right:8px;top:5px;width:34px;height:34px;padding:0;background:transparent;color:var(--muted);font-size:22px}
+    .dashboard-shell{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(300px,.85fr);gap:14px;align-items:start}
+    .dashboard-primary,.dashboard-side{display:grid;gap:14px}
+    .dashboard-main section{margin:0}
+    .inbox-panel,.recent-panel,.call-preview,.activity-panel,.usage-panel{padding:0;overflow:visible}
+    .section-heading{display:flex;align-items:end;justify-content:space-between;gap:20px;padding:15px 16px;margin:0;border-bottom:1px solid var(--line)}
+    .section-heading .eyebrow{margin-bottom:3px}
+    .section-heading h2{margin:0;font-size:21px}
+    .section-heading p{margin:4px 0 0}
+    .inbox-list,.recent-list{display:grid}
+    .inbox-row{display:grid;grid-template-columns:42px minmax(0,1fr) auto;gap:10px;align-items:center;padding:11px 12px;border-bottom:1px solid var(--line);margin:0;background:white}
+    .inbox-row:last-child{border-bottom:0}
+    .inbox-row:hover,.recent-row:hover{background:#f7faf8}
+    .inbox-row.urgent{box-shadow:inset 4px 0 0 var(--danger);background:#fff9f8}
+    .inbox-copy{display:grid;gap:2px;min-width:0;color:var(--ink);text-decoration:none}
+    .inbox-copy>span:not(.small){white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .inbox-title{display:flex;align-items:center;gap:8px}
+    .task-check{width:34px;height:34px;border:2px solid #9aaba0;border-radius:50%;padding:0;background:white;color:transparent;cursor:pointer}
+    .task-check:hover,.task-check:focus-visible{border-color:var(--accent);color:var(--accent);background:#eef8f2}
+    .task-check:disabled{cursor:not-allowed;opacity:.55}
+    .row-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;font-size:13px}
+    .row-actions>a,.action-menu>summary{white-space:nowrap}
+    .inline-form{display:inline;margin:0;padding:0;border:0;background:transparent}
+    .inline-form button{padding:8px 11px}
+    .action-menu{position:relative}
+    .action-menu summary{color:var(--accent);cursor:pointer;list-style:none}
+    .action-menu summary::-webkit-details-marker{display:none}
+    .action-menu form{position:absolute;z-index:20;right:0;top:28px;display:grid;min-width:140px;margin:0;padding:6px;border:1px solid var(--line);border-radius:10px;background:white;box-shadow:0 8px 22px rgba(20,34,27,.14)}
+    .action-menu form button{background:white;color:var(--ink);text-align:left;padding:9px 10px}
+    .action-menu form button:hover{background:var(--paper)}
     .queue-empty{display:grid;gap:4px;padding:28px;border:1px dashed var(--line);border-radius:12px;color:var(--muted)}
-    @media(max-width:720px){.queue-item,.section-heading{align-items:flex-start;flex-direction:column}.queue-actions{width:100%;justify-content:space-between}}
+    .recent-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 14px;border-bottom:1px solid var(--line);color:var(--ink);text-decoration:none}
+    .recent-row:last-child{border-bottom:0}
+    .recent-row.selected{background:#edf7f1;box-shadow:inset 3px 0 0 var(--accent)}
+    .recent-row>span{display:grid;min-width:0}
+    .recent-row small{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:58ch}
+    .recent-row time,.activity-panel time{color:var(--muted);font-size:12px;white-space:nowrap}
+    .call-preview>.section-heading,.activity-panel>.section-heading{padding-bottom:12px}
+    .call-preview>p,.call-preview>dl,.call-preview>.quick-actions,.call-preview>.transcript{margin-inline:16px}
+    .call-problem{font-size:17px;font-weight:650;margin-top:14px}
+    .compact-details{display:grid;grid-template-columns:72px 1fr;gap:6px 10px;padding-block:12px;border-block:1px solid var(--line)}
+    .compact-details dt{color:var(--muted);font-weight:500}
+    .compact-details dd{margin:0;overflow-wrap:anywhere}
+    .quick-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-block:13px}
+    .quick-actions .button{padding:9px 12px}
+    .transcript{padding:10px 0 15px}
+    .transcript summary{cursor:pointer;color:var(--accent);font-weight:650}
+    .transcript p{max-height:180px;overflow:auto;color:var(--muted)}
+    .activity-panel ul{list-style:none;margin:0;padding:0}
+    .activity-panel li{display:flex;justify-content:space-between;gap:12px;padding:10px 14px;border-bottom:1px solid var(--line)}
+    .activity-panel li:last-child{border-bottom:0}
+    .usage-panel{display:grid;grid-template-columns:repeat(3,1fr)}
+    .usage-panel>div{display:grid;gap:1px;padding:13px;border-right:1px solid var(--line)}
+    .usage-panel>div:last-child{border-right:0}
+    .usage-panel strong{font-size:20px}
+    .usage-panel span{font-size:12px;color:var(--muted)}
+    .info-tip{position:relative;display:inline}
+    .info-tip summary{display:inline-grid;place-items:center;width:17px;height:17px;margin-left:3px;border:1px solid #9aaba0;border-radius:50%;cursor:pointer;list-style:none;font-size:11px;font-style:normal}
+    .info-tip p{position:absolute;z-index:10;right:0;top:20px;width:220px;margin:0;padding:10px;border:1px solid var(--line);border-radius:8px;background:white;color:var(--ink);box-shadow:0 8px 22px rgba(20,34,27,.12)}
+    .toast{position:sticky;top:8px;z-index:30;justify-content:space-between;border-color:#80b897;background:#f1fbf5}
+    @media(max-width:900px){.dashboard-shell{grid-template-columns:1fr}.dashboard-side{grid-template-columns:1fr 1fr}.usage-panel{grid-column:1/-1}}
+    @media(max-width:720px){.app-header{align-items:flex-start}.app-header nav{font-size:13px}.dashboard-main{padding:10px}.coach-tip{align-items:flex-start;flex-direction:column}.dashboard-shell,.dashboard-side{grid-template-columns:1fr}.inbox-row{grid-template-columns:38px minmax(0,1fr)}.row-actions{grid-column:2;justify-content:flex-start;flex-wrap:wrap}.section-heading{align-items:flex-start}.usage-panel{grid-template-columns:1fr}.usage-panel>div{border-right:0;border-bottom:1px solid var(--line)}.usage-panel>div:last-child{border-bottom:0}.coverage-strip>span:not(:last-child){border-right:0}.recent-row small{max-width:36ch}}
   </style>${body}`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · Front Office</title><style>:root{color-scheme:light;--ink:#14221b;--muted:#627067;--line:#dfe7e1;--paper:#f6f8f5;--accent:#176b45;--danger:#a42b2b}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif}header,main,.narrow{max-width:1120px;margin:auto;padding:28px}header{display:flex;align-items:end;justify-content:space-between;gap:20px}footer{display:flex;gap:18px;padding:12px 4px 40px}nav{display:flex;gap:16px;flex-wrap:wrap}a{color:var(--accent)}h1{font-size:clamp(28px,5vw,48px);line-height:1.05;margin:0}h2{font-size:clamp(18px,2.3vw,28px);line-height:1.2;margin:0 0 10px}.eyebrow{color:var(--muted);margin:0 0 4px;text-transform:uppercase;letter-spacing:.08em}.hero{padding:clamp(24px,6vw,64px)}.lede{font-size:clamp(18px,3vw,25px);max-width:820px}.actions{display:flex;gap:12px;flex-wrap:wrap;margin:24px 0}.button{display:inline-block;background:var(--accent);color:white;text-decoration:none;font-weight:750;padding:12px 18px;border-radius:10px}.button.secondary{background:var(--ink)}.small{color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:24px}.grid.two{grid-template-columns:repeat(2,1fr)}article,form,section{background:white;border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:18px}.status{border-width:2px}.goodbox{border-color:#74b58f;background:#f1fbf5}.badbox{border-color:#d99b9b;background:#fff6f6}.narrow{max-width:560px;padding-top:12vh}label{display:block;font-weight:650;margin-bottom:16px}input,textarea,select{display:block;width:100%;margin-top:7px;padding:11px;border:1px solid #aebbb2;border-radius:8px;font:inherit}textarea{min-height:92px}button{background:var(--ink);color:white;border:0;border-radius:9px;padding:12px 18px;font-weight:700}.dangerbutton{background:var(--danger)}.check{display:flex;gap:8px;align-items:flex-start}.check input{width:auto;margin:5px 0 0}.table{overflow:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--line);vertical-align:top}.pill{display:inline-block;background:#e7eee9;border-radius:99px;padding:2px 8px}.danger,.error,.formerror{color:var(--danger)}.formerror{max-width:1120px;margin:0 auto 18px;padding:14px 20px;background:#fff6f6;border:1px solid #d99b9b;border-radius:10px}.good{color:var(--accent)}.trap{position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#102019;color:#e9f4ed;border-radius:10px;padding:16px}dt{font-weight:700}dd{margin:0 0 10px}@media(max-width:720px){header{align-items:start;flex-direction:column}.grid,.grid.two{grid-template-columns:1fr}header,main{padding:18px}}</style></head><body>${body}</body></html>`;
 }
@@ -220,6 +345,10 @@ function safeHttpsUrl(value: string | null): string | null {
 
 function formatDate(value: string, timezone: string): string {
   return new Intl.DateTimeFormat("en-US", { timeZone: timezone, dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+}
+
+function formatCompactDate(value: string, timezone: string): string {
+  return new Intl.DateTimeFormat("en-US", { timeZone: timezone, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
 }
 
 function option(value: BusinessConfig["operationMode"], current: BusinessConfig["operationMode"]): string {

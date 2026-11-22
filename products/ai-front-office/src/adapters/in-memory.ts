@@ -177,6 +177,13 @@ export class InMemoryStore implements Store {
       .slice(0, limit));
   }
 
+  async listCallbackTasks(tenantId: string, limit: number): Promise<CallbackTask[]> {
+    return structuredClone([...this.callbackTasks.values()]
+      .filter((task) => task.tenantId === tenantId)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .slice(0, limit));
+  }
+
   async saveCallbackTask(task: CallbackTask): Promise<void> {
     const existing = [...this.callbackTasks.values()].find((item) => item.callId === task.callId);
     this.callbackTasks.set(existing?.id ?? task.id, structuredClone(existing ? { ...task, id: existing.id, createdAt: existing.createdAt } : task));

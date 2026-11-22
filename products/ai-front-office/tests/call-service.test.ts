@@ -78,8 +78,16 @@ describe("call outcomes", () => {
   it("counts a direct booking only after read-back, complete evidence, and customer confirmation queue", async () => {
     await enableDirectBooking();
     await start("verified");
+    const startedCall = await store.getCallByProviderId("verified");
+    await store.saveCallbackTask({
+      id: "88888888-8888-4888-8888-888888888888", tenantId: "demo", callId: startedCall!.id,
+      ownerRef: "owner-primary", reason: "Confirm requested appointment", priority: "normal", status: "open",
+      dueAt: "2026-01-15T08:30:00.000Z", completedAt: null, completionSource: null,
+      createdAt: "2026-01-15T08:00:00.000Z", updatedAt: "2026-01-15T08:00:00.000Z",
+    });
     const slot = "2026-01-15T15:00:00.000Z";
     expect((await book("verified", slot)).status).toBe("confirmed");
+    expect(await store.getCallbackTaskForCall(startedCall!.id)).toMatchObject({ status: "completed", completionSource: "verified_booking" });
     const call = await service.finalize(summary("verified", { requestedStart: slot, explicitSlotConfirmation: true }));
     expect(call.outcome).toBe("booked");
     expect(call.qualityFlags).toEqual([]);

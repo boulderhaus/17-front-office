@@ -61,9 +61,10 @@ describe("HTTP boundary", () => {
     const response = await fetch(`${baseUrl}/demo`);
     expect(response.status).toBe(200);
     const html = await response.text();
-    expect(html).toContain("Read-only dashboard demo");
-    expect(html).toContain("Synthetic data only");
-    expect(html).toContain("Needs attention");
+    expect(html).toContain("Read-only demo");
+    expect(html).toContain("Synthetic calls only");
+    expect(html).toContain("Needs your attention");
+    expect(html).toContain("Recent activity");
     expect(html).toContain("Jamie R.");
     expect(html).toContain("Suncoast Heating Demo");
     expect(html).not.toContain("task/complete");
@@ -491,14 +492,17 @@ describe("HTTP boundary", () => {
       priority: "high",
       status: "open",
       dueAt: "2026-01-15T08:05:00.000Z",
+      completedAt: null,
+      completionSource: null,
       createdAt: "2026-01-15T07:34:00.000Z",
       updatedAt: "2026-01-15T07:34:00.000Z",
     });
     const dashboard = await fetch(`${baseUrl}/app`, { headers: { cookie } });
     expect(dashboard.status).toBe(200);
     const dashboardHtml = await dashboard.text();
-    expect(dashboardHtml).toContain("196 included minutes left");
-    expect(dashboardHtml).toContain("Needs attention");
+    expect(dashboardHtml).toContain("196");
+    expect(dashboardHtml).toContain("AI minutes left");
+    expect(dashboardHtml).toContain("Needs your attention");
     expect(dashboardHtml).toContain("Urgent callback requested");
     const taskCsrf = /task\/complete"><input type="hidden" name="csrf" value="([^"]+)"/.exec(dashboardHtml)?.[1];
     expect(taskCsrf).toBeTruthy();
@@ -509,7 +513,25 @@ describe("HTTP boundary", () => {
       body: new URLSearchParams({ csrf: taskCsrf! }),
     });
     expect(taskComplete.status).toBe(303);
-    expect((await store.getCallbackTaskForCall(taskCall.id))?.status).toBe("completed");
+    expect(await store.getCallbackTaskForCall(taskCall.id)).toMatchObject({ status: "completed", completionSource: "owner" });
+    const completedDashboard = await fetch(`${baseUrl}/app?completed=${taskCall.id}`, { headers: { cookie } });
+    expect(await completedDashboard.text()).toContain("Marked handled.");
+    const taskReopen = await fetch(`${baseUrl}/app/calls/${taskCall.id}/task/reopen`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf: taskCsrf! }),
+    });
+    expect(taskReopen.status).toBe(303);
+    expect(await store.getCallbackTaskForCall(taskCall.id)).toMatchObject({ status: "open", completionSource: null });
+    const taskSnooze = await fetch(`${baseUrl}/app/calls/${taskCall.id}/task/snooze`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf: taskCsrf!, minutes: "60" }),
+    });
+    expect(taskSnooze.status).toBe(303);
+    expect(await store.getCallbackTaskForCall(taskCall.id)).toMatchObject({ status: "snoozed", completedAt: null });
     const settings = await fetch(`${baseUrl}/app/settings`, { headers: { cookie } });
     const settingsHtml = await settings.text();
     const csrf = /name="csrf" value="([^"]+)"/.exec(settingsHtml)?.[1];
