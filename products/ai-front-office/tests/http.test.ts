@@ -653,6 +653,9 @@ describe("HTTP boundary", () => {
     expect(landingHtml).toContain("Five-person shop?");
     expect(landingHtml).toContain("One new paying customer can cover the month.");
     expect(landingHtml).toContain("ten recovered missed or after-hours calls for one completed job");
+    expect(landingHtml).toContain("Optional: try a test call.");
+    expect(landingHtml).toContain("automated checks either way");
+    expect(landingHtml).not.toContain("approve the setup before it ever answers a customer");
     expect((await fetch(`${baseUrl}/activationz`)).status).toBe(503);
     const signupPage = await (await fetch(`${baseUrl}/signup`)).text();
     expect(signupPage).toContain("Message frequency varies");
@@ -661,10 +664,15 @@ describe("HTTP boundary", () => {
     expect(signupPage).not.toContain("stays off until you test and approve it");
     const privacy = await fetch(`${baseUrl}/privacy`);
     expect(privacy.status).toBe(200);
-    expect(await privacy.text()).toContain("not sold, rented, or shared with third parties or affiliates for marketing");
+    const privacyHtml = await privacy.text();
+    expect(privacyHtml).toContain("not sold, rented, or shared with third parties or affiliates for marketing");
+    expect(privacyHtml).toContain("recorded AI line cannot continue");
     const terms = await fetch(`${baseUrl}/terms`);
     expect(terms.status).toBe(200);
-    expect(await terms.text()).toContain("Reply STOP to opt out or HELP for help");
+    const termsHtml = await terms.text();
+    expect(termsHtml).toContain("Reply STOP to opt out or HELP for help");
+    expect(termsHtml).toContain("creating an account, activating service, or paying for a subscription");
+    expect(termsHtml).toContain("By continuing, you consent");
     const simulator = await fetch(`${baseUrl}/admin/simulator`, { headers: { authorization: `Bearer ${adminToken}` } });
     expect(simulator.status).toBe(200);
     expect(await simulator.text()).toContain("Run all 15 launch scenarios");

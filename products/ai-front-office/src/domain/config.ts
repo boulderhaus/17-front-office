@@ -34,7 +34,7 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     pronunciations: [],
     serviceCategories: ["HVAC repair", "HVAC maintenance", "plumbing", "electrical", "other"],
     requireDiagnosticFeeAcceptance: true,
-    recordingDisclosure: "This call may be recorded and handled by an AI assistant.",
+    recordingDisclosure: "This call is recorded and transcribed for service quality. By continuing, you consent.",
     dataRetentionDays: 30,
     supportEmail: null,
     flatMonthlyPriceCents: 4900,
