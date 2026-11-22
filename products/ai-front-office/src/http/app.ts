@@ -342,6 +342,14 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       response.end(asset);
       return;
     }
+    if (method === "GET" && url.pathname === "/assets/signup-wizard.js") {
+      const asset = await readFile(resolve(process.cwd(), "public/assets/signup-wizard.js"));
+      response.statusCode = 200;
+      response.setHeader("content-type", "text/javascript; charset=utf-8");
+      response.setHeader("cache-control", "public, max-age=86400");
+      response.end(asset);
+      return;
+    }
     if (method === "GET" && url.pathname === "/") {
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
       return sendHtml(response, 200, renderLanding(config));

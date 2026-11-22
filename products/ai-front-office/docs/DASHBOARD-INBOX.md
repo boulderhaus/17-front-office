@@ -13,6 +13,8 @@ The dashboard separates **work that needs an owner** from the permanent call rec
 
 This follows the useful parts of Gmail, Todoist, Jobber, and Attio without turning a small-shop phone product into a general CRM: one familiar inbox, explicit ownership, reversible completion, deterministic automation, and contextual help. Saved views and team assignment are later features, not V1 requirements.
 
+The visual shell adapts the official open-source shadcn `dashboard-01` block anatomy—fixed sidebar, compact header, independent metric cards, bordered data surfaces, and responsive stacking—to the existing server-rendered application. It does not copy rendered `outerHTML`; that output loses source semantics, responsive intent, and component behavior.
+
 ## Automatic task triggers
 
 - Life-safety or urgent escalation
@@ -35,3 +37,4 @@ This follows the useful parts of Gmail, Todoist, Jobber, and Attio without turni
 - [Gmail: Snooze emails](https://support.google.com/mail/answer/7622010)
 - [Todoist: Plan your day with Today](https://www.todoist.com/help/articles/plan-your-day-with-the-today-view-UVUXaiSs)
 - [Jobber: Home](https://help.getjobber.com/en/articles/home/)
+- [shadcn/ui: dashboard-01 source](https://github.com/shadcn-ui/ui/tree/main/apps/v4/registry/new-york-v4/blocks/dashboard-01)

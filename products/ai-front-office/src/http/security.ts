@@ -34,7 +34,7 @@ export function setSecurityHeaders(response: ServerResponse): void {
   response.setHeader("referrer-policy", "no-referrer");
   response.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=()");
   response.setHeader("strict-transport-security", "max-age=31536000; includeSubDomains");
-  response.setHeader("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+  response.setHeader("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
 }
 
 export function sendJson(response: ServerResponse, status: number, value: unknown): void {

@@ -53,6 +53,10 @@ describe("HTTP boundary", () => {
     expect(mascot.status).toBe(200);
     expect(mascot.headers.get("content-type")).toBe("image/png");
     expect((await mascot.arrayBuffer()).byteLength).toBeGreaterThan(10_000);
+    const signupWizard = await fetch(`${baseUrl}/assets/signup-wizard.js`);
+    expect(signupWizard.status).toBe(200);
+    expect(signupWizard.headers.get("content-type")).toContain("text/javascript");
+    expect(await signupWizard.text()).toContain("wizard-progress");
     expect((await fetch(`${baseUrl}/tools/check-availability`, { method: "POST", body: "{}" })).status).toBe(401);
     expect(logs.some((entry) => entry.event === "request_completed" && entry.status === 401)).toBe(true);
   });
@@ -69,7 +73,7 @@ describe("HTTP boundary", () => {
     expect(html).toContain("Suncoast Heating Demo");
     expect(html).toContain('class="mobile-app-nav"');
     expect(html).toContain('class="app-sidebar"');
-    expect(html).toContain('aria-label="Dashboard views"');
+    expect(html).toContain('aria-label="Main navigation"');
     expect(html).toContain("Next 7 days");
     expect(html).toContain('grid-template-areas:"inbox" "call" "recent" "activity" "usage"');
     expect(html.indexOf('id="inbox"')).toBeLessThan(html.indexOf('id="call-preview"'));
