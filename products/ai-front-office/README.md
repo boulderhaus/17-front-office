@@ -4,7 +4,7 @@ A narrow, supervised AI receptionist for solo and 1–10-person home-service sho
 
 ## Honest status
 
-The application is buildable, tested, containerized, and deployed to a fail-closed Railway staging service with isolated Postgres and public HTTPS. Owners can create an isolated account, enter their own hours/service area/rules, connect Google Calendar, inspect usage and calls, and start checkout when Stripe is configured. Telnyx remains the voice, number, recording, webhook, and owner-alert provider. Each shop stays paused until its assistant route, calendar, owner destination, subscription, recording language, and live smoke matrix pass the activation gate.
+The application is buildable, tested, containerized, and deployed to a fail-closed Railway staging service with isolated Postgres and public HTTPS. Owners can create an isolated account, enter their own hours/service area/rules, connect Google Calendar, work an automatically prioritized callback inbox, inspect usage and call evidence, and start checkout when Stripe is configured. Telnyx remains the voice, number, recording, webhook, and owner-alert provider. Each shop stays paused until its assistant route, calendar, owner destination, subscription, recording language, and live smoke matrix pass the activation gate.
 
 ## Product rules
 
@@ -51,6 +51,7 @@ Open `http://127.0.0.1:8787/admin` and sign in with `ADMIN_TOKEN`.
 8. Keep the service paused, run `npm run simulate:launch`, then use `PROVIDER_TEST_MODE=true` for the live smoke matrix in `docs/LAUNCH-CHECKLIST.md`.
 9. Only after the live smoke matrix passes: record its ISO timestamp in `LIVE_PROVIDER_PROOF_AT`, disable provider-test mode, unpause, and require `/activationz=200` before forwarding the shop's line.
 10. To sell self-serve subscriptions, configure all three `STRIPE_*` variables and register `/webhooks/stripe` in Stripe. Without them, checkout remains hidden or uses the reviewed `FOUNDING_CHECKOUT_URL` fallback.
+11. Optional founder welcomes require explicit signup consent plus `FOUNDER_WELCOME_ENABLED=true`, an approved Telnyx sender in `FOUNDER_WELCOME_FROM_NUMBER`, and `FOUNDER_WELCOME_NAME`. A personal wireless number cannot be assumed to be an approved sender.
 
 ## Architecture
 
@@ -78,6 +79,6 @@ The application ports isolate the voice provider, calendar/system of record, not
 
 The service is paused by default. The authenticated admin provides **Readiness**, **Simulator**, configuration, call history, and permanent call deletion; public `/privacy` and `/terms` pages describe the current beta boundaries.
 
-The public `/signup` flow creates an encrypted owner workspace; `/login` opens the tenant-scoped dashboard. The older `/start` pilot application remains available for assisted prospects and appears only at `/admin/signups`.
+The public `/signup` flow creates an encrypted owner workspace; `/login` opens the tenant-scoped dashboard. Open callback tasks are ordered by urgency and due time, tied to the underlying call, and disappear from the inbox only when marked done. The older `/start` pilot application remains available for assisted prospects and appears only at `/admin/signups`.
 
-See `docs/UNIT-ECONOMICS.md`, `docs/COMMERCIAL-POSITIONING.md`, `docs/RELEASE-PACKET.md`, `docs/FIRST-USER-ONBOARDING.md`, `docs/REQUIREMENTS.md`, `docs/DECISION-DELTA.md`, `docs/REA-METHOD.md`, `docs/PROVIDER-DECISION.md`, `docs/PRODUCT-STRATEGY.md`, and `docs/LAUNCH-CHECKLIST.md`.
+See `docs/DASHBOARD-INBOX.md`, `docs/UNIT-ECONOMICS.md`, `docs/COMMERCIAL-POSITIONING.md`, `docs/RELEASE-PACKET.md`, `docs/FIRST-USER-ONBOARDING.md`, `docs/REQUIREMENTS.md`, `docs/DECISION-DELTA.md`, `docs/REA-METHOD.md`, `docs/PROVIDER-DECISION.md`, `docs/PRODUCT-STRATEGY.md`, and `docs/LAUNCH-CHECKLIST.md`.

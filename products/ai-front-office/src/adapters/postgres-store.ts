@@ -242,6 +242,17 @@ export class PostgresStore implements Store {
     return result.rows[0] ? mapCallbackTask(result.rows[0] as Row) : null;
   }
 
+  async listOpenCallbackTasks(tenantId: string, limit: number): Promise<CallbackTask[]> {
+    const result = await this.#pool.query(
+      `SELECT * FROM callback_tasks
+       WHERE tenant_id=$1 AND status='open'
+       ORDER BY CASE WHEN priority='high' THEN 0 ELSE 1 END, due_at ASC
+       LIMIT $2`,
+      [tenantId, limit],
+    );
+    return result.rows.map((row) => mapCallbackTask(row as Row));
+  }
+
   async saveCallbackTask(task: CallbackTask): Promise<void> {
     await this.#pool.query(
       `INSERT INTO callback_tasks(id,tenant_id,call_id,owner_ref,reason,priority,status,due_at,created_at,updated_at)
@@ -267,10 +278,10 @@ export class PostgresStore implements Store {
 
   async enqueueNotification(notification: OutboxNotification): Promise<boolean> {
     const result = await this.#pool.query(
-      `INSERT INTO notification_outbox(id,tenant_id,call_id,channel,destination_ref_ciphertext,body_ciphertext,priority,state,attempts,next_attempt_at,idempotency_key,provider_receipt,last_error,created_at,sent_at)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+      `INSERT INTO notification_outbox(id,tenant_id,call_id,channel,sender_ref,destination_ref_ciphertext,body_ciphertext,priority,state,attempts,next_attempt_at,idempotency_key,provider_receipt,last_error,created_at,sent_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
        ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`,
-      [notification.id, notification.tenantId, notification.callId, notification.channel, this.cryptoBox.encrypt(notification.destinationRef), this.cryptoBox.encrypt(notification.body), notification.priority, notification.state, notification.attempts, notification.nextAttemptAt, notification.idempotencyKey, notification.providerReceipt, notification.lastError, notification.createdAt, notification.sentAt],
+      [notification.id, notification.tenantId, notification.callId, notification.channel, notification.senderRef ?? "default", this.cryptoBox.encrypt(notification.destinationRef), this.cryptoBox.encrypt(notification.body), notification.priority, notification.state, notification.attempts, notification.nextAttemptAt, notification.idempotencyKey, notification.providerReceipt, notification.lastError, notification.createdAt, notification.sentAt],
     );
     return result.rowCount === 1;
   }
@@ -609,8 +620,9 @@ function mapToolEvent(row: Row): ToolEvent {
 
 function mapNotification(row: Row, cryptoBox: CryptoBox): OutboxNotification {
   return {
-    id: String(row.id), tenantId: String(row.tenant_id), callId: String(row.call_id),
+    id: String(row.id), tenantId: String(row.tenant_id), callId: row.call_id ? String(row.call_id) : null,
     channel: row.channel as OutboxNotification["channel"], destinationRef: cryptoBox.decrypt(String(row.destination_ref_ciphertext)) ?? "",
+    senderRef: row.sender_ref === "founder" ? "founder" : "default",
     body: cryptoBox.decrypt(String(row.body_ciphertext)) ?? "", priority: row.priority as OutboxNotification["priority"],
     state: row.state as OutboxNotification["state"], attempts: Number(row.attempts), nextAttemptAt: iso(row.next_attempt_at),
     idempotencyKey: String(row.idempotency_key), providerReceipt: row.provider_receipt ? String(row.provider_receipt) : null,

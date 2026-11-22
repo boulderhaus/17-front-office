@@ -167,6 +167,16 @@ export class InMemoryStore implements Store {
     return structuredClone([...this.callbackTasks.values()].find((task) => task.callId === callId) ?? null);
   }
 
+  async listOpenCallbackTasks(tenantId: string, limit: number): Promise<CallbackTask[]> {
+    return structuredClone([...this.callbackTasks.values()]
+      .filter((task) => task.tenantId === tenantId && task.status === "open")
+      .sort((left, right) => {
+        if (left.priority !== right.priority) return left.priority === "high" ? -1 : 1;
+        return left.dueAt.localeCompare(right.dueAt);
+      })
+      .slice(0, limit));
+  }
+
   async saveCallbackTask(task: CallbackTask): Promise<void> {
     const existing = [...this.callbackTasks.values()].find((item) => item.callId === task.callId);
     this.callbackTasks.set(existing?.id ?? task.id, structuredClone(existing ? { ...task, id: existing.id, createdAt: existing.createdAt } : task));

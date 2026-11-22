@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
+import { resolve } from "node:path";
 import { z } from "zod";
 import { renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms } from "../admin/render.js";
 import { buildActivationReport, type ActivationReport } from "../application/readiness.js";
@@ -9,7 +11,7 @@ import { DataDeletionService } from "../application/data-deletion.js";
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import { createDemoConfig } from "../domain/config.js";
-import type { BusinessConfig, OwnerAccount, PilotSignup } from "../domain/models.js";
+import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import { clearOwnerSessionCookie, hashOwnerPassword, mintOwnerSession, ownerSessionCookie, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
 import { buildTelnyxGreeting } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
@@ -134,6 +136,8 @@ const ownerSignupSchema = z.object({
   serviceCategories: z.string().trim().min(2).max(800),
   emergencyKeywords: z.string().trim().min(2).max(800),
   weekends: z.string().optional(),
+  ownerSmsConsent: z.literal("yes"),
+  founderSmsConsent: z.literal("yes").optional(),
   consent: z.literal("yes"),
 });
 const ownerLoginSchema = z.object({
@@ -148,6 +152,106 @@ export interface AppDependencies {
   clock: Clock;
   integrations: Record<string, boolean>;
   logger?: (entry: Record<string, unknown>) => void;
+}
+
+function publicOwnerDemo(now: Date): {
+  account: OwnerAccount;
+  config: BusinessConfig;
+  calls: CallRecord[];
+  tasks: CallbackTask[];
+  usage: UsageSummary;
+  subscription: SubscriptionRecord;
+} {
+  const tenantId = "public-dashboard-demo";
+  const stamp = (minutesAgo: number): string => new Date(now.getTime() - minutesAgo * 60_000).toISOString();
+  const config: BusinessConfig = {
+    ...createDemoConfig(tenantId),
+    paused: false,
+    businessName: "Suncoast Heating Demo",
+    timezone: "America/New_York",
+    serviceAreaTerms: ["Sarasota FL", "342"],
+    operationMode: "overflow",
+  };
+  const urgentCall: CallRecord = {
+    id: "11111111-1111-4111-8111-111111111111",
+    tenantId,
+    providerCallId: "synthetic-urgent-demo",
+    fromNumber: "+15555550111",
+    fromNumberVerified: true,
+    startedAt: stamp(18),
+    endedAt: stamp(14),
+    durationSeconds: 241,
+    fields: {
+      callerName: "Jamie R.", companyName: null, callbackNumber: "+15555550111",
+      address: "100 Bay Street, Sarasota, FL 34236", serviceCategory: "HVAC repair",
+      serviceCategoryConfidence: 0.96, problemDescription: "No cooling; elderly resident in the home",
+      equipmentDetails: "Outdoor unit is not starting", accessNotes: null, requestedStart: null,
+      explicitSlotConfirmation: false, diagnosticFeeAccepted: false, humanRequested: true, confidence: 0.93,
+    },
+    emergency: { emergency: true, severity: "urgent", score: 0.91, evidence: ["no cooling", "elderly resident"], immediateInstruction: null },
+    outcome: "handoff_queued",
+    transcript: "Synthetic demonstration transcript.",
+    recordingUrl: null,
+    consentState: "disclosed",
+    billingDisposition: "billable",
+    qualityFlags: [],
+    createdAt: stamp(18),
+    updatedAt: stamp(14),
+  };
+  const routineCall: CallRecord = {
+    id: "22222222-2222-4222-8222-222222222222",
+    tenantId,
+    providerCallId: "synthetic-routine-demo",
+    fromNumber: "+15555550122",
+    fromNumberVerified: true,
+    startedAt: stamp(126),
+    endedAt: stamp(123),
+    durationSeconds: 188,
+    fields: {
+      callerName: "Morgan L.", companyName: null, callbackNumber: "+15555550122",
+      address: "200 Palm Avenue, Sarasota, FL 34236", serviceCategory: "HVAC maintenance",
+      serviceCategoryConfidence: 0.98, problemDescription: "Seasonal maintenance before travel",
+      equipmentDetails: null, accessNotes: "Gate code required", requestedStart: stamp(-1_440),
+      explicitSlotConfirmation: false, diagnosticFeeAccepted: true, humanRequested: false, confidence: 0.95,
+    },
+    emergency: { emergency: false, severity: "routine", score: 0.08, evidence: [], immediateInstruction: null },
+    outcome: "pending_confirmation",
+    transcript: "Synthetic demonstration transcript.",
+    recordingUrl: null,
+    consentState: "disclosed",
+    billingDisposition: "billable",
+    qualityFlags: [],
+    createdAt: stamp(126),
+    updatedAt: stamp(123),
+  };
+  const tasks: CallbackTask[] = [
+    {
+      id: "33333333-3333-4333-8333-333333333333", tenantId, callId: urgentCall.id,
+      ownerRef: "owner-primary", reason: "Urgent callback requested", priority: "high", status: "open",
+      dueAt: stamp(9), createdAt: stamp(14), updatedAt: stamp(14),
+    },
+    {
+      id: "44444444-4444-4444-8444-444444444444", tenantId, callId: routineCall.id,
+      ownerRef: "owner-primary", reason: "Confirm the proposed maintenance window", priority: "normal", status: "open",
+      dueAt: stamp(-45), createdAt: stamp(123), updatedAt: stamp(123),
+    },
+  ];
+  const [periodStart, periodEnd] = currentBillingPeriod(now);
+  return {
+    account: {
+      id: "55555555-5555-4555-8555-555555555555", tenantId, email: "owner@demo.invalid",
+      displayName: "Demo Owner", passwordHash: "synthetic-read-only", status: "active",
+      createdAt: stamp(43_200), updatedAt: stamp(14),
+    },
+    config,
+    calls: [urgentCall, routineCall],
+    tasks,
+    usage: { periodStart, periodEnd, billableCalls: 22, excludedSpamCalls: 5, billedMinutes: 87 },
+    subscription: {
+      tenantId, providerCustomerId: null, providerSubscriptionId: null, status: "active",
+      currentPeriodEnd: periodEnd, providerEventCreatedAt: stamp(43_200), createdAt: stamp(43_200), updatedAt: stamp(43_200),
+    },
+  };
 }
 
 export function createRequestHandler(dependencies: AppDependencies): RequestListener {
@@ -191,9 +295,28 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       throw new HttpError(429, "Too many requests");
     }
 
+    if (method === "GET" && url.pathname === "/assets/front-office-mascot-flat.png") {
+      const asset = await readFile(resolve(process.cwd(), "public/assets/front-office-mascot-flat.png"));
+      response.statusCode = 200;
+      response.setHeader("content-type", "image/png");
+      response.setHeader("cache-control", "public, max-age=86400");
+      response.end(asset);
+      return;
+    }
     if (method === "GET" && url.pathname === "/") {
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
       return sendHtml(response, 200, renderLanding(config));
+    }
+    if (method === "GET" && url.pathname === "/demo") {
+      const demo = publicOwnerDemo(dependencies.clock.now());
+      return sendHtml(response, 200, renderOwnerDashboard({
+        ...demo,
+        googleConnected: true,
+        csrf: "",
+        checkoutConfigured: false,
+        checkoutUrl: null,
+        preview: true,
+      }));
     }
     if (method === "GET" && url.pathname === "/signup") return sendHtml(response, 200, renderOwnerSignup());
     if (method === "POST" && url.pathname === "/signup") {
@@ -250,6 +373,28 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       };
       const created = await dependencies.store.createOwnerWorkspace({ account, config, ownerPhone: phone });
       if (!created) return sendHtml(response, 409, renderOwnerSignup("That email already has an account. Sign in instead.", values));
+      if (parsed.data.founderSmsConsent === "yes") {
+        const welcomeConfigured = dependencies.env.FOUNDER_WELCOME_ENABLED
+          && dependencies.env.TELNYX_MESSAGING_APPROVED
+          && dependencies.env.FOUNDER_WELCOME_FROM_NUMBER
+          && dependencies.env.FOUNDER_WELCOME_NAME;
+        if (welcomeConfigured) {
+          try {
+            const queued = await dependencies.store.enqueueNotification({
+              id: randomUUID(), tenantId, callId: null, channel: "sms", senderRef: "founder", destinationRef: "owner-primary",
+              body: renderFounderWelcome(dependencies.env.FOUNDER_WELCOME_TEMPLATE, dependencies.env.FOUNDER_WELCOME_NAME!, config.businessName),
+              priority: "normal", state: "pending", attempts: 0, nextAttemptAt: now,
+              idempotencyKey: `founder-welcome:${tenantId}`,
+              providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
+            });
+            log({ level: "info", event: queued ? "founder_welcome_queued" : "founder_welcome_duplicate", tenantId });
+          } catch (error) {
+            log({ level: "warn", event: "founder_welcome_queue_failed", tenantId, error: safeError(error) });
+          }
+        } else {
+          log({ level: "info", event: "founder_welcome_unconfigured", tenantId });
+        }
+      }
       const session = mintOwnerSession(account, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
       response.setHeader("set-cookie", ownerSessionCookie(session, dependencies.env.NODE_ENV === "production"));
       log({ level: "info", event: "owner_workspace_created", accountId: account.id, tenantId });
@@ -348,9 +493,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     const method = request.method ?? "GET";
     if (method === "GET" && url.pathname === "/app") {
-      const [config, calls, usage, googleConnected, subscription] = await Promise.all([
+      const [config, calls, tasks, usage, googleConnected, subscription] = await Promise.all([
         dependencies.store.getConfig(account.tenantId),
         dependencies.store.listCalls(account.tenantId, 50),
+        dependencies.store.listOpenCallbackTasks(account.tenantId, 50),
         dependencies.store.getUsageSummary(account.tenantId, ...currentBillingPeriod(dependencies.clock.now())),
         isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
         dependencies.store.getSubscription(account.tenantId),
@@ -359,6 +505,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         account,
         config,
         calls,
+        tasks,
         usage,
         googleConnected,
         subscription,
@@ -492,6 +639,19 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (!deleted) throw new HttpError(404, "Call not found");
       return redirect(response, "/app");
     }
+    const completeTaskMatch = /^\/app\/calls\/([0-9a-f-]+)\/task\/complete$/i.exec(url.pathname);
+    if (method === "POST" && completeTaskMatch?.[1]) {
+      const form = parseForm(await readBody(request, 8_000));
+      if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      const task = await dependencies.store.getCallbackTaskForCall(completeTaskMatch[1]);
+      if (!task || task.tenantId !== account.tenantId) throw new HttpError(404, "Task not found");
+      await dependencies.store.saveCallbackTask({
+        ...task,
+        status: "completed",
+        updatedAt: dependencies.clock.now().toISOString(),
+      });
+      return redirect(response, "/app");
+    }
     const callMatch = /^\/app\/calls\/([0-9a-f-]+)$/i.exec(url.pathname);
     if (method === "GET" && callMatch?.[1]) {
       const call = await dependencies.store.getCall(callMatch[1]);
@@ -578,8 +738,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (!await dependencies.store.claimWebhook(telnyxEventId(envelope, rawBody))) return sendJson(response, 200, { received: true, duplicate: true });
       const action = received.data.payload.autoresponse_type?.toUpperCase();
       if ((action === "STOP" || action === "START") && /^\+1[2-9]\d{9}$/.test(received.data.payload.from.phone_number)) {
-        await dependencies.store.setSmsOptOut(dependencies.env.DEFAULT_TENANT_ID, received.data.payload.from.phone_number, action === "STOP");
-        log({ level: "info", event: "sms_consent_changed", action });
+        const tenants = await dependencies.store.listTenantIds();
+        await Promise.all(tenants.map((tenantId) => dependencies.store.setSmsOptOut(tenantId, received.data.payload.from.phone_number, action === "STOP")));
+        log({ level: "info", event: "sms_consent_changed", action, tenantCount: tenants.length });
       }
       return sendJson(response, 200, { received: true });
     }
@@ -1275,6 +1436,16 @@ function safeError(error: unknown): string {
   if (error instanceof z.ZodError) return "Request validation failed";
   if (error instanceof Error) return redactError(error);
   return "Unknown error";
+}
+
+function renderFounderWelcome(template: string, founderName: string, businessName: string): string {
+  const rendered = template
+    .replaceAll("{founder_name}", founderName)
+    .replaceAll("{business_name}", businessName)
+    .replace(/\s+/g, " ")
+    .trim();
+  const compliant = /reply\s+stop/i.test(rendered) ? rendered : `${rendered} Reply STOP to opt out.`;
+  return compliant.slice(0, 500);
 }
 
 async function isGoogleConnected(env: Environment, store: Store, tenantId = env.DEFAULT_TENANT_ID): Promise<boolean> {

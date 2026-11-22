@@ -119,8 +119,9 @@ export interface ToolEvent {
 export interface OutboxNotification {
   id: string;
   tenantId: string;
-  callId: string;
+  callId: string | null;
   channel: "sms" | "email" | "voice";
+  senderRef?: "default" | "founder";
   destinationRef: string;
   body: string;
   priority: "normal" | "high";

@@ -75,6 +75,7 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
     ? new TelnyxSmsAdapter({
         apiKey: env.TELNYX_API_KEY!,
         fromNumber: env.TELNYX_FROM_NUMBER!,
+        ...(env.FOUNDER_WELCOME_FROM_NUMBER ? { founderFromNumber: env.FOUNDER_WELCOME_FROM_NUMBER } : {}),
         messagingProfileId: env.TELNYX_MESSAGING_PROFILE_ID!,
         resolveDestination: async (tenantId, reference) =>
           (await store.getIntegrationSecret(tenantId, "notifications", reference)) ?? null,

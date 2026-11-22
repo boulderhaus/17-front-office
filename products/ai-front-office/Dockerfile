@@ -6,6 +6,7 @@ COPY tsconfig.json vitest.config.ts ./
 COPY src ./src
 COPY scripts ./scripts
 COPY migrations ./migrations
+COPY public ./public
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-alpine AS runtime
@@ -15,6 +16,7 @@ COPY --from=build --chown=node:node /app/package.json /app/package-lock.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/migrations ./migrations
+COPY --from=build --chown=node:node /app/public ./public
 USER node
 EXPOSE 8787
 CMD ["sh", "-c", "node dist/scripts/migrate.js && exec node dist/src/server.js"]

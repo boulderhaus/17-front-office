@@ -149,6 +149,24 @@ describe("Telnyx provider boundary", () => {
     });
   });
 
+  it("uses the separately approved sender only for founder welcome SMS", async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ data: { id: "message-founder" } })) as unknown as typeof fetch;
+    const adapter = new TelnyxSmsAdapter({
+      apiKey: "synthetic-key",
+      fromNumber: "+15555550199",
+      founderFromNumber: "+15555550200",
+      resolveDestination: async () => "+15555550100",
+      fetcher,
+    });
+    const welcome = { ...syntheticNotification(), callId: null, senderRef: "founder" as const, body: "Synthetic welcome" };
+    await adapter.send(welcome);
+    expect(JSON.parse(String(((fetcher as unknown as ReturnType<typeof vi.fn>).mock.calls[0]![1] as RequestInit).body))).toMatchObject({
+      from: "+15555550200",
+      to: "+15555550100",
+      text: "Synthetic welcome",
+    });
+  });
+
   it("refuses SMS to a destination that opted out", async () => {
     const fetcher = vi.fn() as unknown as typeof fetch;
     const adapter = new TelnyxSmsAdapter({

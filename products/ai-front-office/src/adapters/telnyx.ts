@@ -291,6 +291,7 @@ function userTranscript(messages: TelnyxConversationEndedEnvelope["data"]["paylo
 interface TelnyxSmsOptions {
   apiKey: string;
   fromNumber: string;
+  founderFromNumber?: string;
   messagingProfileId?: string;
   resolveDestination: (tenantId: string, reference: string) => Promise<string | null>;
   allowedDirectDestinations?: ReadonlySet<string>;
@@ -310,8 +311,10 @@ export class TelnyxSmsAdapter implements NotificationPort {
     const to = direct ?? await this.options.resolveDestination(notification.tenantId, notification.destinationRef);
     if (!to || !isAllowedUsNumber(to)) throw new Error(`No valid US phone number is configured for destination reference ${notification.destinationRef}`);
     if (await this.options.isOptedOut?.(notification.tenantId, to)) throw new Error("Destination has opted out of SMS");
+    const from = notification.senderRef === "founder" ? this.options.founderFromNumber : this.options.fromNumber;
+    if (!from) throw new Error("Founder welcome sender is not configured");
     const body = {
-      from: this.options.fromNumber,
+      from,
       to,
       text: notification.body,
       ...(this.options.messagingProfileId ? { messaging_profile_id: this.options.messagingProfileId } : {}),

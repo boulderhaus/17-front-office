@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
 import { demoEnvironment, loadEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
+import type { CallRecord } from "../src/domain/models.js";
 import { createRequestHandler } from "../src/http/app.js";
 import type { Clock } from "../src/ports.js";
 
@@ -21,7 +22,15 @@ describe("HTTP boundary", () => {
     store = new InMemoryStore();
     logs = [];
     await store.saveConfig(createDemoConfig());
-    const env = demoEnvironment({ ADMIN_TOKEN: adminToken, TOOL_TOKEN: toolToken, PUBLIC_BASE_URL: "http://127.0.0.1:8787" });
+    const env = demoEnvironment({
+      ADMIN_TOKEN: adminToken,
+      TOOL_TOKEN: toolToken,
+      PUBLIC_BASE_URL: "http://127.0.0.1:8787",
+      TELNYX_MESSAGING_APPROVED: "true",
+      FOUNDER_WELCOME_ENABLED: "true",
+      FOUNDER_WELCOME_FROM_NUMBER: "+15555550199",
+      FOUNDER_WELCOME_NAME: "Synthetic Founder",
+    });
     server = createServer(createRequestHandler({ env, store, calendar: new InMemoryCalendar(), clock, integrations: { Demo: true }, logger: (entry) => logs.push(entry) }));
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -40,8 +49,25 @@ describe("HTTP boundary", () => {
     const health = await fetch(`${baseUrl}/healthz`);
     expect(health.status).toBe(200);
     expect(health.headers.get("cache-control")).toBe("no-store");
+    const mascot = await fetch(`${baseUrl}/assets/front-office-mascot-flat.png`);
+    expect(mascot.status).toBe(200);
+    expect(mascot.headers.get("content-type")).toBe("image/png");
+    expect((await mascot.arrayBuffer()).byteLength).toBeGreaterThan(10_000);
     expect((await fetch(`${baseUrl}/tools/check-availability`, { method: "POST", body: "{}" })).status).toBe(401);
     expect(logs.some((entry) => entry.event === "request_completed" && entry.status === 401)).toBe(true);
+  });
+
+  it("shows a public read-only owner dashboard with synthetic data", async () => {
+    const response = await fetch(`${baseUrl}/demo`);
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("Read-only dashboard demo");
+    expect(html).toContain("Synthetic data only");
+    expect(html).toContain("Needs attention");
+    expect(html).toContain("Jamie R.");
+    expect(html).toContain("Suncoast Heating Demo");
+    expect(html).not.toContain("task/complete");
+    expect(html).not.toContain('method="post"');
   });
 
   it("accepts an authenticated availability tool call", async () => {
@@ -409,6 +435,8 @@ describe("HTTP boundary", () => {
         serviceCategories: "HVAC repair, maintenance",
         emergencyKeywords: "gas smell, no heat",
         weekends: "on",
+        ownerSmsConsent: "yes",
+        founderSmsConsent: "yes",
         consent: "yes",
       }),
     });
@@ -422,10 +450,66 @@ describe("HTTP boundary", () => {
     expect(config).toMatchObject({ paused: true, operationMode: "overflow", includedMinutes: 200, customerSmsEnabled: false });
     expect(config.afterHours).toMatchObject({ weekdayStart: "18:00", weekdayEnd: "07:00", weekends: true });
     expect(await store.getIntegrationSecret(account!.tenantId, "notifications", "owner-primary")).toBe("+12125550198");
+    const welcome = [...store.notifications.values()].find((item) => item.tenantId === account!.tenantId && item.senderRef === "founder");
+    expect(welcome).toMatchObject({ callId: null, destinationRef: "owner-primary", idempotencyKey: `founder-welcome:${account!.tenantId}` });
+    expect(welcome?.body).toContain("Synthetic HVAC");
+    expect(welcome?.body).toContain("STOP");
 
+    const taskCall: CallRecord = {
+      id: "11111111-1111-4111-8111-111111111111",
+      tenantId: account!.tenantId,
+      providerCallId: "owner-queue-call",
+      fromNumber: "+12125550177",
+      fromNumberVerified: true,
+      startedAt: "2026-01-15T07:30:00.000Z",
+      endedAt: "2026-01-15T07:34:00.000Z",
+      durationSeconds: 240,
+      fields: {
+        callerName: "Synthetic Caller", companyName: null, callbackNumber: "+12125550177",
+        address: "100 Main St, Albany, NY 12207", serviceCategory: "HVAC repair",
+        serviceCategoryConfidence: 0.9, problemDescription: "No heat overnight", equipmentDetails: null,
+        accessNotes: null, requestedStart: null, explicitSlotConfirmation: false,
+        diagnosticFeeAccepted: false, humanRequested: true, confidence: 0.9,
+      },
+      emergency: { emergency: true, severity: "urgent", score: 0.9, evidence: ["no heat"], immediateInstruction: null },
+      outcome: "handoff_queued",
+      transcript: "Synthetic transcript",
+      recordingUrl: null,
+      consentState: "disclosed",
+      billingDisposition: "billable",
+      qualityFlags: [],
+      createdAt: "2026-01-15T07:30:00.000Z",
+      updatedAt: "2026-01-15T07:34:00.000Z",
+    };
+    await store.saveCall(taskCall);
+    await store.saveCallbackTask({
+      id: "22222222-2222-4222-8222-222222222222",
+      tenantId: account!.tenantId,
+      callId: taskCall.id,
+      ownerRef: "owner-primary",
+      reason: "Urgent callback requested",
+      priority: "high",
+      status: "open",
+      dueAt: "2026-01-15T08:05:00.000Z",
+      createdAt: "2026-01-15T07:34:00.000Z",
+      updatedAt: "2026-01-15T07:34:00.000Z",
+    });
     const dashboard = await fetch(`${baseUrl}/app`, { headers: { cookie } });
     expect(dashboard.status).toBe(200);
-    expect(await dashboard.text()).toContain("200 included minutes left");
+    const dashboardHtml = await dashboard.text();
+    expect(dashboardHtml).toContain("196 included minutes left");
+    expect(dashboardHtml).toContain("Needs attention");
+    expect(dashboardHtml).toContain("Urgent callback requested");
+    const taskCsrf = /task\/complete"><input type="hidden" name="csrf" value="([^"]+)"/.exec(dashboardHtml)?.[1];
+    expect(taskCsrf).toBeTruthy();
+    const taskComplete = await fetch(`${baseUrl}/app/calls/${taskCall.id}/task/complete`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf: taskCsrf! }),
+    });
+    expect(taskComplete.status).toBe(303);
+    expect((await store.getCallbackTaskForCall(taskCall.id))?.status).toBe("completed");
     const settings = await fetch(`${baseUrl}/app/settings`, { headers: { cookie } });
     const settingsHtml = await settings.text();
     const csrf = /name="csrf" value="([^"]+)"/.exec(settingsHtml)?.[1];
@@ -521,10 +605,17 @@ describe("HTTP boundary", () => {
     const landingHtml = await landing.text();
     expect(landingHtml).toContain("When you’re on a job, we answer the phone.");
     expect(landingHtml).toContain("Don’t buy a call center to catch a missed call.");
-    expect(landingHtml).toContain("The $49 question:");
+    expect(landingHtml).toContain("Five-person shop?");
     expect((await fetch(`${baseUrl}/activationz`)).status).toBe(503);
-    expect((await fetch(`${baseUrl}/privacy`)).status).toBe(200);
-    expect((await fetch(`${baseUrl}/terms`)).status).toBe(200);
+    const signupPage = await (await fetch(`${baseUrl}/signup`)).text();
+    expect(signupPage).toContain("Message frequency varies");
+    expect(signupPage).toContain('name="ownerSmsConsent"');
+    const privacy = await fetch(`${baseUrl}/privacy`);
+    expect(privacy.status).toBe(200);
+    expect(await privacy.text()).toContain("not sold, rented, or shared with third parties or affiliates for marketing");
+    const terms = await fetch(`${baseUrl}/terms`);
+    expect(terms.status).toBe(200);
+    expect(await terms.text()).toContain("Reply STOP to opt out or HELP for help");
     const simulator = await fetch(`${baseUrl}/admin/simulator`, { headers: { authorization: `Bearer ${adminToken}` } });
     expect(simulator.status).toBe(200);
     expect(await simulator.text()).toContain("Run all 15 launch scenarios");

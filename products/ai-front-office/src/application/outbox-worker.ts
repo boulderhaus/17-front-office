@@ -53,6 +53,7 @@ export class OutboxWorker {
   }
 
   private async enqueueOwnerFailureAlert(notification: OutboxNotification): Promise<void> {
+    if (!notification.callId) return;
     const config = await this.store.getConfig(notification.tenantId);
     const call = await this.store.getCall(notification.callId);
     if (!call) return;

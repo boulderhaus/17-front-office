@@ -29,6 +29,13 @@ const schema = z.object({
   TELNYX_MESSAGING_PROFILE_ID: z.string().uuid().optional(),
   TELNYX_ASSISTANT_ID: z.string().min(1).optional(),
   TELNYX_MESSAGING_APPROVED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  FOUNDER_WELCOME_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  FOUNDER_WELCOME_FROM_NUMBER: z.preprocess(
+    (value) => value === "" ? undefined : value,
+    z.string().regex(/^\+[1-9]\d{7,14}$/, "FOUNDER_WELCOME_FROM_NUMBER must use E.164 format").optional(),
+  ),
+  FOUNDER_WELCOME_NAME: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(80).optional()),
+  FOUNDER_WELCOME_TEMPLATE: z.string().max(500).default("Welcome to Front Office. I'm {founder_name}. This is my number if you need anything or have an idea for making this more useful for {business_name}. Reply STOP to opt out."),
   RECORDING_CONSENT_APPROVED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
