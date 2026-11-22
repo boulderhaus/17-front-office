@@ -83,4 +83,4 @@ The service is paused by default. The authenticated admin provides **Readiness**
 
 The public `/signup` flow creates an encrypted owner workspace; `/login` opens the tenant-scoped dashboard. Callback work is ordered by urgency and due time, tied to the underlying call, and can be completed, undone, or snoozed. A task closes automatically only when the booking write is verified. The older `/start` pilot application remains available for assisted prospects and appears only at `/admin/signups`.
 
-See `docs/DASHBOARD-INBOX.md`, `docs/UNIT-ECONOMICS.md`, `docs/COMMERCIAL-POSITIONING.md`, `docs/RELEASE-PACKET.md`, `docs/FIRST-USER-ONBOARDING.md`, `docs/REQUIREMENTS.md`, `docs/DECISION-DELTA.md`, `docs/REA-METHOD.md`, `docs/PROVIDER-DECISION.md`, `docs/PRODUCT-STRATEGY.md`, and `docs/LAUNCH-CHECKLIST.md`.
+See `docs/DASHBOARD-INBOX.md`, `docs/UNIT-ECONOMICS.md`, `docs/ICP-TEAM-BRAND-STRATEGY.md`, `docs/COMMERCIAL-POSITIONING.md`, `docs/RELEASE-PACKET.md`, `docs/FIRST-USER-ONBOARDING.md`, `docs/REQUIREMENTS.md`, `docs/DECISION-DELTA.md`, `docs/REA-METHOD.md`, `docs/PROVIDER-DECISION.md`, `docs/PRODUCT-STRATEGY.md`, and `docs/LAUNCH-CHECKLIST.md`.

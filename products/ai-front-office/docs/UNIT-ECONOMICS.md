@@ -52,6 +52,30 @@ Approved public wording: **“One recovered $375 service call can cover the mont
 
 Evidence: [ServiceTitan contractor KPI playbook](https://www.servicetitan.com/guides/contractor-playbook/kpi-tracking), [NREL HVAC contractor business-model report](https://www.nrel.gov/docs/fy24osti/88387.pdf).
 
+### The owner's break-even, in plain English
+
+The relevant launch question is how much *incremental contribution* a recovered call produces after the direct cost of doing that job. At the ServiceTitan benchmark, the answer is simple: one new paying customer covers the $49 subscription.
+
+| Completed ticket | Gross margin | Contribution before overhead | Customers needed to cover $49 |
+|---:|---:|---:|---:|
+| $375 | 72% | $270.00 | 1 |
+| $150 | 50% | $75.00 | 1 |
+| $99 | 50% | $49.50 | 1 |
+| $89 | 50% | $44.50 | 2 |
+
+At 72% gross margin, the break-even ticket is about $68. At 50%, it is $98. At 30%, it is about $164.
+
+The number of qualified calls the product must recover depends on the shop's actual close rate:
+
+| Qualified-call-to-job close rate | Expected recovered calls for one job |
+|---:|---:|
+| 20% | 5 |
+| 25% | 4 |
+| 33% | about 3 |
+| 50% | 2 |
+
+Those are scenarios, not measured product results. Pilot reporting must show recovered qualified calls, booked jobs, completed jobs, ticket revenue, and repeat work before making a customer-lifetime-value claim.
+
 ## Why the same 200 minutes cannot cost $3 on current Telnyx Voice AI
 
 The Telnyx Voice AI engine alone is $10 for 200 minutes before telephony, model, recording, number, messaging, or hosting. A $3 target therefore requires replacing the managed agent layer with a custom SIP/media pipeline—not a pricing tweak.
