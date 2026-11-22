@@ -657,6 +657,8 @@ describe("HTTP boundary", () => {
     const signupPage = await (await fetch(`${baseUrl}/signup`)).text();
     expect(signupPage).toContain("Message frequency varies");
     expect(signupPage).toContain('name="ownerSmsConsent"');
+    expect(signupPage).toContain("hearing a test call yourself is optional");
+    expect(signupPage).not.toContain("stays off until you test and approve it");
     const privacy = await fetch(`${baseUrl}/privacy`);
     expect(privacy.status).toBe(200);
     expect(await privacy.text()).toContain("not sold, rented, or shared with third parties or affiliates for marketing");

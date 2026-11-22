@@ -45,7 +45,7 @@ Do not sell either team offer before invitations, calendar isolation, assignment
 
 Calendly's relevant lesson is not its meeting-page UI. It is the progression from a single person's availability to reliable team routing:
 
-- **Fast first success:** ask for only the information needed to run a safe test call, then reveal advanced rules after the owner hears it work.
+- **Fast first success:** ask only for the business facts needed to start safely, run automated checks behind the scenes, and keep an owner test call optional. Reveal advanced rules only when they are needed.
 - **Availability as a reusable object:** separate shop hours, bookable hours, appointment duration, minimum notice, travel buffer, holidays, and one-off date overrides.
 - **Routing before booking:** service type, ZIP code, urgency, and caller preference determine which calendar or on-call person should receive the job.
 - **Round robin with an explanation:** show who received a job and why; allow priority-first or balanced distribution.
