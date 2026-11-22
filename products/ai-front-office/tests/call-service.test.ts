@@ -41,8 +41,20 @@ describe("call outcomes", () => {
     calendar = new InMemoryCalendar();
     sender = new CapturingNotificationSender();
     clock = new MutableClock(new Date("2026-01-15T08:00:00.000Z"));
-    await store.saveConfig(createDemoConfig());
+    await store.saveConfig({ ...createDemoConfig(), ownerRealtimeSmsEnabled: true });
     service = new CallService(store, calendar, clock, "https://front-office.example");
+  });
+
+  it("keeps routine instant texts behind the add-on while safety alerts stay included", async () => {
+    await store.saveConfig({ ...createDemoConfig(), ownerRealtimeSmsEnabled: false });
+    await start("routine-no-addon");
+    const routine = await service.finalize(summary("routine-no-addon"));
+    expect(await store.listNotifications(routine.id)).toHaveLength(0);
+
+    await start("urgent-no-addon");
+    await service.triageCall({ tenantId: "demo", providerCallId: "urgent-no-addon", fromNumber: "+15555550100", problemDescription: "No heat and an infant is home" });
+    const urgent = await service.finalize(summary("urgent-no-addon", { problemDescription: "No heat and an infant is home" }));
+    expect((await store.listNotifications(urgent.id)).some((item) => item.priority === "high")).toBe(true);
   });
 
   it("routes a 2 a.m. no-heat emergency to the owner without booking", async () => {
@@ -192,7 +204,7 @@ describe("call outcomes", () => {
     expect(covered.status).toBe("covered");
     const outside = await service.checkServiceArea({ tenantId: "demo", providerCallId: "coverage", address: "100 Main St, Albany, NY 12207" });
     expect(outside.status).toBe("outside");
-    await store.saveConfig({ ...createDemoConfig(), serviceAreaTerms: [] });
+    await store.saveConfig({ ...createDemoConfig(), ownerRealtimeSmsEnabled: true, serviceAreaTerms: [] });
     const unconfigured = await service.checkServiceArea({ tenantId: "demo", providerCallId: "coverage", address: "100 Main St, Springfield, IL 62701" });
     expect(unconfigured.status).toBe("unconfigured");
     expect(unconfigured.message).toContain("Do not promise service or book");
@@ -358,6 +370,7 @@ describe("call outcomes", () => {
   async function enableDirectBooking(): Promise<void> {
     await store.saveConfig({
       ...createDemoConfig(),
+      ownerRealtimeSmsEnabled: true,
       bookingMode: "direct",
       customerSmsEnabled: true,
       priceSnippets: [{ label: "Diagnostic", text: "The diagnostic visit is $89." }],
@@ -367,6 +380,7 @@ describe("call outcomes", () => {
   async function configureApprovedFee(): Promise<void> {
     await store.saveConfig({
       ...createDemoConfig(),
+      ownerRealtimeSmsEnabled: true,
       priceSnippets: [{ label: "Diagnostic", text: "The diagnostic visit is $89." }],
     });
   }

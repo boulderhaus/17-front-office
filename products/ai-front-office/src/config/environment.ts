@@ -49,6 +49,10 @@ const schema = z.object({
   STRIPE_SECRET_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().min(20).optional()),
   STRIPE_WEBHOOK_SECRET: z.preprocess((value) => value === "" ? undefined : value, z.string().min(20).optional()),
   STRIPE_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
+  STRIPE_DAILY_SMS_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
+  STRIPE_REALTIME_SMS_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
+  RESEND_API_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("re_").optional()),
+  RESEND_FROM_EMAIL: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
 });
 
 export type Environment = z.infer<typeof schema>;
@@ -66,6 +70,12 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
   }
   const stripeValues = [parsed.STRIPE_SECRET_KEY, parsed.STRIPE_WEBHOOK_SECRET, parsed.STRIPE_PRICE_ID].filter(Boolean).length;
   if (stripeValues !== 0 && stripeValues !== 3) throw new Error("STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and STRIPE_PRICE_ID must be configured together");
+  if ((parsed.STRIPE_DAILY_SMS_PRICE_ID || parsed.STRIPE_REALTIME_SMS_PRICE_ID) && stripeValues !== 3) {
+    throw new Error("Stripe add-on prices require the base Stripe configuration");
+  }
+  if (Boolean(parsed.RESEND_API_KEY) !== Boolean(parsed.RESEND_FROM_EMAIL)) {
+    throw new Error("RESEND_API_KEY and RESEND_FROM_EMAIL must be configured together");
+  }
   if (!parsed.DEMO_MODE) {
     for (const key of ["DATABASE_URL", "DATA_ENCRYPTION_KEY", "SESSION_SIGNING_KEY"] as const) {
       if (!parsed[key]) throw new Error(`${key} is required outside demo mode`);

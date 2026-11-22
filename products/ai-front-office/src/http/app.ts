@@ -292,7 +292,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     ? new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: dependencies.env.TELNYX_FROM_NUMBER, assistantId: dependencies.env.TELNYX_ASSISTANT_ID })
     : null;
   const stripeClient = dependencies.env.STRIPE_SECRET_KEY && dependencies.env.STRIPE_PRICE_ID
-    ? new StripeBillingClient(dependencies.env.STRIPE_SECRET_KEY, dependencies.env.STRIPE_PRICE_ID)
+    ? new StripeBillingClient(dependencies.env.STRIPE_SECRET_KEY, {
+        base: dependencies.env.STRIPE_PRICE_ID,
+        ...(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID ? { dailySms: dependencies.env.STRIPE_DAILY_SMS_PRICE_ID } : {}),
+        ...(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID ? { realtimeSms: dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID } : {}),
+      })
     : null;
   const deletionService = new DataDeletionService(dependencies.store, dependencies.calendar, recordingClient);
   const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
@@ -556,6 +560,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const subscription = await dependencies.store.getSubscription(account.tenantId);
       if (subscription?.status === "active" || subscription?.status === "trialing") return redirect(response, "/app");
       if (stripeClient) {
+        const config = await dependencies.store.getConfig(account.tenantId);
         const base = dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "");
         const checkoutUrl = await stripeClient.createCheckout({
           tenantId: account.tenantId,
@@ -563,6 +568,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           successUrl: `${base}/app?checkout=success`,
           cancelUrl: `${base}/app?checkout=cancelled`,
           idempotencyKey: `checkout:${account.tenantId}:${randomUUID()}`,
+          dailySms: config.ownerDailySmsEnabled,
+          realtimeSms: config.ownerRealtimeSmsEnabled,
         });
         return redirect(response, checkoutUrl);
       }
@@ -579,6 +586,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         googleAvailable: Boolean(dependencies.env.GOOGLE_CLIENT_ID && dependencies.env.GOOGLE_CLIENT_SECRET),
         googleConnected,
         ownerPhoneConfigured: Boolean(ownerPhone),
+        weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
+        dailySmsAvailable: Boolean(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID),
+        realtimeSmsAvailable: Boolean(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID),
       }, "owner"));
     }
     if (method === "POST" && url.pathname === "/app/config") {
@@ -590,6 +600,21 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       updated.includedMinutes = current.includedMinutes;
       updated.overageCentsPerMinute = current.overageCentsPerMinute;
       updated.customerSmsEnabled = current.customerSmsEnabled;
+      if (updated.ownerWeeklyEmailEnabled && !(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL)) {
+        throw new HttpError(503, "Weekly email delivery is not configured yet");
+      }
+      if (updated.ownerDailySmsEnabled && !dependencies.env.STRIPE_DAILY_SMS_PRICE_ID) throw new HttpError(503, "Daily SMS billing is not configured yet");
+      if (updated.ownerRealtimeSmsEnabled && !dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID) throw new HttpError(503, "Instant lead SMS billing is not configured yet");
+      const addOnsChanged = updated.ownerDailySmsEnabled !== current.ownerDailySmsEnabled
+        || updated.ownerRealtimeSmsEnabled !== current.ownerRealtimeSmsEnabled;
+      let addOnSubscriptionId: string | null = null;
+      if (addOnsChanged) {
+        const subscription = await dependencies.store.getSubscription(account.tenantId);
+        if (subscription?.status === "active" || subscription?.status === "trialing") {
+          if (!stripeClient || !subscription.providerSubscriptionId) throw new HttpError(503, "Subscription add-on billing is not available yet");
+          addOnSubscriptionId = subscription.providerSubscriptionId;
+        }
+      }
       if (account.status !== "active") updated.paused = true;
       const ownerPhone = form.get("ownerPhone")?.trim();
       if (ownerPhone) {
@@ -609,10 +634,24 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         await liveRouteChange.setPaused(updated.paused)
           .catch(() => { throw new HttpError(502, "Telnyx could not change the live phone route; your setting was not changed"); });
       }
+      if (addOnSubscriptionId) {
+        await stripeClient!.syncAddOns(addOnSubscriptionId, {
+          dailySms: updated.ownerDailySmsEnabled,
+          realtimeSms: updated.ownerRealtimeSmsEnabled,
+        }).catch(async (error) => {
+          if (liveRouteChange) await liveRouteChange.setPaused(current.paused).catch(() => undefined);
+          log({ level: "error", event: "owner_addon_sync_failed", tenantId: account.tenantId, error: safeError(error) });
+          throw new HttpError(502, "Stripe could not update the notification add-ons; settings were not changed");
+        });
+      }
       try {
         await dependencies.store.saveConfig(updated);
       } catch (error) {
         if (liveRouteChange) await liveRouteChange.setPaused(current.paused).catch((rollbackError) => log({ level: "error", event: "owner_route_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
+        if (addOnSubscriptionId) await stripeClient!.syncAddOns(addOnSubscriptionId, {
+          dailySms: current.ownerDailySmsEnabled,
+          realtimeSms: current.ownerRealtimeSmsEnabled,
+        }).catch((rollbackError) => log({ level: "error", event: "owner_addon_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
         throw error;
       }
       return redirect(response, "/app/settings");
@@ -1182,6 +1221,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         googleAvailable: Boolean(dependencies.env.GOOGLE_CLIENT_ID && dependencies.env.GOOGLE_CLIENT_SECRET),
         googleConnected,
         ownerPhoneConfigured: Boolean(ownerPhone),
+        weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
+        dailySmsAvailable: Boolean(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID),
+        realtimeSmsAvailable: Boolean(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID),
       }));
     }
     if (method === "POST" && url.pathname === "/admin/config") {
@@ -1445,6 +1487,8 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
   if (!Number.isInteger(minimumLeadTimeMinutes) || minimumLeadTimeMinutes < 0 || minimumLeadTimeMinutes > 10_080) throw new HttpError(400, "Minimum lead time must be 0–10080 minutes");
   const maxCallsPerCallerPerDay = Number(form.get("maxCallsPerCallerPerDay") ?? "0");
   if (!Number.isInteger(maxCallsPerCallerPerDay) || maxCallsPerCallerPerDay < 1 || maxCallsPerCallerPerDay > 20) throw new HttpError(400, "Caller daily limit must be 1–20 calls");
+  const ownerDailySmsHour = Number(form.get("ownerDailySmsHour") ?? current.ownerDailySmsHour);
+  if (!Number.isInteger(ownerDailySmsHour) || ownerDailySmsHour < 0 || ownerDailySmsHour > 23) throw new HttpError(400, "Daily summary hour must be 0–23");
   const holidayDates = list("holidayDates");
   if (holidayDates.some((value) => !isIsoDate(value))) throw new HttpError(400, "Holiday dates must use valid YYYY-MM-DD values");
   return {
@@ -1476,6 +1520,10 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
       return { term: term!.trim().slice(0, 120), spokenAs: rest.join(":").trim().slice(0, 240) };
     }).filter((item) => item.term && item.spokenAs),
     customerSmsEnabled: form.has("customerSmsEnabled"),
+    ownerWeeklyEmailEnabled: form.has("ownerWeeklyEmailEnabled"),
+    ownerDailySmsEnabled: form.has("ownerDailySmsEnabled"),
+    ownerDailySmsHour,
+    ownerRealtimeSmsEnabled: form.has("ownerRealtimeSmsEnabled"),
     requireDiagnosticFeeAcceptance: form.has("requireDiagnosticFeeAcceptance"),
     recordingDisclosure: required("recordingDisclosure").slice(0, 1_000),
     dataRetentionDays,

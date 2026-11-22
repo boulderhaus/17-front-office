@@ -304,6 +304,7 @@ export class TelnyxSmsAdapter implements NotificationPort {
   constructor(private readonly options: TelnyxSmsOptions) {}
 
   async send(notification: OutboxNotification): Promise<{ providerReceipt: string }> {
+    if (notification.channel !== "sms") throw new Error("Telnyx SMS only sends SMS notifications");
     const direct = notification.destinationRef.startsWith("tel:") ? notification.destinationRef.slice(4) : null;
     if (direct && this.options.allowedDirectDestinations && !this.options.allowedDirectDestinations.has(direct)) {
       throw new Error("Direct SMS destination is not allowlisted in provider test mode");

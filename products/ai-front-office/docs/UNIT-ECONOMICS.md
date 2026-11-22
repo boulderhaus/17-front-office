@@ -44,6 +44,14 @@ At 50 connected minutes, the same model is about $8.74 total and 82% contributio
 
 Stripe inputs: [Payments pricing](https://stripe.com/pricing), [Billing pricing](https://stripe.com/billing/pricing).
 
+## Does one recovered job pay for the plan?
+
+Use contribution margin, not net-profit theater. ServiceTitan’s contractor KPI playbook sets an HVAC service target of at least $375 per ticket and at least 72% gross margin. At those benchmarks, one incremental service call contributes about $270 before overhead, enough to cover a $49 month. Fully allocated net profit is different: NREL reports average HVAC-business net margins of roughly 2.5%–5%, which would be only $9–$19 on a $375 ticket.
+
+Approved public wording: **“One recovered $375 service call can cover the month before overhead.”** Never say one average job necessarily nets the subscription price.
+
+Evidence: [ServiceTitan contractor KPI playbook](https://www.servicetitan.com/guides/contractor-playbook/kpi-tracking), [NREL HVAC contractor business-model report](https://www.nrel.gov/docs/fy24osti/88387.pdf).
+
 ## Why the same 200 minutes cannot cost $3 on current Telnyx Voice AI
 
 The Telnyx Voice AI engine alone is $10 for 200 minutes before telephony, model, recording, number, messaging, or hosting. A $3 target therefore requires replacing the managed agent layer with a custom SIP/media pipeline—not a pricing tweak.

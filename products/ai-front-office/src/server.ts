@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { OutboxWorker } from "./application/outbox-worker.js";
 import { CallService } from "./application/call-service.js";
 import { DataDeletionService } from "./application/data-deletion.js";
+import { OwnerSummaryService } from "./application/owner-summary-service.js";
 import { TelnyxRecordingClient } from "./adapters/telnyx.js";
 import { loadEnvironment } from "./config/environment.js";
 import { createRequestHandler } from "./http/app.js";
@@ -25,9 +26,11 @@ const deletion = new DataDeletionService(
   runtime.calendar,
   env.TELNYX_API_KEY ? new TelnyxRecordingClient(env.TELNYX_API_KEY) : null,
 );
+const summaries = new OwnerSummaryService(runtime.store, systemClock, env.PUBLIC_BASE_URL);
 let workerActive = false;
 let nextRecoveryAt = 0;
 let nextRetentionAt = 0;
+let nextSummaryAt = 0;
 const runWorker = async (): Promise<void> => {
   if (workerActive) return;
   workerActive = true;
@@ -59,6 +62,11 @@ const runWorker = async (): Promise<void> => {
       }
       const purgedWebhooks = await runtime.store.purgeWebhookEvents(new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString());
       if (purgedWebhooks > 0) logger({ level: "info", event: "webhook_retention_cycle", purged: purgedWebhooks });
+    }
+    if (Date.now() >= nextSummaryAt) {
+      nextSummaryAt = Date.now() + 60_000;
+      const queued = await summaries.runOnce();
+      if (queued.smsQueued + queued.emailQueued > 0) logger({ level: "info", event: "owner_summaries_queued", ...queued });
     }
   } catch (error) {
     logger({ level: "error", event: "outbox_failed", error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });

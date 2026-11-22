@@ -177,6 +177,10 @@ export interface BusinessConfig {
   includedMinutes: number;
   overageCentsPerMinute: number;
   customerSmsEnabled: boolean;
+  ownerWeeklyEmailEnabled: boolean;
+  ownerDailySmsEnabled: boolean;
+  ownerDailySmsHour: number;
+  ownerRealtimeSmsEnabled: boolean;
   maxCallsPerCallerPerDay: number;
 }
 

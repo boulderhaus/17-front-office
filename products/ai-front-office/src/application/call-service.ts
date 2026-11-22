@@ -625,6 +625,11 @@ export class CallService {
     keyPrefix = "call-summary",
   ): Promise<void> {
     if (call.billingDisposition === "spam_excluded") return;
+    const safetyAlert = call.emergency?.emergency === true
+      || call.outcome === "handoff_queued"
+      || call.outcome === "failed"
+      || keyPrefix === "recovery-summary";
+    if (!safetyAlert && !config.ownerRealtimeSmsEnabled) return;
     const now = this.clock.now().toISOString();
     const ownerPortal = await this.store.getOwnerAccountByTenant(call.tenantId) ? "/app" : "/admin";
     const link = `${this.publicBaseUrl.replace(/\/$/, "")}${ownerPortal}/calls/${encodeURIComponent(call.id)}`;

@@ -67,6 +67,9 @@ describe("HTTP boundary", () => {
     expect(html).toContain("Recent activity");
     expect(html).toContain("Jamie R.");
     expect(html).toContain("Suncoast Heating Demo");
+    expect(html).toContain('class="mobile-app-nav"');
+    expect(html).toContain('grid-template-areas:"inbox" "call" "recent" "activity" "usage"');
+    expect(html.indexOf('id="inbox"')).toBeLessThan(html.indexOf('id="call-preview"'));
     expect(html).not.toContain("task/complete");
     expect(html).not.toContain('method="post"');
   });

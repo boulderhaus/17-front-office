@@ -1,6 +1,6 @@
 # AI Front Office
 
-A narrow, supervised AI receptionist for solo and 1–10-person home-service shops. It answers overflow/after-hours calls, performs deterministic emergency triage, captures a complete request, books only when the configured system of record proves the write, and notifies the owner through a durable SMS outbox.
+A narrow, supervised AI receptionist for solo and 1–10-person home-service shops. It answers overflow/after-hours calls, performs deterministic emergency triage, captures a complete request, books only when the configured system of record proves the write, and routes owner updates through a durable multi-channel outbox.
 
 ## Honest status
 
@@ -11,7 +11,8 @@ The application is buildable, tested, containerized, and deployed to a fail-clos
 - Default to after-hours coverage and owner-confirmation booking.
 - Disclose that the caller is speaking to the owner's AI assistant.
 - Never improvise a price, availability, service promise, or safety instruction.
-- Life-safety and urgent calls bypass booking and alert the owner.
+- Life-safety, urgent, failed, and human-handoff calls bypass paid notification gates and alert the owner immediately.
+- Routine instant lead texts cost $10/month; a daily SMS recap costs $5/month; a Sunday week-ahead email is included when enabled.
 - A verified booking requires: calendar write/read-back, transcript, recording, complete intake, and diagnostic-fee acceptance when enabled. Customer confirmation SMS is an optional carrier-registered add-on, not a Solo-plan dependency.
 - A failure becomes an owned callback with a due time; it never disappears behind a green status.
 - Spam is neither billed nor pushed to the owner.
@@ -50,8 +51,9 @@ Open `http://127.0.0.1:8787/admin` and sign in with `ADMIN_TOKEN`.
 7. Configure named owner destinations and keep `TELNYX_MESSAGING_APPROVED=false` until the account and applicable US A2P campaign are approved.
 8. Keep the service paused, run `npm run simulate:launch`, then use `PROVIDER_TEST_MODE=true` for the live smoke matrix in `docs/LAUNCH-CHECKLIST.md`.
 9. Only after the live smoke matrix passes: record its ISO timestamp in `LIVE_PROVIDER_PROOF_AT`, disable provider-test mode, unpause, and require `/activationz=200` before forwarding the shop's line.
-10. To sell self-serve subscriptions, configure all three `STRIPE_*` variables and register `/webhooks/stripe` in Stripe. Without them, checkout remains hidden or uses the reviewed `FOUNDING_CHECKOUT_URL` fallback.
-11. Optional founder welcomes require explicit signup consent plus `FOUNDER_WELCOME_ENABLED=true`, an approved Telnyx sender in `FOUNDER_WELCOME_FROM_NUMBER`, and `FOUNDER_WELCOME_NAME`. A personal wireless number cannot be assumed to be an approved sender.
+10. To sell self-serve subscriptions, configure `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and `STRIPE_PRICE_ID`, then register `/webhooks/stripe`. Add `STRIPE_DAILY_SMS_PRICE_ID` and `STRIPE_REALTIME_SMS_PRICE_ID` before exposing those paid toggles.
+11. To offer the included Sunday week-ahead email, configure `RESEND_API_KEY` and a verified `RESEND_FROM_EMAIL`. Summary enqueueing is tenant-timezone aware and idempotent.
+12. Optional founder welcomes require explicit signup consent plus `FOUNDER_WELCOME_ENABLED=true`, an approved Telnyx sender in `FOUNDER_WELCOME_FROM_NUMBER`, and `FOUNDER_WELCOME_NAME`. A personal wireless number cannot be assumed to be an approved sender.
 
 ## Architecture
 
@@ -60,7 +62,7 @@ caller -> Telnyx number/assistant -> Ed25519-signed webhook + tools
                          -> deterministic triage
                          -> confirm mode OR Google booking + read-back
                          -> encrypted Postgres record + callback task
-                         -> durable idempotent SMS outbox -> Telnyx -> owner/caller
+                         -> durable idempotent outbox -> Telnyx SMS / Resend email
                          -> isolated owner account, usage meter, and evidence surface
 ```
 

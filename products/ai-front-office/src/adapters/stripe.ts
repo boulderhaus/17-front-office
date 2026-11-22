@@ -9,13 +9,19 @@ export interface StripeEvent {
   data: { object: Record<string, unknown> };
 }
 
-export class StripeBillingClient {
-  constructor(private readonly secretKey: string, private readonly priceId: string, private readonly fetcher: typeof fetch = fetch) {}
+export interface StripePrices {
+  base: string;
+  dailySms?: string;
+  realtimeSms?: string;
+}
 
-  async createCheckout(input: { tenantId: string; email: string; successUrl: string; cancelUrl: string; idempotencyKey: string }): Promise<string> {
+export class StripeBillingClient {
+  constructor(private readonly secretKey: string, private readonly prices: StripePrices, private readonly fetcher: typeof fetch = fetch) {}
+
+  async createCheckout(input: { tenantId: string; email: string; successUrl: string; cancelUrl: string; idempotencyKey: string; dailySms: boolean; realtimeSms: boolean }): Promise<string> {
     const body = new URLSearchParams({
       mode: "subscription",
-      "line_items[0][price]": this.priceId,
+      "line_items[0][price]": this.prices.base,
       "line_items[0][quantity]": "1",
       customer_email: input.email,
       client_reference_id: input.tenantId,
@@ -24,6 +30,9 @@ export class StripeBillingClient {
       success_url: input.successUrl,
       cancel_url: input.cancelUrl,
     });
+    let lineItem = 1;
+    if (input.dailySms) body.set(`line_items[${lineItem++}][price]`, requiredPrice(this.prices.dailySms, "daily SMS"));
+    if (input.realtimeSms) body.set(`line_items[${lineItem}][price]`, requiredPrice(this.prices.realtimeSms, "instant lead SMS"));
     const response = await withTimeout(this.fetcher("https://api.stripe.com/v1/checkout/sessions", {
       method: "POST",
       headers: {
@@ -37,6 +46,47 @@ export class StripeBillingClient {
     if (!response.ok || !payload.url?.startsWith("https://")) throw new Error(`Stripe checkout failed with HTTP ${response.status}${payload.error?.message ? `: ${payload.error.message}` : ""}`);
     return payload.url;
   }
+
+  async syncAddOns(subscriptionId: string, input: { dailySms: boolean; realtimeSms: boolean }): Promise<void> {
+    const response = await withTimeout(this.fetcher(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(subscriptionId)}?expand[]=items.data.price`, {
+      headers: { authorization: `Bearer ${this.secretKey}` },
+    }), 6_000);
+    const payload = await response.json().catch(() => ({})) as {
+      items?: { data?: Array<{ id?: string; price?: { id?: string } }> };
+      error?: { message?: string };
+    };
+    if (!response.ok) throw new Error(`Stripe subscription lookup failed with HTTP ${response.status}${payload.error?.message ? `: ${payload.error.message}` : ""}`);
+    const items = payload.items?.data ?? [];
+    const changes: Array<{ id?: string; price?: string; deleted?: boolean }> = [];
+    for (const [enabled, price, label] of [
+      [input.dailySms, this.prices.dailySms, "daily SMS"],
+      [input.realtimeSms, this.prices.realtimeSms, "instant lead SMS"],
+    ] as const) {
+      if (enabled && !price) throw new Error(`Stripe ${label} price is not configured`);
+      const existing = price ? items.find((item) => item.price?.id === price) : undefined;
+      if (enabled && price && !existing) changes.push({ price });
+      if (!enabled && existing?.id) changes.push({ id: existing.id, deleted: true });
+    }
+    if (changes.length === 0) return;
+    const body = new URLSearchParams({ proration_behavior: "always_invoice", payment_behavior: "error_if_incomplete" });
+    changes.forEach((change, index) => {
+      if (change.id) body.set(`items[${index}][id]`, change.id);
+      if (change.price) body.set(`items[${index}][price]`, change.price);
+      if (change.deleted) body.set(`items[${index}][deleted]`, "true");
+    });
+    const update = await withTimeout(this.fetcher(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${this.secretKey}`, "content-type": "application/x-www-form-urlencoded" },
+      body,
+    }), 6_000);
+    const updated = await update.json().catch(() => ({})) as { id?: string; error?: { message?: string } };
+    if (!update.ok || updated.id !== subscriptionId) throw new Error(`Stripe subscription update failed with HTTP ${update.status}${updated.error?.message ? `: ${updated.error.message}` : ""}`);
+  }
+}
+
+function requiredPrice(value: string | undefined, label: string): string {
+  if (!value) throw new Error(`Stripe ${label} price is not configured`);
+  return value;
 }
 
 export function verifyStripeWebhook(rawBody: string, signatureHeader: string | undefined, secret: string, now = Date.now()): StripeEvent {

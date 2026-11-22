@@ -41,6 +41,10 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     includedMinutes: 200,
     overageCentsPerMinute: 20,
     customerSmsEnabled: false,
+    ownerWeeklyEmailEnabled: false,
+    ownerDailySmsEnabled: false,
+    ownerDailySmsHour: 7,
+    ownerRealtimeSmsEnabled: false,
     maxCallsPerCallerPerDay: 5,
   };
 }

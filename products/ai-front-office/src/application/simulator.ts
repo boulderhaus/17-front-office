@@ -154,7 +154,7 @@ async function createRig(): Promise<Rig> {
   const calendar = new InMemoryCalendar();
   const sender = new CapturingNotificationSender();
   const clock = new MutableClock();
-  await store.saveConfig(createDemoConfig());
+  await store.saveConfig({ ...createDemoConfig(), ownerRealtimeSmsEnabled: true });
   return { store, calendar, sender, clock, service: new CallService(store, calendar, clock, "https://simulator.invalid") };
 }
 

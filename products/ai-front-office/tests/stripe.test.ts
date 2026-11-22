@@ -1,8 +1,32 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it } from "vitest";
-import { subscriptionFromStripeEvent, verifyStripeWebhook } from "../src/adapters/stripe.js";
+import { describe, expect, it, vi } from "vitest";
+import { StripeBillingClient, subscriptionFromStripeEvent, verifyStripeWebhook } from "../src/adapters/stripe.js";
 
 describe("Stripe billing boundary", () => {
+  it("adds selected recurring prices to checkout and safely syncs an active subscription", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ url: "https://checkout.stripe.com/synthetic" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ items: { data: [{ id: "si_daily", price: { id: "price_daily" } }] } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "sub_synthetic" }), { status: 200 }));
+    const fetcher = fetchMock as unknown as typeof fetch;
+    const client = new StripeBillingClient("sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", {
+      base: "price_base", dailySms: "price_daily", realtimeSms: "price_realtime",
+    }, fetcher);
+    await client.createCheckout({
+      tenantId: "shop_synthetic", email: "owner@synthetic.example", successUrl: "https://example.com/success",
+      cancelUrl: "https://example.com/cancel", idempotencyKey: "checkout:synthetic", dailySms: true, realtimeSms: false,
+    });
+    const checkoutBody = fetchMock.mock.calls[0]![1]?.body as URLSearchParams;
+    expect(checkoutBody.get("line_items[0][price]")).toBe("price_base");
+    expect(checkoutBody.get("line_items[1][price]")).toBe("price_daily");
+
+    await client.syncAddOns("sub_synthetic", { dailySms: false, realtimeSms: true });
+    const updateBody = fetchMock.mock.calls[2]![1]?.body as URLSearchParams;
+    expect(updateBody.get("items[0][id]")).toBe("si_daily");
+    expect(updateBody.get("items[0][deleted]")).toBe("true");
+    expect(updateBody.get("items[1][price]")).toBe("price_realtime");
+    expect(updateBody.get("proration_behavior")).toBe("always_invoice");
+  });
   it("accepts a current signed subscription event and maps it to one tenant", () => {
     const secret = "whsec_synthetic_abcdefghijklmnopqrstuvwxyz";
     const now = new Date("2026-11-21T18:00:00.000Z");

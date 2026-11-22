@@ -2,7 +2,9 @@ import { CapturingNotificationSender, InMemoryCalendar, InMemoryStore } from "./
 import { GoogleCalendarAdapter } from "./adapters/google-calendar.js";
 import { PostgresStore } from "./adapters/postgres-store.js";
 import { TelnyxSmsAdapter } from "./adapters/telnyx.js";
-import { UnavailableCalendar, UnavailableNotificationSender } from "./adapters/unavailable.js";
+import { ResendEmailAdapter } from "./adapters/resend.js";
+import { NotificationRouter } from "./adapters/notification-router.js";
+import { UnavailableCalendar } from "./adapters/unavailable.js";
 import { parseOwnerDestinations, type Environment } from "./config/environment.js";
 import { createDemoConfig } from "./domain/config.js";
 import type { CalendarPort, NotificationPort, Store } from "./ports.js";
@@ -71,7 +73,7 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
         calendarId: env.GOOGLE_CALENDAR_ID,
       })
     : new UnavailableCalendar();
-  const sender = telnyxSmsConfigured
+  const smsSender = telnyxSmsConfigured
     ? new TelnyxSmsAdapter({
         apiKey: env.TELNYX_API_KEY!,
         fromNumber: env.TELNYX_FROM_NUMBER!,
@@ -83,12 +85,17 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
         webhookUrl: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx`,
         ...(env.PROVIDER_TEST_MODE ? { allowedDirectDestinations: new Set(Object.values(destinations)) } : {}),
       })
-    : new UnavailableNotificationSender();
+    : null;
+  const emailConfigured = Boolean(env.RESEND_API_KEY && env.RESEND_FROM_EMAIL);
+  const emailSender = emailConfigured
+    ? new ResendEmailAdapter({ apiKey: env.RESEND_API_KEY!, from: env.RESEND_FROM_EMAIL! })
+    : null;
+  const sender = new NotificationRouter(smsSender, emailSender);
   return {
     store,
     calendar,
     sender,
-    integrations: { "Telnyx Voice": telnyxVoiceConfigured, "Google Calendar": googleConfigured, "Telnyx SMS": telnyxSmsConfigured },
+    integrations: { "Telnyx Voice": telnyxVoiceConfigured, "Google Calendar": googleConfigured, "Telnyx SMS": telnyxSmsConfigured, "Weekly Email": emailConfigured },
     close: () => store.close(),
   };
 }
