@@ -124,7 +124,7 @@ async function execute(id: SimulationScenarioId): Promise<Omit<SimulationResult,
     return verdict(booking.status === "pending" && call.outcome === "pending_confirmation" && rig.sender.sent.length === 1, "Pending outcome and owner alert despite calendar failure", `${booking.status}; ${call.outcome}; ${rig.sender.sent.length} alert(s)`);
   }
   if (id === "sms_failure") {
-    await configure(rig, { bookingMode: "direct", priceSnippets: approvedFee() });
+    await configure(rig, { bookingMode: "direct", priceSnippets: approvedFee(), customerSmsEnabled: true });
     await start(rig, id);
     await book(rig, id, "100 Main St, Springfield, IL");
     const call = await rig.service.finalize(summary(id, { requestedStart: "2026-01-15T15:00:00.000Z", explicitSlotConfirmation: true }));

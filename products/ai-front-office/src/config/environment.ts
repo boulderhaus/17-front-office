@@ -39,6 +39,9 @@ const schema = z.object({
     (value) => value === "" ? undefined : value,
     z.string().url().refine((value) => value.startsWith("https://"), "FOUNDING_CHECKOUT_URL must use HTTPS").optional(),
   ),
+  STRIPE_SECRET_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().min(20).optional()),
+  STRIPE_WEBHOOK_SECRET: z.preprocess((value) => value === "" ? undefined : value, z.string().min(20).optional()),
+  STRIPE_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
 });
 
 export type Environment = z.infer<typeof schema>;
@@ -54,6 +57,8 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
   if (parsed.SESSION_SIGNING_KEY && (parsed.SESSION_SIGNING_KEY === parsed.ADMIN_TOKEN || parsed.SESSION_SIGNING_KEY === parsed.TOOL_TOKEN)) {
     throw new Error("SESSION_SIGNING_KEY must be distinct from ADMIN_TOKEN and TOOL_TOKEN");
   }
+  const stripeValues = [parsed.STRIPE_SECRET_KEY, parsed.STRIPE_WEBHOOK_SECRET, parsed.STRIPE_PRICE_ID].filter(Boolean).length;
+  if (stripeValues !== 0 && stripeValues !== 3) throw new Error("STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and STRIPE_PRICE_ID must be configured together");
   if (!parsed.DEMO_MODE) {
     for (const key of ["DATABASE_URL", "DATA_ENCRYPTION_KEY", "SESSION_SIGNING_KEY"] as const) {
       if (!parsed[key]) throw new Error(`${key} is required outside demo mode`);

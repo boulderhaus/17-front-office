@@ -36,15 +36,27 @@ const runWorker = async (): Promise<void> => {
     if (result.sent + result.retried + result.dead > 0) logger({ level: "info", event: "outbox_cycle", ...result });
     if (Date.now() >= nextRecoveryAt) {
       nextRecoveryAt = Date.now() + 30_000;
-      const recovered = await recovery.recoverStaleCalls(env.DEFAULT_TENANT_ID);
-      if (recovered > 0) logger({ level: "warn", event: "stale_calls_recovered", recovered });
+      for (const tenantId of await runtime.store.listTenantIds()) {
+        try {
+          const recovered = await recovery.recoverStaleCalls(tenantId);
+          if (recovered > 0) logger({ level: "warn", event: "stale_calls_recovered", tenantId, recovered });
+        } catch (error) {
+          logger({ level: "error", event: "stale_call_recovery_failed", tenantId, error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });
+        }
+      }
     }
     if (Date.now() >= nextRetentionAt) {
       nextRetentionAt = Date.now() + 60 * 60_000;
-      const config = await runtime.store.getConfig(env.DEFAULT_TENANT_ID);
-      const cutoff = new Date(Date.now() - config.dataRetentionDays * 24 * 60 * 60_000).toISOString();
-      const result = await deletion.deleteExpired(env.DEFAULT_TENANT_ID, cutoff);
-      if (result.deleted > 0 || result.failed > 0) logger({ level: result.failed > 0 ? "error" : "info", event: "retention_cycle", ...result, retentionDays: config.dataRetentionDays });
+      for (const tenantId of await runtime.store.listTenantIds()) {
+        try {
+          const config = await runtime.store.getConfig(tenantId);
+          const cutoff = new Date(Date.now() - config.dataRetentionDays * 24 * 60 * 60_000).toISOString();
+          const result = await deletion.deleteExpired(tenantId, cutoff);
+          if (result.deleted > 0 || result.failed > 0) logger({ level: result.failed > 0 ? "error" : "info", event: "retention_cycle", tenantId, ...result, retentionDays: config.dataRetentionDays });
+        } catch (error) {
+          logger({ level: "error", event: "retention_cycle_failed", tenantId, error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });
+        }
+      }
       const purgedWebhooks = await runtime.store.purgeWebhookEvents(new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString());
       if (purgedWebhooks > 0) logger({ level: "info", event: "webhook_retention_cycle", purged: purgedWebhooks });
     }

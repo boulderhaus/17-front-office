@@ -300,6 +300,7 @@ export class CallService {
     urgent?: EmergencyDecision;
   }): Promise<{ status: "handoff_queued"; transferAvailable: boolean; message: string }> {
     const config = await this.store.getConfig(input.tenantId);
+    const ownerPortal = await this.store.getOwnerAccountByTenant(input.tenantId) ? "/app" : "/admin";
     const existing = await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
     const now = this.clock.now().toISOString();
     const call: CallRecord = {
@@ -332,7 +333,7 @@ export class CallService {
           `${call.fields.callerName ?? "Unknown caller"} · ${call.fields.callbackNumber ?? call.fromNumber}`,
           `Problem: ${call.fields.problemDescription || "not captured"}`,
           ...(input.urgent?.immediateInstruction ? [`Safety: ${input.urgent.immediateInstruction}`] : []),
-          `Review: ${this.publicBaseUrl.replace(/\/$/, "")}/admin/calls/${encodeURIComponent(call.id)}`,
+          `Review: ${this.publicBaseUrl.replace(/\/$/, "")}${ownerPortal}/calls/${encodeURIComponent(call.id)}`,
         ].join("\n"),
         priority: "high",
         state: "pending",
@@ -449,7 +450,7 @@ export class CallService {
     }
 
     let confirmationQueued = false;
-    if (booking?.status === "confirmed") {
+    if (booking?.status === "confirmed" && config.customerSmsEnabled) {
       const confirmation = await this.enqueueCustomerConfirmation(call, booking, config);
       confirmationQueued = confirmation !== null;
       if (confirmation && booking.confirmationNotificationId !== confirmation) {
@@ -507,7 +508,7 @@ export class CallService {
         await this.store.saveCall(call);
         await this.ensureCallbackTask(call, config, "Provider call ended without a final payload", emergency.emergency);
         const callerNumber = call.fields.callbackNumber ?? call.fromNumber;
-        if (isAllowedCustomerNumber(callerNumber)) {
+        if (config.customerSmsEnabled && isAllowedCustomerNumber(callerNumber)) {
           await this.store.enqueueNotification({
             id: randomUUID(), tenantId: call.tenantId, callId: call.id, channel: "sms", destinationRef: `tel:${callerNumber}`,
             body: `${config.businessName}: We may have been disconnected. Your request was saved and the owner will follow up. Reply STOP to opt out.`,
@@ -550,7 +551,7 @@ export class CallService {
     if (!call.fields.serviceCategory?.trim()) flags.push("service_category_missing");
     if (config.requireDiagnosticFeeAcceptance && !call.fields.diagnosticFeeAccepted) flags.push("diagnostic_fee_not_accepted");
     if (booking?.status !== "confirmed" || !booking.writeVerifiedAt) flags.push("system_write_not_verified");
-    if (!confirmationQueued) flags.push("customer_confirmation_not_queued");
+    if (config.customerSmsEnabled && !confirmationQueued) flags.push("customer_confirmation_not_queued");
     return [...new Set(flags)];
   }
 
@@ -605,7 +606,8 @@ export class CallService {
   ): Promise<void> {
     if (call.billingDisposition === "spam_excluded") return;
     const now = this.clock.now().toISOString();
-    const link = `${this.publicBaseUrl.replace(/\/$/, "")}/admin/calls/${encodeURIComponent(call.id)}`;
+    const ownerPortal = await this.store.getOwnerAccountByTenant(call.tenantId) ? "/app" : "/admin";
+    const link = `${this.publicBaseUrl.replace(/\/$/, "")}${ownerPortal}/calls/${encodeURIComponent(call.id)}`;
     const summary = call.fields.problemDescription.trim() || "Problem details were not captured; review the call.";
     const lines = [
       call.emergency?.emergency ? "URGENT CALL" : "New call",

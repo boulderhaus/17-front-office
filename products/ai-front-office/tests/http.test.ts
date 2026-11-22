@@ -380,6 +380,81 @@ describe("HTTP boundary", () => {
     expect(response.status).toBe(403);
   });
 
+  it("creates an isolated owner workspace and lets the owner manage shop hours", async () => {
+    const trapped = await fetch(`${baseUrl}/signup`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ email: "owner@synthetic.example", faxNumber: "bot-filled" }),
+    });
+    expect(trapped.status).toBe(200);
+    expect(await store.getOwnerAccountByEmail("owner@synthetic.example")).toBeNull();
+    const signup = await fetch(`${baseUrl}/signup`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        displayName: "Synthetic Owner",
+        businessName: "Synthetic HVAC",
+        email: "owner@synthetic.example",
+        password: "synthetic-password-42",
+        phone: "(212) 555-0198",
+        timezone: "America/New_York",
+        serviceAreaTerms: "Albany NY, 12207",
+        operationMode: "overflow",
+        greeting: "Thanks for calling Synthetic HVAC. I am the owner's AI assistant.",
+        weekdayStart: "18:00",
+        weekdayEnd: "07:00",
+        bookableWeekdayStart: "08:00",
+        bookableWeekdayEnd: "16:00",
+        serviceCategories: "HVAC repair, maintenance",
+        emergencyKeywords: "gas smell, no heat",
+        weekends: "on",
+        consent: "yes",
+      }),
+    });
+    expect(signup.status).toBe(303);
+    expect(signup.headers.get("location")).toBe("/app");
+    const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
+    expect(signup.headers.get("set-cookie")).toContain("HttpOnly");
+    const account = await store.getOwnerAccountByEmail("owner@synthetic.example");
+    expect(account?.tenantId).not.toBe("demo");
+    const config = await store.getConfig(account!.tenantId);
+    expect(config).toMatchObject({ paused: true, operationMode: "overflow", includedMinutes: 200, customerSmsEnabled: false });
+    expect(config.afterHours).toMatchObject({ weekdayStart: "18:00", weekdayEnd: "07:00", weekends: true });
+    expect(await store.getIntegrationSecret(account!.tenantId, "notifications", "owner-primary")).toBe("+12125550198");
+
+    const dashboard = await fetch(`${baseUrl}/app`, { headers: { cookie } });
+    expect(dashboard.status).toBe(200);
+    expect(await dashboard.text()).toContain("200 included minutes left");
+    const settings = await fetch(`${baseUrl}/app/settings`, { headers: { cookie } });
+    const settingsHtml = await settings.text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(settingsHtml)?.[1];
+    expect(csrf).toBeTruthy();
+    const update = await fetch(`${baseUrl}/app/config`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        csrf: csrf!, businessName: "Synthetic HVAC", timezone: "America/New_York",
+        greeting: "Thanks for calling. I am the owner's AI assistant.", serviceState: "active",
+        bookingMode: "confirm", operationMode: "after_hours", answerAfterRings: "5", flatMonthlyPrice: "49",
+        dataRetentionDays: "30", supportEmail: "owner@synthetic.example", defaultServiceDurationMinutes: "90",
+        emergencyThreshold: "0.7", maxCallsPerCallerPerDay: "5", serviceAreaTerms: "Albany NY, 12207",
+        emergencyKeywords: "gas smell, no heat", serviceCategories: "HVAC repair, maintenance",
+        weekdayStart: "17:30", weekdayEnd: "07:30", bookableWeekdayStart: "08:30", bookableWeekdayEnd: "16:30",
+        minimumLeadTimeMinutes: "120", weekends: "on", recordingDisclosure: "This call may be recorded and handled by an AI assistant.",
+      }),
+    });
+    expect(update.status).toBe(303);
+    const updated = await store.getConfig(account!.tenantId);
+    expect(updated.afterHours.weekdayStart).toBe("17:30");
+    expect(updated.bookableHours.weekdayEnd).toBe("16:30");
+    expect(updated.paused).toBe(true);
+    expect(updated.includedMinutes).toBe(200);
+    expect(updated.overageCentsPerMinute).toBe(20);
+    expect(updated.customerSmsEnabled).toBe(false);
+  });
+
   it("persists owner-approved scripts and coverage rules from the admin form", async () => {
     const login = await fetch(`${baseUrl}/admin/login`, {
       method: "POST",

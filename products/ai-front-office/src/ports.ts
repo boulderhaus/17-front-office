@@ -7,14 +7,20 @@ import type {
   CallRecord,
   CustomerRecord,
   OutboxNotification,
+  OwnerAccount,
+  OwnerWorkspaceInput,
   PilotSignup,
+  ProviderRoute,
+  SubscriptionRecord,
   ToolEvent,
+  UsageSummary,
 } from "./domain/models.js";
 
 export interface Store {
   ping(): Promise<void>;
   withLock<T>(key: string, task: () => Promise<T>): Promise<T>;
   claimWebhook(eventId: string): Promise<boolean>;
+  listTenantIds(): Promise<string[]>;
   getConfig(tenantId: string): Promise<BusinessConfig>;
   saveConfig(config: BusinessConfig): Promise<void>;
   getIntegrationSecret(tenantId: string, provider: string, key: string): Promise<string | null>;
@@ -45,6 +51,18 @@ export interface Store {
   isSmsOptedOut(tenantId: string, phone: string): Promise<boolean>;
   savePilotSignup(signup: PilotSignup): Promise<void>;
   listPilotSignups(limit: number): Promise<PilotSignup[]>;
+  createOwnerWorkspace(input: OwnerWorkspaceInput): Promise<boolean>;
+  getOwnerAccountByEmail(email: string): Promise<OwnerAccount | null>;
+  getOwnerAccountById(accountId: string): Promise<OwnerAccount | null>;
+  getOwnerAccountByTenant(tenantId: string): Promise<OwnerAccount | null>;
+  listOwnerAccounts(limit: number): Promise<OwnerAccount[]>;
+  updateOwnerAccountStatus(accountId: string, status: OwnerAccount["status"], updatedAt: string): Promise<boolean>;
+  getUsageSummary(tenantId: string, periodStart: string, periodEnd: string): Promise<UsageSummary>;
+  saveProviderRoute(route: ProviderRoute): Promise<void>;
+  getProviderRoute(provider: ProviderRoute["provider"], externalId: string): Promise<ProviderRoute | null>;
+  getProviderRouteForTenant(provider: ProviderRoute["provider"], tenantId: string): Promise<ProviderRoute | null>;
+  saveSubscription(subscription: SubscriptionRecord): Promise<void>;
+  getSubscription(tenantId: string): Promise<SubscriptionRecord | null>;
   purgeWebhookEvents(before: string): Promise<number>;
 }
 

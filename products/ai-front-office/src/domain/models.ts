@@ -171,7 +171,54 @@ export interface BusinessConfig {
   dataRetentionDays: number;
   supportEmail: string | null;
   flatMonthlyPriceCents: number;
+  includedMinutes: number;
+  overageCentsPerMinute: number;
+  customerSmsEnabled: boolean;
   maxCallsPerCallerPerDay: number;
+}
+
+export interface OwnerAccount {
+  id: string;
+  tenantId: string;
+  email: string;
+  displayName: string;
+  passwordHash: string;
+  status: "pending_activation" | "active" | "suspended";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OwnerWorkspaceInput {
+  account: OwnerAccount;
+  config: BusinessConfig;
+  ownerPhone: string;
+}
+
+export interface UsageSummary {
+  periodStart: string;
+  periodEnd: string;
+  billableCalls: number;
+  excludedSpamCalls: number;
+  billedMinutes: number;
+}
+
+export interface ProviderRoute {
+  provider: "telnyx";
+  externalId: string;
+  tenantId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SubscriptionRecord {
+  tenantId: string;
+  providerCustomerId: string | null;
+  providerSubscriptionId: string | null;
+  status: "not_started" | "incomplete" | "trialing" | "active" | "past_due" | "canceled" | "unpaid";
+  currentPeriodEnd: string | null;
+  providerEventCreatedAt: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PilotSignup {

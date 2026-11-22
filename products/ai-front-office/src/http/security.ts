@@ -93,7 +93,7 @@ export function adminCookie(session: string, secure: boolean): string {
   return `afo_admin=${encodeURIComponent(session)}; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=28800${secure ? "; Secure" : ""}`;
 }
 
-export function createGoogleOAuthAttempt(adminToken: string, secure: boolean, now = Date.now()): {
+export function createGoogleOAuthAttempt(adminToken: string, secure: boolean, now = Date.now(), cookiePath = "/admin/integrations/google"): {
   state: string;
   challenge: string;
   cookie: string;
@@ -103,7 +103,7 @@ export function createGoogleOAuthAttempt(adminToken: string, secure: boolean, no
   const verifier = randomBytes(32).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
   const cookieValue = Buffer.from(JSON.stringify({ state, verifier })).toString("base64url");
-  const cookie = `afo_google_pkce=${cookieValue}; Path=/admin/integrations/google; HttpOnly; SameSite=Lax; Max-Age=600${secure ? "; Secure" : ""}`;
+  const cookie = `afo_google_pkce=${cookieValue}; Path=${cookiePath}; HttpOnly; SameSite=Lax; Max-Age=600${secure ? "; Secure" : ""}`;
   return { state, challenge, cookie };
 }
 
@@ -122,8 +122,8 @@ export function verifyGoogleOAuthAttempt(state: string | null, cookieValue: stri
   }
 }
 
-export function clearGoogleOAuthCookie(secure: boolean): string {
-  return `afo_google_pkce=; Path=/admin/integrations/google; HttpOnly; SameSite=Lax; Max-Age=0${secure ? "; Secure" : ""}`;
+export function clearGoogleOAuthCookie(secure: boolean, cookiePath = "/admin/integrations/google"): string {
+  return `afo_google_pkce=; Path=${cookiePath}; HttpOnly; SameSite=Lax; Max-Age=0${secure ? "; Secure" : ""}`;
 }
 
 export class RateLimiter {

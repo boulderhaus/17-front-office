@@ -1,6 +1,6 @@
 import pg from "pg";
 import type { Store } from "../ports.js";
-import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, CustomerRecord, OutboxNotification, PilotSignup, ToolEvent } from "../domain/models.js";
+import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, CustomerRecord, OutboxNotification, OwnerAccount, OwnerWorkspaceInput, PilotSignup, ProviderRoute, SubscriptionRecord, ToolEvent, UsageSummary } from "../domain/models.js";
 import { CryptoBox } from "../security/crypto-box.js";
 import { normalizeBusinessConfig } from "../domain/config.js";
 
@@ -52,6 +52,11 @@ export class PostgresStore implements Store {
       [eventId],
     );
     return result.rowCount === 1;
+  }
+
+  async listTenantIds(): Promise<string[]> {
+    const result = await this.#pool.query("SELECT tenant_id FROM business_configs ORDER BY tenant_id");
+    return result.rows.map((row) => String(row.tenant_id));
   }
 
   async getConfig(tenantId: string): Promise<BusinessConfig> {
@@ -386,6 +391,142 @@ export class PostgresStore implements Store {
     return result.rows.map((row) => mapPilotSignup(row as Row, this.cryptoBox));
   }
 
+  async createOwnerWorkspace(input: OwnerWorkspaceInput): Promise<boolean> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO business_configs(tenant_id,config,updated_at) VALUES($1,$2,now())
+         ON CONFLICT (tenant_id) DO UPDATE SET config=EXCLUDED.config,updated_at=now()`,
+        [input.config.tenantId, input.config],
+      );
+      await client.query(
+        `INSERT INTO integration_secrets(tenant_id,provider,secret_key,value_ciphertext,updated_at)
+         VALUES($1,'notifications','owner-primary',$2,now())
+         ON CONFLICT (tenant_id,provider,secret_key) DO UPDATE SET value_ciphertext=EXCLUDED.value_ciphertext,updated_at=now()`,
+        [input.config.tenantId, this.cryptoBox.encrypt(input.ownerPhone)],
+      );
+      await client.query(
+        `INSERT INTO owner_accounts(id,tenant_id,email_hash,email_ciphertext,display_name_ciphertext,password_hash,status,created_at,updated_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [input.account.id, input.account.tenantId, this.cryptoBox.hashLookup(input.account.email), this.cryptoBox.encrypt(input.account.email),
+          this.cryptoBox.encrypt(input.account.displayName), input.account.passwordHash, input.account.status, input.account.createdAt, input.account.updatedAt],
+      );
+      await client.query("COMMIT");
+      return true;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      if (isUniqueViolation(error)) return false;
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getOwnerAccountByEmail(email: string): Promise<OwnerAccount | null> {
+    const result = await this.#pool.query("SELECT * FROM owner_accounts WHERE email_hash=$1", [this.cryptoBox.hashLookup(email)]);
+    return result.rows[0] ? mapOwnerAccount(result.rows[0] as Row, this.cryptoBox) : null;
+  }
+
+  async getOwnerAccountById(accountId: string): Promise<OwnerAccount | null> {
+    const result = await this.#pool.query("SELECT * FROM owner_accounts WHERE id=$1", [accountId]);
+    return result.rows[0] ? mapOwnerAccount(result.rows[0] as Row, this.cryptoBox) : null;
+  }
+
+  async getOwnerAccountByTenant(tenantId: string): Promise<OwnerAccount | null> {
+    const result = await this.#pool.query("SELECT * FROM owner_accounts WHERE tenant_id=$1", [tenantId]);
+    return result.rows[0] ? mapOwnerAccount(result.rows[0] as Row, this.cryptoBox) : null;
+  }
+
+  async listOwnerAccounts(limit: number): Promise<OwnerAccount[]> {
+    const result = await this.#pool.query("SELECT * FROM owner_accounts ORDER BY created_at DESC LIMIT $1", [limit]);
+    return result.rows.map((row) => mapOwnerAccount(row as Row, this.cryptoBox));
+  }
+
+  async updateOwnerAccountStatus(accountId: string, status: OwnerAccount["status"], updatedAt: string): Promise<boolean> {
+    const result = await this.#pool.query("UPDATE owner_accounts SET status=$2,updated_at=$3 WHERE id=$1", [accountId, status, updatedAt]);
+    return result.rowCount === 1;
+  }
+
+  async getUsageSummary(tenantId: string, periodStart: string, periodEnd: string): Promise<UsageSummary> {
+    const result = await this.#pool.query(
+      `SELECT
+         count(*) FILTER (WHERE billing_disposition='billable')::int AS billable_calls,
+         count(*) FILTER (WHERE billing_disposition='spam_excluded')::int AS excluded_spam_calls,
+         COALESCE(sum(ceil(COALESCE(duration_seconds,0)::numeric / 60)) FILTER (WHERE billing_disposition='billable'),0)::int AS billed_minutes
+       FROM calls WHERE tenant_id=$1 AND started_at >= $2 AND started_at < $3`,
+      [tenantId, periodStart, periodEnd],
+    );
+    return {
+      periodStart,
+      periodEnd,
+      billableCalls: Number(result.rows[0]?.billable_calls ?? 0),
+      excludedSpamCalls: Number(result.rows[0]?.excluded_spam_calls ?? 0),
+      billedMinutes: Number(result.rows[0]?.billed_minutes ?? 0),
+    };
+  }
+
+  async saveProviderRoute(route: ProviderRoute): Promise<void> {
+    await this.#pool.query(
+      `INSERT INTO provider_routes(provider,external_id,tenant_id,created_at,updated_at) VALUES($1,$2,$3,$4,$5)
+       ON CONFLICT (provider,external_id) DO UPDATE SET tenant_id=EXCLUDED.tenant_id,updated_at=EXCLUDED.updated_at`,
+      [route.provider, route.externalId, route.tenantId, route.createdAt, route.updatedAt],
+    );
+  }
+
+  async getProviderRoute(provider: ProviderRoute["provider"], externalId: string): Promise<ProviderRoute | null> {
+    const result = await this.#pool.query("SELECT * FROM provider_routes WHERE provider=$1 AND external_id=$2", [provider, externalId]);
+    const row = result.rows[0] as Row | undefined;
+    return row ? {
+      provider: row.provider as ProviderRoute["provider"],
+      externalId: String(row.external_id),
+      tenantId: String(row.tenant_id),
+      createdAt: iso(row.created_at),
+      updatedAt: iso(row.updated_at),
+    } : null;
+  }
+
+  async getProviderRouteForTenant(provider: ProviderRoute["provider"], tenantId: string): Promise<ProviderRoute | null> {
+    const result = await this.#pool.query("SELECT * FROM provider_routes WHERE provider=$1 AND tenant_id=$2 ORDER BY updated_at DESC LIMIT 1", [provider, tenantId]);
+    const row = result.rows[0] as Row | undefined;
+    return row ? {
+      provider: row.provider as ProviderRoute["provider"],
+      externalId: String(row.external_id),
+      tenantId: String(row.tenant_id),
+      createdAt: iso(row.created_at),
+      updatedAt: iso(row.updated_at),
+    } : null;
+  }
+
+  async saveSubscription(subscription: SubscriptionRecord): Promise<void> {
+    await this.#pool.query(
+      `INSERT INTO tenant_subscriptions(tenant_id,provider_customer_id,provider_subscription_id,status,current_period_end,provider_event_created_at,created_at,updated_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (tenant_id) DO UPDATE SET provider_customer_id=EXCLUDED.provider_customer_id,
+         provider_subscription_id=EXCLUDED.provider_subscription_id,status=EXCLUDED.status,
+         current_period_end=EXCLUDED.current_period_end,provider_event_created_at=EXCLUDED.provider_event_created_at,
+         updated_at=EXCLUDED.updated_at
+       WHERE tenant_subscriptions.provider_event_created_at <= EXCLUDED.provider_event_created_at`,
+      [subscription.tenantId, subscription.providerCustomerId, subscription.providerSubscriptionId, subscription.status,
+        subscription.currentPeriodEnd, subscription.providerEventCreatedAt, subscription.createdAt, subscription.updatedAt],
+    );
+  }
+
+  async getSubscription(tenantId: string): Promise<SubscriptionRecord | null> {
+    const result = await this.#pool.query("SELECT * FROM tenant_subscriptions WHERE tenant_id=$1", [tenantId]);
+    const row = result.rows[0] as Row | undefined;
+    return row ? {
+      tenantId: String(row.tenant_id),
+      providerCustomerId: row.provider_customer_id === null ? null : String(row.provider_customer_id),
+      providerSubscriptionId: row.provider_subscription_id === null ? null : String(row.provider_subscription_id),
+      status: row.status as SubscriptionRecord["status"],
+      currentPeriodEnd: row.current_period_end === null ? null : iso(row.current_period_end),
+      providerEventCreatedAt: iso(row.provider_event_created_at),
+      createdAt: iso(row.created_at),
+      updatedAt: iso(row.updated_at),
+    } : null;
+  }
+
   async purgeWebhookEvents(before: string): Promise<number> {
     const result = await this.#pool.query("DELETE FROM webhook_events WHERE received_at < $1", [before]);
     return result.rowCount ?? 0;
@@ -413,6 +554,23 @@ export class PostgresStore implements Store {
       updatedAt: iso(row.updated_at),
     };
   }
+}
+
+function mapOwnerAccount(row: Row, cryptoBox: CryptoBox): OwnerAccount {
+  return {
+    id: String(row.id),
+    tenantId: String(row.tenant_id),
+    email: cryptoBox.decrypt(String(row.email_ciphertext)) ?? "",
+    displayName: cryptoBox.decrypt(String(row.display_name_ciphertext)) ?? "",
+    passwordHash: String(row.password_hash),
+    status: row.status as OwnerAccount["status"],
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  };
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "23505";
 }
 
 function iso(value: unknown): string {

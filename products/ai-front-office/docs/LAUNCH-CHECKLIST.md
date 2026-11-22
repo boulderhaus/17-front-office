@@ -14,7 +14,7 @@
 - Public HTTPS URL and stable DNS.
 - Telnyx Ed25519-signed webhook and every tool reject bad, missing, and stale signatures.
 - Warm transfer succeeds; forced transfer failure creates a callback task.
-- Telnyx sends owner and caller SMS with a stable idempotency key; forced provider failure retries then raises owner alert; opt-out and campaign-compliance behavior are verified.
+- Telnyx sends the owner alert with a stable idempotency key; forced provider failure retries visibly. Test customer SMS only for a shop whose own carrier registration is approved.
 - Google OAuth reconnects; conflict race yields exactly one write; created event is read back.
 - Forwarding/overflow timing works from the real shop number.
 - Carrier/Telnyx coverage hours and ring delay match the admin policy; test business-hours pickup, after-hours pickup, owner-busy overflow, and forwarding failure.
@@ -31,6 +31,8 @@
 
 - The service starts paused; `/readyz=200` is not customer approval. `/activationz` must remain `503` until the complete provider gate is proven.
 - Owner approves greeting, knowledge, pronunciation, service area, emergency rules, fee language, schedule, destination numbers, and callback SLA.
+- Owner signs in, sees only their own tenant, edits their own hours, and confirms the dashboard usage meter.
+- Stripe production price and signed webhook are verified, or the founding customer is explicitly handled through the reviewed manual-payment fallback.
 - Counsel/qualified reviewer approves disclosure and recording consent for operating jurisdictions.
 - Use `PROVIDER_TEST_MODE=true` only on the dedicated test number. Record `LIVE_PROVIDER_PROOF_AT`, disable test mode, and require `/activationz=200` before customer forwarding.
 - Start in confirmation mode for the first 14 days; review transcripts daily; record every correction in the approved knowledge/rules.

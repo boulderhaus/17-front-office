@@ -19,10 +19,11 @@ Sell the outcome against voicemail: “When you cannot answer, it captures the j
 - Trust compounding: confirm mode first; expose the proof; let the owner opt into direct booking only after observed success.
 - Failure honesty: missed bookings, failed texts, ambiguous writes, and dropped calls become tasks instead of hidden errors.
 
-## Pricing hypothesis
+## Launch pricing
 
-- Solo: $49/month, after-hours/overflow, message capture, text summary, Google bridge.
-- Crew: $99/month, direct booking after verification, multiple owner destinations, expanded usage.
-- Publish usage caps and overage before launch. Never silently disable coverage. No setup fee, annual lock-in, or percentage take.
+- Solo: $49/month, 200 connected AI minutes, $0.20/minute after, spam excluded, after-hours/overflow, owner SMS summary, recordings/transcripts, emergency triage, service-area checks, and Google Calendar.
+- Customer-facing SMS is off by default and requires that shop's carrier registration; the Solo plan does not depend on it.
+- Crew remains a later $99 hypothesis for team destinations and higher usage. Do not advertise it until implemented.
+- Never silently disable coverage. No setup fee, annual lock-in, or percentage take.
 
-These prices are a hypothesis to test against Jobber's $29 add-on and standalone products around $49–$199; they are not validated revenue claims.
+The $49 price is a launch hypothesis, not validated revenue. The 200-minute allowance is a ceiling, not a claim that a typical solo shop uses 200 missed-call minutes; pilots must establish the actual distribution.

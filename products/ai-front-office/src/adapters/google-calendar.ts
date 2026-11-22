@@ -6,13 +6,12 @@ import { withTimeout } from "../application/retry.js";
 interface GoogleCalendarOptions {
   clientId: string;
   clientSecret: string;
-  getRefreshToken: () => Promise<string | null>;
+  getRefreshToken: (tenantId: string) => Promise<string | null>;
   calendarId: string;
 }
 
 export class GoogleCalendarAdapter implements CalendarPort {
-  #cachedAccessToken: string | null = null;
-  #accessTokenExpiresAt = 0;
+  readonly #cachedAccessTokens = new Map<string, { token: string; expiresAt: number }>();
 
   constructor(private readonly options: GoogleCalendarOptions) {}
 
@@ -26,7 +25,7 @@ export class GoogleCalendarAdapter implements CalendarPort {
     minimumLeadTimeMinutes: number;
     now: string;
   }): Promise<AvailabilitySlot[]> {
-    const busy = await this.queryBusy(input.windowStart, input.windowEnd);
+    const busy = await this.queryBusy(input.tenantId, input.windowStart, input.windowEnd);
     const slots: AvailabilitySlot[] = [];
     const stepMs = 30 * 60_000;
     const durationMs = input.durationMinutes * 60_000;
@@ -44,11 +43,11 @@ export class GoogleCalendarAdapter implements CalendarPort {
   }
 
   async isFree(input: { tenantId: string; slot: AvailabilitySlot }): Promise<boolean> {
-    return (await this.queryBusy(input.slot.start, input.slot.end)).length === 0;
+    return (await this.queryBusy(input.tenantId, input.slot.start, input.slot.end)).length === 0;
   }
 
   async createEvent(attempt: BookingAttempt): Promise<{ status: "confirmed" | "unknown"; providerEventId: string | null }> {
-    const accessToken = await this.accessToken();
+    const accessToken = await this.accessToken(attempt.tenantId);
     const eventId = createHash("sha256").update(attempt.idempotencyKey).digest("hex").slice(0, 32);
     const response = await withTimeout(fetch(
       `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(this.options.calendarId)}/events?sendUpdates=none`,
@@ -72,8 +71,8 @@ export class GoogleCalendarAdapter implements CalendarPort {
     return { status: "confirmed", providerEventId: event.id ?? eventId };
   }
 
-  async verifyEvent(input: { providerEventId: string; slot: AvailabilitySlot }): Promise<boolean> {
-    const accessToken = await this.accessToken();
+  async verifyEvent(input: { tenantId: string; providerEventId: string; slot: AvailabilitySlot }): Promise<boolean> {
+    const accessToken = await this.accessToken(input.tenantId);
     const response = await withTimeout(fetch(
       `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(this.options.calendarId)}/events/${encodeURIComponent(input.providerEventId)}`,
       { headers: { authorization: `Bearer ${accessToken}` } },
@@ -89,7 +88,7 @@ export class GoogleCalendarAdapter implements CalendarPort {
   }
 
   async deleteEvent(input: { tenantId: string; providerEventId: string }): Promise<void> {
-    const accessToken = await this.accessToken();
+    const accessToken = await this.accessToken(input.tenantId);
     const response = await withTimeout(fetch(
       `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(this.options.calendarId)}/events/${encodeURIComponent(input.providerEventId)}`,
       { method: "DELETE", headers: { authorization: `Bearer ${accessToken}` } },
@@ -97,8 +96,8 @@ export class GoogleCalendarAdapter implements CalendarPort {
     if (response.status !== 404 && !response.ok) throw new Error(`Google Calendar delete failed with HTTP ${response.status}`);
   }
 
-  private async queryBusy(start: string, end: string): Promise<Array<{ start: string; end: string }>> {
-    const accessToken = await this.accessToken();
+  private async queryBusy(tenantId: string, start: string, end: string): Promise<Array<{ start: string; end: string }>> {
+    const accessToken = await this.accessToken(tenantId);
     const response = await withTimeout(fetch("https://www.googleapis.com/calendar/v3/freeBusy", {
       method: "POST",
       headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
@@ -111,9 +110,10 @@ export class GoogleCalendarAdapter implements CalendarPort {
     return calendar.busy ?? [];
   }
 
-  private async accessToken(): Promise<string> {
-    if (this.#cachedAccessToken && this.#accessTokenExpiresAt > Date.now() + 60_000) return this.#cachedAccessToken;
-    const refreshToken = await this.options.getRefreshToken();
+  private async accessToken(tenantId: string): Promise<string> {
+    const cached = this.#cachedAccessTokens.get(tenantId);
+    if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
+    const refreshToken = await this.options.getRefreshToken(tenantId);
     if (!refreshToken) throw new Error("Google Calendar is not connected");
     const body = new URLSearchParams({
       client_id: this.options.clientId,
@@ -129,9 +129,9 @@ export class GoogleCalendarAdapter implements CalendarPort {
     if (!response.ok) throw new Error(`Google OAuth refresh failed with HTTP ${response.status}`);
     const payload = await response.json() as { access_token?: string; expires_in?: number };
     if (!payload.access_token) throw new Error("Google OAuth response did not include an access token");
-    this.#cachedAccessToken = payload.access_token;
-    this.#accessTokenExpiresAt = Date.now() + Math.max(60, payload.expires_in ?? 3_600) * 1_000;
-    return this.#cachedAccessToken;
+    const token = payload.access_token;
+    this.#cachedAccessTokens.set(tenantId, { token, expiresAt: Date.now() + Math.max(60, payload.expires_in ?? 3_600) * 1_000 });
+    return token;
   }
 }
 

@@ -38,6 +38,9 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     dataRetentionDays: 30,
     supportEmail: null,
     flatMonthlyPriceCents: 4900,
+    includedMinutes: 200,
+    overageCentsPerMinute: 20,
+    customerSmsEnabled: false,
     maxCallsPerCallerPerDay: 5,
   };
 }

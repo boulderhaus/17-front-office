@@ -9,8 +9,13 @@ import type {
   CallRecord,
   CustomerRecord,
   OutboxNotification,
+  OwnerAccount,
+  OwnerWorkspaceInput,
   PilotSignup,
+  ProviderRoute,
+  SubscriptionRecord,
   ToolEvent,
+  UsageSummary,
 } from "../domain/models.js";
 import { normalizeBusinessConfig } from "../domain/config.js";
 
@@ -48,6 +53,9 @@ export class InMemoryStore implements Store {
   readonly integrationSecrets = new Map<string, string>();
   readonly smsOptOuts = new Map<string, boolean>();
   readonly pilotSignups = new Map<string, PilotSignup>();
+  readonly ownerAccounts = new Map<string, OwnerAccount>();
+  readonly providerRoutes = new Map<string, ProviderRoute>();
+  readonly subscriptions = new Map<string, SubscriptionRecord>();
   readonly #mutex = new KeyedMutex();
 
   async ping(): Promise<void> {}
@@ -60,6 +68,10 @@ export class InMemoryStore implements Store {
     if (this.webhookEvents.has(eventId)) return false;
     this.webhookEvents.set(eventId, new Date().toISOString());
     return true;
+  }
+
+  async listTenantIds(): Promise<string[]> {
+    return [...this.configs.keys()].sort();
   }
 
   async getConfig(tenantId: string): Promise<BusinessConfig> {
@@ -235,6 +247,75 @@ export class InMemoryStore implements Store {
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
       .slice(0, limit)
       .map((signup) => structuredClone(signup));
+  }
+
+  async createOwnerWorkspace(input: OwnerWorkspaceInput): Promise<boolean> {
+    const emailKey = input.account.email.trim().toLowerCase();
+    if ([...this.ownerAccounts.values()].some((account) => account.email.toLowerCase() === emailKey || account.tenantId === input.account.tenantId)) return false;
+    this.configs.set(input.config.tenantId, structuredClone(input.config));
+    this.integrationSecrets.set(`${input.config.tenantId}:notifications:owner-primary`, input.ownerPhone);
+    this.ownerAccounts.set(input.account.id, structuredClone(input.account));
+    return true;
+  }
+
+  async getOwnerAccountByEmail(email: string): Promise<OwnerAccount | null> {
+    const normalized = email.trim().toLowerCase();
+    return structuredClone([...this.ownerAccounts.values()].find((account) => account.email.toLowerCase() === normalized) ?? null);
+  }
+
+  async getOwnerAccountById(accountId: string): Promise<OwnerAccount | null> {
+    return structuredClone(this.ownerAccounts.get(accountId) ?? null);
+  }
+
+  async getOwnerAccountByTenant(tenantId: string): Promise<OwnerAccount | null> {
+    return structuredClone([...this.ownerAccounts.values()].find((account) => account.tenantId === tenantId) ?? null);
+  }
+
+  async listOwnerAccounts(limit: number): Promise<OwnerAccount[]> {
+    return [...this.ownerAccounts.values()]
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, limit)
+      .map((account) => structuredClone(account));
+  }
+
+  async updateOwnerAccountStatus(accountId: string, status: OwnerAccount["status"], updatedAt: string): Promise<boolean> {
+    const account = this.ownerAccounts.get(accountId);
+    if (!account) return false;
+    this.ownerAccounts.set(accountId, { ...account, status, updatedAt });
+    return true;
+  }
+
+  async getUsageSummary(tenantId: string, periodStart: string, periodEnd: string): Promise<UsageSummary> {
+    const calls = [...this.calls.values()].filter((call) => call.tenantId === tenantId && call.startedAt >= periodStart && call.startedAt < periodEnd);
+    return {
+      periodStart,
+      periodEnd,
+      billableCalls: calls.filter((call) => call.billingDisposition === "billable").length,
+      excludedSpamCalls: calls.filter((call) => call.billingDisposition === "spam_excluded").length,
+      billedMinutes: calls.filter((call) => call.billingDisposition === "billable").reduce((total, call) => total + Math.ceil((call.durationSeconds ?? 0) / 60), 0),
+    };
+  }
+
+  async saveProviderRoute(route: ProviderRoute): Promise<void> {
+    this.providerRoutes.set(`${route.provider}:${route.externalId}`, structuredClone(route));
+  }
+
+  async getProviderRoute(provider: ProviderRoute["provider"], externalId: string): Promise<ProviderRoute | null> {
+    return structuredClone(this.providerRoutes.get(`${provider}:${externalId}`) ?? null);
+  }
+
+  async getProviderRouteForTenant(provider: ProviderRoute["provider"], tenantId: string): Promise<ProviderRoute | null> {
+    return structuredClone([...this.providerRoutes.values()].find((route) => route.provider === provider && route.tenantId === tenantId) ?? null);
+  }
+
+  async saveSubscription(subscription: SubscriptionRecord): Promise<void> {
+    const existing = this.subscriptions.get(subscription.tenantId);
+    if (existing && existing.providerEventCreatedAt > subscription.providerEventCreatedAt) return;
+    this.subscriptions.set(subscription.tenantId, structuredClone(subscription));
+  }
+
+  async getSubscription(tenantId: string): Promise<SubscriptionRecord | null> {
+    return structuredClone(this.subscriptions.get(tenantId) ?? null);
   }
 
   async purgeWebhookEvents(before: string): Promise<number> {

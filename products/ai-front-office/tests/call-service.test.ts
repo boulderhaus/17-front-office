@@ -306,6 +306,7 @@ describe("call outcomes", () => {
   });
 
   it("recovers a dropped call with an owner task and caller text", async () => {
+    await store.saveConfig({ ...await store.getConfig("demo"), customerSmsEnabled: true });
     await start("dropped");
     clock.advance(35 * 60_000 + 1);
     expect(await service.recoverStaleCalls("demo")).toBe(1);
@@ -350,6 +351,7 @@ describe("call outcomes", () => {
     await store.saveConfig({
       ...createDemoConfig(),
       bookingMode: "direct",
+      customerSmsEnabled: true,
       priceSnippets: [{ label: "Diagnostic", text: "The diagnostic visit is $89." }],
     });
   }

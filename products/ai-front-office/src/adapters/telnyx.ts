@@ -292,9 +292,9 @@ interface TelnyxSmsOptions {
   apiKey: string;
   fromNumber: string;
   messagingProfileId?: string;
-  resolveDestination: (reference: string) => Promise<string | null>;
+  resolveDestination: (tenantId: string, reference: string) => Promise<string | null>;
   allowedDirectDestinations?: ReadonlySet<string>;
-  isOptedOut?: (phone: string) => Promise<boolean>;
+  isOptedOut?: (tenantId: string, phone: string) => Promise<boolean>;
   webhookUrl?: string;
   fetcher?: typeof fetch;
 }
@@ -307,9 +307,9 @@ export class TelnyxSmsAdapter implements NotificationPort {
     if (direct && this.options.allowedDirectDestinations && !this.options.allowedDirectDestinations.has(direct)) {
       throw new Error("Direct SMS destination is not allowlisted in provider test mode");
     }
-    const to = direct ?? await this.options.resolveDestination(notification.destinationRef);
+    const to = direct ?? await this.options.resolveDestination(notification.tenantId, notification.destinationRef);
     if (!to || !isAllowedUsNumber(to)) throw new Error(`No valid US phone number is configured for destination reference ${notification.destinationRef}`);
-    if (await this.options.isOptedOut?.(to)) throw new Error("Destination has opted out of SMS");
+    if (await this.options.isOptedOut?.(notification.tenantId, to)) throw new Error("Destination has opted out of SMS");
     const body = {
       from: this.options.fromNumber,
       to,

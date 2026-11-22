@@ -35,9 +35,9 @@ Avoid shops that require live human transfers, Spanish, ServiceTitan customer hi
 | Owner rules | Repeats only approved prices, policies, service categories, and answers |
 | Evidence | Stores encrypted call details, transcript, recording link, outcome, booking evidence, and notification status |
 | Follow-up | Creates an owned callback when automation cannot safely finish |
-| Control | Owner can pause the line, change coverage and booking rules, inspect calls, and delete call data |
-| Signup | Public founding-pilot application; encrypted details appear only in the protected admin |
-| Payment | Optional secure payment-link handoff is implemented but must remain hidden until checkout and launch terms are approved |
+| Control | Each owner has an isolated account to set hours, service area, greeting, rules, prices, and appointment windows; inspect usage/calls; pause; and delete call data |
+| Signup | Self-serve owner workspace plus an assisted activation gate; the line cannot receive customer traffic before provisioning |
+| Payment | Stripe Checkout and signed subscription state are implemented and remain hidden until production credentials/price are configured |
 
 ## What it does not do yet
 
@@ -46,7 +46,7 @@ Avoid shops that require live human transfers, Spanish, ServiceTitan customer hi
 - No Jobber, Housecall Pro, or ServiceTitan write path
 - No mobile app, website chat, outbound campaigns, or CSR coaching
 - No multi-location or shared team permissions
-- No self-serve phone-number provisioning or instant tenant creation
+- No instant self-serve Telnyx number/assistant provisioning; account and tenant creation are self-serve, line activation is assisted
 - No production SMS until the carrier approves the Telnyx campaign
 - No customer traffic until recording language is approved and the live smoke gate passes
 
@@ -72,6 +72,7 @@ Official sources:
 
 Founding plan: $49/month for the first local shops.
 
+- 200 connected AI minutes; $0.20/minute after; spam excluded
 - Assisted setup
 - Overflow or after-hours first
 - Existing number stays in place
@@ -80,7 +81,7 @@ Founding plan: $49/month for the first local shops.
 - Owner-approved service area, prices, and answers
 - Month to month
 
-Do not promise unlimited use, instant self-serve activation, live transfer, direct FSM booking, or a specific revenue result.
+Do not promise unlimited use, instant phone-line activation, live transfer, direct FSM booking, or a specific revenue result.
 
 ## Buyer FAQ
 

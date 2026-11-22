@@ -1,14 +1,16 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { z } from "zod";
-import { renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms } from "../admin/render.js";
+import { renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms } from "../admin/render.js";
 import { buildActivationReport, type ActivationReport } from "../application/readiness.js";
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService } from "../application/call-service.js";
 import { DataDeletionService } from "../application/data-deletion.js";
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
-import type { BusinessConfig, PilotSignup } from "../domain/models.js";
+import { createDemoConfig } from "../domain/config.js";
+import type { BusinessConfig, OwnerAccount, PilotSignup } from "../domain/models.js";
+import { clearOwnerSessionCookie, hashOwnerPassword, mintOwnerSession, ownerSessionCookie, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
 import { buildTelnyxGreeting } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import {
@@ -25,6 +27,7 @@ import {
   toTelnyxTexmlCallSummary,
   verifyTelnyxWebhook,
 } from "../adapters/telnyx.js";
+import { StripeBillingClient, subscriptionFromStripeEvent, verifyStripeWebhook } from "../adapters/stripe.js";
 import {
   adminCookie,
   bearerMatches,
@@ -114,6 +117,29 @@ const pilotSignupSchema = z.object({
   notes: z.string().trim().max(1_500).optional(),
   consent: z.literal("yes"),
 });
+const ownerSignupSchema = z.object({
+  displayName: z.string().trim().min(2).max(120),
+  businessName: z.string().trim().min(2).max(120),
+  email: z.string().trim().toLowerCase().email().max(254),
+  password: z.string().min(12).max(200),
+  phone: z.string().trim().min(7).max(30),
+  timezone: z.string().trim().min(3).max(100),
+  serviceAreaTerms: z.string().trim().min(2).max(800),
+  operationMode: z.enum(["after_hours", "overflow", "always"]),
+  greeting: z.string().trim().min(5).max(500),
+  weekdayStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  weekdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  bookableWeekdayStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  bookableWeekdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  serviceCategories: z.string().trim().min(2).max(800),
+  emergencyKeywords: z.string().trim().min(2).max(800),
+  weekends: z.string().optional(),
+  consent: z.literal("yes"),
+});
+const ownerLoginSchema = z.object({
+  email: z.string().trim().toLowerCase().email().max(254),
+  password: z.string().min(1).max(200),
+});
 
 export interface AppDependencies {
   env: Environment;
@@ -130,7 +156,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   const routingClient = dependencies.env.TELNYX_API_KEY && dependencies.env.TELNYX_FROM_NUMBER && dependencies.env.TELNYX_ASSISTANT_ID
     ? new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: dependencies.env.TELNYX_FROM_NUMBER, assistantId: dependencies.env.TELNYX_ASSISTANT_ID })
     : null;
+  const stripeClient = dependencies.env.STRIPE_SECRET_KEY && dependencies.env.STRIPE_PRICE_ID
+    ? new StripeBillingClient(dependencies.env.STRIPE_SECRET_KEY, dependencies.env.STRIPE_PRICE_ID)
+    : null;
   const deletionService = new DataDeletionService(dependencies.store, dependencies.calendar, recordingClient);
+  const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
   const limiter = new RateLimiter();
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));
 
@@ -165,6 +195,83 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
       return sendHtml(response, 200, renderLanding(config));
     }
+    if (method === "GET" && url.pathname === "/signup") return sendHtml(response, 200, renderOwnerSignup());
+    if (method === "POST" && url.pathname === "/signup") {
+      if (!limiter.allow(`${ip}:owner-signup`, 5, 60 * 60_000)) throw new HttpError(429, "Too many signup attempts from this connection");
+      const form = parseForm(await readBody(request, 48_000));
+      if (form.get("faxNumber")?.trim()) return sendHtml(response, 200, renderOwnerSignup());
+      const values = Object.fromEntries(form.entries());
+      const parsed = ownerSignupSchema.safeParse(values);
+      if (!parsed.success) return sendHtml(response, 400, renderOwnerSignup("Check every required field and use a password with at least 12 characters.", values));
+      const phone = normalizeUsPhone(parsed.data.phone);
+      if (!phone) return sendHtml(response, 400, renderOwnerSignup("Enter a valid US mobile number.", values));
+      try {
+        new Intl.DateTimeFormat("en-US", { timeZone: parsed.data.timezone }).format();
+      } catch {
+        return sendHtml(response, 400, renderOwnerSignup("Choose a valid timezone.", values));
+      }
+      const now = dependencies.clock.now().toISOString();
+      const tenantId = `shop_${randomUUID()}`;
+      const account: OwnerAccount = {
+        id: randomUUID(),
+        tenantId,
+        email: parsed.data.email,
+        displayName: parsed.data.displayName,
+        passwordHash: await hashOwnerPassword(parsed.data.password),
+        status: "pending_activation",
+        createdAt: now,
+        updatedAt: now,
+      };
+      const splitList = (value: string): string[] => value.split(",").map((item) => item.trim()).filter(Boolean).slice(0, 100);
+      const config: BusinessConfig = {
+        ...createDemoConfig(tenantId),
+        paused: true,
+        businessName: parsed.data.businessName,
+        greeting: parsed.data.greeting,
+        timezone: parsed.data.timezone,
+        serviceAreaTerms: splitList(parsed.data.serviceAreaTerms),
+        emergencyKeywords: splitList(parsed.data.emergencyKeywords),
+        serviceCategories: splitList(parsed.data.serviceCategories),
+        operationMode: parsed.data.operationMode,
+        ownerNotificationRefs: ["owner-primary"],
+        ownerTransferNumberRef: "owner-primary",
+        supportEmail: parsed.data.email,
+        afterHours: {
+          weekdayStart: parsed.data.weekdayStart,
+          weekdayEnd: parsed.data.weekdayEnd,
+          weekends: parsed.data.weekends === "on",
+          holidayDates: [],
+        },
+        bookableHours: {
+          weekdayStart: parsed.data.bookableWeekdayStart,
+          weekdayEnd: parsed.data.bookableWeekdayEnd,
+          weekends: parsed.data.weekends === "on",
+        },
+      };
+      const created = await dependencies.store.createOwnerWorkspace({ account, config, ownerPhone: phone });
+      if (!created) return sendHtml(response, 409, renderOwnerSignup("That email already has an account. Sign in instead.", values));
+      const session = mintOwnerSession(account, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
+      response.setHeader("set-cookie", ownerSessionCookie(session, dependencies.env.NODE_ENV === "production"));
+      log({ level: "info", event: "owner_workspace_created", accountId: account.id, tenantId });
+      return redirect(response, "/app");
+    }
+    if (method === "GET" && url.pathname === "/login") return sendHtml(response, 200, renderOwnerLogin());
+    if (method === "POST" && url.pathname === "/login") {
+      if (!limiter.allow(`${ip}:owner-login`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
+      const parsed = ownerLoginSchema.safeParse(Object.fromEntries(parseForm(await readBody(request, 16_000)).entries()));
+      if (!parsed.success) return sendHtml(response, 400, renderOwnerLogin("Enter a valid email and password."));
+      const account = await dependencies.store.getOwnerAccountByEmail(parsed.data.email);
+      const valid = await verifyOwnerPassword(parsed.data.password, account?.passwordHash ?? await dummyOwnerPasswordHash);
+      if (!account || !valid || account.status === "suspended") return sendHtml(response, 401, renderOwnerLogin("Email or password is incorrect."));
+      const session = mintOwnerSession(account, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
+      response.setHeader("set-cookie", ownerSessionCookie(session, dependencies.env.NODE_ENV === "production"));
+      return redirect(response, "/app");
+    }
+    if (method === "GET" && url.pathname === "/logout") {
+      response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
+      return redirect(response, "/");
+    }
+    if (url.pathname.startsWith("/app")) return handleOwner(request, response, url);
     if (method === "GET" && url.pathname === "/start") return sendHtml(response, 200, renderStart());
     if (method === "POST" && url.pathname === "/start") {
       if (!limiter.allow(`${ip}:pilot-signup`, 5, 60 * 60_000)) throw new HttpError(429, "Too many applications from this connection");
@@ -219,6 +326,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return sendHtml(response, 200, renderTerms(await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID)));
     }
     if (method === "POST" && url.pathname === "/webhooks/telnyx") return handleTelnyx(request, response);
+    if (method === "POST" && url.pathname === "/webhooks/stripe") return handleStripe(request, response);
     if (method === "POST" && url.pathname === "/tools/save-intake") return handleIntake(request, response);
     if (method === "POST" && url.pathname === "/tools/check-service-area") return handleServiceArea(request, response);
     if (method === "POST" && url.pathname === "/tools/check-availability") return handleAvailability(request, response);
@@ -227,6 +335,199 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (method === "POST" && url.pathname === "/tools/request-human") return handleHandoff(request, response);
     if (url.pathname.startsWith("/admin")) return handleAdmin(request, response, url);
     throw new HttpError(404, "Not found");
+  }
+
+  async function handleOwner(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    const sessionValue = readCookie(request, "afo_owner");
+    const session = verifyOwnerSession(sessionValue, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
+    if (!session) return redirect(response, "/login");
+    const account = await dependencies.store.getOwnerAccountById(session.accountId);
+    if (!account || account.tenantId !== session.tenantId || account.status === "suspended") {
+      response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
+      return redirect(response, "/login");
+    }
+    const method = request.method ?? "GET";
+    if (method === "GET" && url.pathname === "/app") {
+      const [config, calls, usage, googleConnected, subscription] = await Promise.all([
+        dependencies.store.getConfig(account.tenantId),
+        dependencies.store.listCalls(account.tenantId, 50),
+        dependencies.store.getUsageSummary(account.tenantId, ...currentBillingPeriod(dependencies.clock.now())),
+        isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
+        dependencies.store.getSubscription(account.tenantId),
+      ]);
+      return sendHtml(response, 200, renderOwnerDashboard({
+        account,
+        config,
+        calls,
+        usage,
+        googleConnected,
+        subscription,
+        csrf: session.csrf,
+        checkoutConfigured: Boolean(stripeClient || dependencies.env.FOUNDING_CHECKOUT_URL),
+        checkoutUrl: dependencies.env.FOUNDING_CHECKOUT_URL ?? null,
+      }));
+    }
+    if (method === "POST" && url.pathname === "/app/billing/checkout") {
+      const form = parseForm(await readBody(request, 8_000));
+      if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      const subscription = await dependencies.store.getSubscription(account.tenantId);
+      if (subscription?.status === "active" || subscription?.status === "trialing") return redirect(response, "/app");
+      if (stripeClient) {
+        const base = dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "");
+        const checkoutUrl = await stripeClient.createCheckout({
+          tenantId: account.tenantId,
+          email: account.email,
+          successUrl: `${base}/app?checkout=success`,
+          cancelUrl: `${base}/app?checkout=cancelled`,
+          idempotencyKey: `checkout:${account.tenantId}:${randomUUID()}`,
+        });
+        return redirect(response, checkoutUrl);
+      }
+      if (dependencies.env.FOUNDING_CHECKOUT_URL) return redirect(response, dependencies.env.FOUNDING_CHECKOUT_URL);
+      throw new HttpError(503, "Checkout is not configured yet");
+    }
+    if (method === "GET" && (url.pathname === "/app/settings" || url.pathname === "/app/config")) {
+      const [config, googleConnected, ownerPhone] = await Promise.all([
+        dependencies.store.getConfig(account.tenantId),
+        isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
+        dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary"),
+      ]);
+      return sendHtml(response, 200, renderConfig(config, session.csrf, {
+        googleAvailable: Boolean(dependencies.env.GOOGLE_CLIENT_ID && dependencies.env.GOOGLE_CLIENT_SECRET),
+        googleConnected,
+        ownerPhoneConfigured: Boolean(ownerPhone),
+      }, "owner"));
+    }
+    if (method === "POST" && url.pathname === "/app/config") {
+      const form = parseForm(await readBody(request, 64_000));
+      if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      const current = await dependencies.store.getConfig(account.tenantId);
+      const updated = configFromForm(current, form);
+      updated.flatMonthlyPriceCents = current.flatMonthlyPriceCents;
+      updated.includedMinutes = current.includedMinutes;
+      updated.overageCentsPerMinute = current.overageCentsPerMinute;
+      updated.customerSmsEnabled = current.customerSmsEnabled;
+      if (account.status !== "active") updated.paused = true;
+      const ownerPhone = form.get("ownerPhone")?.trim();
+      if (ownerPhone) {
+        if (!/^\+[1-9]\d{7,14}$/.test(ownerPhone)) throw new HttpError(400, "Owner phone must use E.164 format");
+        await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner-primary", ownerPhone);
+        updated.ownerNotificationRefs = ["owner-primary"];
+        updated.ownerTransferNumberRef = "owner-primary";
+      }
+      let liveRouteChange: TelnyxVoiceRoutingClient | null = null;
+      if (account.status === "active" && updated.paused !== current.paused) {
+        const [route, inboundNumber] = await Promise.all([
+          dependencies.store.getProviderRouteForTenant("telnyx", account.tenantId),
+          dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
+        ]);
+        if (!dependencies.env.TELNYX_API_KEY || !route || !inboundNumber) throw new HttpError(409, "The live phone route is not configured for this shop");
+        liveRouteChange = new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: inboundNumber, assistantId: route.externalId });
+        await liveRouteChange.setPaused(updated.paused)
+          .catch(() => { throw new HttpError(502, "Telnyx could not change the live phone route; your setting was not changed"); });
+      }
+      try {
+        await dependencies.store.saveConfig(updated);
+      } catch (error) {
+        if (liveRouteChange) await liveRouteChange.setPaused(current.paused).catch((rollbackError) => log({ level: "error", event: "owner_route_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
+        throw error;
+      }
+      return redirect(response, "/app/settings");
+    }
+    if (method === "GET" && url.pathname === "/app/integrations/google/start") {
+      if (!dependencies.env.GOOGLE_CLIENT_ID || !dependencies.env.GOOGLE_CLIENT_SECRET) throw new HttpError(503, "Google OAuth is not configured on the server");
+      const cookiePath = "/app/integrations/google";
+      const attempt = createGoogleOAuthAttempt(dependencies.env.SESSION_SIGNING_KEY!, dependencies.env.NODE_ENV === "production", dependencies.clock.now().getTime(), cookiePath);
+      const callback = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app/integrations/google/callback`;
+      const authorization = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+      authorization.search = new URLSearchParams({
+        client_id: dependencies.env.GOOGLE_CLIENT_ID,
+        redirect_uri: callback,
+        response_type: "code",
+        access_type: "offline",
+        prompt: "consent",
+        scope: "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.freebusy",
+        state: attempt.state,
+        code_challenge: attempt.challenge,
+        code_challenge_method: "S256",
+      }).toString();
+      response.setHeader("set-cookie", attempt.cookie);
+      return redirect(response, authorization.toString());
+    }
+    if (method === "GET" && url.pathname === "/app/integrations/google/callback") {
+      const cookiePath = "/app/integrations/google";
+      const verifier = verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, "afo_google_pkce"), dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
+      if (!verifier) throw new HttpError(400, "Google authorization state is invalid or expired");
+      const code = url.searchParams.get("code");
+      if (!code) throw new HttpError(400, "Google did not return an authorization code");
+      const refreshToken = await exchangeGoogleCode(dependencies.env, code, verifier, "/app/integrations/google/callback");
+      await dependencies.store.saveIntegrationSecret(account.tenantId, "google", "refresh_token", refreshToken);
+      response.setHeader("set-cookie", clearGoogleOAuthCookie(dependencies.env.NODE_ENV === "production", cookiePath));
+      return redirect(response, "/app/settings");
+    }
+    const recordingMatch = /^\/app\/provider\/telnyx\/recordings\/(.+)$/.exec(url.pathname);
+    if (method === "GET" && recordingMatch?.[1]) {
+      if (!recordingClient) throw new HttpError(503, "Telnyx recordings are not configured");
+      let providerCallId: string;
+      try {
+        providerCallId = decodeURIComponent(recordingMatch[1]);
+      } catch {
+        throw new HttpError(400, "Invalid recording identifier");
+      }
+      const call = await dependencies.store.getCallByProviderId(providerCallId);
+      if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Recording not found");
+      const downloadUrl = await recordingClient.getDownloadUrl(providerCallId);
+      if (!downloadUrl) throw new HttpError(404, "Recording is not available yet");
+      response.writeHead(302, { location: downloadUrl, "cache-control": "no-store" });
+      response.end();
+      return;
+    }
+    const deleteCallMatch = /^\/app\/calls\/([0-9a-f-]+)\/delete$/i.exec(url.pathname);
+    if (method === "POST" && deleteCallMatch?.[1]) {
+      const form = parseForm(await readBody(request, 16_000));
+      if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      if (form.get("confirm") !== "delete") throw new HttpError(400, "Deletion confirmation is required");
+      const deleted = await deletionService.deleteCall(account.tenantId, deleteCallMatch[1])
+        .catch(() => { throw new HttpError(502, "Provider deletion failed. The local record was retained so deletion can be retried."); });
+      if (!deleted) throw new HttpError(404, "Call not found");
+      return redirect(response, "/app");
+    }
+    const callMatch = /^\/app\/calls\/([0-9a-f-]+)$/i.exec(url.pathname);
+    if (method === "GET" && callMatch?.[1]) {
+      const call = await dependencies.store.getCall(callMatch[1]);
+      if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Call not found");
+      const [config, booking, callbackTask, events, notifications] = await Promise.all([
+        dependencies.store.getConfig(call.tenantId),
+        dependencies.store.getBookingForCall(call.id),
+        dependencies.store.getCallbackTaskForCall(call.id),
+        dependencies.store.listToolEvents(call.id),
+        dependencies.store.listNotifications(call.id),
+      ]);
+      return sendHtml(response, 200, renderCallDetail({ config, call, booking, callbackTask, events, notifications, csrf: session.csrf, surface: "owner" }));
+    }
+    throw new HttpError(404, "Not found");
+  }
+
+  async function handleStripe(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (!dependencies.env.STRIPE_WEBHOOK_SECRET) throw new HttpError(503, "Stripe webhooks are not configured");
+    const rawBody = await readBody(request, 256_000);
+    let event;
+    try {
+      event = verifyStripeWebhook(rawBody, singleHeader(request.headers["stripe-signature"]), dependencies.env.STRIPE_WEBHOOK_SECRET, dependencies.clock.now().getTime());
+    } catch {
+      throw new HttpError(401, "Invalid Stripe webhook signature");
+    }
+    if (event.type === "checkout.session.completed" || event.type.startsWith("customer.subscription.")) {
+      const object = event.data.object;
+      const metadata = object.metadata && typeof object.metadata === "object" ? object.metadata as Record<string, unknown> : {};
+      const tenantId = typeof metadata.tenant_id === "string" ? metadata.tenant_id : typeof object.client_reference_id === "string" ? object.client_reference_id : null;
+      if (!tenantId || !await dependencies.store.getOwnerAccountByTenant(tenantId)) throw new HttpError(400, "Stripe event tenant is not recognized");
+      const record = subscriptionFromStripeEvent(event, await dependencies.store.getSubscription(tenantId), dependencies.clock.now().toISOString());
+      if (record) await dependencies.store.saveSubscription(record);
+    }
+    const firstReceipt = await dependencies.store.claimWebhook(`stripe:${event.id}`);
+    if (!firstReceipt) return sendJson(response, 200, { received: true, duplicate: true });
+    return sendJson(response, 200, { received: true });
   }
 
   async function handleTelnyx(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -238,10 +539,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (callback.callStatus === "conversation_ended" && callback.providerCallId) {
         const existing = await dependencies.store.getCallByProviderId(callback.providerCallId);
         if (existing) {
-          const recordingUrl = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/admin/provider/telnyx/recordings/${encodeURIComponent(callback.providerCallId)}`;
+          const ownerPortal = await dependencies.store.getOwnerAccountByTenant(existing.tenantId) ? "/app" : "/admin";
+          const recordingUrl = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}${ownerPortal}/provider/telnyx/recordings/${encodeURIComponent(callback.providerCallId)}`;
           await service.finalize(toTelnyxTexmlCallSummary(
             rawBody,
-            dependencies.env.DEFAULT_TENANT_ID,
+            existing.tenantId,
             dependencies.clock.now(),
             recordingUrl,
           ));
@@ -282,10 +584,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return sendJson(response, 200, { received: true });
     }
     if (envelope.data.event_type === "assistant.initialization") {
-      await requireOperational();
       const initialization = asTelnyxInitialization(envelope);
-      requireExpectedAssistant(initialization.data.payload.assistant_id);
-      const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
+      const tenantId = await tenantForAssistant(initialization.data.payload.assistant_id);
+      await requireOperational(tenantId);
+      const config = await dependencies.store.getConfig(tenantId);
       const callerPhone = initialization.data.payload.telnyx_end_user_target ?? "unknown";
       const recentCalls = /^\+1[2-9]\d{9}$/.test(callerPhone)
         ? await dependencies.store.countCallsFromNumberSince(config.tenantId, callerPhone, new Date(dependencies.clock.now().getTime() - 24 * 60 * 60_000).toISOString())
@@ -293,7 +595,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const callAccess = recentCalls >= config.maxCallsPerCallerPerDay ? "blocked_daily_limit" : "allowed";
       await service.recordStarted({
         eventId: telnyxEventId(envelope, rawBody),
-        tenantId: dependencies.env.DEFAULT_TENANT_ID,
+        tenantId,
         providerCallId: initialization.data.payload.call_control_id,
         fromNumber: callerPhone,
         fromNumberVerified: initialization.data.payload.telnyx_end_user_target_verified === true,
@@ -318,17 +620,21 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (envelope.data.event_type === "call.conversation.ended") {
       const ended = asTelnyxConversationEnded(envelope);
-      requireExpectedAssistant(ended.data.payload.assistant_id);
+      const routedTenantId = await tenantForAssistant(ended.data.payload.assistant_id);
+      const existing = await dependencies.store.getCallByProviderId(ended.data.payload.call_control_id);
+      const tenantId = existing?.tenantId ?? routedTenantId;
+      if (tenantId !== routedTenantId) throw new HttpError(403, "Webhook assistant does not match the call tenant");
       const recordingAvailable = recordingClient
         ? await recordingClient.getDownloadUrl(ended.data.payload.call_control_id).then(Boolean).catch(() => false)
         : false;
+      const ownerPortal = await dependencies.store.getOwnerAccountByTenant(tenantId) ? "/app" : "/admin";
       const recordingUrl = recordingAvailable
-        ? `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/admin/provider/telnyx/recordings/${encodeURIComponent(ended.data.payload.call_control_id)}`
+        ? `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}${ownerPortal}/provider/telnyx/recordings/${encodeURIComponent(ended.data.payload.call_control_id)}`
         : null;
       const summary = toTelnyxCallSummary(
         ended,
         rawBody,
-        dependencies.env.DEFAULT_TENANT_ID,
+        tenantId,
         dependencies.clock.now(),
         recordingUrl,
       );
@@ -347,11 +653,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const rawBody = await readBody(request);
     requireProviderAuth(request, rawBody);
     enforceProviderRate(request, "tool:save-intake");
-    await requireOperational();
     const input = intakeSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
+    const tenantId = await tenantForCall(input.provider_call_id);
+    await requireOperational(tenantId);
     const result = await service.saveIntake({
-      tenantId: await tenantForCall(input.provider_call_id),
+      tenantId,
       providerCallId: input.provider_call_id,
       fromNumber: input.from_number,
       fields: {
@@ -378,11 +685,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const rawBody = await readBody(request);
     requireProviderAuth(request, rawBody);
     enforceProviderRate(request, "tool:check-availability");
-    await requireOperational();
     const input = availabilitySchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
+    const tenantId = await tenantForCall(input.provider_call_id);
+    await requireOperational(tenantId);
     const result = await service.checkAvailability({
-      tenantId: await tenantForCall(input.provider_call_id),
+      tenantId,
       providerCallId: input.provider_call_id,
       windowStart: input.window_start,
       windowEnd: input.window_end,
@@ -394,11 +702,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const rawBody = await readBody(request);
     requireProviderAuth(request, rawBody);
     enforceProviderRate(request, "tool:check-service-area");
-    await requireOperational();
     const input = serviceAreaSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
+    const tenantId = await tenantForCall(input.provider_call_id);
+    await requireOperational(tenantId);
     const result = await service.checkServiceArea({
-      tenantId: await tenantForCall(input.provider_call_id),
+      tenantId,
       providerCallId: input.provider_call_id,
       address: input.address,
     });
@@ -409,11 +718,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const rawBody = await readBody(request);
     requireProviderAuth(request, rawBody);
     enforceProviderRate(request, "tool:triage");
-    await requireOperational();
     const input = triageSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
+    const tenantId = await tenantForCall(input.provider_call_id);
+    await requireOperational(tenantId);
     const result = await service.triageCall({
-      tenantId: await tenantForCall(input.provider_call_id),
+      tenantId,
       providerCallId: input.provider_call_id,
       fromNumber: input.from_number,
       problemDescription: input.problem_description,
@@ -428,11 +738,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const rawBody = await readBody(request);
     requireProviderAuth(request, rawBody);
     enforceProviderRate(request, "tool:book");
-    await requireOperational();
     const input = bookingSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
+    const tenantId = await tenantForCall(input.provider_call_id);
+    await requireOperational(tenantId);
     const result = await service.bookConfirmedSlot({
-      tenantId: await tenantForCall(input.provider_call_id),
+      tenantId,
       providerCallId: input.provider_call_id,
       slotStart: input.slot_start,
       callerName: input.caller_name,
@@ -450,10 +761,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const rawBody = await readBody(request);
     requireProviderAuth(request, rawBody);
     enforceProviderRate(request, "tool:request-human");
-    await requireOperational();
     const input = handoffSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
+    await requireOperational(tenantId);
     if (input.reason === "explicit_request") {
       if (!isExplicitHumanRequest(input.caller_quote)) {
         throw new HttpError(409, "Human handoff requires the caller's explicit request for a person");
@@ -561,6 +872,71 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (method === "GET" && url.pathname === "/admin/signups") {
       return sendHtml(response, 200, renderPilotSignups(await dependencies.store.listPilotSignups(200)));
     }
+    if (method === "GET" && url.pathname === "/admin/owners") {
+      return sendHtml(response, 200, renderOwnerAccounts(await dependencies.store.listOwnerAccounts(200), csrf));
+    }
+    const ownerStatusMatch = /^\/admin\/owners\/([0-9a-f-]+)\/status$/i.exec(url.pathname);
+    if (method === "POST" && ownerStatusMatch?.[1]) {
+      const form = parseForm(await readBody(request, 16_000));
+      if (!bearer && (!session || !verifyCsrf(session, form.get("csrf"), dependencies.env.SESSION_SIGNING_KEY!))) throw new HttpError(403, "Invalid CSRF token");
+      const status = form.get("status");
+      if (status !== "pending_activation" && status !== "active" && status !== "suspended") throw new HttpError(400, "Invalid owner status");
+      const account = await dependencies.store.getOwnerAccountById(ownerStatusMatch[1]);
+      if (!account) throw new HttpError(404, "Owner account not found");
+      const config = await dependencies.store.getConfig(account.tenantId);
+      if (status === "active") {
+        const assistantId = form.get("assistantId")?.trim();
+        const inboundNumber = form.get("inboundNumber")?.trim();
+        if (!assistantId) throw new HttpError(400, "An existing Telnyx assistant ID is required for activation");
+        if (!inboundNumber || !/^\+[1-9]\d{7,14}$/.test(inboundNumber)) throw new HttpError(400, "A dedicated Telnyx number in E.164 format is required for activation");
+        const providerBlockers = [
+          !dependencies.env.TELNYX_API_KEY && "Telnyx API key",
+          !dependencies.env.TELNYX_PUBLIC_KEY && "Telnyx webhook verification",
+          !dependencies.env.TELNYX_FROM_NUMBER && "Telnyx SMS sender",
+          !dependencies.env.TELNYX_MESSAGING_PROFILE_ID && "Telnyx messaging profile",
+          !dependencies.env.TELNYX_MESSAGING_APPROVED && "approved owner-alert messaging",
+          !dependencies.env.RECORDING_CONSENT_APPROVED && "recording-consent approval",
+          !dependencies.env.LIVE_PROVIDER_PROOF_AT && "recorded live-provider proof",
+          dependencies.env.PROVIDER_TEST_MODE && "provider test mode must be disabled",
+        ].filter(Boolean) as string[];
+        if (providerBlockers.length > 0) throw new HttpError(409, `Live provider prerequisites are missing: ${providerBlockers.join(", ")}`);
+        const [ownerPhone, googleConnected, subscription] = await Promise.all([
+          dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary"),
+          isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
+          dependencies.store.getSubscription(account.tenantId),
+        ]);
+        if (!ownerPhone || !googleConnected || config.serviceAreaTerms.length === 0) throw new HttpError(409, "Owner phone, Google Calendar, and service area must be configured before activation");
+        if (stripeClient && subscription?.status !== "active" && subscription?.status !== "trialing") throw new HttpError(409, "An active subscription is required before activation");
+        const existingRoute = await dependencies.store.getProviderRoute("telnyx", assistantId);
+        if (existingRoute && existingRoute.tenantId !== account.tenantId) throw new HttpError(409, "That Telnyx assistant is already assigned to another tenant");
+        const liveRoute = new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY!, phoneNumber: inboundNumber, assistantId });
+        await liveRoute.setPaused(false)
+          .catch(() => { throw new HttpError(502, "Telnyx could not verify and connect that assistant and phone number"); });
+        const now = dependencies.clock.now().toISOString();
+        try {
+          await dependencies.store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", inboundNumber);
+          await dependencies.store.saveProviderRoute({ provider: "telnyx", externalId: assistantId, tenantId: account.tenantId, createdAt: existingRoute?.createdAt ?? now, updatedAt: now });
+          await dependencies.store.saveConfig({ ...config, paused: false });
+          await dependencies.store.updateOwnerAccountStatus(account.id, status, now);
+        } catch (error) {
+          await liveRoute.setPaused(true).catch((rollbackError) => log({ level: "error", event: "owner_activation_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
+          throw error;
+        }
+      } else {
+        const [route, inboundNumber] = await Promise.all([
+          dependencies.store.getProviderRouteForTenant("telnyx", account.tenantId),
+          dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
+        ]);
+        if (route && inboundNumber && dependencies.env.TELNYX_API_KEY) {
+          await new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: inboundNumber, assistantId: route.externalId })
+            .setPaused(true)
+            .catch(() => { throw new HttpError(502, "Telnyx could not disconnect the live phone route; account status was not changed"); });
+        }
+        await dependencies.store.saveConfig({ ...config, paused: true });
+        await dependencies.store.updateOwnerAccountStatus(account.id, status, dependencies.clock.now().toISOString());
+      }
+      return redirect(response, "/admin/owners");
+    }
     if (method === "GET" && url.pathname === "/admin/config") {
       const [config, googleConnected, ownerPhone] = await Promise.all([
         dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID),
@@ -657,10 +1033,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (!verified) throw new HttpError(401, "Invalid Telnyx webhook signature");
   }
 
-  function requireExpectedAssistant(assistantId: string): void {
-    if (dependencies.env.TELNYX_ASSISTANT_ID && assistantId !== dependencies.env.TELNYX_ASSISTANT_ID) {
-      throw new HttpError(403, "Webhook assistant does not match this deployment");
+  async function tenantForAssistant(assistantId: string): Promise<string> {
+    const route = await dependencies.store.getProviderRoute("telnyx", assistantId);
+    if (route) return route.tenantId;
+    if (assistantId === dependencies.env.TELNYX_ASSISTANT_ID || (dependencies.env.DEMO_MODE && !dependencies.env.TELNYX_ASSISTANT_ID)) {
+      return dependencies.env.DEFAULT_TENANT_ID;
     }
+    throw new HttpError(403, "Webhook assistant is not assigned to a tenant");
   }
 
   function requireMatchingCallHeader(request: IncomingMessage, providerCallId: string): void {
@@ -695,11 +1074,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     });
   }
 
-  async function requireOperational(): Promise<void> {
+  async function requireOperational(tenantId = dependencies.env.DEFAULT_TENANT_ID): Promise<void> {
     if (dependencies.env.DEMO_MODE) return;
-    const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
+    const config = await dependencies.store.getConfig(tenantId);
     if (config.paused) throw new HttpError(503, "Service is paused");
     if (dependencies.env.PROVIDER_TEST_MODE) return;
+    if (tenantId !== dependencies.env.DEFAULT_TENANT_ID) return;
     const report = await getActivationReport();
     if (!report.go) throw new HttpError(503, "Commercial activation gate is not satisfied");
   }
@@ -739,7 +1119,15 @@ function routeKey(pathname: string): string {
   if (pathname === "/webhooks/telnyx") return "webhook:telnyx";
   if (pathname.startsWith("/tools/")) return `tool:${pathname.slice(7)}`;
   if (pathname.startsWith("/admin/calls/")) return "admin:call";
+  if (pathname.startsWith("/app/calls/")) return "owner:call";
+  if (pathname.startsWith("/app")) return "owner:app";
   return pathname;
+}
+
+function currentBillingPeriod(now: Date): [string, string] {
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  return [start.toISOString(), end.toISOString()];
 }
 
 function normalizeUsPhone(value: string): string | null {
@@ -852,6 +1240,7 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
       const [term, ...rest] = line.split(":");
       return { term: term!.trim().slice(0, 120), spokenAs: rest.join(":").trim().slice(0, 240) };
     }).filter((item) => item.term && item.spokenAs),
+    customerSmsEnabled: form.has("customerSmsEnabled"),
     requireDiagnosticFeeAcceptance: form.has("requireDiagnosticFeeAcceptance"),
     recordingDisclosure: required("recordingDisclosure").slice(0, 1_000),
     dataRetentionDays,
@@ -888,12 +1277,12 @@ function safeError(error: unknown): string {
   return "Unknown error";
 }
 
-async function isGoogleConnected(env: Environment, store: Store): Promise<boolean> {
-  return Boolean(await store.getIntegrationSecret(env.DEFAULT_TENANT_ID, "google", "refresh_token") || env.GOOGLE_REFRESH_TOKEN);
+async function isGoogleConnected(env: Environment, store: Store, tenantId = env.DEFAULT_TENANT_ID): Promise<boolean> {
+  return Boolean(await store.getIntegrationSecret(tenantId, "google", "refresh_token") || (tenantId === env.DEFAULT_TENANT_ID && env.GOOGLE_REFRESH_TOKEN));
 }
 
-async function exchangeGoogleCode(env: Environment, code: string, verifier: string): Promise<string> {
-  const callback = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/admin/integrations/google/callback`;
+async function exchangeGoogleCode(env: Environment, code: string, verifier: string, callbackPath = "/admin/integrations/google/callback"): Promise<string> {
+  const callback = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}${callbackPath}`;
   const response = await withTimeout(fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
