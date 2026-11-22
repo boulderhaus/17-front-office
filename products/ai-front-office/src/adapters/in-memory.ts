@@ -270,7 +270,7 @@ export class InMemoryStore implements Store {
     const emailKey = input.account.email.trim().toLowerCase();
     if ([...this.ownerAccounts.values()].some((account) => account.email.toLowerCase() === emailKey || account.tenantId === input.account.tenantId)) return false;
     this.configs.set(input.config.tenantId, structuredClone(input.config));
-    this.integrationSecrets.set(`${input.config.tenantId}:notifications:owner-primary`, input.ownerPhone);
+    if (input.ownerPhone) this.integrationSecrets.set(`${input.config.tenantId}:notifications:owner-primary`, input.ownerPhone);
     this.ownerAccounts.set(input.account.id, structuredClone(input.account));
     return true;
   }

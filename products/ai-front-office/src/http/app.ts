@@ -124,7 +124,7 @@ const ownerSignupSchema = z.object({
   businessName: z.string().trim().min(2).max(120),
   email: z.string().trim().toLowerCase().email().max(254),
   password: z.string().min(12).max(200),
-  phone: z.string().trim().min(7).max(30),
+  phone: z.string().trim().max(30).optional(),
   timezone: z.string().trim().min(3).max(100),
   serviceAreaTerms: z.string().trim().min(2).max(800),
   operationMode: z.enum(["after_hours", "overflow", "always"]),
@@ -136,7 +136,7 @@ const ownerSignupSchema = z.object({
   serviceCategories: z.string().trim().min(2).max(800),
   emergencyKeywords: z.string().trim().min(2).max(800),
   weekends: z.string().optional(),
-  ownerSmsConsent: z.literal("yes"),
+  ownerSmsConsent: z.literal("yes").optional(),
   founderSmsConsent: z.literal("yes").optional(),
   consent: z.literal("yes"),
 });
@@ -376,8 +376,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const values = Object.fromEntries(form.entries());
       const parsed = ownerSignupSchema.safeParse(values);
       if (!parsed.success) return sendHtml(response, 400, renderOwnerSignup("Check every required field and use a password with at least 12 characters.", values));
-      const phone = normalizeUsPhone(parsed.data.phone);
-      if (!phone) return sendHtml(response, 400, renderOwnerSignup("Enter a valid US mobile number.", values));
+      const phoneInput = parsed.data.phone?.trim() ?? "";
+      const phone = phoneInput ? normalizeUsPhone(phoneInput) : null;
+      if (phoneInput && !phone) return sendHtml(response, 400, renderOwnerSignup("Enter a valid US mobile number.", values));
+      if ((parsed.data.ownerSmsConsent === "yes" || parsed.data.founderSmsConsent === "yes") && !phone) {
+        return sendHtml(response, 400, renderOwnerSignup("Add a valid US mobile number to receive text messages.", values));
+      }
       try {
         new Intl.DateTimeFormat("en-US", { timeZone: parsed.data.timezone }).format();
       } catch {
@@ -406,8 +410,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         emergencyKeywords: splitList(parsed.data.emergencyKeywords),
         serviceCategories: splitList(parsed.data.serviceCategories),
         operationMode: parsed.data.operationMode,
-        ownerNotificationRefs: ["owner-primary"],
-        ownerTransferNumberRef: "owner-primary",
+        ownerNotificationRefs: parsed.data.ownerSmsConsent === "yes" ? ["owner-primary"] : [],
+        ownerTransferNumberRef: phone ? "owner-primary" : null,
         supportEmail: parsed.data.email,
         afterHours: {
           weekdayStart: parsed.data.weekdayStart,

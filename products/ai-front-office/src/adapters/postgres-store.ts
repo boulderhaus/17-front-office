@@ -424,12 +424,14 @@ export class PostgresStore implements Store {
          ON CONFLICT (tenant_id) DO UPDATE SET config=EXCLUDED.config,updated_at=now()`,
         [input.config.tenantId, input.config],
       );
-      await client.query(
-        `INSERT INTO integration_secrets(tenant_id,provider,secret_key,value_ciphertext,updated_at)
-         VALUES($1,'notifications','owner-primary',$2,now())
-         ON CONFLICT (tenant_id,provider,secret_key) DO UPDATE SET value_ciphertext=EXCLUDED.value_ciphertext,updated_at=now()`,
-        [input.config.tenantId, this.cryptoBox.encrypt(input.ownerPhone)],
-      );
+      if (input.ownerPhone) {
+        await client.query(
+          `INSERT INTO integration_secrets(tenant_id,provider,secret_key,value_ciphertext,updated_at)
+           VALUES($1,'notifications','owner-primary',$2,now())
+           ON CONFLICT (tenant_id,provider,secret_key) DO UPDATE SET value_ciphertext=EXCLUDED.value_ciphertext,updated_at=now()`,
+          [input.config.tenantId, this.cryptoBox.encrypt(input.ownerPhone)],
+        );
+      }
       await client.query(
         `INSERT INTO owner_accounts(id,tenant_id,email_hash,email_ciphertext,display_name_ciphertext,password_hash,status,created_at,updated_at)
          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,

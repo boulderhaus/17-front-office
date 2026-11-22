@@ -584,6 +584,38 @@ describe("HTTP boundary", () => {
     expect(updated.customerSmsEnabled).toBe(false);
   });
 
+  it("allows account creation without optional SMS enrollment", async () => {
+    const signup = await fetch(`${baseUrl}/signup`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        displayName: "No SMS Owner",
+        businessName: "No SMS HVAC",
+        email: "no-sms@synthetic.example",
+        password: "synthetic-password-42",
+        timezone: "America/New_York",
+        serviceAreaTerms: "Albany NY, 12207",
+        operationMode: "overflow",
+        greeting: "Thanks for calling No SMS HVAC. I am the owner's AI assistant.",
+        weekdayStart: "18:00",
+        weekdayEnd: "07:00",
+        bookableWeekdayStart: "08:00",
+        bookableWeekdayEnd: "16:00",
+        serviceCategories: "HVAC repair, maintenance",
+        emergencyKeywords: "gas smell, no heat",
+        consent: "yes",
+      }),
+    });
+    expect(signup.status).toBe(303);
+    const account = await store.getOwnerAccountByEmail("no-sms@synthetic.example");
+    expect(account).not.toBeNull();
+    const config = await store.getConfig(account!.tenantId);
+    expect(config.ownerNotificationRefs).toEqual([]);
+    expect(config.ownerTransferNumberRef).toBeNull();
+    expect(await store.getIntegrationSecret(account!.tenantId, "notifications", "owner-primary")).toBeNull();
+  });
+
   it("persists owner-approved scripts and coverage rules from the admin form", async () => {
     const login = await fetch(`${baseUrl}/admin/login`, {
       method: "POST",
@@ -660,6 +692,10 @@ describe("HTTP boundary", () => {
     const signupPage = await (await fetch(`${baseUrl}/signup`)).text();
     expect(signupPage).toContain("Message frequency varies");
     expect(signupPage).toContain('name="ownerSmsConsent"');
+    expect(signupPage).toContain("Mobile number <span class=\"small\">(optional)</span>");
+    expect(signupPage).toContain("Consent is not a condition of purchase");
+    expect(signupPage).toContain("We do not share mobile information with third parties for marketing or promotional purposes");
+    expect(signupPage).not.toContain('name="ownerSmsConsent" type="checkbox" value="yes" required');
     expect(signupPage).toContain("hearing a test call yourself is optional");
     expect(signupPage).not.toContain("stays off until you test and approve it");
     const privacy = await fetch(`${baseUrl}/privacy`);

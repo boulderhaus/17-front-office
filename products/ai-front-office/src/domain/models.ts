@@ -198,7 +198,7 @@ export interface OwnerAccount {
 export interface OwnerWorkspaceInput {
   account: OwnerAccount;
   config: BusinessConfig;
-  ownerPhone: string;
+  ownerPhone: string | null;
 }
 
 export interface UsageSummary {
