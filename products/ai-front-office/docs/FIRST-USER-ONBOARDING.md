@@ -20,5 +20,5 @@
 
 - Confirmation mode only; review transcripts and failures daily.
 - Keep the pause switch and carrier rollback instructions available to the owner.
-- Reconcile manual billing; do not describe the plan as an automated subscription.
+- Confirm the Stripe base subscription is active when Stripe is configured; otherwise keep billing assisted. Usage overages remain a separate visible monthly invoice.
 - Enable direct booking only after the owner signs off on observed calls and the complete booking evidence contract consistently passes.
