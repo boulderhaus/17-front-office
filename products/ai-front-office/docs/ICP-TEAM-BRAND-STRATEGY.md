@@ -14,18 +14,32 @@ The first buyer is a solo owner or 1–5-truck HVAC shop where the owner still a
 
 The current $49 plan supports that centralized model: one shared line, one shared Google Calendar, one owner/dispatcher alert destination, 200 connected AI minutes, and no per-employee charge. It does **not** support five independent users, five calendars, round-robin assignment, or on-call rotations.
 
-## Five-person plan decision
+## Team and five-person pricing decision
 
-Keep the $49 Shared Line plan for any shop that uses one dispatcher. A later $99 Crew plan is viable only after these features exist and pass live tests:
+Price team access separately from call usage because an additional login or calendar has little marginal infrastructure cost; connected voice minutes remain the main cost driver.
 
-- up to five named users with owner, dispatcher, and technician permissions;
-- multiple calendars with availability-aware round-robin or priority routing;
-- rotating on-call schedule and emergency escalation order;
-- per-call assignment, reassignment, and acknowledgements;
-- 400 included connected minutes;
+| Offer | Price | Included |
+|---|---:|---|
+| Shared Line | $49/month | Owner account, one calendar, one dispatcher destination, 200 connected minutes |
+| Active teammate | +$5/month each | Login, personal calendar and availability, round-robin eligibility, job assignment and acknowledgement; no added voice minutes |
+| Crew bundle | $99/month | Up to 10 people, 400 connected minutes, on-call rotation, multiple alert destinations, and priority routing |
+
+A five-person shop can pay $69 for the owner plus four teammate seats while retaining the 200-minute allowance. It can choose the $99 Crew bundle when the extra 200 minutes and dispatch controls are worth more than the difference. Do not impose a $99 cliff merely because a fourth person joins; the usage and workflow bundle should earn the upgrade.
+
+Team functionality is not live until these capabilities exist and pass production tests:
+
+- named owner, dispatcher, and technician roles;
+- per-user Google Calendar authorization and visible connection health;
+- availability-aware round-robin or priority-first assignment;
+- rotating on-call schedule and deterministic emergency escalation order;
+- per-call assignment, reassignment, and acknowledgement history;
+- tenant-scoped invitations, removal, and access revocation;
+- billing that adds or removes the $5 seat only after the corresponding membership change succeeds;
 - multiple alert destinations without blasting the whole crew.
 
-Do not sell Crew before those capabilities exist. At the current ~$0.0636/minute voice cost, 400 voice minutes cost about $25.44; a $99 plan can retain roughly the same contribution-margin shape as Solo after payment, messaging, and shared infrastructure allowances.
+Calendly charges $16 per seat per month for its Teams plan, so $5 is intentionally aggressive. It is viable only because Front Office remains narrower and minutes are priced separately. At the current ~$0.0636/minute voice cost, 400 voice minutes cost about $25.44; a $99 plan can retain roughly the same contribution-margin shape as Solo after payment, messaging, and shared infrastructure allowances.
+
+Do not sell either team offer before invitations, calendar isolation, assignment fairness, authorization, billing-webhook replay, and member-removal tests pass.
 
 ## What to learn from Calendly
 

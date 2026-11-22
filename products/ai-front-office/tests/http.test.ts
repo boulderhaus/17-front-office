@@ -648,7 +648,7 @@ describe("HTTP boundary", () => {
     expect(landingHtml).toContain("Don’t buy a call center to catch a missed call.");
     expect(landingHtml).toContain("Five-person shop?");
     expect(landingHtml).toContain("One new paying customer can cover the month.");
-    expect(landingHtml).toContain("recovering four calls should produce one customer");
+    expect(landingHtml).toContain("ten recovered missed or after-hours calls for one completed job");
     expect((await fetch(`${baseUrl}/activationz`)).status).toBe(503);
     const signupPage = await (await fetch(`${baseUrl}/signup`)).text();
     expect(signupPage).toContain("Message frequency varies");

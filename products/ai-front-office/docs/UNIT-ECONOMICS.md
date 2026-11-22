@@ -65,16 +65,20 @@ The relevant launch question is how much *incremental contribution* a recovered 
 
 At 72% gross margin, the break-even ticket is about $68. At 50%, it is $98. At 30%, it is about $164.
 
-The number of qualified calls the product must recover depends on the shop's actual close rate:
+Denominators matter more than a single “conversion rate.” Invoca's 2026 home-services call analysis reports that 45% of answered HVAC calls are leads and 43% of those leads convert on the call. Multiplying those rates implies about 19% of all answered HVAC calls convert on the call. ServiceTitan's older shop-size analysis found that shops with fewer than five technicians booked 24% of calls overall, but only 9% after 6 p.m.
 
-| Qualified-call-to-job close rate | Expected recovered calls for one job |
-|---:|---:|
-| 20% | 5 |
-| 25% | 4 |
-| 33% | about 3 |
-| 50% | 2 |
+| Metric | Benchmark or launch assumption |
+|---|---:|
+| Answered HVAC calls that are leads | 45% |
+| HVAC phone leads booked on the call | 43% |
+| Implied bookings per answered HVAC call | about 19% |
+| Fewer-than-five-tech shop booking rate | 24% |
+| Small-shop booking rate after 6 p.m. | 9% |
+| Front Office launch model: completed jobs per recovered missed/after-hours call | **10%** |
 
-Those are scenarios, not measured product results. Pilot reporting must show recovered qualified calls, booked jobs, completed jobs, ticket revenue, and repeat work before making a customer-lifetime-value claim.
+The 25% assumption was conservative only when the denominator was already-qualified phone leads. It was aggressive for all recovered missed and after-hours calls. Until pilot cohorts prove otherwise, model **ten recovered calls for one completed job**. Track answered calls, qualified opportunities, bookings, cancellations, completed jobs, ticket revenue, and repeat work separately.
+
+Evidence: [Invoca 2026 Home Services Lead Conversion Benchmarks](https://www.invoca.com/reports/the-invoca-call-conversion-benchmarks-report-home-services-2025), [ServiceTitan call-booking analysis](https://www.servicetitan.com/blog/data-call-booking-rates).
 
 ## Why the same 200 minutes cannot cost $3 on current Telnyx Voice AI
 
