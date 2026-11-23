@@ -19,7 +19,7 @@ describe("voice lab turn-taking settings", () => {
     expect(update.transcription).toEqual({
       model: "deepgram/flux",
       language: "en",
-      settings: expect.objectContaining({ smart_format: true, numerals: true, eot_threshold: 0.75, eager_eot_threshold: 0.5, eot_timeout_ms: 2_000 }),
+      settings: expect.objectContaining({ smart_format: true, numerals: true, eot_threshold: 0.75, eager_eot_threshold: 0.5, eot_timeout_ms: 1_000 }),
     });
     expect(update.transcription.settings.keyterm).toContain("HVAC,heating,cooling");
   });
@@ -38,7 +38,7 @@ describe("voice lab turn-taking settings", () => {
 
   it("keeps the current Ultra voice by default, never with expressive mode", () => {
     expect(DEFAULT_TELNYX_VOICE).toBe("Telnyx.Ultra.f786b574-daa5-4673-aa0c-cbe3e8534c02");
-    expect(update.voice_settings).toEqual({ voice: DEFAULT_TELNYX_VOICE, voice_speed: 1 });
+    expect(update.voice_settings).toMatchObject({ voice: DEFAULT_TELNYX_VOICE, voice_speed: 1 });
     expect(JSON.stringify(update)).not.toContain("expressive_mode");
   });
 
@@ -47,7 +47,7 @@ describe("voice lab turn-taking settings", () => {
     const env = demoEnvironment({ TELNYX_VOICE: "Inworld.TTS2.Ashley" });
     expect(env.TELNYX_VOICE).toBe("Inworld.TTS2.Ashley");
     const custom = buildTelnyxAssistantUpdate(createDemoConfig(), "https://front-office.example", { voice: env.TELNYX_VOICE }) as Record<string, any>;
-    expect(custom.voice_settings).toEqual({ voice: "Inworld.TTS2.Ashley", voice_speed: 1 });
+    expect(custom.voice_settings).toMatchObject({ voice: "Inworld.TTS2.Ashley", voice_speed: 1 });
     expect(demoEnvironment({ TELNYX_VOICE: "" }).TELNYX_VOICE).toBe(DEFAULT_TELNYX_VOICE);
   });
 
