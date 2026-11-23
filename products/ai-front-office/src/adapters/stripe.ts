@@ -130,17 +130,17 @@ export function verifyStripeWebhook(rawBody: string, signatureHeader: string | u
 }
 
 export function subscriptionFromStripeEvent(event: StripeEvent, existing: SubscriptionRecord | null, now: string): SubscriptionRecord | null {
+  // Checkout receipts have no authoritative subscription status and can arrive
+  // after subscription updates. Ignoring them also avoids resaving stale state.
+  if (!event.type.startsWith("customer.subscription.")) return null;
   const object = event.data.object;
   const metadata = object.metadata && typeof object.metadata === "object" ? object.metadata as Record<string, unknown> : {};
   const tenantId = typeof metadata.tenant_id === "string" ? metadata.tenant_id : typeof object.client_reference_id === "string" ? object.client_reference_id : null;
   if (!tenantId) return null;
-  const isSubscription = event.type.startsWith("customer.subscription.");
-  const rawStatus = isSubscription && typeof object.status === "string" ? object.status : "incomplete";
+  const rawStatus = typeof object.status === "string" ? object.status : "incomplete";
   const status = normalizeSubscriptionStatus(event.type === "customer.subscription.deleted" ? "canceled" : rawStatus);
   const customer = typeof object.customer === "string" ? object.customer : existing?.providerCustomerId ?? null;
-  const subscription = isSubscription && typeof object.id === "string"
-    ? object.id
-    : typeof object.subscription === "string" ? object.subscription : existing?.providerSubscriptionId ?? null;
+  const subscription = typeof object.id === "string" ? object.id : existing?.providerSubscriptionId ?? null;
   const periodEndSeconds = typeof object.current_period_end === "number" ? object.current_period_end : null;
   const providerEventCreatedAt = typeof event.created === "number" ? new Date(event.created * 1_000).toISOString() : now;
   if (existing && existing.providerEventCreatedAt > providerEventCreatedAt) return existing;
