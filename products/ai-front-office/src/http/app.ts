@@ -15,6 +15,7 @@ import { isExplicitHumanRequest } from "../domain/human-request.js";
 import { saveAssistantConfig } from "../adapters/assistant-config.js";
 import { DataDeletionService } from "../application/data-deletion.js";
 import { formatEmailBody } from "../adapters/resend.js";
+import { anyGoogleClient, clientForNewConnections, saveGoogleConnection, type GoogleOAuthClient } from "../adapters/google-oauth-clients.js";
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
@@ -679,7 +680,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary"),
       ]);
       return sendHtml(response, 200, renderConfig(config, session.csrf, {
-        googleAvailable: Boolean(dependencies.env.GOOGLE_CLIENT_ID && dependencies.env.GOOGLE_CLIENT_SECRET),
+        googleAvailable: anyGoogleClient(dependencies.env),
         googleConnected,
         ownerPhoneConfigured: Boolean(ownerPhone),
         weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
@@ -809,13 +810,14 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return redirect(response, "/?deleted=1");
     }
     if (method === "GET" && url.pathname === "/app/integrations/google/start") {
-      if (!dependencies.env.GOOGLE_CLIENT_ID || !dependencies.env.GOOGLE_CLIENT_SECRET) throw new HttpError(503, "Google OAuth is not configured on the server");
+      const googleOAuth = clientForNewConnections(dependencies.env);
+      if (!googleOAuth) throw new HttpError(503, "Google OAuth is not configured on the server");
       const cookiePath = "/app/integrations/google";
       const attempt = createGoogleOAuthAttempt(`${dependencies.env.SESSION_SIGNING_KEY!}:${account.id}`, dependencies.env.NODE_ENV === "production", dependencies.clock.now().getTime(), cookiePath);
       const callback = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app/integrations/google/callback`;
       const authorization = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       authorization.search = new URLSearchParams({
-        client_id: dependencies.env.GOOGLE_CLIENT_ID,
+        client_id: googleOAuth.id,
         redirect_uri: callback,
         response_type: "code",
         access_type: "offline",
@@ -834,8 +836,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (!verifier) throw new HttpError(400, "Google authorization state is invalid or expired");
       const code = url.searchParams.get("code");
       if (!code) throw new HttpError(400, "Google did not return an authorization code");
-      const refreshToken = await exchangeGoogleCode(dependencies.env, code, verifier, "/app/integrations/google/callback");
-      await dependencies.store.saveIntegrationSecret(account.tenantId, "google", member ? `refresh_token:${account.id}` : "refresh_token", refreshToken);
+      const googleOAuth = clientForNewConnections(dependencies.env);
+      if (!googleOAuth) throw new HttpError(503, "Google OAuth is not configured on the server");
+      const refreshToken = await exchangeGoogleCode(dependencies.env, googleOAuth, code, verifier, "/app/integrations/google/callback");
+      await saveGoogleConnection(dependencies.store, account.tenantId, member ? `refresh_token:${account.id}` : "refresh_token", refreshToken, googleOAuth);
       response.setHeader("set-cookie", clearGoogleOAuthCookie(dependencies.env.NODE_ENV === "production", cookiePath));
       return redirect(response, "/app/settings");
     }
@@ -1305,14 +1309,15 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return redirect(response, "/admin");
     }
     if (method === "GET" && url.pathname === "/admin/integrations/google/callback") {
-      if (!dependencies.env.GOOGLE_CLIENT_ID || !dependencies.env.GOOGLE_CLIENT_SECRET) throw new HttpError(503, "Google OAuth is not configured on the server");
+      const googleOAuth = clientForNewConnections(dependencies.env);
+      if (!googleOAuth) throw new HttpError(503, "Google OAuth is not configured on the server");
       const verifier = verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, "afo_google_pkce"), dependencies.env.SESSION_SIGNING_KEY!);
       if (!verifier) throw new HttpError(400, "Google OAuth state is invalid or expired");
       if (url.searchParams.has("error")) throw new HttpError(400, "Google authorization was declined");
       const code = url.searchParams.get("code");
       if (!code) throw new HttpError(400, "Google did not return an authorization code");
-      const refreshToken = await exchangeGoogleCode(dependencies.env, code, verifier);
-      await dependencies.store.saveIntegrationSecret(dependencies.env.DEFAULT_TENANT_ID, "google", "refresh_token", refreshToken);
+      const refreshToken = await exchangeGoogleCode(dependencies.env, googleOAuth, code, verifier);
+      await saveGoogleConnection(dependencies.store, dependencies.env.DEFAULT_TENANT_ID, "refresh_token", refreshToken, googleOAuth);
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
       await dependencies.store.saveConfig({ ...config, calendarConnectionRef: "google-oauth" });
       response.setHeader("set-cookie", clearGoogleOAuthCookie(dependencies.env.NODE_ENV === "production"));
@@ -1346,12 +1351,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
 
     if (method === "GET" && url.pathname === "/admin/integrations/google/start") {
-      if (!dependencies.env.GOOGLE_CLIENT_ID || !dependencies.env.GOOGLE_CLIENT_SECRET) throw new HttpError(503, "Google OAuth is not configured on the server");
+      const googleOAuth = clientForNewConnections(dependencies.env);
+      if (!googleOAuth) throw new HttpError(503, "Google OAuth is not configured on the server");
       const attempt = createGoogleOAuthAttempt(dependencies.env.SESSION_SIGNING_KEY!, dependencies.env.NODE_ENV === "production");
       const callback = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/admin/integrations/google/callback`;
       const authorization = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       authorization.search = new URLSearchParams({
-        client_id: dependencies.env.GOOGLE_CLIENT_ID,
+        client_id: googleOAuth.id,
         redirect_uri: callback,
         response_type: "code",
         access_type: "offline",
@@ -1459,7 +1465,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         dependencies.store.getIntegrationSecret(dependencies.env.DEFAULT_TENANT_ID, "notifications", "owner-primary"),
       ]);
       return sendHtml(response, 200, renderConfig(config, csrf, {
-        googleAvailable: Boolean(dependencies.env.GOOGLE_CLIENT_ID && dependencies.env.GOOGLE_CLIENT_SECRET),
+        googleAvailable: anyGoogleClient(dependencies.env),
         googleConnected,
         ownerPhoneConfigured: Boolean(ownerPhone),
         weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
@@ -1829,14 +1835,14 @@ async function isGoogleConnected(env: Environment, store: Store, tenantId = env.
   return Boolean(await store.getIntegrationSecret(tenantId, "google", "refresh_token") || (tenantId === env.DEFAULT_TENANT_ID && env.GOOGLE_REFRESH_TOKEN));
 }
 
-async function exchangeGoogleCode(env: Environment, code: string, verifier: string, callbackPath = "/admin/integrations/google/callback"): Promise<string> {
+async function exchangeGoogleCode(env: Environment, client: GoogleOAuthClient, code: string, verifier: string, callbackPath = "/admin/integrations/google/callback"): Promise<string> {
   const callback = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}${callbackPath}`;
   const response = await withTimeout(fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      client_id: env.GOOGLE_CLIENT_ID!,
-      client_secret: env.GOOGLE_CLIENT_SECRET!,
+      client_id: client.id,
+      client_secret: client.secret,
       code,
       code_verifier: verifier,
       grant_type: "authorization_code",

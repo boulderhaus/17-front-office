@@ -43,6 +43,10 @@ const schema = z.object({
   RECORDING_CONSENT_APPROVED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
+  // A second OAuth client for migrating projects; existing tokens keep their own client.
+  GOOGLE_CLIENT_ID_NEXT: z.preprocess((value) => value === "" ? undefined : value, z.string().optional()),
+  GOOGLE_CLIENT_SECRET_NEXT: z.preprocess((value) => value === "" ? undefined : value, z.string().optional()),
+  GOOGLE_OAUTH_NEW_CONNECTIONS: z.enum(["legacy", "next"]).default("legacy"),
   GOOGLE_REFRESH_TOKEN: z.string().optional(),
   GOOGLE_CALENDAR_ID: z.string().default("primary"),
   OWNER_DESTINATIONS_JSON: z.string().default("{}"),
