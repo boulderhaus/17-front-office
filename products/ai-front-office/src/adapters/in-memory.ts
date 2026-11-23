@@ -98,6 +98,13 @@ export class InMemoryStore implements Store {
     this.integrationSecrets.delete(`${tenantId}:${provider}:${key}`);
   }
 
+  async getTenantIdByInboundNumber(phoneNumber: string): Promise<string | null> {
+    for (const [key, value] of this.integrationSecrets) {
+      if (key.endsWith(":telnyx:inbound_number") && value === phoneNumber) return key.slice(0, -":telnyx:inbound_number".length);
+    }
+    return null;
+  }
+
   async getCallByProviderId(providerCallId: string): Promise<CallRecord | null> {
     return structuredClone([...this.calls.values()].find((call) => call.providerCallId === providerCallId) ?? null);
   }
@@ -217,6 +224,13 @@ export class InMemoryStore implements Store {
   async enqueueNotification(notification: OutboxNotification): Promise<boolean> {
     if ([...this.notifications.values()].some((item) => item.idempotencyKey === notification.idempotencyKey)) return false;
     this.notifications.set(notification.id, structuredClone(notification));
+    return true;
+  }
+
+  async cancelPendingNotification(idempotencyKey: string): Promise<boolean> {
+    const item = [...this.notifications.values()].find((candidate) => candidate.idempotencyKey === idempotencyKey);
+    if (!item || item.state !== "pending") return false;
+    item.state = "cancelled";
     return true;
   }
 

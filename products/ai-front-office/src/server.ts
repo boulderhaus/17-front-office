@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { OutboxWorker } from "./application/outbox-worker.js";
 import { CallService } from "./application/call-service.js";
 import { DataDeletionService } from "./application/data-deletion.js";
+import { GraceLineService } from "./application/grace-line.js";
 import { OwnerSummaryService } from "./application/owner-summary-service.js";
 import { TelnyxRecordingClient } from "./adapters/telnyx.js";
 import { loadEnvironment } from "./config/environment.js";
@@ -29,10 +30,12 @@ const deletion = new DataDeletionService(
   env.TELNYX_API_KEY ? new TelnyxRecordingClient(env.TELNYX_API_KEY) : null,
 );
 const summaries = new OwnerSummaryService(runtime.store, systemClock, env.PUBLIC_BASE_URL);
+const graceLine = new GraceLineService({ store: runtime.store, env, clock: systemClock, log: logger });
 let workerActive = false;
 let nextRecoveryAt = 0;
 let nextRetentionAt = 0;
 let nextSummaryAt = 0;
+let nextGraceAt = 0;
 const runWorker = async (): Promise<void> => {
   if (workerActive) return;
   workerActive = true;
@@ -71,6 +74,12 @@ const runWorker = async (): Promise<void> => {
       nextSummaryAt = Date.now() + 60_000;
       const queued = await summaries.runOnce();
       if (queued.smsQueued + queued.emailQueued > 0) logger({ level: "info", event: "owner_summaries_queued", ...queued });
+    }
+    if (Date.now() >= nextGraceAt) {
+      // Billing grace line: day-23 reminder and day-30 release. Locked and idempotent, so every replica may run it.
+      nextGraceAt = Date.now() + 10 * 60_000;
+      const grace = await graceLine.runOnce();
+      if (grace.reminded + grace.released > 0) logger({ level: "info", event: "grace_line_cycle", ...grace });
     }
   } catch (error) {
     logger({ level: "error", event: "outbox_failed", error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });

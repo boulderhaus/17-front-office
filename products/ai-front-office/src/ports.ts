@@ -26,6 +26,8 @@ export interface Store {
   getIntegrationSecret(tenantId: string, provider: string, key: string): Promise<string | null>;
   saveIntegrationSecret(tenantId: string, provider: string, key: string, value: string): Promise<void>;
   deleteIntegrationSecret(tenantId: string, provider: string, key: string): Promise<void>;
+  /** The shop whose provisioned Front Office number (telnyx/inbound_number) is this E.164 number. */
+  getTenantIdByInboundNumber(phoneNumber: string): Promise<string | null>;
   getCallByProviderId(providerCallId: string): Promise<CallRecord | null>;
   isProviderCallDeleted(providerCallId: string): Promise<boolean>;
   getCall(callId: string): Promise<CallRecord | null>;
@@ -52,6 +54,8 @@ export interface Store {
   claimDueNotifications(now: string, limit: number): Promise<OutboxNotification[]>;
   requeueStaleNotifications(staleBefore: string, now: string): Promise<number>;
   saveNotification(notification: OutboxNotification): Promise<void>;
+  /** Atomically cancel a notification that has not been claimed for sending yet. True when it was cancelled. */
+  cancelPendingNotification(idempotencyKey: string): Promise<boolean>;
   getNotificationByProviderReceipt(providerReceipt: string): Promise<OutboxNotification | null>;
   listNotifications(callId: string): Promise<OutboxNotification[]>;
   setSmsOptOut(tenantId: string, phone: string, optedOut: boolean): Promise<void>;
