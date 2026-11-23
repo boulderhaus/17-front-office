@@ -1,4 +1,5 @@
 import { shopActivationBlockers } from "../src/application/readiness.js";
+import { isExplicitHumanRequest } from "../src/domain/human-request.js";
 import { describe, expect, it } from "vitest";
 import { createDemoConfig, evaluateServiceArea, isCoverageActive } from "../src/domain/config.js";
 import { triageEmergency } from "../src/domain/triage.js";
@@ -185,5 +186,14 @@ describe("life-safety phrasing", () => {
     "my furnace won't fire", "the pilot won't fire up", "smoke detector is chirping, low battery", "I want to schedule a fireplace inspection",
   ])("does not escalate: %s", (text) => {
     expect(triageEmergency(text, config).severity).not.toBe("life_safety");
+  });
+});
+
+describe("explicit human request gate", () => {
+  it.each(["I want to talk to a person", "Can I speak to the owner?", "Transfer me to someone please", "Have the owner call me back", "I need a human", "Representative please", "Could you connect me with the owner"])("accepts: %s", (quote) => {
+    expect(isExplicitHumanRequest(quote)).toBe(true);
+  });
+  it.each(["I need a technician to look at my furnace", "I need someone to fix my AC", "Why is this so loud?", "I don't want to talk to a person", "Can someone come out tomorrow?"])("rejects: %s", (quote) => {
+    expect(isExplicitHumanRequest(quote)).toBe(false);
   });
 });

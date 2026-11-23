@@ -11,6 +11,7 @@ import { approvedTransferTargets } from "../application/transfer-policy.js";
 import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
 import { approvedAnswer } from "../domain/approved-answer.js";
+import { isExplicitHumanRequest } from "../domain/human-request.js";
 import { saveAssistantConfig } from "../adapters/assistant-config.js";
 import { DataDeletionService } from "../application/data-deletion.js";
 import { redactError, withTimeout } from "../application/retry.js";
@@ -1438,19 +1439,6 @@ function unwrapToolPayload(value: unknown): unknown {
   return { ...(nested as Record<string, unknown>), ...outer };
 }
 
-function isExplicitHumanRequest(callerQuote: string): boolean {
-  const quote = callerQuote.toLowerCase().replace(/\s+/g, " ").trim();
-  const person = "(?:human|person|owner|representative|operator|technician|someone|somebody)";
-  if (new RegExp(`\\b(?:do not|don't|dont|never|no need to|not trying to|not asking to|do not want to|don't want to)\\b.{0,40}\\b${person}\\b`).test(quote)) return false;
-  return [
-    new RegExp(`\\b(?:i|we)\\s+(?:want|need|would like|have to)\\s+(?:to\\s+)?(?:speak|talk|connect|transfer|reach|get|call|be connected)?\\s*(?:with|to)?\\s*(?:a|the|your)?\\s*${person}\\b`),
-    new RegExp(`\\b(?:can|could|would|will)\\s+(?:i|you)\\s+(?:please\\s+)?(?:speak|talk|connect|transfer|put|get|reach)\\b.{0,30}\\b${person}\\b`),
-    new RegExp(`\\b(?:connect|transfer|put|get)\\s+me\\b.{0,30}\\b${person}\\b`),
-    new RegExp(`\\b(?:let me|please)\\s+(?:speak|talk)\\b.{0,30}\\b${person}\\b`),
-    /\b(?:have|ask)\s+(?:the\s+)?(?:owner|technician|someone|somebody)\s+(?:to\s+)?call\s+me(?:\s+back)?\b/,
-    /\b(?:human|person|representative|operator)\s*(?:please|now)?[.!?]*$/,
-  ].some((pattern) => pattern.test(quote));
-}
 
 function formatLocalCallContext(now: Date, timeZone: string): { date: string; time: string } {
   return {
