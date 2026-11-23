@@ -54,7 +54,8 @@ export interface ApiDashboard {
   googleConnected: boolean;
   paid: boolean;
   checkoutConfigured: boolean;
-  usage: { billedMinutes: number; billableCalls: number };
+  /** Spam and calls under 15 seconds are left out of billedMinutes; the counts say how many. */
+  usage: { billedMinutes: number; billableCalls: number; excludedSpamCalls: number; excludedShortCalls: number };
   calls: ApiCall[];
   tasks: ApiTask[];
 }
@@ -140,7 +141,12 @@ export function apiDashboard(input: {
     googleConnected: input.googleConnected,
     paid: input.subscription?.status === "active",
     checkoutConfigured: input.checkoutConfigured,
-    usage: { billedMinutes: input.usage.billedMinutes, billableCalls: input.usage.billableCalls },
+    usage: {
+      billedMinutes: input.usage.billedMinutes,
+      billableCalls: input.usage.billableCalls,
+      excludedSpamCalls: input.usage.excludedSpamCalls,
+      excludedShortCalls: input.usage.excludedShortCalls,
+    },
     calls: input.calls.map(apiCall),
     tasks: input.tasks.map(apiTask),
   };
@@ -176,6 +182,7 @@ export function apiSettings(config: BusinessConfig): Record<string, string | boo
     ownerDailySmsHour: String(config.ownerDailySmsHour),
     ownerRealtimeSmsEnabled: config.ownerRealtimeSmsEnabled,
     ownerWeeklyEmailEnabled: config.ownerWeeklyEmailEnabled,
+    usageAlertPercent: String(config.usageAlertPercent),
     emergencyKeywords: config.emergencyKeywords.join(", "),
     emergencyThreshold: String(config.emergencyThreshold),
     maxCallsPerCallerPerDay: String(config.maxCallsPerCallerPerDay),
@@ -187,7 +194,7 @@ export function apiSettings(config: BusinessConfig): Record<string, string | boo
 }
 
 const SETTINGS_FIELDS = new Set([
-  "serviceState", "operationMode", "answerAfterRings", "weekends", "weekdayStart", "weekdayEnd", "holidayDates", "businessName", "timezone", "greeting", "recordingNotice", "serviceAreaTerms", "serviceCategories", "bookableWeekdayStart", "bookableWeekdayEnd", "defaultServiceDurationMinutes", "minimumLeadTimeMinutes", "bookableWeekends", "bookingMode", "requireDiagnosticFeeAcceptance", "priceSnippets", "approvedKnowledge", "ownerPhone", "ownerDailySmsEnabled", "ownerDailySmsHour", "ownerRealtimeSmsEnabled", "ownerWeeklyEmailEnabled", "emergencyKeywords", "emergencyThreshold", "maxCallsPerCallerPerDay", "pronunciations", "dataRetentionDays", "supportEmail", "flatMonthlyPrice",
+  "serviceState", "operationMode", "answerAfterRings", "weekends", "weekdayStart", "weekdayEnd", "holidayDates", "businessName", "timezone", "greeting", "recordingNotice", "serviceAreaTerms", "serviceCategories", "bookableWeekdayStart", "bookableWeekdayEnd", "defaultServiceDurationMinutes", "minimumLeadTimeMinutes", "bookableWeekends", "bookingMode", "requireDiagnosticFeeAcceptance", "priceSnippets", "approvedKnowledge", "ownerPhone", "ownerDailySmsEnabled", "ownerDailySmsHour", "ownerRealtimeSmsEnabled", "ownerWeeklyEmailEnabled", "usageAlertPercent", "emergencyKeywords", "emergencyThreshold", "maxCallsPerCallerPerDay", "pronunciations", "dataRetentionDays", "supportEmail", "flatMonthlyPrice",
 ]);
 
 /**

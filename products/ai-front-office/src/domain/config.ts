@@ -1,4 +1,5 @@
 import type { BusinessConfig } from "./models.js";
+import { DEFAULT_USAGE_ALERT_PERCENT, isValidUsageAlertPercent } from "./usage.js";
 
 export function createDemoConfig(tenantId = "demo"): BusinessConfig {
   return {
@@ -42,6 +43,7 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     flatMonthlyPriceCents: 4900,
     includedMinutes: 200,
     overageCentsPerMinute: 20,
+    usageAlertPercent: DEFAULT_USAGE_ALERT_PERCENT,
     customerSmsEnabled: false,
     ownerWeeklyEmailEnabled: false,
     ownerDailySmsEnabled: false,
@@ -58,6 +60,7 @@ export function normalizeBusinessConfig(value: Partial<BusinessConfig> & Pick<Bu
     ...value,
     afterHours: { ...defaults.afterHours, ...value.afterHours },
     bookableHours: { ...defaults.bookableHours, ...value.bookableHours },
+    usageAlertPercent: isValidUsageAlertPercent(Number(value.usageAlertPercent)) ? Number(value.usageAlertPercent) : defaults.usageAlertPercent,
   };
 }
 

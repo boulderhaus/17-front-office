@@ -13,6 +13,9 @@ import { approvedTransferTargets } from "../application/transfer-policy.js";
 import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
 import { renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
+import { MAX_USAGE_ALERT_PERCENT, MIN_USAGE_ALERT_PERCENT, currentBillingPeriod, isValidUsageAlertPercent } from "../domain/usage.js";
+
+export { currentBillingPeriod };
 import { apiCall, apiDashboard, apiSettings, apiTask, settingsForm, type ApiCallDetail } from "./owner-api-model.js";
 import { approvedAnswer } from "../domain/approved-answer.js";
 import { isExplicitHumanRequest } from "../domain/human-request.js";
@@ -295,7 +298,7 @@ function publicOwnerDemo(now: Date): {
     config,
     calls: [urgentCall, routineCall, bookedCall],
     tasks,
-    usage: { periodStart, periodEnd, billableCalls: 22, excludedSpamCalls: 5, billedMinutes: 87 },
+    usage: { periodStart, periodEnd, billableCalls: 22, excludedSpamCalls: 5, excludedShortCalls: 3, billedMinutes: 87 },
     subscription: {
       tenantId, providerCustomerId: null, providerSubscriptionId: null, status: "active",
       currentPeriodEnd: periodEnd, providerEventCreatedAt: stamp(43_200), createdAt: stamp(43_200), updatedAt: stamp(43_200),
@@ -313,7 +316,9 @@ function ownerDashboardView(value: string | null): "today" | "pipeline" | "calen
 }
 
 export function createRequestHandler(dependencies: AppDependencies): RequestListener {
-  const service = new CallService(dependencies.store, dependencies.calendar, dependencies.clock, dependencies.env.PUBLIC_BASE_URL);
+  const service = new CallService(dependencies.store, dependencies.calendar, dependencies.clock, dependencies.env.PUBLIC_BASE_URL, {
+    ownerEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
+  });
   const recordingClient = dependencies.env.TELNYX_API_KEY ? new TelnyxRecordingClient(dependencies.env.TELNYX_API_KEY, dependencies.fetcher ?? fetch) : null;
   const routingClient = dependencies.env.TELNYX_API_KEY && dependencies.env.TELNYX_FROM_NUMBER && dependencies.env.TELNYX_ASSISTANT_ID
     ? new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: dependencies.env.TELNYX_FROM_NUMBER, assistantId: dependencies.env.TELNYX_ASSISTANT_ID })
@@ -2041,23 +2046,6 @@ function routeKey(pathname: string): string {
   return pathname;
 }
 
-/**
- * The usage meter follows the shop's Stripe billing cycle so included minutes
- * reset when the subscription renews. Without a current period (unpaid, or a
- * stale record) it falls back to the UTC calendar month.
- */
-export function currentBillingPeriod(now: Date, currentPeriodEnd?: string | null): [string, string] {
-  const end = currentPeriodEnd ? new Date(currentPeriodEnd) : null;
-  if (end && !Number.isNaN(end.getTime()) && end.getTime() > now.getTime()) {
-    const start = new Date(end.getTime());
-    start.setUTCMonth(start.getUTCMonth() - 1);
-    if (start.getTime() <= now.getTime()) return [start.toISOString(), end.toISOString()];
-  }
-  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const fallbackEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
-  return [start.toISOString(), fallbackEnd.toISOString()];
-}
-
 function normalizeUsPhone(value: string): string | null {
   const digits = value.replace(/\D/g, "");
   const national = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
@@ -2149,6 +2137,9 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams, surface:
   if (!Number.isInteger(maxCallsPerCallerPerDay) || maxCallsPerCallerPerDay < 1 || maxCallsPerCallerPerDay > 20) throw new HttpError(400, "Caller daily limit must be 1–20 calls");
   const ownerDailySmsHour = Number(form.get("ownerDailySmsHour") ?? current.ownerDailySmsHour);
   if (!Number.isInteger(ownerDailySmsHour) || ownerDailySmsHour < 0 || ownerDailySmsHour > 23) throw new HttpError(400, "Daily summary hour must be 0–23");
+  // Forms that don't show the minutes alert (the platform admin page) keep the saved value.
+  const usageAlertPercent = form.has("usageAlertPercent") ? Number(form.get("usageAlertPercent")) : current.usageAlertPercent;
+  if (!isValidUsageAlertPercent(usageAlertPercent)) throw new HttpError(400, `Minutes alert must be between ${MIN_USAGE_ALERT_PERCENT}% and ${MAX_USAGE_ALERT_PERCENT}%`);
   const holidayDates = list("holidayDates");
   if (holidayDates.some((value) => !isIsoDate(value))) throw new HttpError(400, "Holiday dates must use valid YYYY-MM-DD values");
   return {
@@ -2185,6 +2176,7 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams, surface:
     ownerDailySmsEnabled: form.has("ownerDailySmsEnabled"),
     ownerDailySmsHour,
     ownerRealtimeSmsEnabled: form.has("ownerRealtimeSmsEnabled"),
+    usageAlertPercent,
     requireDiagnosticFeeAcceptance: form.has("requireDiagnosticFeeAcceptance"),
     // Owners toggle a fixed notice; only the platform admin form may send its own text (single line).
     recordingDisclosure: surface === "platform" ? (form.get("recordingDisclosure") ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 200) : form.get("recordingNotice") === "on" ? RECORDING_NOTICE : "",

@@ -58,7 +58,8 @@ export interface ApiDashboard {
   googleConnected: boolean
   paid: boolean
   checkoutConfigured: boolean
-  usage: { billedMinutes: number; billableCalls: number }
+  /** Spam and calls under 15 seconds are left out of billedMinutes; the counts say how many. */
+  usage: { billedMinutes: number; billableCalls: number; excludedSpamCalls: number; excludedShortCalls: number }
   calls: ApiCall[]
   tasks: ApiTask[]
 }

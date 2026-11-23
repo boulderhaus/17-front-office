@@ -17,6 +17,9 @@ import { cn } from "@/lib/utils"
 const ZONES: Array<[string, string]> = [["America/New_York", "Eastern"], ["America/Chicago", "Central"], ["America/Denver", "Mountain"], ["America/Phoenix", "Arizona"], ["America/Los_Angeles", "Pacific"], ["America/Anchorage", "Alaska"], ["Pacific/Honolulu", "Hawaii"]]
 const selectClass = "h-12 w-full rounded-lg border border-input bg-card px-3 text-[16px] shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 lg:h-10 lg:text-sm"
 const fieldClass = "h-12 text-[16px] lg:h-10 lg:text-sm bg-card"
+// The server accepts any whole percent from 50 to 95; 75 (the default) and 90 are the easy picks.
+const EASY_ALERT_PERCENTS = [75, 90]
+const OTHER_ALERT_PERCENTS = [50, 55, 60, 65, 70, 80, 85, 95]
 
 function Field({ label, hint, children, className }: { label: string; hint?: string; children: ReactNode; className?: string }) {
   return (
@@ -158,6 +161,14 @@ export function SettingsPage() {
           </Field>
           <Toggle id="ownerRealtimeSmsEnabled" label={<>Instant lead texts <em className="ml-1 not-italic text-brand-ink/70">+$10/mo</em></>} hint="Every routine new lead the moment the call ends." checked={flag("ownerRealtimeSmsEnabled")} disabled={!i.realtimeSmsAvailable} onChange={(value) => set("ownerRealtimeSmsEnabled", value)} extra={i.realtimeSmsAvailable ? undefined : <span className="text-[13px] text-amber-700">Not available yet.</span>} />
           <Toggle id="ownerWeeklyEmailEnabled" label={<>Sunday week-ahead email <em className="ml-1 not-italic text-brand-ink/70">Included</em></>} hint="Open callbacks and the next seven days." checked={flag("ownerWeeklyEmailEnabled")} disabled={!i.weeklyEmailAvailable} onChange={(value) => set("ownerWeeklyEmailEnabled", value)} extra={i.weeklyEmailAvailable ? undefined : <span className="text-[13px] text-amber-700">Not available yet.</span>} />
+          <Field label="Minutes alert" hint={`We’ll tell you once when you reach this share of your ${plan.includedMinutes} minutes, and again if you use them all.`}>
+            <select className={selectClass} {...bind("usageAlertPercent")}>
+              {EASY_ALERT_PERCENTS.map((percent) => <option key={percent} value={percent}>When I’ve used {percent}%</option>)}
+              <optgroup label="Other">
+                {unique([...OTHER_ALERT_PERCENTS, Number(text("usageAlertPercent"))]).filter((percent) => percent >= 50 && percent <= 95 && !EASY_ALERT_PERCENTS.includes(percent)).map((percent) => <option key={percent} value={percent}>When I’ve used {percent}%</option>)}
+              </optgroup>
+            </select>
+          </Field>
         </Group>
 
         <Card>

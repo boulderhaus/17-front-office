@@ -18,6 +18,7 @@ import type {
   UsageSummary,
 } from "../domain/models.js";
 import { normalizeBusinessConfig } from "../domain/config.js";
+import { billedMinutesFor, usageClass } from "../domain/usage.js";
 
 class KeyedMutex {
   readonly #tails = new Map<string, Promise<void>>();
@@ -357,12 +358,14 @@ export class InMemoryStore implements Store {
 
   async getUsageSummary(tenantId: string, periodStart: string, periodEnd: string): Promise<UsageSummary> {
     const calls = [...this.calls.values()].filter((call) => call.tenantId === tenantId && call.startedAt >= periodStart && call.startedAt < periodEnd);
+    const billable = calls.filter((call) => usageClass(call) === "billable");
     return {
       periodStart,
       periodEnd,
-      billableCalls: calls.filter((call) => call.billingDisposition === "billable").length,
-      excludedSpamCalls: calls.filter((call) => call.billingDisposition === "spam_excluded").length,
-      billedMinutes: calls.filter((call) => call.billingDisposition === "billable").reduce((total, call) => total + Math.ceil((call.durationSeconds ?? 0) / 60), 0),
+      billableCalls: billable.length,
+      excludedSpamCalls: calls.filter((call) => usageClass(call) === "spam").length,
+      excludedShortCalls: calls.filter((call) => usageClass(call) === "short").length,
+      billedMinutes: billable.reduce((total, call) => total + billedMinutesFor(call), 0),
     };
   }
 
