@@ -71,3 +71,12 @@ Thumbs.db
 
 # Complete static website output, including generated language editions.
 website/_site/
+
+# Competitor research: notes and frames are committed; recordings and audio stay local
+/research/**/*.mov
+/research/**/*.mp4
+/research/**/*.m4a
+/research/**/*.mp3
+
+# Agent worktrees
+/.claude/worktrees/
