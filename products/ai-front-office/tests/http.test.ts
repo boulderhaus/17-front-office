@@ -45,6 +45,13 @@ describe("HTTP boundary", () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
+  it("lets billing forms redirect to Stripe without loosening other CSP directives", async () => {
+    const csp = (await fetch(`${baseUrl}/signup`)).headers.get("content-security-policy") ?? "";
+    expect(csp).toContain("form-action 'self' https://checkout.stripe.com https://billing.stripe.com");
+    expect(csp).toContain("script-src 'self'");
+    expect(csp).toContain("default-src 'none'");
+  });
+
   it("exposes health and rejects unauthenticated tools", async () => {
     const health = await fetch(`${baseUrl}/healthz`);
     expect(health.status).toBe(200);
