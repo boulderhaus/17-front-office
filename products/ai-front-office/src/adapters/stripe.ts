@@ -24,15 +24,30 @@ export interface StripeSubscriptionSnapshot {
   currentPeriodEnd: string | null;
 }
 
+const PORTAL_CONFIGURATION_TAG = "v1";
+
 export class StripeBillingClient {
   private portalConfiguration: string | null = null;
   constructor(private readonly secretKey: string, private readonly prices: StripePrices, private readonly fetcher: typeof fetch = fetch) {}
 
   get basePriceId(): string { return this.prices.base; }
 
+  private async findPortalConfiguration(): Promise<string | null> {
+    const response = await withTimeout(this.fetcher("https://api.stripe.com/v1/billing_portal/configurations?active=true&limit=100", {
+      headers: { authorization: `Bearer ${this.secretKey}` },
+    }), 6_000);
+    if (!response.ok) return null;
+    const payload = await response.json().catch(() => ({})) as { data?: Array<{ id?: string; metadata?: Record<string, string> }> };
+    return payload.data?.find((item) => item.metadata?.front_office === PORTAL_CONFIGURATION_TAG)?.id ?? null;
+  }
+
   async createPortal(customerId: string, returnUrl: string): Promise<string> {
+    if (!this.portalConfiguration) this.portalConfiguration = await this.findPortalConfiguration();
     if (!this.portalConfiguration) {
+      // No permanent idempotency key: Stripe replays a stored failure for 24 hours and
+      // rejects the same key with a changed body. A tagged configuration is found next time.
       const body = new URLSearchParams({
+        "metadata[front_office]": PORTAL_CONFIGURATION_TAG,
         "business_profile[headline]": "Manage your Front Office subscription",
         "features[subscription_cancel][enabled]": "true",
         "features[subscription_cancel][mode]": "at_period_end",
@@ -40,7 +55,7 @@ export class StripeBillingClient {
         "features[invoice_history][enabled]": "true",
       });
       const response = await withTimeout(this.fetcher("https://api.stripe.com/v1/billing_portal/configurations", {
-        method: "POST", headers: { authorization: `Bearer ${this.secretKey}`, "content-type": "application/x-www-form-urlencoded", "idempotency-key": "front-office-portal-v1" }, body,
+        method: "POST", headers: { authorization: `Bearer ${this.secretKey}`, "content-type": "application/x-www-form-urlencoded" }, body,
       }), 6_000);
       const data = await response.json() as { id?: string };
       if (!response.ok || !data.id) throw new Error(`Stripe billing portal configuration failed with HTTP ${response.status}`);
@@ -93,12 +108,20 @@ export class StripeBillingClient {
   }
 
   /** Expire an unpaid Checkout Session so it can no longer start a subscription. */
-  async expireCheckout(sessionId: string): Promise<void> {
+  /** Returns "complete" if the session was already paid; a new checkout must not be created then. */
+  async expireCheckout(sessionId: string): Promise<"expired" | "complete"> {
     const response = await withTimeout(this.fetcher(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}/expire`, {
       method: "POST", headers: { authorization: `Bearer ${this.secretKey}`, "content-type": "application/x-www-form-urlencoded" },
     }), 6_000);
-    // Already complete or expired sessions return 400; either way they can no longer be paid twice.
-    if (!response.ok && response.status !== 400) throw new Error(`Stripe checkout expire failed with HTTP ${response.status}`);
+    if (response.ok) return "expired";
+    if (response.status !== 400) throw new Error(`Stripe checkout expire failed with HTTP ${response.status}`);
+    // 400: already expired or already completed. Find out which.
+    const current = await withTimeout(this.fetcher(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}`, {
+      headers: { authorization: `Bearer ${this.secretKey}` },
+    }), 6_000);
+    const session = await current.json().catch(() => ({})) as { status?: string };
+    if (!current.ok) throw new Error(`Stripe checkout lookup failed with HTTP ${current.status}`);
+    return session.status === "complete" ? "complete" : "expired";
   }
 
   /**

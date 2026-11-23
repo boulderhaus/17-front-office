@@ -10,14 +10,17 @@ import { createRequestHandler } from "../src/http/app.js";
 describe("Stripe billing boundary", () => {
   it("creates a cancellation-enabled portal for the server-selected customer only", async () => {
     const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: "bpc_other", metadata: {} }] }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ id: "bpc_synthetic" }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ url: "https://billing.stripe.com/p/session/synthetic" }), { status: 200 }));
     const client = new StripeBillingClient("sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", { base: "price_base" }, fetchMock as unknown as typeof fetch);
     expect(await client.createPortal("cus_synthetic", "https://example.com/app")).toContain("https://billing.stripe.com/");
-    const configuration = fetchMock.mock.calls[0]![1]?.body as URLSearchParams;
+    const configuration = fetchMock.mock.calls[1]![1]?.body as URLSearchParams;
+    expect(fetchMock.mock.calls[1]![1]?.headers).not.toHaveProperty("idempotency-key");
+    expect(configuration.get("metadata[front_office]")).toBe("v1");
     expect(configuration.get("features[subscription_cancel][enabled]")).toBe("true");
     expect(configuration.get("features[subscription_cancel][mode]")).toBe("at_period_end");
-    const session = fetchMock.mock.calls[1]![1]?.body as URLSearchParams;
+    const session = fetchMock.mock.calls[2]![1]?.body as URLSearchParams;
     expect(session.get("customer")).toBe("cus_synthetic");
     expect(session.get("return_url")).toBe("https://example.com/app");
   });
@@ -119,7 +122,7 @@ describe("Stripe webhook state is read from the Stripe API", () => {
   const timestamp = String(now.getTime() / 1_000);
 
   async function harness(options: { activeAccount?: boolean; telnyxFails?: boolean } = {}) {
-    const api: { status: string; price: string; tenant: string | null; subscriptions: Record<string, { status: string; price: string }> } = { status: "active", price: "price_synthetic", tenant: null, subscriptions: {} };
+    const api: { status: string; price: string; tenant: string | null; subscriptions: Record<string, { status: string; price: string }>; sessionComplete?: boolean } = { status: "active", price: "price_synthetic", tenant: null, subscriptions: {} };
     const calls: Array<{ url: string; method: string; body?: unknown; key?: string | undefined }> = [];
     let checkoutCount = 0;
     const fetcher = (async (input: string | URL, init?: RequestInit) => {
@@ -133,8 +136,10 @@ describe("Stripe webhook state is read from the Stripe API", () => {
         const state = api.subscriptions[id] ?? { status: api.status, price: api.price };
         return json({ id, status: state.status, customer: "cus_synthetic", metadata: { tenant_id: api.tenant }, items: { data: [{ price: { id: state.price }, current_period_end: 1_766_400_000 }] } });
       }
-      if (url.includes("api.stripe.com/v1/checkout/sessions/") && url.endsWith("/expire")) return json({ id: "expired" });
+      if (url.includes("api.stripe.com/v1/checkout/sessions/") && url.endsWith("/expire")) return api.sessionComplete ? json({ error: { message: "complete" } }, 400) : json({ id: "expired" });
+      if (url.includes("api.stripe.com/v1/checkout/sessions/") && method === "GET") return json({ status: api.sessionComplete ? "complete" : "expired" });
       if (url.includes("api.stripe.com/v1/checkout/sessions")) { checkoutCount += 1; return json({ id: `cs_${checkoutCount}`, url: `https://checkout.stripe.com/c/synthetic-${checkoutCount}` }); }
+      if (url.includes("api.stripe.com/v1/billing_portal/configurations") && method === "GET") return json({ data: [] });
       if (url.includes("api.stripe.com/v1/billing_portal/configurations")) return json({ id: "bpc_synthetic" });
       if (url.includes("api.stripe.com/v1/billing_portal/sessions")) return json({ url: "https://billing.stripe.com/p/synthetic" });
       if (url.includes("api.telnyx.com/v2/ai/assistants/")) return options.telnyxFails ? json({ errors: [{ detail: "down" }] }, 503) : json({ data: { telephony_settings: { default_texml_app_id: "texml_synthetic" } } });
@@ -252,6 +257,34 @@ describe("Stripe webhook state is read from the Stripe API", () => {
       h.api.status = "active";
       await h.subscriptionEvent("customer.subscription.updated");
       expect((await h.store.getConfig(h.tenantId)).paused).toBe(true);
+    } finally { await h.close(); }
+  });
+
+  it("turns a paid shop back on even when the earlier status change was missed", async () => {
+    const h = await harness({ activeAccount: true });
+    try {
+      await h.subscriptionEvent("customer.subscription.updated");
+      // Simulate a crash after pausing but before the past_due status was saved.
+      await h.store.saveConfig({ ...(await h.store.getConfig(h.tenantId)), paused: true, pausedForBilling: true });
+      await h.subscriptionEvent("customer.subscription.updated");
+      expect((await h.store.getConfig(h.tenantId)).paused).toBe(false);
+    } finally { await h.close(); }
+  });
+
+  it("never opens a second checkout while a first payment is processing or a session was already paid", async () => {
+    const h = await harness();
+    try {
+      const page = await (await fetch(`${h.baseUrl}/app`, { headers: { cookie: h.cookie } })).text();
+      const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
+      const tap = () => fetch(`${h.baseUrl}/app/billing/checkout`, { method: "POST", redirect: "manual", headers: { cookie: h.cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }) });
+      expect((await tap()).headers.get("location")).toContain("checkout.stripe.com");
+      h.api.sessionComplete = true;
+      await h.store.saveConfig({ ...(await h.store.getConfig(h.tenantId)), ownerDailySmsEnabled: true });
+      expect((await tap()).headers.get("location")).toContain("checkout=processing");
+      expect(h.calls.filter((call) => call.url.endsWith("/v1/checkout/sessions"))).toHaveLength(1);
+      h.api.status = "incomplete";
+      await h.subscriptionEvent("customer.subscription.created");
+      expect((await tap()).headers.get("location")).toContain("checkout=processing");
     } finally { await h.close(); }
   });
 

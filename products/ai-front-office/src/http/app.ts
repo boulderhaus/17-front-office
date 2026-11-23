@@ -651,14 +651,18 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         if (dependencies.env.FOUNDING_CHECKOUT_URL) return redirect(response, dependencies.env.FOUNDING_CHECKOUT_URL);
         throw new HttpError(503, "Checkout is not configured yet");
       }
-      const target = await dependencies.store.withLock(`checkout:${account.tenantId}`, async () => {
+      // Same lock as the billing webhook, so a payment cannot land between this read and a new session.
+      const target = await dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
         const subscription = await dependencies.store.getSubscription(account.tenantId);
-        if (subscription?.status === "active" || subscription?.status === "trialing") return `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`;
+        const app = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`;
+        if (subscription?.status === "active" || subscription?.status === "trialing") return app;
         if (subscription?.providerCustomerId && (subscription.status === "past_due" || subscription.status === "unpaid")) {
           // Fix payment on the existing subscription instead of starting a second one.
           return stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`)
             .catch(() => { throw new HttpError(502, "Billing could not be opened. Please retry; your subscription has not changed."); });
         }
+        // Any other live subscription (e.g. a first payment still processing) blocks a second one.
+        if (subscription?.providerSubscriptionId && subscription.status !== "canceled") return `${app}?checkout=processing`;
         const config = await dependencies.store.getConfig(account.tenantId);
         const addOns = `${config.ownerDailySmsEnabled ? 1 : 0}${config.ownerRealtimeSmsEnabled ? 1 : 0}`;
         const now = dependencies.clock.now();
@@ -667,7 +671,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         if (open && Date.parse(open.expiresAt) > now.getTime() + 60_000) {
           // One payable Checkout Session per shop: reuse it, or expire it if the add-ons changed.
           if (open.addOns === addOns) return open.url;
-          await stripeClient.expireCheckout(open.id).catch(() => { throw new HttpError(502, "Checkout could not be updated. Please retry."); });
+          const expired = await stripeClient.expireCheckout(open.id).catch(() => { throw new HttpError(502, "Checkout could not be updated. Please retry."); });
+          if (expired === "complete") return `${app}?checkout=processing`;
         }
         const base = dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "");
         const created = await stripeClient.createCheckout({
@@ -676,7 +681,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           customerId: subscription?.providerCustomerId ?? null,
           successUrl: `${base}/app?checkout=success`,
           cancelUrl: `${base}/app?checkout=cancelled`,
-          idempotencyKey: `checkout:${account.tenantId}:${randomUUID()}`,
+          // A retry after a timeout in the same half hour gets the same session back from Stripe.
+          idempotencyKey: `checkout:${account.tenantId}:${addOns}:${Math.floor(now.getTime() / 1_800_000)}`,
           dailySms: config.ownerDailySmsEnabled,
           realtimeSms: config.ownerRealtimeSmsEnabled,
           now,
@@ -966,6 +972,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   async function handleBillingLapse(tenantId: string, status: SubscriptionRecord["status"], eventId: string): Promise<void> {
     const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
     if (account?.status !== "active") return;
+    if ((await dependencies.store.getConfig(tenantId)).paused) return; // already off (billing or owner)
     await pauseLiveRoute(tenantId).catch((error) => {
       log({ level: "error", event: "billing_lapse_pause_failed", tenantId, error: safeError(error) });
       throw new HttpError(502, "Could not pause the live phone route; Stripe will retry");
@@ -1076,8 +1083,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         }
         if (record) {
           // Pause or resume first: if Telnyx fails, nothing is saved and Stripe's retry sees the same transition.
-          if (existing?.status === "active" && record.status !== "active") await handleBillingLapse(tenantId, record.status, event.id);
-          if (existing && existing.status !== "active" && record.status === "active") await handleBillingRestored(tenantId, event.id);
+          // Reconcile the line with the current status on every event, not only on a status edge,
+          // so a crash between steps cannot leave a paid shop paused or an unpaid shop live.
+          if (record.status !== "active") await handleBillingLapse(tenantId, record.status, event.id);
+          else await handleBillingRestored(tenantId, event.id);
           await dependencies.store.saveSubscription(record);
           if (record.status === "active") await dependencies.store.deleteIntegrationSecret(tenantId, "stripe", "open_checkout");
         }
