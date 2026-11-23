@@ -5,7 +5,7 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     tenantId,
     paused: true,
     businessName: "North Star Heating",
-    greeting: "Thanks for calling North Star Heating. I’m the owner’s AI assistant. How can I help?",
+    greeting: "Thanks for calling North Star Heating. How can I help?",
     timezone: "America/Chicago",
     serviceAreaTerms: ["Springfield IL", "62701"],
     emergencyKeywords: ["frozen pipes", "no heat", "gas"],
@@ -35,7 +35,8 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     pronunciations: [],
     serviceCategories: ["HVAC repair", "HVAC maintenance", "plumbing", "electrical", "other"],
     requireDiagnosticFeeAcceptance: true,
-    recordingDisclosure: "This call is recorded and transcribed for service quality. By continuing, you consent.",
+    // Optional, off by default (as Rosie and Goodcall do); the shop owns recording compliance under the terms.
+    recordingDisclosure: "",
     dataRetentionDays: 30,
     supportEmail: null,
     flatMonthlyPriceCents: 4900,

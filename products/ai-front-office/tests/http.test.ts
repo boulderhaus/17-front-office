@@ -345,7 +345,8 @@ describe("HTTP boundary", () => {
     expect(initBody.dynamic_variables.current_local_date).toBe("Thursday, January 15, 2026");
     expect(initBody.dynamic_variables.current_local_time).toBe("2:00 AM CST");
     expect(await store.getCallByProviderId("v3:signed-call")).not.toBeNull();
-    expect((await store.getCallByProviderId("v3:signed-call"))?.consentState).toBe("disclosed");
+    // No recording notice by default, so consent is not recorded as given.
+    expect((await store.getCallByProviderId("v3:signed-call"))?.consentState).toBe("unknown");
 
     const intake = JSON.stringify({
       provider_call_id: "v3:signed-call", from_number: "+15555550110", caller_name: "Signed Caller",
@@ -852,13 +853,14 @@ describe("HTTP boundary", () => {
     expect(privacy.status).toBe(200);
     const privacyHtml = await privacy.text();
     expect(privacyHtml).toContain("not sold, rented, or shared with third parties or affiliates for marketing");
-    expect(privacyHtml).toContain("recorded AI line cannot continue");
+    expect(privacyHtml).toContain("that call's recording is deleted after the call");
     const terms = await fetch(`${baseUrl}/terms`);
     expect(terms.status).toBe(200);
     const termsHtml = await terms.text();
+    expect(termsHtml).toContain("solely responsible for giving any notice and obtaining any consent");
     expect(termsHtml).toContain("Reply STOP to opt out or HELP for help");
     expect(termsHtml).toContain("creating an account, activating service, or paying for a subscription");
-    expect(termsHtml).toContain("By continuing, you consent");
+    expect(termsHtml).not.toContain("By continuing, you consent");
     const simulator = await fetch(`${baseUrl}/admin/simulator`, { headers: { authorization: `Bearer ${adminToken}` } });
     expect(simulator.status).toBe(200);
     expect(await simulator.text()).toContain("Run all 15 launch scenarios");

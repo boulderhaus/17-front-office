@@ -136,7 +136,7 @@ const ownerSignupSchema = z.object({
   timezone: z.string().trim().min(3).max(100).default("America/New_York"),
   serviceAreaTerms: z.string().trim().max(800).default(""),
   operationMode: z.enum(["after_hours", "overflow", "always"]).default("overflow"),
-  greeting: z.string().trim().min(5).max(500).default("Hi, I’m the owner’s AI assistant. How can I help?"),
+  greeting: z.string().trim().min(5).max(500).default("Thanks for calling. How can I help?"),
   weekdayStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("17:00"),
   weekdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("08:00"),
   bookableWeekdayStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("08:00"),
@@ -420,7 +420,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         ...createDemoConfig(tenantId),
         paused: true,
         businessName: parsed.data.businessName,
-        greeting: form.has("greeting") ? parsed.data.greeting : `Thanks for calling ${parsed.data.businessName}. I’m the owner’s AI assistant. How can I help?`,
+        greeting: form.has("greeting") ? parsed.data.greeting : `Thanks for calling ${parsed.data.businessName}. How can I help?`,
         timezone: parsed.data.timezone,
         serviceAreaTerms: serviceArea.terms,
         emergencyKeywords: splitList(parsed.data.emergencyKeywords),
@@ -585,10 +585,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const form = parseForm(await readBody(request, 20_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
       const time = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
-      const parsed = z.object({ businessName: z.string().trim().min(2).max(120), serviceAreaTerms: z.string().trim().min(2).max(800), timezone: z.string(), operationMode: z.enum(["overflow", "after_hours", "always"]), start: time, end: time, bookStart: time, bookEnd: time, bookingMode: z.enum(["confirm", "direct"]), greeting: z.string().trim().min(5).max(500), prices: z.string().max(5000), answers: z.string().max(5000), disclosureApproved: z.literal("yes") }).safeParse(Object.fromEntries(form));
+      const parsed = z.object({ businessName: z.string().trim().min(2).max(120), serviceAreaTerms: z.string().trim().min(2).max(800), timezone: z.string(), operationMode: z.enum(["overflow", "after_hours", "always"]), start: time, end: time, bookStart: time, bookEnd: time, bookingMode: z.enum(["confirm", "direct"]), greeting: z.string().trim().min(5).max(500), prices: z.string().max(5000), answers: z.string().max(5000) }).safeParse(Object.fromEntries(form));
       if (!parsed.success || parsed.data.bookStart >= parsed.data.bookEnd) throw new HttpError(400, "Check the required answers and appointment hours");
       const data = parsed.data;
-      if (!/\bAI\b/i.test(data.greeting)) throw new HttpError(400, "Your greeting must identify the AI assistant");
       const serviceArea = normalizeServiceAreaInput(data.serviceAreaTerms);
       if (serviceArea.errors.length > 0 || serviceArea.terms.length === 0) throw new HttpError(400, serviceAreaMessage(serviceArea.errors));
       try { new Intl.DateTimeFormat("en-US", { timeZone: data.timezone }).format(); } catch { throw new HttpError(400, "Choose a valid timezone"); }
@@ -599,7 +598,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         const current = await dependencies.store.getConfig(account.tenantId);
         if (phone) await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner-primary", phone);
         if (form.get("ownerSmsConsent") === "yes" && !phone && !await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")) throw new HttpError(400, "Add a mobile number for text alerts");
-        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, businessName: data.businessName, timezone: data.timezone, serviceAreaTerms: serviceArea.terms, operationMode: data.operationMode, afterHours: { ...current.afterHours, weekdayStart: data.start, weekdayEnd: data.end }, bookableHours: { weekdayStart: data.bookStart, weekdayEnd: data.bookEnd, weekends: form.get("weekends") === "on" }, bookingMode: dependencies.env.DIRECT_BOOKING_BETA ? data.bookingMode : "confirm", greeting: data.greeting, priceSnippets: parseLines(data.prices, 30).map((text, index) => ({ label: `Approved price ${index + 1}`, text })), approvedKnowledge: parseLines(data.answers, 30).map((text, index) => ({ topic: `Approved answer ${index + 1}`, text })), ownerNotificationRefs: form.get("ownerSmsConsent") === "yes" ? ["owner-primary"] : [], ownerTransferNumberRef: "owner-primary", warmTransferEnabled: dependencies.env.WARM_TRANSFER_BETA && form.get("warmTransferEnabled") === "on" });
+        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, businessName: data.businessName, timezone: data.timezone, serviceAreaTerms: serviceArea.terms, operationMode: data.operationMode, afterHours: { ...current.afterHours, weekdayStart: data.start, weekdayEnd: data.end }, bookableHours: { weekdayStart: data.bookStart, weekdayEnd: data.bookEnd, weekends: form.get("weekends") === "on" }, bookingMode: dependencies.env.DIRECT_BOOKING_BETA ? data.bookingMode : "confirm", greeting: data.greeting, recordingDisclosure: form.get("recordingNotice") === "on" ? RECORDING_NOTICE : "", priceSnippets: parseLines(data.prices, 30).map((text, index) => ({ label: `Approved price ${index + 1}`, text })), approvedKnowledge: parseLines(data.answers, 30).map((text, index) => ({ topic: `Approved answer ${index + 1}`, text })), ownerNotificationRefs: form.get("ownerSmsConsent") === "yes" ? ["owner-primary"] : [], ownerTransferNumberRef: "owner-primary", warmTransferEnabled: dependencies.env.WARM_TRANSFER_BETA && form.get("warmTransferEnabled") === "on" });
       });
       return redirect(response, "/app?setup=saved");
     }
@@ -1483,7 +1482,6 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           !dependencies.env.TELNYX_FROM_NUMBER && "Telnyx SMS sender",
           !dependencies.env.TELNYX_MESSAGING_PROFILE_ID && "Telnyx messaging profile",
           !dependencies.env.TELNYX_MESSAGING_APPROVED && "approved owner-alert messaging",
-          !dependencies.env.RECORDING_CONSENT_APPROVED && "recording-consent approval",
           !dependencies.env.LIVE_PROVIDER_PROOF_AT && "recorded live-provider proof",
           dependencies.env.PROVIDER_TEST_MODE && "provider test mode must be disabled",
         ].filter(Boolean) as string[];
@@ -1672,7 +1670,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (config.paused) throw new HttpError(503, "Service is paused");
     if (dependencies.env.PROVIDER_TEST_MODE) return;
     if (tenantId !== dependencies.env.DEFAULT_TENANT_ID) {
-      if (!dependencies.env.TELNYX_MESSAGING_APPROVED || !dependencies.env.RECORDING_CONSENT_APPROVED || !dependencies.env.LIVE_PROVIDER_PROOF_AT) throw new HttpError(503, "Commercial provider prerequisites are not satisfied");
+      if (!dependencies.env.TELNYX_MESSAGING_APPROVED || !dependencies.env.LIVE_PROVIDER_PROOF_AT) throw new HttpError(503, "Commercial provider prerequisites are not satisfied");
       const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
       const subscription = await dependencies.store.getSubscription(tenantId);
       if (account?.status !== "active") throw new HttpError(503, "Shop activation is not complete");
@@ -1766,6 +1764,9 @@ function timingSafeEqualBuffers(left: Buffer, right: Buffer): boolean {
   return mismatch === 0;
 }
 
+/** The short optional notice an owner can switch on in setup. */
+const RECORDING_NOTICE = "Calls may be recorded.";
+
 function serviceAreaMessage(errors: string[]): string {
   return errors.length > 0
     ? `Add a state to: ${errors.slice(0, 5).join(", ")}. Use a city and state ("Sarasota FL") or a 5-digit ZIP.`
@@ -1852,7 +1853,7 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
     ownerDailySmsHour,
     ownerRealtimeSmsEnabled: form.has("ownerRealtimeSmsEnabled"),
     requireDiagnosticFeeAcceptance: form.has("requireDiagnosticFeeAcceptance"),
-    recordingDisclosure: required("recordingDisclosure").slice(0, 1_000),
+    recordingDisclosure: (form.get("recordingDisclosure") ?? "").trim().slice(0, 1_000),
     dataRetentionDays,
     supportEmail,
     flatMonthlyPriceCents: Math.round(monthlyDollars * 100),
