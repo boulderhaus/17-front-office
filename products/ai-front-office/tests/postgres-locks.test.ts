@@ -2,6 +2,8 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PostgresStore } from "../src/adapters/postgres-store.js";
 import { CryptoBox } from "../src/security/crypto-box.js";
+import { randomUUID } from "node:crypto";
+import { createDemoConfig } from "../src/domain/config.js";
 
 // Explicit opt-in and localhost-only: never run this against a customer database.
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -36,4 +38,19 @@ describe.skipIf(!databaseUrl)("PostgreSQL advisory locks under overlapping calls
     const held = await pool.query("SELECT count(*)::int AS count FROM pg_locks WHERE locktype='advisory'");
     expect(held.rows[0].count).toBe(0);
   });
+
+  it("skips a call whose retention deletion failed in the last 24 hours, then retries it", async () => {
+    const tenantId = `retention_${randomUUID()}`;
+    await store.saveConfig(createDemoConfig(tenantId));
+    const id = randomUUID();
+    const base = { id, tenantId, providerCallId: `retention-${id}`, fromNumber: "+12175550100", fromNumberVerified: false, startedAt: "2026-01-01T00:00:00.000Z", endedAt: "2026-01-01T00:05:00.000Z", durationSeconds: 300,
+      fields: { callerName: null, companyName: null, callbackNumber: null, address: null, serviceCategory: null, serviceCategoryConfidence: 0, problemDescription: "", equipmentDetails: null, accessNotes: null, requestedStart: null, explicitSlotConfirmation: false, diagnosticFeeAccepted: false, humanRequested: false, confidence: 0 },
+      emergency: null, outcome: "pending_confirmation" as const, transcript: null, recordingUrl: null, consentState: "unknown" as const, billingDisposition: "billable" as const, qualityFlags: [], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:05:00.000Z" };
+    await store.saveCall(base);
+    expect((await store.listExpiredCalls(tenantId, "2026-02-01T00:00:00Z", 10, "2026-02-01T00:00:00Z")).map((call) => call.id)).toEqual([id]);
+    await store.markRetentionFailed(id, "2026-02-01T00:00:00Z");
+    expect(await store.listExpiredCalls(tenantId, "2026-02-01T00:00:00Z", 10, "2026-02-01T12:00:00Z")).toEqual([]);
+    expect((await store.listExpiredCalls(tenantId, "2026-02-01T00:00:00Z", 10, "2026-02-02T01:00:00Z")).map((call) => call.id)).toEqual([id]);
+  });
 });
+
