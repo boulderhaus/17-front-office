@@ -647,31 +647,44 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (method === "POST" && url.pathname === "/app/billing/checkout") {
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
-      const subscription = await dependencies.store.getSubscription(account.tenantId);
-      if (subscription?.status === "active") return redirect(response, "/app");
-      if (stripeClient && subscription?.providerCustomerId && (subscription.status === "incomplete" || subscription.status === "past_due" || subscription.status === "unpaid")) {
-        // An existing subscription needs payment fixed, not a second subscription.
-        const portalUrl = await stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`)
-          .catch(() => { throw new HttpError(502, "Billing could not be opened. Please retry; your subscription has not changed."); });
-        return redirect(response, portalUrl);
+      if (!stripeClient) {
+        if (dependencies.env.FOUNDING_CHECKOUT_URL) return redirect(response, dependencies.env.FOUNDING_CHECKOUT_URL);
+        throw new HttpError(503, "Checkout is not configured yet");
       }
-      if (stripeClient) {
+      const target = await dependencies.store.withLock(`checkout:${account.tenantId}`, async () => {
+        const subscription = await dependencies.store.getSubscription(account.tenantId);
+        if (subscription?.status === "active" || subscription?.status === "trialing") return `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`;
+        if (subscription?.providerCustomerId && (subscription.status === "past_due" || subscription.status === "unpaid")) {
+          // Fix payment on the existing subscription instead of starting a second one.
+          return stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`)
+            .catch(() => { throw new HttpError(502, "Billing could not be opened. Please retry; your subscription has not changed."); });
+        }
         const config = await dependencies.store.getConfig(account.tenantId);
+        const addOns = `${config.ownerDailySmsEnabled ? 1 : 0}${config.ownerRealtimeSmsEnabled ? 1 : 0}`;
+        const now = dependencies.clock.now();
+        const savedOpen = await dependencies.store.getIntegrationSecret(account.tenantId, "stripe", "open_checkout");
+        const open = savedOpen ? JSON.parse(savedOpen) as { id: string; url: string; expiresAt: string; addOns: string } : null;
+        if (open && Date.parse(open.expiresAt) > now.getTime() + 60_000) {
+          // One payable Checkout Session per shop: reuse it, or expire it if the add-ons changed.
+          if (open.addOns === addOns) return open.url;
+          await stripeClient.expireCheckout(open.id).catch(() => { throw new HttpError(502, "Checkout could not be updated. Please retry."); });
+        }
         const base = dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "");
-        const checkoutUrl = await stripeClient.createCheckout({
+        const created = await stripeClient.createCheckout({
           tenantId: account.tenantId,
           email: account.email,
+          customerId: subscription?.providerCustomerId ?? null,
           successUrl: `${base}/app?checkout=success`,
           cancelUrl: `${base}/app?checkout=cancelled`,
-          // Same 10-minute window and add-ons reuse one Checkout Session, so repeat taps cannot open two subscriptions.
-          idempotencyKey: `checkout:${account.tenantId}:${Math.floor(dependencies.clock.now().getTime() / 600_000)}:${config.ownerDailySmsEnabled ? 1 : 0}${config.ownerRealtimeSmsEnabled ? 1 : 0}`,
+          idempotencyKey: `checkout:${account.tenantId}:${randomUUID()}`,
           dailySms: config.ownerDailySmsEnabled,
           realtimeSms: config.ownerRealtimeSmsEnabled,
+          now,
         });
-        return redirect(response, checkoutUrl);
-      }
-      if (dependencies.env.FOUNDING_CHECKOUT_URL) return redirect(response, dependencies.env.FOUNDING_CHECKOUT_URL);
-      throw new HttpError(503, "Checkout is not configured yet");
+        await dependencies.store.saveIntegrationSecret(account.tenantId, "stripe", "open_checkout", JSON.stringify({ ...created, addOns }));
+        return created.url;
+      });
+      return redirect(response, target);
     }
     if (method === "GET" && (url.pathname === "/app/settings" || url.pathname === "/app/config")) {
       const [config, googleConnected, ownerPhone] = await Promise.all([
@@ -717,6 +730,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         }
       }
       if (account.status !== "active") updated.paused = true;
+      if (updated.paused !== current.paused) updated.pausedForBilling = false;
       const ownerPhone = form.get("ownerPhone")?.trim();
       if (ownerPhone) {
         if (!/^\+[1-9]\d{7,14}$/.test(ownerPhone)) throw new HttpError(400, "Owner phone must use E.164 format");
@@ -956,8 +970,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       log({ level: "error", event: "billing_lapse_pause_failed", tenantId, error: safeError(error) });
       throw new HttpError(502, "Could not pause the live phone route; Stripe will retry");
     });
-    const config = await dependencies.store.getConfig(tenantId);
-    await dependencies.store.saveConfig({ ...config, paused: true });
+    const config = await dependencies.store.withLock(`config:${tenantId}`, async () => {
+      const current = await dependencies.store.getConfig(tenantId);
+      // Remember that billing (not the owner) paused it, so payment can turn it back on.
+      await dependencies.store.saveConfig({ ...current, paused: true, pausedForBilling: !current.paused || current.pausedForBilling === true });
+      return current;
+    });
     const now = dependencies.clock.now().toISOString();
     const statusWords = status === "past_due" ? "past due" : status === "canceled" ? "cancelled" : status.replace("_", " ");
     for (const destinationRef of config.ownerNotificationRefs) {
@@ -970,6 +988,42 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       });
     }
     log({ level: "warn", event: "billing_lapse_paused", tenantId, status });
+  }
+
+  /** Billing paused this shop and it has now paid: reconnect the line and tell the owner. */
+  async function handleBillingRestored(tenantId: string, eventId: string): Promise<void> {
+    const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
+    if (account?.status !== "active") return;
+    const config = await dependencies.store.getConfig(tenantId);
+    if (!config.pausedForBilling) return;
+    const [route, inboundNumber] = await Promise.all([
+      dependencies.store.getProviderRouteForTenant("telnyx", tenantId),
+      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
+    ]);
+    if (route && inboundNumber && dependencies.env.TELNYX_API_KEY) {
+      await new TelnyxVoiceRoutingClient({
+        apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: inboundNumber, assistantId: route.externalId,
+        ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}),
+      }).setPaused(false).catch((error) => {
+        log({ level: "error", event: "billing_restore_resume_failed", tenantId, error: safeError(error) });
+        throw new HttpError(502, "Could not reconnect the live phone route; Stripe will retry");
+      });
+    }
+    await dependencies.store.withLock(`config:${tenantId}`, async () => {
+      const current = await dependencies.store.getConfig(tenantId);
+      await dependencies.store.saveConfig({ ...current, paused: false, pausedForBilling: false });
+    });
+    const now = dependencies.clock.now().toISOString();
+    for (const destinationRef of config.ownerNotificationRefs) {
+      await dependencies.store.enqueueNotification({
+        id: randomUUID(), tenantId, callId: null, channel: "sms", destinationRef,
+        body: "Front Office is back on: your payment went through and calls forwarded to your Front Office line are being answered again.",
+        priority: "normal", state: "pending", attempts: 0, nextAttemptAt: now,
+        idempotencyKey: `billing-restored:${tenantId}:${eventId}:${destinationRef}`,
+        providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
+      });
+    }
+    log({ level: "info", event: "billing_restored_resumed", tenantId });
   }
 
   async function handleStripe(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -986,42 +1040,48 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const metadata = object.metadata && typeof object.metadata === "object" ? object.metadata as Record<string, unknown> : {};
       const tenantId = typeof metadata.tenant_id === "string" ? metadata.tenant_id : typeof object.client_reference_id === "string" ? object.client_reference_id : null;
       if (!tenantId || !await dependencies.store.getOwnerAccountByTenant(tenantId)) throw new HttpError(400, "Stripe event tenant is not recognized");
-      const existing = await dependencies.store.getSubscription(tenantId);
-      const now = dependencies.clock.now().toISOString();
-      const subscriptionId = event.type.startsWith("customer.subscription.")
-        ? (typeof object.id === "string" ? object.id : null)
-        : (typeof object.subscription === "string" ? object.subscription : null);
-      let record: SubscriptionRecord | null = null;
-      if (stripeClient && subscriptionId) {
-        const live = await stripeClient.retrieveSubscription(subscriptionId)
-          .catch(() => { throw new HttpError(502, "Stripe subscription lookup failed; Stripe will retry"); });
-        if (live.tenantId && live.tenantId !== tenantId) throw new HttpError(400, "Stripe subscription belongs to a different workspace");
-        const otherSubscription = existing?.providerSubscriptionId && existing.providerSubscriptionId !== live.id;
-        if (!live.priceIds.includes(stripeClient.basePriceId)) {
-          log({ level: "warn", event: "stripe_subscription_ignored_wrong_price", tenantId });
-        } else if (otherSubscription && existing?.status === "active") {
-          // Never let a second subscription cancel or replace the one that is paying.
-          if (live.status !== "canceled") log({ level: "error", event: "stripe_duplicate_subscription_requires_refund", tenantId });
+      // One shop's billing events are applied one at a time, each against a fresh API read,
+      // so a slow stale read can never overwrite a newer state.
+      await dependencies.store.withLock(`billing:${tenantId}`, async () => {
+        const existing = await dependencies.store.getSubscription(tenantId);
+        const now = dependencies.clock.now().toISOString();
+        const subscriptionId = event.type.startsWith("customer.subscription.")
+          ? (typeof object.id === "string" ? object.id : null)
+          : (typeof object.subscription === "string" ? object.subscription : null);
+        let record: SubscriptionRecord | null = null;
+        if (stripeClient && subscriptionId) {
+          const live = await stripeClient.retrieveSubscription(subscriptionId)
+            .catch(() => { throw new HttpError(502, "Stripe subscription lookup failed; Stripe will retry"); });
+          if (live.tenantId && live.tenantId !== tenantId) throw new HttpError(400, "Stripe subscription belongs to a different workspace");
+          const otherSubscription = existing?.providerSubscriptionId && existing.providerSubscriptionId !== live.id;
+          if (!live.priceIds.includes(stripeClient.basePriceId)) {
+            log({ level: "warn", event: "stripe_subscription_ignored_wrong_price", tenantId });
+          } else if (otherSubscription && existing?.status === "active") {
+            // Never let a second subscription cancel or replace the one that is paying.
+            if (live.status !== "canceled") log({ level: "error", event: "stripe_duplicate_subscription_requires_refund", tenantId });
+          } else {
+            record = {
+              tenantId,
+              providerCustomerId: live.customer ?? existing?.providerCustomerId ?? null,
+              providerSubscriptionId: live.id,
+              status: live.status,
+              currentPeriodEnd: live.currentPeriodEnd ?? existing?.currentPeriodEnd ?? null,
+              providerEventCreatedAt: typeof event.created === "number" ? new Date(event.created * 1_000).toISOString() : now,
+              createdAt: existing?.createdAt ?? now,
+              updatedAt: now,
+            };
+          }
         } else {
-          record = {
-            tenantId,
-            providerCustomerId: live.customer ?? existing?.providerCustomerId ?? null,
-            providerSubscriptionId: live.id,
-            status: live.status,
-            currentPeriodEnd: live.currentPeriodEnd ?? existing?.currentPeriodEnd ?? null,
-            providerEventCreatedAt: typeof event.created === "number" ? new Date(event.created * 1_000).toISOString() : now,
-            createdAt: existing?.createdAt ?? now,
-            updatedAt: now,
-          };
+          record = subscriptionFromStripeEvent(event, existing, now);
         }
-      } else {
-        record = subscriptionFromStripeEvent(event, existing, now);
-      }
-      if (record) {
-        // Pause first: if Telnyx fails, nothing is saved and Stripe's retry sees the same transition.
-        if (existing?.status === "active" && record.status !== "active") await handleBillingLapse(tenantId, record.status, event.id);
-        await dependencies.store.saveSubscription(record);
-      }
+        if (record) {
+          // Pause or resume first: if Telnyx fails, nothing is saved and Stripe's retry sees the same transition.
+          if (existing?.status === "active" && record.status !== "active") await handleBillingLapse(tenantId, record.status, event.id);
+          if (existing && existing.status !== "active" && record.status === "active") await handleBillingRestored(tenantId, event.id);
+          await dependencies.store.saveSubscription(record);
+          if (record.status === "active") await dependencies.store.deleteIntegrationSecret(tenantId, "stripe", "open_checkout");
+        }
+      });
     }
     const firstReceipt = await dependencies.store.claimWebhook(`stripe:${event.id}`);
     if (!firstReceipt) return sendJson(response, 200, { received: true, duplicate: true });

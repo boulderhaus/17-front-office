@@ -150,6 +150,8 @@ export interface BusinessConfig {
   ownerNotificationRefs: string[];
   ownerTransferNumberRef: string | null;
   warmTransferEnabled?: boolean;
+  /** True only when billing (not the owner) paused coverage, so payment can restore it. */
+  pausedForBilling?: boolean;
   schedulingCalendars?: Array<{ accountId: string; enabled: boolean; hours: BusinessConfig["bookableHours"] }>;
   calendarConnectionRef: string | null;
   bookingMode: "confirm" | "direct";

@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { createServer } from "node:http";
 import { describe, expect, it, vi } from "vitest";
-import { StripeBillingClient, subscriptionFromStripeEvent, verifyStripeWebhook } from "../src/adapters/stripe.js";
+import { normalizeSubscriptionStatus, StripeBillingClient, subscriptionFromStripeEvent, verifyStripeWebhook } from "../src/adapters/stripe.js";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
 import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
@@ -23,7 +23,7 @@ describe("Stripe billing boundary", () => {
   });
   it("adds selected recurring prices to checkout and safely syncs an active subscription", async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ url: "https://checkout.stripe.com/synthetic" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "cs_synthetic", url: "https://checkout.stripe.com/synthetic" }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ items: { data: [{ id: "si_daily", price: { id: "price_daily" } }] } }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ id: "sub_synthetic" }), { status: 200 }));
     const fetcher = fetchMock as unknown as typeof fetch;
@@ -37,6 +37,7 @@ describe("Stripe billing boundary", () => {
     const checkoutBody = fetchMock.mock.calls[0]![1]?.body as URLSearchParams;
     expect(checkoutBody.get("line_items[0][price]")).toBe("price_base");
     expect(checkoutBody.get("line_items[1][price]")).toBe("price_daily");
+    expect(checkoutBody.get("line_items[1][quantity]")).toBe("1");
 
     await client.syncAddOns("sub_synthetic", { dailySms: false, realtimeSms: true });
     const updateBody = fetchMock.mock.calls[2]![1]?.body as URLSearchParams;
@@ -120,6 +121,7 @@ describe("Stripe webhook state is read from the Stripe API", () => {
   async function harness(options: { activeAccount?: boolean; telnyxFails?: boolean } = {}) {
     const api: { status: string; price: string; tenant: string | null; subscriptions: Record<string, { status: string; price: string }> } = { status: "active", price: "price_synthetic", tenant: null, subscriptions: {} };
     const calls: Array<{ url: string; method: string; body?: unknown; key?: string | undefined }> = [];
+    let checkoutCount = 0;
     const fetcher = (async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? "GET";
@@ -131,7 +133,8 @@ describe("Stripe webhook state is read from the Stripe API", () => {
         const state = api.subscriptions[id] ?? { status: api.status, price: api.price };
         return json({ id, status: state.status, customer: "cus_synthetic", metadata: { tenant_id: api.tenant }, items: { data: [{ price: { id: state.price }, current_period_end: 1_766_400_000 }] } });
       }
-      if (url.includes("api.stripe.com/v1/checkout/sessions")) return json({ url: "https://checkout.stripe.com/c/synthetic" });
+      if (url.includes("api.stripe.com/v1/checkout/sessions/") && url.endsWith("/expire")) return json({ id: "expired" });
+      if (url.includes("api.stripe.com/v1/checkout/sessions")) { checkoutCount += 1; return json({ id: `cs_${checkoutCount}`, url: `https://checkout.stripe.com/c/synthetic-${checkoutCount}` }); }
       if (url.includes("api.stripe.com/v1/billing_portal/configurations")) return json({ id: "bpc_synthetic" });
       if (url.includes("api.stripe.com/v1/billing_portal/sessions")) return json({ url: "https://billing.stripe.com/p/synthetic" });
       if (url.includes("api.telnyx.com/v2/ai/assistants/")) return options.telnyxFails ? json({ errors: [{ detail: "down" }] }, 503) : json({ data: { telephony_settings: { default_texml_app_id: "texml_synthetic" } } });
@@ -142,7 +145,7 @@ describe("Stripe webhook state is read from the Stripe API", () => {
     const store = new InMemoryStore();
     await store.saveConfig(createDemoConfig());
     const server = createServer(createRequestHandler({
-      env: demoEnvironment({ STRIPE_WEBHOOK_SECRET: secret, STRIPE_SECRET_KEY: "sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", STRIPE_PRICE_ID: "price_synthetic", TELNYX_API_KEY: "KEY_synthetic" }),
+      env: demoEnvironment({ STRIPE_WEBHOOK_SECRET: secret, STRIPE_SECRET_KEY: "sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", STRIPE_PRICE_ID: "price_synthetic", STRIPE_DAILY_SMS_PRICE_ID: "price_daily_synthetic", TELNYX_API_KEY: "KEY_synthetic" }),
       store, calendar: new InMemoryCalendar(), clock: { now: () => now }, integrations: {}, logger: () => undefined, fetcher,
     }));
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
@@ -234,6 +237,20 @@ describe("Stripe webhook state is read from the Stripe API", () => {
       expect(lapse[0]!.body).toContain("past due");
       h.api.status = "active";
       await h.subscriptionEvent("customer.subscription.updated");
+      expect(await h.store.getConfig(h.tenantId)).toMatchObject({ paused: false, pausedForBilling: false });
+      expect([...h.store.notifications.values()].filter((item) => item.idempotencyKey.startsWith("billing-restored:"))).toHaveLength(1);
+    } finally { await h.close(); }
+  });
+
+  it("does not turn on a line the owner paused themselves when payment comes back", async () => {
+    const h = await harness({ activeAccount: true });
+    try {
+      await h.subscriptionEvent("customer.subscription.updated");
+      await h.store.saveConfig({ ...(await h.store.getConfig(h.tenantId)), paused: true });
+      h.api.status = "past_due";
+      await h.subscriptionEvent("customer.subscription.updated");
+      h.api.status = "active";
+      await h.subscriptionEvent("customer.subscription.updated");
       expect((await h.store.getConfig(h.tenantId)).paused).toBe(true);
     } finally { await h.close(); }
   });
@@ -248,22 +265,41 @@ describe("Stripe webhook state is read from the Stripe API", () => {
     } finally { await h.close(); }
   });
 
-  it("reuses one Checkout Session for repeat taps and sends unpaid shops to the billing portal", async () => {
+  it("keeps one payable Checkout Session per shop, reuses the customer, and sends unpaid shops to the portal", async () => {
     const h = await harness();
     try {
       const page = await (await fetch(`${h.baseUrl}/app`, { headers: { cookie: h.cookie } })).text();
       const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
       const tap = () => fetch(`${h.baseUrl}/app/billing/checkout`, { method: "POST", redirect: "manual", headers: { cookie: h.cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }) });
-      expect((await tap()).headers.get("location")).toContain("checkout.stripe.com");
-      await tap();
-      const keys = h.calls.filter((call) => call.url.includes("/checkout/sessions")).map((call) => call.key);
-      expect(keys).toHaveLength(2);
-      expect(keys[0]).toBeTruthy();
-      expect(keys[1]).toBe(keys[0]);
+      const first = (await tap()).headers.get("location");
+      expect(first).toContain("checkout.stripe.com");
+      expect((await tap()).headers.get("location")).toBe(first);
+      expect(h.calls.filter((call) => call.url.endsWith("/v1/checkout/sessions"))).toHaveLength(1);
+      const created = h.calls.find((call) => call.url.endsWith("/v1/checkout/sessions"))!.body as URLSearchParams;
+      expect(created.get("expires_at")).toBeTruthy();
+      const config = await h.store.getConfig(h.tenantId);
+      await h.store.saveConfig({ ...config, ownerDailySmsEnabled: true });
+      const changed = await tap();
+      expect(changed.status).toBe(303);
+      expect(changed.headers.get("location")).toContain("checkout.stripe.com");
+      expect(changed.headers.get("location")).not.toBe(first);
+      expect(h.calls.some((call) => call.url.endsWith("/expire"))).toBe(true);
+      h.api.status = "canceled";
+      await h.subscriptionEvent("customer.subscription.deleted");
+      expect((await h.store.getSubscription(h.tenantId))?.providerCustomerId).toBe("cus_synthetic");
+      await h.store.deleteIntegrationSecret(h.tenantId, "stripe", "open_checkout");
+      expect((await tap()).status).toBe(303);
+      const resubscribe = h.calls.filter((call) => call.url.endsWith("/v1/checkout/sessions")).at(-1)!.body as URLSearchParams;
+      expect(resubscribe.get("customer")).toBe("cus_synthetic");
+      expect(resubscribe.get("customer_email")).toBeNull();
       h.api.status = "past_due";
       await h.subscriptionEvent("customer.subscription.updated");
       expect((await tap()).headers.get("location")).toContain("billing.stripe.com");
     } finally { await h.close(); }
+  });
+
+  it("treats an expired first payment as ended so the shop can buy again", () => {
+    expect(normalizeSubscriptionStatus("incomplete_expired")).toBe("canceled");
   });
 });
 
