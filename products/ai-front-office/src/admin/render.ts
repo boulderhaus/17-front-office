@@ -27,7 +27,7 @@ export function renderOwnerSignup(error = "", values: Record<string, string> = {
 .formintro h1{font-size:clamp(28px,8.4vw,58px);white-space:nowrap;line-height:1;letter-spacing:-.035em}
 .formintro>p:last-child{font-size:17px;margin:12px 0 0}
 .onboard-steps{display:grid;gap:8px;margin:0 0 20px;font:800 13px/1.2 ui-sans-serif,system-ui,-apple-system,sans-serif}
-.onboard-steps ol{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;list-style:none;margin:0;padding:0}
+.onboard-steps ol{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;list-style:none;margin:0;padding:0}
 .onboard-steps li{height:6px;background:rgba(7,89,168,.18);font-size:0}.onboard-steps li.on{background:var(--blue)}
 .publicform{padding:24px;margin-bottom:28px}.publicform label{margin-bottom:18px;font-size:15px}
 .publicform input{min-height:52px;font-size:17px}
@@ -65,7 +65,7 @@ export function renderOwnerSignup(error = "", values: Record<string, string> = {
 @media(min-width:768px){.publicform button{width:auto;min-width:280px;max-width:360px;display:block;margin:0 auto}}
 ${planCss}
 </style>`;
-  const steps = `<div class="onboard-steps" aria-label="Step 1 of 4: your shop"><span>Step 1 of 4 · Your shop</span><ol aria-hidden="true"><li class="on">Shop</li><li>Card</li><li>Calls</li><li>Hours</li></ol></div>`;
+  const steps = `<div class="onboard-steps" aria-label="Step 1 of 3: your shop"><span>Step 1 of 3 · Your shop</span><ol aria-hidden="true"><li class="on">Your shop</li><li>Your card</li><li>Forward your calls</li></ol></div>`;
   const button = options.chargeNote ? "Continue to card" : "Create my account";
   // Optional, unchecked, separate from the terms and from paying (10DLC / Telnyx opt-in checklist).
   const optIn = `<div class="optin"><label class="check"><input name="ownerSmsConsent" type="checkbox" value="yes" ${values.ownerSmsConsent === "yes" ? "checked" : ""}><span>Send me Front Office account notifications by text (new calls, appointments)—optional</span></label><small>By checking this, you agree to receive SMS account notifications from Front Office by Dutchworks LLC. Msg frequency varies. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. We won’t share mobile info with third parties for marketing. Not required to sign up. <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></small></div>`;
@@ -79,6 +79,18 @@ ${planCss}
     ? plans.map((plan) => `<p class="charge" data-plan="${escapeHtml(plan.id)}">${escapeHtml(plan.chargeNote)}</p>`).join("")
     : options.chargeNote ? `<p class="charge always">${escapeHtml(plans[0]?.chargeNote ?? options.chargeNote)}</p>` : "";
   return publicLayout("Get started", `${style}<header class="publicnav"><a class="brand smallbrand" href="/"><span>Front</span> Office</a><nav><a href="/login">Sign in</a></nav></header><main class="publicmain formpage"><section class="formintro">${steps}<h1>Get your calls covered.</h1><p>Four quick answers. Your line turns on right after you add a card.</p></section>${error ? `<p class="formerror" role="alert">${escapeHtml(error)}</p>` : ""}<form class="publicform" method="post" action="/signup"><input type="hidden" name="timezone" value="${value("timezone")}"><label>Shop name<input name="businessName" autocomplete="organization" maxlength="120" value="${value("businessName")}" required></label><label>Your mobile number<input name="phone" type="tel" autocomplete="tel" inputmode="tel" maxlength="30" placeholder="(941) 555-0123" value="${value("phone")}" required><span class="hint">We use it to set up your line. Callers never see it.</span></label><label>Email<input name="email" type="email" autocomplete="email" inputmode="email" maxlength="254" value="${value("email")}" required></label><label>Password<input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="200" required><span class="hint">At least 12 characters.</span></label>${optIn}<label class="trap" aria-hidden="true">Fax number<input name="faxNumber" tabindex="-1" autocomplete="off"></label>${planPicker}<button>${button}</button>${charges}${plans.length ? `<p class="guarantee"><b>Lead guarantee:</b> no real customer lead in your first 30 days, and we refund your first month.</p>` : ""}<p class="agree">By continuing you agree to the <a href="/terms">Terms</a> and <a href="/privacy">Privacy notice</a>.</p></form><p class="signin">Already have an account? <a class="textlink" href="/login">Sign in</a></p>${siteFooter(options.supportEmail)}</main>`);
+}
+
+/** The page behind "Call back" in an owner text: who called, about what, and one big Call button. */
+export function renderCallbackLink(input: { shop: string; callerName: string | null; problem: string; address: string | null; phone: string | null; urgent: boolean; callId: string } | null): string {
+  const style = `<style>.cb{max-width:520px;padding-top:28px}.cb h1{font-size:clamp(30px,9vw,46px);line-height:1.05;letter-spacing:-.03em;margin:6px 0 10px}.cb .shop{font:800 13px/1.3 ui-sans-serif,system-ui,-apple-system,sans-serif;text-transform:uppercase;letter-spacing:.08em}.cb .urgent{display:inline-block;background:var(--red);color:#fff;padding:4px 10px;font:800 13px/1.3 ui-sans-serif,system-ui,-apple-system,sans-serif;margin-bottom:6px}.cb p{font-size:18px;margin:0 0 8px}.cb .call{display:flex;align-items:center;justify-content:center;gap:10px;min-height:64px;margin:22px 0 14px;background:var(--blue);color:#fff;text-decoration:none;font:800 22px/1 ui-sans-serif,system-ui,-apple-system,sans-serif;box-shadow:6px 6px 0 var(--ink,#073a6d)}.cb .more{font:700 15px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif}</style>`;
+  if (!input) {
+    return publicLayout("Link expired", `${style}<main class="publicmain cb"><h1>This link has expired.</h1><p>Call-back links work for 7 days. Open Front Office to see the call.</p><p class="more"><a href="/app">Open Front Office</a></p></main>`);
+  }
+  const us = input.phone ? /^\+1(\d{3})(\d{3})(\d{4})$/.exec(input.phone) : null;
+  const display = us ? `(${us[1]}) ${us[2]}-${us[3]}` : input.phone;
+  const name = input.callerName?.trim() || "the caller";
+  return publicLayout("Call back", `${style}<main class="publicmain cb"><p class="shop">${escapeHtml(input.shop)}</p>${input.urgent ? `<span class="urgent">Urgent</span>` : ""}<h1>Call back ${escapeHtml(name)}</h1>${input.problem.trim() ? `<p>${escapeHtml(input.problem)}</p>` : ""}${input.address ? `<p>${escapeHtml(input.address)}</p>` : ""}${input.phone ? `<a class="call" href="tel:${escapeHtml(input.phone)}">Call ${escapeHtml(display ?? input.phone)}</a>` : `<p><strong>No callback number was captured.</strong></p>`}<p class="more"><a href="/app/calls/${encodeURIComponent(input.callId)}">See the full call in Front Office</a></p></main>`);
 }
 
 export function renderOwnerLogin(error = ""): string {

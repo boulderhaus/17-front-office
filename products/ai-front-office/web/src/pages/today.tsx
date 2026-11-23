@@ -127,9 +127,8 @@ function SetupCard({ dashboard }: { dashboard: ApiDashboard }) {
   if (dashboard.onboarding.completed) return null
   const steps = [
     { done: true, label: "Your shop" },
-    { done: dashboard.paid, label: "Add a card" },
-    { done: Boolean(dashboard.line.confirmedAt) || dashboard.onboarding.hoursSet, label: "Forward missed calls" },
-    { done: dashboard.onboarding.hoursSet, label: "Pick your hours" },
+    { done: dashboard.paid, label: "Your card" },
+    { done: Boolean(dashboard.line.confirmedAt), label: "Forward your calls" },
   ]
   const done = steps.filter((step) => step.done).length
   const next = steps.find((step) => !step.done)

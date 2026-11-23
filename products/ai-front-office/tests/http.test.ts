@@ -880,7 +880,7 @@ describe("HTTP boundary", () => {
     expect(landingHtml).toContain("If Front Office doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month.");
     expect(landingHtml).not.toMatch(/connected AI minutes|\/minute/);
     expect(landingHtml).toContain("EXAMPLE CALL");
-    for (const item of ["Phone rings", "Front Office picks up", "What you get by text", "New job from Maria G.", "AC not cooling · 41 Palm Ave, Sarasota", "Wants someone today", "Tap to call back", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
+    for (const item of ["Phone rings", "Front Office picks up", "What you get by text", "Front Office - Suncoast Heating", "New call: Maria G.", "AC not cooling", "41 Palm Ave, Sarasota", "Wants someone today", "Call back", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
     // The example loops with CSS only and holds still for people who turn motion off.
     expect(landingHtml).toContain("@keyframes demoFrame");
     expect(landingHtml).toMatch(/prefers-reduced-motion:reduce\)\{[^}]*\}[^@]*\.frame\{position:static;opacity:1;animation:none/);
@@ -902,7 +902,10 @@ describe("HTTP boundary", () => {
     expect(signupPage.slice(signupPage.indexOf('name="ownerSmsConsent"'), signupPage.indexOf("</label>", signupPage.indexOf('name="ownerSmsConsent"')))).not.toMatch(/\balerts?\b/i);
     // The fewest fields: shop, mobile, email, password.
     expect([...signupPage.matchAll(/<input name="(\w+)"/g)].map((match) => match[1]).filter((name) => !["ownerSmsConsent", "faxNumber"].includes(name!))).toEqual(["businessName", "phone", "email", "password"]);
-    expect(signupPage).toContain("Step 1 of 4");
+    // Three steps now: Your shop, Your card, Forward your calls. No hours step.
+    expect(signupPage).toContain("Step 1 of 3 · Your shop");
+    expect(signupPage).toContain("<li>Forward your calls</li></ol>");
+    expect(signupPage).not.toMatch(/<li>Hours<\/li>|of 4/);
     expect(signupPage).toContain('Front Office is a product of <a href="https://bydutchworks.com"');
     const privacy = await fetch(`${baseUrl}/privacy`);
     expect(privacy.status).toBe(200);

@@ -5,7 +5,7 @@ import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { renderAdminResetLink, renderForgotPassword, renderResetPassword, renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms } from "../admin/render.js";
+import { renderAdminResetLink, renderCallbackLink, renderForgotPassword, renderResetPassword, renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms } from "../admin/render.js";
 import { buildActivationReport, shopActivationBlockers, type ActivationReport } from "../application/readiness.js";
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService } from "../application/call-service.js";
@@ -16,6 +16,7 @@ import { renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.j
 import { chargeSentence, isPaidStatus } from "../domain/billing.js";
 import { introCouponId, legacyPlanPriceIds, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, type Plan, type PlanId } from "../domain/plans.js";
 import { GuaranteeError, LeadGuaranteeService, recordFirstPaid } from "../application/billing-jobs.js";
+import { callbackLinkMatches, readCallbackLinkToken } from "../domain/owner-sms.js";
 import { callsCsv } from "./calls-csv.js";
 import { hoursFromChoice } from "../domain/hours.js";
 import { SMS_CONSENT_VERSION } from "../admin/footer.js";
@@ -179,8 +180,8 @@ const ownerSignupSchema = z.object({
   operationMode: z.enum(["after_hours", "overflow", "always"]).default("overflow"),
   greeting: z.string().trim().min(5).max(500).default("Thanks for calling. How can I help?"),
   weekdayStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("17:00"),
-  weekdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("08:00"),
-  bookableWeekdayStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("08:00"),
+  weekdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("09:00"),
+  bookableWeekdayStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("09:00"),
   bookableWeekdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("17:00"),
   serviceCategories: z.string().trim().min(2).max(800).default("HVAC repair, HVAC maintenance"),
   emergencyKeywords: z.string().trim().min(2).max(800).default("gas smell, carbon monoxide, no heat, frozen pipes"),
@@ -361,6 +362,7 @@ function ownerDashboardView(value: string | null): "today" | "pipeline" | "calen
 
 export function createRequestHandler(dependencies: AppDependencies): RequestListener {
   const service = new CallService(dependencies.store, dependencies.calendar, dependencies.clock, dependencies.env.PUBLIC_BASE_URL, {
+    callbackLinkKey: dependencies.env.SESSION_SIGNING_KEY ?? null,
     ownerEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
   });
   const recordingClient = dependencies.env.TELNYX_API_KEY ? new TelnyxRecordingClient(dependencies.env.TELNYX_API_KEY, dependencies.fetcher ?? fetch) : null;
@@ -511,6 +513,20 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         preview: true,
       }));
     }
+    // The "Call back" link from an owner text: signed for this call in this shop, 7 days, no sign-in needed.
+    const callbackLink = /^\/c\/([A-Za-z0-9_.-]{20,80})$/.exec(url.pathname);
+    if (method === "GET" && callbackLink?.[1]) {
+      response.setHeader("cache-control", "private, no-store");
+      response.setHeader("referrer-policy", "no-referrer");
+      const parsed = readCallbackLinkToken(callbackLink[1], dependencies.clock.now());
+      const call = parsed ? await dependencies.store.getCall(parsed.callId) : null;
+      if (!parsed || !call || !dependencies.env.SESSION_SIGNING_KEY || !callbackLinkMatches(parsed, call.tenantId, dependencies.env.SESSION_SIGNING_KEY)) {
+        return sendHtml(response, 404, renderCallbackLink(null));
+      }
+      const config = await dependencies.store.getConfig(call.tenantId);
+      const phone = [call.fields.callbackNumber, call.fromNumber].find((value) => value && /^\+[1-9]\d{7,14}$/.test(value)) ?? null;
+      return sendHtml(response, 200, renderCallbackLink({ shop: config.businessName, callerName: call.fields.callerName, problem: call.fields.problemDescription, address: call.fields.address, phone, urgent: call.emergency?.emergency === true, callId: call.id }));
+    }
     if (url.pathname === "/join" && (method === "GET" || method === "POST")) {
       if (!limiter.allow(`${ip}:team-join`, 12, 60 * 60_000)) throw new HttpError(429, "Too many invitation attempts");
       return joinTeam(request, response, url, dependencies);
@@ -576,10 +592,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         ownerNotificationRefs: parsed.data.ownerSmsConsent === "yes" ? ["owner-primary"] : [],
         ownerTransferNumberRef: phone ? "owner-primary" : null,
         supportEmail: parsed.data.email,
+        // Default Mon–Fri 9 AM–5 PM (no hours step in onboarding; changed in Settings). Outside that, weekends included, is after hours.
         afterHours: {
           weekdayStart: parsed.data.weekdayStart,
           weekdayEnd: parsed.data.weekdayEnd,
-          weekends: parsed.data.weekends === "on",
+          weekends: form.has("weekends") ? parsed.data.weekends === "on" : true,
           holidayDates: [],
         },
         bookableHours: {
@@ -2775,6 +2792,7 @@ function routeKey(pathname: string): string {
   if (pathname.startsWith("/texml/")) return `texml:${pathname.slice(7)}`;
   if (pathname.startsWith("/tools/")) return `tool:${pathname.slice(7)}`;
   if (pathname.startsWith("/admin/calls/")) return "admin:call";
+  if (pathname.startsWith("/c/")) return "callback-link";
   if (pathname.startsWith("/app/calls/")) return "owner:call";
   if (pathname.startsWith("/app/provider/")) return "owner:recording";
   if (pathname.startsWith("/api/app/")) return "owner:api";

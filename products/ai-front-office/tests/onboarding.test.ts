@@ -137,6 +137,10 @@ describe("three taps to a live line", () => {
     expect(await store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")).toBe("+19415550199");
     expect(await store.getIntegrationSecret(account.tenantId, "notifications", "owner_sms_consent")).toBeNull();
     expect(config).toMatchObject({ planId: "solo", flatMonthlyPriceCents: 4_999, includedCalls: 60, overageCentsPerCall: 75 });
+    // No hours step: every new shop starts Mon–Fri 9 AM–5 PM; evenings and weekends are after hours.
+    expect(config.bookableHours).toMatchObject({ weekdayStart: "09:00", weekdayEnd: "17:00", weekends: false });
+    expect(config.afterHours).toMatchObject({ weekdayStart: "17:00", weekdayEnd: "09:00", weekends: true });
+    expect(describeHours(config.bookableHours)).toBe("Mon–Fri 9 AM–5 PM");
   });
 
   it("shows Solo already picked and the bigger plans behind one compact line, and charges the one picked", async () => {
