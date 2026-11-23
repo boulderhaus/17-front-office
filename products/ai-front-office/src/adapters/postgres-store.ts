@@ -454,18 +454,36 @@ export class PostgresStore implements Store {
     return result.rows[0] ? mapOwnerAccount(result.rows[0] as Row, this.cryptoBox) : null;
   }
 
+  async createTeamAccount(account: OwnerAccount): Promise<boolean> {
+    try {
+      await this.#pool.query(
+        `INSERT INTO owner_accounts(id,tenant_id,email_hash,email_ciphertext,display_name_ciphertext,password_hash,status,role,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,'member',$8,$9)`,
+        [account.id, account.tenantId, this.cryptoBox.hashLookup(account.email), this.cryptoBox.encrypt(account.email), this.cryptoBox.encrypt(account.displayName), account.passwordHash, account.status, account.createdAt, account.updatedAt],
+      );
+      return true;
+    } catch (error) {
+      if (isUniqueViolation(error)) return false;
+      throw error;
+    }
+  }
+
+  async listTeamAccounts(tenantId: string): Promise<OwnerAccount[]> {
+    const result = await this.#pool.query("SELECT * FROM owner_accounts WHERE tenant_id=$1 ORDER BY created_at,id", [tenantId]);
+    return result.rows.map((row) => mapOwnerAccount(row as Row, this.cryptoBox));
+  }
+
   async getOwnerAccountById(accountId: string): Promise<OwnerAccount | null> {
     const result = await this.#pool.query("SELECT * FROM owner_accounts WHERE id=$1", [accountId]);
     return result.rows[0] ? mapOwnerAccount(result.rows[0] as Row, this.cryptoBox) : null;
   }
 
   async getOwnerAccountByTenant(tenantId: string): Promise<OwnerAccount | null> {
-    const result = await this.#pool.query("SELECT * FROM owner_accounts WHERE tenant_id=$1", [tenantId]);
+    const result = await this.#pool.query("SELECT * FROM owner_accounts WHERE tenant_id=$1 AND role='owner'", [tenantId]);
     return result.rows[0] ? mapOwnerAccount(result.rows[0] as Row, this.cryptoBox) : null;
   }
 
   async listOwnerAccounts(limit: number): Promise<OwnerAccount[]> {
-    const result = await this.#pool.query("SELECT * FROM owner_accounts ORDER BY created_at DESC LIMIT $1", [limit]);
+    const result = await this.#pool.query("SELECT * FROM owner_accounts WHERE role='owner' ORDER BY created_at DESC LIMIT $1", [limit]);
     return result.rows.map((row) => mapOwnerAccount(row as Row, this.cryptoBox));
   }
 
@@ -589,6 +607,7 @@ function mapOwnerAccount(row: Row, cryptoBox: CryptoBox): OwnerAccount {
     email: cryptoBox.decrypt(String(row.email_ciphertext)) ?? "",
     displayName: cryptoBox.decrypt(String(row.display_name_ciphertext)) ?? "",
     passwordHash: String(row.password_hash),
+    role: row.role === "owner" ? "owner" : "member",
     status: row.status as OwnerAccount["status"],
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),

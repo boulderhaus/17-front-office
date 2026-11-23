@@ -280,16 +280,27 @@ export class InMemoryStore implements Store {
     return structuredClone([...this.ownerAccounts.values()].find((account) => account.email.toLowerCase() === normalized) ?? null);
   }
 
+  async createTeamAccount(account: OwnerAccount): Promise<boolean> {
+    if (await this.getOwnerAccountByEmail(account.email) || !this.configs.has(account.tenantId)) return false;
+    this.ownerAccounts.set(account.id, structuredClone({ ...account, role: "member" }));
+    return true;
+  }
+
+  async listTeamAccounts(tenantId: string): Promise<OwnerAccount[]> {
+    return structuredClone([...this.ownerAccounts.values()].filter((account) => account.tenantId === tenantId));
+  }
+
   async getOwnerAccountById(accountId: string): Promise<OwnerAccount | null> {
     return structuredClone(this.ownerAccounts.get(accountId) ?? null);
   }
 
   async getOwnerAccountByTenant(tenantId: string): Promise<OwnerAccount | null> {
-    return structuredClone([...this.ownerAccounts.values()].find((account) => account.tenantId === tenantId) ?? null);
+    return structuredClone([...this.ownerAccounts.values()].find((account) => account.tenantId === tenantId && account.role !== "member") ?? null);
   }
 
   async listOwnerAccounts(limit: number): Promise<OwnerAccount[]> {
     return [...this.ownerAccounts.values()]
+      .filter((account) => account.role !== "member")
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
       .slice(0, limit)
       .map((account) => structuredClone(account));

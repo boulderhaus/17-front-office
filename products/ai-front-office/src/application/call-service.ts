@@ -75,18 +75,28 @@ export class CallService {
     recordingDisclosureGiven?: boolean;
     recordingDisclosureDeclined?: boolean;
   }): Promise<{ status: "saved"; missing: string[] }> {
-    const existing = await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
+    await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
+    return this.store.withLock(`call:${input.providerCallId}`, () => this.saveIntakeClaimed(input));
+  }
+
+  private async saveIntakeClaimed(input: Parameters<CallService["saveIntake"]>[0]): Promise<{ status: "saved"; missing: string[] }> {
+    const existing = await this.store.getCallByProviderId(input.providerCallId);
+    if (!existing || existing.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
     const incoming = completePartialFields(input.fields);
     if (incoming.callbackNumber && !isAllowedCustomerNumber(incoming.callbackNumber)) incoming.callbackNumber = null;
     const fields = mergeCollectedFields(existing.fields, incoming);
+    const config = await this.store.getConfig(input.tenantId);
+    const emergency = mergeEmergencyDecision(existing.emergency, triageEmergency(`${existing.fields.problemDescription}\n${fields.problemDescription}`, config));
     const call: CallRecord = {
       ...existing,
       fromNumber: existing.fromNumber === "unknown" && isAllowedCustomerNumber(input.fromNumber) ? input.fromNumber : existing.fromNumber,
       fields,
+      emergency,
       consentState: input.recordingDisclosureDeclined ? "declined" : input.recordingDisclosureGiven ? "disclosed" : existing.consentState,
       updatedAt: this.clock.now().toISOString(),
     };
     await this.store.saveCall(call);
+    if (emergency.emergency) await this.queueHumanHandoffClaimed({ tenantId: input.tenantId, providerCallId: input.providerCallId, fromNumber: call.fromNumber, problemDescription: fields.problemDescription, urgent: emergency });
     const missing = [
       !fields.callerName?.trim() ? "caller_name" : null,
       !/^\+[1-9]\d{7,14}$/.test(fields.callbackNumber ?? call.fromNumber) ? "callback_number" : null,
@@ -105,6 +115,7 @@ export class CallService {
   }): Promise<{ slots: AvailabilitySlot[]; status: "available" | "pending" | "invalid_window"; message: string; spokenSummary: string | null; timezone: string }> {
     const config = await this.store.getConfig(input.tenantId);
     const call = await this.ensureCall(input.tenantId, input.providerCallId, "unknown", this.clock.now().toISOString());
+    if (call.emergency?.emergency) return { slots: [], status: "pending", message: "Emergency escalation is active. Do not offer appointments; the owner has been alerted.", spokenSummary: null, timezone: config.timezone };
     const windowError = validateAvailabilityWindow(input.windowStart, input.windowEnd, this.clock.now());
     if (windowError) {
       return {
@@ -202,8 +213,14 @@ export class CallService {
     explicitConfirmation: boolean;
     diagnosticFeeAccepted: boolean;
   }): Promise<{ status: "confirmed" | "pending" | "conflict" | "unknown"; message: string }> {
+    await this.ensureCall(input.tenantId, input.providerCallId, input.callbackNumber, this.clock.now().toISOString());
+    return this.store.withLock(`call:${input.providerCallId}`, () => this.bookConfirmedSlotClaimed(input));
+  }
+
+  private async bookConfirmedSlotClaimed(input: Parameters<CallService["bookConfirmedSlot"]>[0]): Promise<{ status: "confirmed" | "pending" | "conflict" | "unknown"; message: string }> {
     const config = await this.store.getConfig(input.tenantId);
-    let call = await this.ensureCall(input.tenantId, input.providerCallId, input.callbackNumber, this.clock.now().toISOString());
+    let call = await this.store.getCallByProviderId(input.providerCallId);
+    if (!call || call.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
     call = {
       ...call,
       fields: {
@@ -224,7 +241,7 @@ export class CallService {
     const emergency = mergeEmergencyDecision(call.emergency, triageEmergency(input.problemDescription, config));
     if (call.fields.humanRequested || emergency.emergency) {
       if (emergency.emergency) {
-        await this.queueHumanHandoff({
+        await this.queueHumanHandoffClaimed({
           tenantId: input.tenantId,
           providerCallId: input.providerCallId,
           fromNumber: input.callbackNumber,
@@ -302,9 +319,15 @@ export class CallService {
     problemDescription?: string;
     urgent?: EmergencyDecision;
   }): Promise<{ status: "handoff_queued"; transferAvailable: boolean; message: string }> {
+    await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
+    return this.store.withLock(`call:${input.providerCallId}`, () => this.queueHumanHandoffClaimed(input));
+  }
+
+  private async queueHumanHandoffClaimed(input: Parameters<CallService["queueHumanHandoff"]>[0]): Promise<{ status: "handoff_queued"; transferAvailable: boolean; message: string }> {
     const config = await this.store.getConfig(input.tenantId);
     const ownerPortal = await this.store.getOwnerAccountByTenant(input.tenantId) ? "/app" : "/admin";
-    const existing = await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
+    const existing = await this.store.getCallByProviderId(input.providerCallId);
+    if (!existing || existing.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
     const now = this.clock.now().toISOString();
     const call: CallRecord = {
       ...existing,
@@ -586,8 +609,7 @@ export class CallService {
   }
 
   private async ensureCallbackTask(call: CallRecord, config: BusinessConfig, reason: string, highPriority: boolean): Promise<CallbackTask | null> {
-    const ownerRef = config.ownerNotificationRefs[0];
-    if (!ownerRef) return null;
+    const ownerRef = config.ownerNotificationRefs[0] ?? "shop-owner";
     const existing = await this.store.getCallbackTaskForCall(call.id);
     if (existing?.status === "completed") return existing;
     const now = this.clock.now();

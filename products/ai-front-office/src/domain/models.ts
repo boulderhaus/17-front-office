@@ -149,6 +149,8 @@ export interface BusinessConfig {
   defaultServiceDurationMinutes: number;
   ownerNotificationRefs: string[];
   ownerTransferNumberRef: string | null;
+  warmTransferEnabled?: boolean;
+  schedulingCalendars?: Array<{ accountId: string; enabled: boolean; hours: BusinessConfig["bookableHours"] }>;
   calendarConnectionRef: string | null;
   bookingMode: "confirm" | "direct";
   operationMode: "after_hours" | "overflow" | "always";
@@ -190,6 +192,7 @@ export interface OwnerAccount {
   email: string;
   displayName: string;
   passwordHash: string;
+  role?: "owner" | "member";
   status: "pending_activation" | "active" | "suspended";
   createdAt: string;
   updatedAt: string;

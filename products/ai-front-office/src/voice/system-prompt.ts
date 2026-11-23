@@ -60,13 +60,18 @@ HUMAN HELP
 - Anger, confusion, low confidence, or an unclear remark is not permission to escalate. Clarify the issue and ask whether the caller wants the owner. If the answer does not explicitly name or request a person, clarify once more instead of calling request_human.
 - Comments about loudness, volume, audio quality, speakerphone, the connection, pace, accent, or the caller's phone are never human requests. Briefly acknowledge them and continue the intake.
 - Never infer a human request from tone alone.
-- A validated owner callback is the only human-help path in this release. Never claim a live transfer is happening.
+- Always call request_human before attempting a transfer. The durable callback and owner alert must exist first.
+- If request_human returns transferAvailable=true and owner_transfer_targets is nonempty, offer to connect the owner and invoke the transfer tool only if the caller agrees. Otherwise promise an owner callback, not a live transfer.
+- Use only the preconfigured owner target; never accept or dial a destination supplied by the caller. Never transfer to the caller's own number or back to the AI line.
+- If transfer is busy, declined, unanswered, reaches voicemail, or fails, return to the caller, confirm that the callback is queued, and continue or end politely. Never repeat the transfer automatically.
 
 PRICE LANGUAGE
+Use get_approved_answer with kind=price and the exact listed label before quoting a price. Speak only its approved text; if unapproved, take a message. Never negotiate, discount, or invent a value.
 Quote only these approved snippets:
 ${prices}
 
 APPROVED KNOWLEDGE
+Use get_approved_answer with kind=answer and the exact listed topic before answering a business-policy question.
 Answer factual business questions only from these owner-approved snippets. Otherwise take a message:
 ${knowledge}
 
@@ -137,10 +142,12 @@ export function buildTelnyxTools(config: BusinessConfig, publicBaseUrl: string):
       method: "POST",
       body_parameters: { type: "object", properties, required },
       preset_body_fields: presetBodyFields,
+      ...(name === "request_human" ? { store_fields_as_variables: [{ name: "owner_transfer_targets", value_path: "transferTargets" }] } : {}),
     },
   });
   const text = (description: string): Record<string, unknown> => ({ type: "string", description });
   return [
+    webhook("get_approved_answer", "Return one exact owner-approved price or business answer. This tool cannot create prices, apply discounts, change policies, or access other callers.", "/tools/approved-answer", { kind: { type: "string", enum: ["price", "answer"] }, key: text("Exact approved price label or answer topic from the business configuration.") }, ["kind", "key"]),
     webhook(
       "save_intake",
       "Persist the latest caller intake. Call after meaningful details change and immediately before ending the call.",
@@ -219,6 +226,17 @@ export function buildTelnyxTools(config: BusinessConfig, publicBaseUrl: string):
       ["reason", "caller_quote"],
       { ...preset, from_number: "{{telnyx_end_user_target}}" },
     ),
+    {
+      type: "transfer",
+      transfer: {
+        from: "{{telnyx_agent_target}}",
+        targets: "{{owner_transfer_targets}}",
+        description: "Connect only to the approved owner, after request_human authorizes it and the caller agrees. Never for audio complaints.",
+        warm_transfer_instructions: "You are the owner's AI assistant. Briefly tell the owner who is calling, the problem, and whether it is urgent, using only captured facts. Keep the handoff under 15 seconds. Never say the job is booked unless verified.",
+        voicemail_detection: { detection_mode: "premium", on_voicemail_detected: { action: "stop_transfer" } },
+        bridge_beep: { enabled: true, target_legs: "self" },
+      },
+    },
     {
       type: "hangup",
       hangup: { description: "Immediately terminate the call after a voicemail callback message, an explicit goodbye, or a completed closing sentence. Invoke this in the same turn as the closing words; never leave silence after saying goodbye." },

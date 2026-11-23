@@ -49,7 +49,7 @@ describe("coverage and voice policy", () => {
     expect(evaluateServiceArea("1200 Main St, Springfield, MO 65802", config).status).toBe("outside");
     expect(evaluateServiceArea("62704 North Lake Shore Dr, Chicago, IL 60611", config).status).toBe("outside");
     expect(evaluateServiceArea("100 Main St, Albany, NY 12207", config)).toMatchObject({ status: "covered", matchedTerm: "12207" });
-    expect(evaluateServiceArea("100 Main St, IL 62704", config)).toMatchObject({ status: "covered", matchedTerm: "627" });
+    expect(evaluateServiceArea("100 Main St, IL 62704", config).status).toBe("outside");
     expect(evaluateServiceArea("100 Main St, Springfield Gardens, NY 11413", config).status).toBe("outside");
     expect(evaluateServiceArea("100 Main St, Albany, NY 12208", config).status).toBe("outside");
     expect(evaluateServiceArea("100 Main St", { ...config, serviceAreaTerms: [] }).status).toBe("unconfigured");

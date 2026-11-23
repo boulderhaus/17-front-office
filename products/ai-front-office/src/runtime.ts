@@ -1,5 +1,6 @@
 import { CapturingNotificationSender, InMemoryCalendar, InMemoryStore } from "./adapters/in-memory.js";
 import { GoogleCalendarAdapter } from "./adapters/google-calendar.js";
+import { TeamCalendar } from "./adapters/team-calendar.js";
 import { PostgresStore } from "./adapters/postgres-store.js";
 import { TelnyxSmsAdapter } from "./adapters/telnyx.js";
 import { ResendEmailAdapter } from "./adapters/resend.js";
@@ -63,7 +64,7 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
   const googleConfigured = Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET);
   const telnyxVoiceConfigured = Boolean(env.TELNYX_API_KEY && env.TELNYX_PUBLIC_KEY && env.TELNYX_ASSISTANT_ID);
   const telnyxSmsConfigured = Boolean(env.TELNYX_API_KEY && env.TELNYX_FROM_NUMBER && env.TELNYX_MESSAGING_PROFILE_ID);
-  const calendar = googleConfigured
+  const soloCalendar = googleConfigured
     ? new GoogleCalendarAdapter({
         clientId: env.GOOGLE_CLIENT_ID!,
         clientSecret: env.GOOGLE_CLIENT_SECRET!,
@@ -73,6 +74,10 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
         calendarId: env.GOOGLE_CALENDAR_ID,
       })
     : new UnavailableCalendar();
+  const calendar = new TeamCalendar(store, soloCalendar, (accountId, owner) => googleConfigured ? new GoogleCalendarAdapter({
+    clientId: env.GOOGLE_CLIENT_ID!, clientSecret: env.GOOGLE_CLIENT_SECRET!, calendarId: owner ? env.GOOGLE_CALENDAR_ID : "primary",
+    getRefreshToken: (tenantId) => store.getIntegrationSecret(tenantId, "google", owner ? "refresh_token" : `refresh_token:${accountId}`),
+  }) : new UnavailableCalendar());
   const smsSender = telnyxSmsConfigured
     ? new TelnyxSmsAdapter({
         apiKey: env.TELNYX_API_KEY!,

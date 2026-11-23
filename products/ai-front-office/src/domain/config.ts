@@ -7,12 +7,13 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     businessName: "North Star Heating",
     greeting: "Thanks for calling North Star Heating. I’m the owner’s AI assistant. How can I help?",
     timezone: "America/Chicago",
-    serviceAreaTerms: ["Springfield IL", "627"],
+    serviceAreaTerms: ["Springfield IL", "62701"],
     emergencyKeywords: ["frozen pipes", "no heat", "gas"],
     emergencyThreshold: 0.7,
     defaultServiceDurationMinutes: 90,
     ownerNotificationRefs: ["owner-primary"],
     ownerTransferNumberRef: "owner-primary",
+    warmTransferEnabled: false,
     calendarConnectionRef: "google-primary",
     bookingMode: "confirm",
     operationMode: "after_hours",
@@ -82,10 +83,6 @@ export function evaluateServiceArea(address: string | null, config: BusinessConf
     const normalizedTerm = normalizeCoverageText(term);
     if (/^\d{5}(?:-\d{4})?$/.test(normalizedTerm)) {
       if (postalCodes.includes(normalizedTerm)) return { status: "covered", matchedTerm: term };
-      continue;
-    }
-    if (/^\d{3}$/.test(normalizedTerm)) {
-      if (postalCodes.some((postalCode) => postalCode.startsWith(normalizedTerm))) return { status: "covered", matchedTerm: term };
       continue;
     }
     const locality = localityComponents.join(" ");

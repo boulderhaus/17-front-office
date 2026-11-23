@@ -616,6 +616,35 @@ describe("HTTP boundary", () => {
     expect(await store.getIntegrationSecret(account!.tenantId, "notifications", "owner-primary")).toBeNull();
   });
 
+  it("allows minimal signup before configuration and isolates teammate permissions", async () => {
+    const response = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Shop", email: "minimal@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
+    expect(response.status).toBe(303);
+    const ownerCookie = response.headers.get("set-cookie")!.split(";")[0]!;
+    const account = await store.getOwnerAccountByEmail("minimal@synthetic.example");
+    expect(account).not.toBeNull();
+    expect((await store.getConfig(account!.tenantId)).serviceAreaTerms).toEqual([]);
+    const dashboard = await (await fetch(`${baseUrl}/app`, { headers: { cookie: ownerCookie } })).text();
+    expect(dashboard).toContain("Set your call rules");
+    const teamPage = await (await fetch(`${baseUrl}/app/team`, { headers: { cookie: ownerCookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(teamPage)![1]!;
+    const invite = await fetch(`${baseUrl}/app/team/invite`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, email: "teammate@synthetic.example" }) });
+    expect(invite.status).toBe(200);
+    const inviteHtml = await invite.text();
+    const link = /href="([^"]+\/join\?shop=[^"]+)"/.exec(inviteHtml)![1]!.replaceAll("&amp;", "&");
+    const url = new URL(link);
+    const join = await fetch(`${baseUrl}/join`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ shop: url.searchParams.get("shop")!, token: url.searchParams.get("token")!, name: "Synthetic Teammate", password: "long-password-for-tests", consent: "yes" }) });
+    expect(join.status).toBe(303);
+    const memberCookie = join.headers.get("set-cookie")!.split(";")[0]!;
+    expect((await fetch(`${baseUrl}/app`, { headers: { cookie: memberCookie } })).status).toBe(200);
+    for (const path of ["/app/config", "/app/billing/checkout", "/app/billing/portal", "/app/team/invite", "/app/setup"]) {
+      const denied = await fetch(`${baseUrl}${path}`, { method: "POST", headers: { cookie: memberCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }) });
+      expect(denied.status).toBe(403);
+    }
+    const setup = await (await fetch(`${baseUrl}/app/setup`, { headers: { cookie: ownerCookie } })).text();
+    expect(setup).toContain("Where can you take a job?");
+    expect(setup).toContain("Connect Google Calendar");
+  });
+
   it("persists owner-approved scripts and coverage rules from the admin form", async () => {
     const login = await fetch(`${baseUrl}/admin/login`, {
       method: "POST",
@@ -686,7 +715,7 @@ describe("HTTP boundary", () => {
     expect(landingHtml).toContain("Five-person shop?");
     expect(landingText).toContain("One new paying customer can cover the month.");
     expect(landingHtml).toContain("$100 after job expenses");
-    expect(landingHtml).toContain("Get started for $49/month");
+    expect(landingHtml).toContain("Get the $49 plan");
     expect(landingHtml).toContain("EXAMPLE OWNER ALERT");
     expect(landingHtml).not.toContain("ServiceTitan’s contractor benchmarks");
     expect(landingHtml).toContain("Optional: try a test call.");
@@ -727,57 +756,16 @@ describe("HTTP boundary", () => {
     expect((body.match(/>PASS</g) ?? [])).toHaveLength(15);
   });
 
-  it("captures a founding-pilot application without exposing it publicly", async () => {
-    expect((await fetch(`${baseUrl}/start`)).status).toBe(200);
-    const response = await fetch(`${baseUrl}/start`, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        ownerName: "Synthetic Owner",
-        businessName: "Synthetic Heating",
-        email: "owner@example.com",
-        phone: "(212) 555-0198",
-        website: "https://example.com",
-        trade: "hvac",
-        serviceArea: "Synthetic County",
-        desiredMode: "overflow",
-        missedCallsPerWeek: "8",
-        calendarProvider: "google",
-        notes: "Uses a synthetic phone tree.",
-        consent: "yes",
-      }),
-    });
-    expect(response.status).toBe(200);
-    expect(await response.text()).toContain("Your shop is in the queue.");
-    const signups = await store.listPilotSignups(10);
-    expect(signups).toHaveLength(1);
-    expect(signups[0]).toMatchObject({ businessName: "Synthetic Heating", phone: "+12125550198", status: "new" });
-
-    const publicLanding = await (await fetch(`${baseUrl}/`)).text();
-    expect(publicLanding).not.toContain("owner@example.com");
-    const adminList = await fetch(`${baseUrl}/admin/signups`, { headers: { authorization: `Bearer ${adminToken}` } });
-    expect(adminList.status).toBe(200);
-    expect(await adminList.text()).toContain("owner@example.com");
-  });
-
-  it("rejects an invalid public pilot application", async () => {
-    const response = await fetch(`${baseUrl}/start`, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        ownerName: "Synthetic Owner",
-        businessName: "Synthetic Heating",
-        email: "owner@example.com",
-        phone: "123",
-        trade: "hvac",
-        serviceArea: "Synthetic County",
-        desiredMode: "overflow",
-        calendarProvider: "google",
-        consent: "yes",
-      }),
-    });
-    expect(response.status).toBe(400);
+  it("redirects old pilot links and submissions into self-serve signup", async () => {
+    for (const method of ["GET", "POST"]) {
+      const response = await fetch(`${baseUrl}/start`, { method, redirect: "manual" });
+      expect(response.status).toBe(303);
+      expect(response.headers.get("location")).toBe("/signup");
+    }
     expect(await store.listPilotSignups(10)).toHaveLength(0);
+    const landing = await (await fetch(`${baseUrl}/`)).text();
+    expect(landing).toContain("Get the $49 plan");
+    expect(landing).not.toMatch(/free trial|founding pilot/i);
   });
 
   it("rejects production provider traffic while paused or commercially unproven", async () => {

@@ -1,5 +1,7 @@
 # First-customer release packet
 
+> Current status, 2026-11-22: use [Critical handoff execution status](HANDOFF-EXECUTION-STATUS.md) for the current feature inventory, verification, and unresolved commercial gates. The rest of this file is the historical 2026-11-20 staging packet; its “Stripe absent/manual billing” and 45-test statements are superseded. Current local evidence is 91 tests (including real PostgreSQL team integration), a passing TypeScript build, and 15/15 simulations. Customer launch remains NO-GO pending live provider/security/billing evidence.
+
 ## Binary verdict
 
 **NO-GO for customer traffic as of 2026-11-20 EST.** A dedicated fail-closed staging deployment and Telnyx number/assistant exist, but the production API connection, Google OAuth, messaging approval, consent approval, target-shop configuration, and live smoke evidence are incomplete. `/activationz` therefore returns `503` by design.

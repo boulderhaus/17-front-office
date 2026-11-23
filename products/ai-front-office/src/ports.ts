@@ -54,6 +54,8 @@ export interface Store {
   savePilotSignup(signup: PilotSignup): Promise<void>;
   listPilotSignups(limit: number): Promise<PilotSignup[]>;
   createOwnerWorkspace(input: OwnerWorkspaceInput): Promise<boolean>;
+  createTeamAccount(account: OwnerAccount): Promise<boolean>;
+  listTeamAccounts(tenantId: string): Promise<OwnerAccount[]>;
   getOwnerAccountByEmail(email: string): Promise<OwnerAccount | null>;
   getOwnerAccountById(accountId: string): Promise<OwnerAccount | null>;
   getOwnerAccountByTenant(tenantId: string): Promise<OwnerAccount | null>;

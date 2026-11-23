@@ -239,7 +239,9 @@ describe("Telnyx provider boundary", () => {
     expect(serialized).toContain("/webhooks/telnyx");
     expect(serialized).toContain("/tools/save-intake");
     expect(serialized).toContain("{{call_control_id}}");
-    expect(serialized).not.toContain('"type":"transfer"');
+    expect(serialized).toContain('"type":"transfer"');
+    expect(serialized).toContain('"targets":"{{owner_transfer_targets}}"');
+    expect(serialized).toContain('"action":"stop_transfer"');
     expect(serialized).not.toContain("TOOL_TOKEN");
     expect(serialized).not.toContain("Retell");
     expect(serialized).not.toContain("Twilio");

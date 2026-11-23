@@ -2,6 +2,11 @@ import type { BusinessConfig, EmergencyDecision } from "./models.js";
 
 const LIFE_SAFETY_RULES: Array<{ pattern: RegExp; evidence: string; instruction: string }> = [
   {
+    pattern: /\b(smoke|fire|immediate danger|can't breathe|cannot breathe|unconscious)\b/i,
+    evidence: "reported smoke, fire, or immediate danger",
+    instruction: "Leave the danger area and call 911. Do not attempt a repair.",
+  },
+  {
     pattern: /\b(gas (?:leak|odor|smell)|smell(?:s|ing)? (?:like )?(?:natural )?gas|(?:natural gas|propane) (?:odor|smell|leak)|rotten eggs?|hissing gas)\b/i,
     evidence: "possible gas leak",
     instruction: "Leave the building, avoid switches or flames, and call 911 or the gas utility from outside.",

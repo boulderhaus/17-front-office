@@ -7,6 +7,11 @@ import { renderCallDetail, renderConfig, renderDashboard, renderLanding, renderL
 import { buildActivationReport, type ActivationReport } from "../application/readiness.js";
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService } from "../application/call-service.js";
+import { approvedTransferTargets } from "../application/transfer-policy.js";
+import { joinTeam, teamRoutes } from "./team-routes.js";
+import { renderQuickSetup } from "../admin/setup.js";
+import { approvedAnswer } from "../domain/approved-answer.js";
+import { saveAssistantConfig } from "../adapters/assistant-config.js";
 import { DataDeletionService } from "../application/data-deletion.js";
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
@@ -120,21 +125,21 @@ const pilotSignupSchema = z.object({
   consent: z.literal("yes"),
 });
 const ownerSignupSchema = z.object({
-  displayName: z.string().trim().min(2).max(120),
-  businessName: z.string().trim().min(2).max(120),
+  displayName: z.string().trim().min(2).max(120).default("Shop owner"),
+  businessName: z.string().trim().min(2).max(120).default("Your service business"),
   email: z.string().trim().toLowerCase().email().max(254),
   password: z.string().min(12).max(200),
   phone: z.string().trim().max(30).optional(),
-  timezone: z.string().trim().min(3).max(100),
-  serviceAreaTerms: z.string().trim().min(2).max(800),
-  operationMode: z.enum(["after_hours", "overflow", "always"]),
-  greeting: z.string().trim().min(5).max(500),
-  weekdayStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
-  weekdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
-  bookableWeekdayStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
-  bookableWeekdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
-  serviceCategories: z.string().trim().min(2).max(800),
-  emergencyKeywords: z.string().trim().min(2).max(800),
+  timezone: z.string().trim().min(3).max(100).default("America/New_York"),
+  serviceAreaTerms: z.string().trim().max(800).default(""),
+  operationMode: z.enum(["after_hours", "overflow", "always"]).default("overflow"),
+  greeting: z.string().trim().min(5).max(500).default("Hi, I’m the owner’s AI assistant. How can I help?"),
+  weekdayStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("17:00"),
+  weekdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("08:00"),
+  bookableWeekdayStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("08:00"),
+  bookableWeekdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("17:00"),
+  serviceCategories: z.string().trim().min(2).max(800).default("HVAC repair, HVAC maintenance"),
+  emergencyKeywords: z.string().trim().min(2).max(800).default("gas smell, carbon monoxide, no heat, frozen pipes"),
   weekends: z.string().optional(),
   ownerSmsConsent: z.literal("yes").optional(),
   founderSmsConsent: z.literal("yes").optional(),
@@ -169,7 +174,7 @@ function publicOwnerDemo(now: Date): {
     paused: false,
     businessName: "Suncoast Heating Demo",
     timezone: "America/New_York",
-    serviceAreaTerms: ["Sarasota FL", "342"],
+    serviceAreaTerms: ["Sarasota FL", "34236"],
     operationMode: "overflow",
   };
   const urgentCall: CallRecord = {
@@ -368,6 +373,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         preview: true,
       }));
     }
+    if (url.pathname === "/join" && (method === "GET" || method === "POST")) {
+      if (!limiter.allow(`${ip}:team-join`, 12, 60 * 60_000)) throw new HttpError(429, "Too many invitation attempts");
+      return joinTeam(request, response, url, dependencies);
+    }
     if (method === "GET" && url.pathname === "/signup") return sendHtml(response, 200, renderOwnerSignup());
     if (method === "POST" && url.pathname === "/signup") {
       if (!limiter.allow(`${ip}:owner-signup`, 5, 60 * 60_000)) throw new HttpError(429, "Too many signup attempts from this connection");
@@ -404,11 +413,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         ...createDemoConfig(tenantId),
         paused: true,
         businessName: parsed.data.businessName,
-        greeting: parsed.data.greeting,
+        greeting: form.has("greeting") ? parsed.data.greeting : `Thanks for calling ${parsed.data.businessName}. I’m the owner’s AI assistant. How can I help?`,
         timezone: parsed.data.timezone,
         serviceAreaTerms: splitList(parsed.data.serviceAreaTerms),
         emergencyKeywords: splitList(parsed.data.emergencyKeywords),
         serviceCategories: splitList(parsed.data.serviceCategories),
+        requireDiagnosticFeeAcceptance: false,
         operationMode: parsed.data.operationMode,
         ownerNotificationRefs: parsed.data.ownerSmsConsent === "yes" ? ["owner-primary"] : [],
         ownerTransferNumberRef: phone ? "owner-primary" : null,
@@ -471,44 +481,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return redirect(response, "/");
     }
     if (url.pathname.startsWith("/app")) return handleOwner(request, response, url);
-    if (method === "GET" && url.pathname === "/start") return sendHtml(response, 200, renderStart());
-    if (method === "POST" && url.pathname === "/start") {
-      if (!limiter.allow(`${ip}:pilot-signup`, 5, 60 * 60_000)) throw new HttpError(429, "Too many applications from this connection");
-      const form = parseForm(await readBody(request, 32_000));
-      if (form.get("faxNumber")?.trim()) return sendHtml(response, 200, renderStartReceived(null));
-      const values = Object.fromEntries(form.entries());
-      const parsed = pilotSignupSchema.safeParse(values);
-      if (!parsed.success) return sendHtml(response, 400, renderStart("Check the required fields and try again.", values));
-      const phone = normalizeUsPhone(parsed.data.phone);
-      if (!phone) return sendHtml(response, 400, renderStart("Enter a valid US mobile number.", values));
-      const website = normalizeOptionalUrl(parsed.data.website);
-      if (parsed.data.website && !website) return sendHtml(response, 400, renderStart("Enter a complete website address beginning with https://", values));
-      const missedCallsPerWeek = parseOptionalCount(parsed.data.missedCallsPerWeek);
-      if (missedCallsPerWeek === undefined) return sendHtml(response, 400, renderStart("Missed calls must be a whole number from 0 to 500.", values));
-      const now = dependencies.clock.now().toISOString();
-      const signup: PilotSignup = {
-        id: randomUUID(),
-        ownerName: parsed.data.ownerName,
-        businessName: parsed.data.businessName,
-        email: parsed.data.email,
-        phone,
-        website,
-        trade: parsed.data.trade,
-        serviceArea: parsed.data.serviceArea,
-        desiredMode: parsed.data.desiredMode,
-        missedCallsPerWeek,
-        calendarProvider: parsed.data.calendarProvider,
-        notes: parsed.data.notes || null,
-        status: "new",
-        source: "website",
-        consentedAt: now,
-        createdAt: now,
-        updatedAt: now,
-      };
-      await dependencies.store.savePilotSignup(signup);
-      log({ level: "info", event: "pilot_signup_received", signupId: signup.id, trade: signup.trade });
-      return sendHtml(response, 200, renderStartReceived(dependencies.env.FOUNDING_CHECKOUT_URL ?? null));
-    }
+    // Retire the old qualification form without breaking saved links.
+    if (url.pathname === "/start") return redirect(response, "/signup");
     if (method === "GET" && url.pathname === "/healthz") return sendJson(response, 200, { status: "ok" });
     if (method === "GET" && url.pathname === "/readyz") {
       await dependencies.store.ping();
@@ -527,6 +501,16 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (method === "POST" && url.pathname === "/webhooks/telnyx") return handleTelnyx(request, response);
     if (method === "POST" && url.pathname === "/webhooks/stripe") return handleStripe(request, response);
     if (method === "POST" && url.pathname === "/tools/save-intake") return handleIntake(request, response);
+    if (method === "POST" && url.pathname === "/tools/approved-answer") {
+      const rawBody = await readBody(request);
+      requireProviderAuth(request, rawBody);
+      enforceProviderRate(request, "tool:approved-answer");
+      const input = baseToolSchema.extend({ kind: z.enum(["price", "answer"]), key: z.string().max(120) }).strict().parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
+      requireMatchingCallHeader(request, input.provider_call_id);
+      const tenantId = await tenantForCall(input.provider_call_id);
+      await requireOperational(tenantId);
+      return sendJson(response, 200, approvedAnswer(await dependencies.store.getConfig(tenantId), input.kind, input.key));
+    }
     if (method === "POST" && url.pathname === "/tools/check-service-area") return handleServiceArea(request, response);
     if (method === "POST" && url.pathname === "/tools/check-availability") return handleAvailability(request, response);
     if (method === "POST" && url.pathname === "/tools/triage") return handleTriage(request, response);
@@ -546,6 +530,36 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return redirect(response, "/login");
     }
     const method = request.method ?? "GET";
+    const member = account.role === "member";
+    if (url.pathname === "/app/setup") {
+      if (member) throw new HttpError(403, "Only the owner can change the shop’s call setup");
+      if (method === "GET") return sendHtml(response, 200, renderQuickSetup(await dependencies.store.getConfig(account.tenantId), session.csrf, await isGoogleConnected(dependencies.env, dependencies.store, account.tenantId)));
+      if (method !== "POST") throw new HttpError(405, "Method not allowed");
+      const form = parseForm(await readBody(request, 20_000));
+      if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      const time = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+      const parsed = z.object({ businessName: z.string().trim().min(2).max(120), serviceAreaTerms: z.string().trim().min(2).max(800), timezone: z.string(), operationMode: z.enum(["overflow", "after_hours", "always"]), start: time, end: time, bookStart: time, bookEnd: time, bookingMode: z.enum(["confirm", "direct"]), greeting: z.string().trim().min(5).max(500), prices: z.string().max(5000), answers: z.string().max(5000), disclosureApproved: z.literal("yes") }).safeParse(Object.fromEntries(form));
+      if (!parsed.success || parsed.data.bookStart >= parsed.data.bookEnd) throw new HttpError(400, "Check the required answers and appointment hours");
+      const data = parsed.data;
+      if (!/\bAI\b/i.test(data.greeting)) throw new HttpError(400, "Your greeting must identify the AI assistant");
+      try { new Intl.DateTimeFormat("en-US", { timeZone: data.timezone }).format(); } catch { throw new HttpError(400, "Choose a valid timezone"); }
+      const phoneInput = form.get("ownerPhone")?.trim();
+      const phone = phoneInput ? normalizeUsPhone(phoneInput) : null;
+      if (phoneInput && !phone) throw new HttpError(400, "Enter a valid US mobile number");
+      await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
+        const current = await dependencies.store.getConfig(account.tenantId);
+        if (phone) await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner-primary", phone);
+        if (form.get("ownerSmsConsent") === "yes" && !phone && !await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")) throw new HttpError(400, "Add a mobile number for text alerts");
+        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, businessName: data.businessName, timezone: data.timezone, serviceAreaTerms: data.serviceAreaTerms.split(",").map((v) => v.trim()).filter(Boolean), operationMode: data.operationMode, afterHours: { ...current.afterHours, weekdayStart: data.start, weekdayEnd: data.end }, bookableHours: { weekdayStart: data.bookStart, weekdayEnd: data.bookEnd, weekends: form.get("weekends") === "on" }, bookingMode: data.bookingMode, greeting: data.greeting, priceSnippets: parseLines(data.prices, 30).map((text, index) => ({ label: `Approved price ${index + 1}`, text })), approvedKnowledge: parseLines(data.answers, 30).map((text, index) => ({ topic: `Approved answer ${index + 1}`, text })), ownerNotificationRefs: form.get("ownerSmsConsent") === "yes" ? ["owner-primary"] : [], ownerTransferNumberRef: "owner-primary", warmTransferEnabled: form.get("warmTransferEnabled") === "on" });
+      });
+      return redirect(response, "/app?setup=saved");
+    }
+    if (member && (url.pathname.startsWith("/app/billing") || url.pathname === "/app/config" || /\/delete$/.test(url.pathname))) throw new HttpError(403, "Only the owner can change billing, shop rules, or delete call records");
+    if (member && url.pathname === "/app/settings") return redirect(response, "/app/team");
+    if (url.pathname === "/app/team" || url.pathname.startsWith("/app/team/")) {
+      if (method === "POST" && url.pathname === "/app/team/invite" && !limiter.allow(`invite:${account.id}`, 10, 60 * 60_000)) throw new HttpError(429, "Too many invitations. Please try again later.");
+      return teamRoutes(request, response, url, dependencies, account, session);
+    }
     if (method === "GET" && url.pathname === "/app") {
       const [config, calls, tasks, usage, googleConnected, subscription] = await Promise.all([
         dependencies.store.getConfig(account.tenantId),
@@ -585,7 +599,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
       const subscription = await dependencies.store.getSubscription(account.tenantId);
-      if (subscription?.status === "active" || subscription?.status === "trialing") return redirect(response, "/app");
+      if (subscription?.status === "active") return redirect(response, "/app");
       if (stripeClient) {
         const config = await dependencies.store.getConfig(account.tenantId);
         const base = dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "");
@@ -621,6 +635,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (method === "POST" && url.pathname === "/app/config") {
       const form = parseForm(await readBody(request, 64_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
       const current = await dependencies.store.getConfig(account.tenantId);
       const updated = configFromForm(current, form);
       updated.flatMonthlyPriceCents = current.flatMonthlyPriceCents;
@@ -637,7 +652,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       let addOnSubscriptionId: string | null = null;
       if (addOnsChanged) {
         const subscription = await dependencies.store.getSubscription(account.tenantId);
-        if (subscription?.status === "active" || subscription?.status === "trialing") {
+        if (subscription?.status === "active") {
           if (!stripeClient || !subscription.providerSubscriptionId) throw new HttpError(503, "Subscription add-on billing is not available yet");
           addOnSubscriptionId = subscription.providerSubscriptionId;
         }
@@ -672,7 +687,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         });
       }
       try {
-        await dependencies.store.saveConfig(updated);
+        await saveAssistantConfig(dependencies.store, dependencies.env, updated);
       } catch (error) {
         if (liveRouteChange) await liveRouteChange.setPaused(current.paused).catch((rollbackError) => log({ level: "error", event: "owner_route_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
         if (addOnSubscriptionId) await stripeClient!.syncAddOns(addOnSubscriptionId, {
@@ -681,12 +696,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         }).catch((rollbackError) => log({ level: "error", event: "owner_addon_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
         throw error;
       }
+      });
       return redirect(response, "/app/settings");
     }
     if (method === "GET" && url.pathname === "/app/integrations/google/start") {
       if (!dependencies.env.GOOGLE_CLIENT_ID || !dependencies.env.GOOGLE_CLIENT_SECRET) throw new HttpError(503, "Google OAuth is not configured on the server");
       const cookiePath = "/app/integrations/google";
-      const attempt = createGoogleOAuthAttempt(dependencies.env.SESSION_SIGNING_KEY!, dependencies.env.NODE_ENV === "production", dependencies.clock.now().getTime(), cookiePath);
+      const attempt = createGoogleOAuthAttempt(`${dependencies.env.SESSION_SIGNING_KEY!}:${account.id}`, dependencies.env.NODE_ENV === "production", dependencies.clock.now().getTime(), cookiePath);
       const callback = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app/integrations/google/callback`;
       const authorization = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       authorization.search = new URLSearchParams({
@@ -705,12 +721,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (method === "GET" && url.pathname === "/app/integrations/google/callback") {
       const cookiePath = "/app/integrations/google";
-      const verifier = verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, "afo_google_pkce"), dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
+      const verifier = verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, "afo_google_pkce"), `${dependencies.env.SESSION_SIGNING_KEY!}:${account.id}`, dependencies.clock.now().getTime());
       if (!verifier) throw new HttpError(400, "Google authorization state is invalid or expired");
       const code = url.searchParams.get("code");
       if (!code) throw new HttpError(400, "Google did not return an authorization code");
       const refreshToken = await exchangeGoogleCode(dependencies.env, code, verifier, "/app/integrations/google/callback");
-      await dependencies.store.saveIntegrationSecret(account.tenantId, "google", "refresh_token", refreshToken);
+      await dependencies.store.saveIntegrationSecret(account.tenantId, "google", member ? `refresh_token:${account.id}` : "refresh_token", refreshToken);
       response.setHeader("set-cookie", clearGoogleOAuthCookie(dependencies.env.NODE_ENV === "production", cookiePath));
       return redirect(response, "/app/settings");
     }
@@ -803,7 +819,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         dependencies.store.listToolEvents(call.id),
         dependencies.store.listNotifications(call.id),
       ]);
-      return sendHtml(response, 200, renderCallDetail({ config, call, booking, callbackTask, events, notifications, csrf: session.csrf, surface: "owner" }));
+      return sendHtml(response, 200, renderCallDetail({ config, call, booking, callbackTask, events, notifications, csrf: session.csrf, surface: "owner", canDelete: !member }));
     }
     throw new HttpError(404, "Not found");
   }
@@ -1083,7 +1099,16 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       ...(input.caller_name === undefined ? {} : { callerName: input.caller_name }),
       ...(input.problem_description === undefined ? {} : { problemDescription: input.problem_description }),
     });
-    sendJson(response, 200, result);
+    const config = await dependencies.store.getConfig(tenantId);
+    const call = await dependencies.store.getCallByProviderId(input.provider_call_id);
+    const targets = await dependencies.store.withLock(`transfer:${input.provider_call_id}`, async () => {
+      const key = `attempt:${input.provider_call_id}`;
+      if (await dependencies.store.getIntegrationSecret(tenantId, "transfer", key)) return [];
+      const approved = await approvedTransferTargets(dependencies.store, config, call?.fromNumber ?? input.from_number, tenantId === dependencies.env.DEFAULT_TENANT_ID ? dependencies.env.TELNYX_FROM_NUMBER : undefined);
+      if (approved.length) await dependencies.store.saveIntegrationSecret(tenantId, "transfer", key, "issued");
+      return approved;
+    });
+    sendJson(response, 200, { ...result, transferAvailable: targets.length > 0, transferTargets: targets, message: targets.length ? "Owner alert and callback are saved. Offer one warm transfer to the configured Owner target. If it fails, return to the caller; the callback remains open." : result.message });
   }
 
   async function handleAdmin(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
@@ -1207,7 +1232,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           dependencies.store.getSubscription(account.tenantId),
         ]);
         if (!ownerPhone || !googleConnected || config.serviceAreaTerms.length === 0) throw new HttpError(409, "Owner phone, Google Calendar, and service area must be configured before activation");
-        if (stripeClient && subscription?.status !== "active" && subscription?.status !== "trialing") throw new HttpError(409, "An active subscription is required before activation");
+        if (!stripeClient || subscription?.status !== "active") throw new HttpError(409, "An active paid subscription is required before activation");
         const existingRoute = await dependencies.store.getProviderRoute("telnyx", assistantId);
         if (existingRoute && existingRoute.tenantId !== account.tenantId) throw new HttpError(409, "That Telnyx assistant is already assigned to another tenant");
         const liveRoute = new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY!, phoneNumber: inboundNumber, assistantId });
@@ -1256,6 +1281,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (method === "POST" && url.pathname === "/admin/config") {
       const form = parseForm(await readBody(request, 64_000));
       if (!bearer && (!session || !verifyCsrf(session, form.get("csrf"), dependencies.env.SESSION_SIGNING_KEY!))) throw new HttpError(403, "Invalid CSRF token");
+      await dependencies.store.withLock(`config:${dependencies.env.DEFAULT_TENANT_ID}`, async () => {
       const current = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
       const updated = configFromForm(current, form);
       const ownerPhone = form.get("ownerPhone")?.trim();
@@ -1272,7 +1298,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           throw new HttpError(502, "Telnyx voice routing could not be updated; configuration was not changed");
         });
       }
-      await dependencies.store.saveConfig(updated);
+      await saveAssistantConfig(dependencies.store, dependencies.env, updated);
+      });
       return redirect(response, "/admin/config");
     }
     if (method === "GET" && url.pathname === "/admin/prompt") {
@@ -1384,10 +1411,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (config.paused) throw new HttpError(503, "Service is paused");
     if (dependencies.env.PROVIDER_TEST_MODE) return;
     if (tenantId !== dependencies.env.DEFAULT_TENANT_ID) {
+      if (!dependencies.env.TELNYX_MESSAGING_APPROVED || !dependencies.env.RECORDING_CONSENT_APPROVED || !dependencies.env.LIVE_PROVIDER_PROOF_AT) throw new HttpError(503, "Commercial provider prerequisites are not satisfied");
       const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
       const subscription = await dependencies.store.getSubscription(tenantId);
       if (account?.status !== "active") throw new HttpError(503, "Shop activation is not complete");
-      if (subscription?.status !== "active" && subscription?.status !== "trialing") throw new HttpError(402, "An active subscription is required for customer traffic");
+      if (subscription?.status !== "active") throw new HttpError(402, "An active paid subscription is required for customer traffic");
       return;
     }
     const report = await getActivationReport();
@@ -1533,6 +1561,7 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
     operationMode: operationMode as BusinessConfig["operationMode"],
     answerAfterRings,
     bookingMode,
+    warmTransferEnabled: form.get("warmTransferEnabled") === "on",
     serviceAreaTerms: list("serviceAreaTerms"),
     emergencyKeywords: list("emergencyKeywords"),
     emergencyThreshold,
