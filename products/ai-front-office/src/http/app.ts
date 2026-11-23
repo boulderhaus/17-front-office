@@ -47,6 +47,8 @@ import {
   verifyTelnyxWebhook,
 } from "../adapters/telnyx.js";
 import { StripeBillingClient, subscriptionFromStripeEvent, verifyStripeWebhook } from "../adapters/stripe.js";
+import { noopTelemetry, type Telemetry } from "../adapters/posthog.js";
+import { injectAnalytics, POSTHOG_PROXY_PREFIX, proxyToPostHog } from "./posthog-proxy.js";
 import {
   adminCookie,
   bearerMatches,
@@ -173,6 +175,8 @@ export interface AppDependencies {
   fetcher?: typeof fetch;
   /** The built React owner app (web/dist). When absent, /app and /demo stay server-rendered. */
   ownerWeb?: { dir: string };
+  /** PostHog product analytics + error tracking; a no-op when POSTHOG_KEY is unset. */
+  telemetry?: Telemetry;
 }
 
 function publicOwnerDemo(now: Date): {
@@ -334,6 +338,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
   const limiter = new RateLimiter();
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));
+  const telemetry = dependencies.telemetry ?? noopTelemetry;
+  const analyticsPage = (html: string, loader = true): string => injectAnalytics(html, { key: dependencies.env.POSTHOG_KEY, ingestionHost: dependencies.env.POSTHOG_HOST, loader });
   let ownerWebIndex: Promise<string | null> | null = null;
   const WEB_TYPES: Record<string, string> = { js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", woff2: "font/woff2", woff: "font/woff", svg: "image/svg+xml", png: "image/png" };
   const recordingUrls = new Map<string, { url: string; expiresAt: number }>();
@@ -344,6 +350,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const status = error instanceof HttpError ? error.status : error instanceof z.ZodError ? 400 : 500;
       const message = error instanceof HttpError || error instanceof z.ZodError ? error.message : "Internal server error";
       log({ level: status >= 500 ? "error" : "warn", event: "request_failed", requestId, status, error: safeError(error) });
+      if (status >= 500) {
+        const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+        telemetry.captureException(error, { route: routeKey(pathname), method: request.method ?? "GET", status, requestId: String(requestId) });
+      }
       if (!response.headersSent) sendJson(response, status, { error: message, request_id: requestId });
       else response.end();
     });
@@ -358,6 +368,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const method = request.method ?? "GET";
     const route = routeKey(url.pathname);
     const ip = requestIp(request);
+    if (url.pathname.startsWith(`${POSTHOG_PROXY_PREFIX}/`)) {
+      // Analytics traffic is chatty (replay chunks), so it skips the request log and has its own limit.
+      if (!dependencies.env.POSTHOG_KEY) throw new HttpError(404, "Not found");
+      if (!limiter.allow(`${ip}:ingest`, 600, 60_000)) throw new HttpError(429, "Too many requests");
+      return proxyToPostHog(request, response, { ingestionHost: dependencies.env.POSTHOG_HOST, clientIp: ip, fetcher: dependencies.fetcher ?? fetch });
+    }
     response.once("finish", () => {
       log({ level: "info", event: "request_completed", requestId, method, route, status: response.statusCode, latencyMs: Date.now() - started });
     });
@@ -373,6 +389,15 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       response.end(asset);
       return;
     }
+    if (method === "GET" && url.pathname === "/assets/analytics.js") {
+      if (!dependencies.env.POSTHOG_KEY) throw new HttpError(404, "Not found");
+      const asset = await readFile(resolve(process.cwd(), "public/assets/analytics.js"));
+      response.statusCode = 200;
+      response.setHeader("content-type", "text/javascript; charset=utf-8");
+      response.setHeader("cache-control", "public, max-age=3600");
+      response.end(asset);
+      return;
+    }
     if (method === "GET" && url.pathname === "/assets/signup-wizard.js") {
       const asset = await readFile(resolve(process.cwd(), "public/assets/signup-wizard.js"));
       response.statusCode = 200;
@@ -383,7 +408,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (method === "GET" && url.pathname === "/") {
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
-      return sendHtml(response, 200, renderLanding(config));
+      return sendHtml(response, 200, analyticsPage(renderLanding(config)));
     }
     if (method === "GET" && url.pathname.startsWith("/web/assets/")) return serveWebAsset(response, url.pathname.slice("/web/assets/".length));
     if (url.pathname.startsWith("/api/demo/")) return handleDemoApi(request, response, url);
@@ -407,7 +432,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (!limiter.allow(`${ip}:team-join`, 12, 60 * 60_000)) throw new HttpError(429, "Too many invitation attempts");
       return joinTeam(request, response, url, dependencies);
     }
-    if (method === "GET" && url.pathname === "/signup") return sendHtml(response, 200, renderOwnerSignup());
+    if (method === "GET" && url.pathname === "/signup") return sendHtml(response, 200, analyticsPage(renderOwnerSignup()));
     if (method === "POST" && url.pathname === "/signup") {
       if (!limiter.allow(`${ip}:owner-signup`, 5, 60 * 60_000)) throw new HttpError(429, "Too many signup attempts from this connection");
       const form = parseForm(await readBody(request, 48_000));
@@ -494,6 +519,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const session = mintOwnerSession(account, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
       response.setHeader("set-cookie", ownerSessionCookie(session, dependencies.env.NODE_ENV === "production"));
       log({ level: "info", event: "owner_workspace_created", accountId: account.id, tenantId });
+      telemetry.capture("owner_signed_up", account.id, tenantId, { operation_mode: config.operationMode });
       return redirect(response, "/app");
     }
     if (method === "GET" && url.pathname === "/login") return sendHtml(response, 200, renderOwnerLogin());
@@ -595,7 +621,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   // ---- React owner app (web/dist) ----------------------------------------------
   function loadOwnerWebIndex(): Promise<string | null> {
     if (!dependencies.ownerWeb) return Promise.resolve(null);
-    ownerWebIndex ??= readFile(resolve(dependencies.ownerWeb.dir, "index.html"), "utf8").catch(() => null);
+    ownerWebIndex ??= readFile(resolve(dependencies.ownerWeb.dir, "index.html"), "utf8").then((html) => analyticsPage(html, false)).catch(() => null);
     return ownerWebIndex;
   }
   async function sendOwnerWeb(response: ServerResponse): Promise<boolean> {
@@ -688,12 +714,14 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
       dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
     ]);
-    return apiDashboard({
+    const model = apiDashboard({
       account, config, calls, tasks, usage, googleConnected, subscription, csrf, lineNumber,
       checkoutConfigured: Boolean(stripeClient || dependencies.env.FOUNDING_CHECKOUT_URL),
       now: dependencies.clock.now().toISOString(),
       preview: false,
     });
+    // Opaque ids only, so the browser can identify the owner and group by shop without email or phone.
+    return telemetry.enabled ? { ...model, analytics: { distinctId: account.id, tenantId: account.tenantId } } : model;
   }
   async function handleOwnerApi(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     const auth = await authenticateOwner(request);
@@ -990,7 +1018,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
       if (!stripeClient) {
-        if (dependencies.env.FOUNDING_CHECKOUT_URL) return redirect(response, dependencies.env.FOUNDING_CHECKOUT_URL);
+        if (dependencies.env.FOUNDING_CHECKOUT_URL) {
+          telemetry.capture("checkout_started", account.id, account.tenantId, { result: "founding_link" });
+          return redirect(response, dependencies.env.FOUNDING_CHECKOUT_URL);
+        }
         throw new HttpError(503, "Checkout is not configured yet");
       }
       // Same lock as the billing webhook, so a payment cannot land between this read and a new session.
@@ -1031,6 +1062,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         });
         await dependencies.store.saveIntegrationSecret(account.tenantId, "stripe", "open_checkout", JSON.stringify({ ...created, addOns }));
         return created.url;
+      });
+      const appUrl = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`;
+      telemetry.capture("checkout_started", account.id, account.tenantId, {
+        result: target === appUrl ? "already_active" : target.endsWith("checkout=processing") ? "processing" : target.startsWith("https://checkout.stripe.com") ? "stripe_session" : "billing_portal",
       });
       return redirect(response, target);
     }
@@ -1232,7 +1267,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
    * after a crash reuses it instead of buying a second number.
    */
   async function goLive(account: OwnerAccount, existing: { assistantId: string; inboundNumber: string } | null): Promise<string> {
-    return dependencies.store.withLock(`go-live:${account.tenantId}`, async () => {
+    telemetry.capture("go_live_attempted", account.tenantId, account.tenantId);
+    return trackGoLive(account.tenantId, dependencies.store.withLock(`go-live:${account.tenantId}`, async () => {
       const providerBlockers = liveProviderBlockers();
       if (providerBlockers.length > 0) throw new HttpError(409, `Live provider prerequisites are missing: ${providerBlockers.join(", ")}`);
       const config = await dependencies.store.getConfig(account.tenantId);
@@ -1303,7 +1339,22 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         throw error;
       }
       return inboundNumber;
-    });
+    }));
+  }
+
+  /** Records how a go-live ended: live, blocked (4xx: a prerequisite is missing) or failed (5xx: provider or server). */
+  function trackGoLive(tenantId: string, attempt: Promise<string>): Promise<string> {
+    return attempt.then(
+      (inboundNumber) => {
+        telemetry.capture("go_live_result", tenantId, tenantId, { result: "live", http_status: 200 });
+        return inboundNumber;
+      },
+      (error: unknown) => {
+        const httpStatus = error instanceof HttpError ? error.status : 500;
+        telemetry.capture("go_live_result", tenantId, tenantId, { result: httpStatus < 500 ? "blocked" : "failed", http_status: httpStatus });
+        throw error;
+      },
+    );
   }
 
   /** Numbers and assistants we bought for a shop go back to Telnyx when the shop is deleted. Best effort: logged, never blocks deletion. */
@@ -1450,6 +1501,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           record = subscriptionFromStripeEvent(event, existing, now);
         }
         if (record) {
+          if (record.status !== existing?.status) telemetry.capture("subscription_status_changed", tenantId, tenantId, { status: record.status, stripe_event_type: event.type });
           // Pause or resume first: if Telnyx fails, nothing is saved and Stripe's retry sees the same transition.
           // Reconcile the line with the current status on every event, not only on a status edge,
           // so a crash between steps cannot leave a paid shop paused or an unpaid shop live.
@@ -1462,6 +1514,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     const firstReceipt = await dependencies.store.claimWebhook(`stripe:${event.id}`);
     if (!firstReceipt) return sendJson(response, 200, { received: true, duplicate: true });
+    if (event.type === "checkout.session.completed") {
+      const tenantId = typeof event.data.object.client_reference_id === "string" ? event.data.object.client_reference_id : null;
+      if (tenantId) telemetry.capture("checkout_completed", tenantId, tenantId, { stripe_event_type: event.type });
+    }
     return sendJson(response, 200, { received: true });
   }
 
@@ -1476,12 +1532,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         if (existing) {
           const ownerPortal = await dependencies.store.getOwnerAccountByTenant(existing.tenantId) ? "/app" : "/admin";
           const recordingUrl = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}${ownerPortal}/provider/telnyx/recordings/${encodeURIComponent(callback.providerCallId)}`;
-          await service.finalize(toTelnyxTexmlCallSummary(
+          trackFinalizedCall(await service.finalize(toTelnyxTexmlCallSummary(
             rawBody,
             existing.tenantId,
             dependencies.clock.now(),
             recordingUrl,
-          ));
+          )), "texml");
         }
       }
       return sendJson(response, 200, { received: true });
@@ -1581,9 +1637,21 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         });
         summary.recordingUrl = null;
       }
-      await service.finalize(summary);
+      trackFinalizedCall(await service.finalize(summary), "ai_assistant");
     }
     sendJson(response, 200, { received: true });
+  }
+
+  /** Outcome only: never the caller's name, number, address or transcript. */
+  function trackFinalizedCall(call: CallRecord, channel: "texml" | "ai_assistant"): void {
+    telemetry.capture("call_finalized", call.tenantId, call.tenantId, {
+      channel,
+      outcome: call.outcome,
+      emergency: call.emergency?.emergency === true,
+      duration_seconds: call.durationSeconds,
+      consent_state: call.consentState,
+      billing_disposition: call.billingDisposition,
+    });
   }
 
   async function handleIntake(request: IncomingMessage, response: ServerResponse): Promise<void> {

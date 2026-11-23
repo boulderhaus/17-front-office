@@ -377,7 +377,7 @@ export function CallPanel({ call, task, tz, standalone }: { call: ApiCall | null
         <Facts rows={facts} />
         <details className="group rounded-xl border">
           <summary className="flex min-h-12 cursor-pointer items-center px-3.5 font-semibold">Read the call</summary>
-          <p className="px-3.5 pb-3.5 text-sm whitespace-pre-wrap text-foreground/85">{call.transcript ?? "Transcript unavailable"}</p>
+          <p className="ph-no-capture px-3.5 pb-3.5 text-sm whitespace-pre-wrap text-foreground/85">{call.transcript ?? "Transcript unavailable"}</p>
         </details>
         <Button variant="link" className="h-10 w-fit px-0" asChild>
           <Link to={`${base}/calls/${encodeURIComponent(call.id)}`}>{preview ? "Open the full call" : "Full record, recording & delete"}</Link>
