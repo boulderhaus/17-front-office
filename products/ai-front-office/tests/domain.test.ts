@@ -43,6 +43,13 @@ describe("coverage and voice policy", () => {
     expect(prompt).toContain("say you're the shop's virtual assistant");
     expect(prompt).toContain("Never claim to be human");
     expect(buildTelnyxGreeting(createDemoConfig())).toBe("Thanks for calling North Star Heating. How can I help?");
+    const recordingConfig = { ...createDemoConfig(), recordingDisclosure: "Calls may be recorded." };
+    expect(buildTelnyxGreeting(recordingConfig)).toBe("Thanks for calling North Star Heating. How can I help?");
+    expect(buildVoiceSystemPrompt(recordingConfig)).toContain('Right before invoking the transfer tool, say exactly: "Connecting you now. Calls may be recorded."');
+    expect(prompt).not.toContain("Connecting you now.");
+    const recordingSettings = (config: ReturnType<typeof createDemoConfig>) => (buildTelnyxAssistantUpdate(config, "https://example.test").telephony_settings as { recording_settings: { enabled: boolean } }).recording_settings.enabled;
+    expect(recordingSettings(createDemoConfig())).toBe(true);
+    expect(recordingSettings(recordingConfig)).toBe(false);
     expect(prompt).toContain("Quote only these approved snippets");
     expect(prompt).toContain("read the exact approved diagnostic fee");
     expect(prompt).toContain("The booking mode is confirm");

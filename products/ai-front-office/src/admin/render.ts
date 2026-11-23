@@ -1,3 +1,4 @@
+import { renderOwnerApp } from "./owner-app.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, OutboxNotification, OwnerAccount, PilotSignup, SubscriptionRecord, ToolEvent, UsageSummary } from "../domain/models.js";
 import type { ActivationReport } from "../application/readiness.js";
 import { SIMULATION_SCENARIOS, type SimulationResult } from "../application/simulator.js";
@@ -52,111 +53,7 @@ export function renderOwnerDashboard(input: {
   view?: OwnerDashboardView;
   preview?: boolean;
 }): string {
-  const preview = input.preview === true;
-  const view = input.view ?? "today";
-  const nowMs = Date.parse(input.now);
-  const used = input.usage.billedMinutes;
-  const remaining = Math.max(0, input.config.includedMinutes - used);
-  const projectedOverage = Math.max(0, used - input.config.includedMinutes) * input.config.overageCentsPerMinute;
-  const paid = input.subscription?.status === "active";
-  const callsById = new Map(input.calls.map((call) => [call.id, call]));
-  const actionableTasks = input.tasks
-    .filter((task) => task.status === "open" || (task.status === "snoozed" && Date.parse(task.dueAt) <= nowMs))
-    .sort((left, right) => left.priority === right.priority ? left.dueAt.localeCompare(right.dueAt) : left.priority === "high" ? -1 : 1);
-  const snoozedTasks = input.tasks.filter((task) => task.status === "snoozed" && Date.parse(task.dueAt) > nowMs);
-  const completedTasks = input.tasks.filter((task) => task.status === "completed");
-  const selectedCall = callsById.get(input.selectedCallId ?? "")
-    ?? callsById.get(actionableTasks[0]?.callId ?? "")
-    ?? input.calls[0]
-    ?? null;
-  const recentlyCompleted = completedTasks.find((task) => task.callId === input.recentlyCompletedCallId);
-  const base = preview ? "/demo" : "/app";
-  const dashboardLink = (targetView: OwnerDashboardView, callId?: string): string => {
-    const params = new URLSearchParams();
-    if (targetView !== "today") params.set("view", targetView);
-    if (callId) params.set("call", callId);
-    const query = params.toString();
-    return `${base}${query ? `?${query}` : ""}`;
-  };
-  const shopRulesSaved = input.config.serviceAreaTerms.length > 0 && input.config.greeting.trim().length > 0;
-  const setupSteps = [shopRulesSaved, input.googleConnected, paid];
-  const setupComplete = setupSteps.filter(Boolean).length;
-  const phoneFor = (call: CallRecord): string | null => {
-    const phone = call.fields.callbackNumber ?? call.fromNumber;
-    return /^\+[1-9]\d{7,14}$/.test(phone) ? phone : null;
-  };
-  const taskRows = actionableTasks.length === 0
-    ? `<div class="queue-empty"><strong>You’re caught up.</strong><span>New emergencies, callbacks, and unconfirmed appointments will appear here automatically.</span></div>`
-    : actionableTasks.map((task) => {
-      const call = callsById.get(task.callId);
-      const phone = call ? phoneFor(call) : null;
-      const overdue = Date.parse(task.dueAt) <= nowMs;
-      const rowLink = `${dashboardLink(view, task.callId)}#call-preview`;
-      const complete = preview
-        ? `<button class="task-check" type="button" disabled aria-label="Read-only example">✓</button>`
-        : `<form class="inline-form" method="post" action="/app/calls/${encodeURIComponent(task.callId)}/task/complete"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><button class="task-check" aria-label="Mark ${escapeHtml(call?.fields.callerName ?? "call")} handled">✓</button></form>`;
-      const snooze = preview ? "" : `<details class="action-menu"><summary>Later</summary><form method="post" action="/app/calls/${encodeURIComponent(task.callId)}/task/snooze"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><button name="minutes" value="60">In 1 hour</button><button name="minutes" value="240">In 4 hours</button><button name="minutes" value="1440">Tomorrow</button></form></details>`;
-      return `<article class="inbox-row ${task.priority === "high" ? "urgent" : ""}">${complete}<a class="inbox-copy" href="${rowLink}"><span class="inbox-title"><strong>${escapeHtml(call?.fields.callerName ?? "Unknown caller")}</strong><span class="pill ${task.priority === "high" ? "danger" : ""}">${task.priority === "high" ? "Urgent" : "Follow up"}</span></span><span>${escapeHtml(call?.fields.problemDescription || task.reason)}</span><span class="small">${escapeHtml(task.reason)} · ${overdue ? "Due now" : `Due ${formatCompactDate(task.dueAt, input.config.timezone)}`}</span></a><div class="row-actions">${phone ? `<a href="tel:${escapeHtml(phone)}">Call back</a>` : ""}${snooze}<a href="${rowLink}">Open</a></div></article>`;
-    }).join("");
-  const recentCalls = input.calls.slice(0, 8).map((call) => {
-    const selected = selectedCall?.id === call.id;
-    return `<a class="recent-row ${selected ? "selected" : ""}" href="${dashboardLink("today", call.id)}#call-preview"><span><strong>${escapeHtml(call.fields.callerName ?? "Unknown caller")}</strong><small>${escapeHtml(call.fields.problemDescription || "No summary")}</small></span><time>${escapeHtml(formatCompactDate(call.startedAt, input.config.timezone))}</time></a>`;
-  }).join("") || `<div class="queue-empty"><strong>No calls yet.</strong><span>Your first handled call will appear here.</span></div>`;
-  const selectedPhone = selectedCall ? phoneFor(selectedCall) : null;
-  const selectedAddress = selectedCall?.fields.address?.trim() || null;
-  const callPreview = selectedCall ? `<section id="call-preview" class="call-preview"><div class="section-heading"><div><p class="eyebrow">Selected call</p><h2>${escapeHtml(selectedCall.fields.callerName ?? "Unknown caller")}</h2></div><span class="pill ${selectedCall.emergency?.emergency ? "danger" : ""}">${escapeHtml(selectedCall.emergency?.severity ?? "routine")}</span></div><p class="call-problem">${escapeHtml(selectedCall.fields.problemDescription || "No problem summary captured")}</p><dl class="compact-details"><dt>Phone</dt><dd>${escapeHtml(selectedPhone ?? "Not confirmed")}</dd><dt>Address</dt><dd>${escapeHtml(selectedAddress ?? "Not confirmed")}</dd><dt>Outcome</dt><dd>${escapeHtml(selectedCall.outcome.replaceAll("_", " "))}</dd></dl><div class="quick-actions">${selectedPhone ? `<a class="button" href="tel:${escapeHtml(selectedPhone)}">Call back</a>` : ""}${selectedAddress ? `<a href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(selectedAddress)}" target="_blank" rel="noreferrer">Open Maps</a>` : ""}${preview ? "" : `<a href="/app/calls/${encodeURIComponent(selectedCall.id)}">Full record</a>`}</div><details class="transcript"><summary>Read transcript</summary><p>${escapeHtml(selectedCall.transcript ?? "Transcript unavailable")}</p></details></section>` : `<section class="call-preview"><h2>No call selected</h2><p>Calls will appear here after Front Office answers.</p></section>`;
-  const activities = [
-    ...input.calls.filter((call) => call.endedAt).map((call) => ({
-      at: call.endedAt!,
-      text: call.outcome === "booked" ? `Booked ${call.fields.callerName ?? "caller"}` : `Captured ${call.fields.callerName ?? "a caller"}`,
-    })),
-    ...completedTasks.map((task) => ({
-      at: task.completedAt ?? task.updatedAt,
-      text: task.completionSource === "verified_booking" ? "Follow-up closed after verified booking" : `Marked ${callsById.get(task.callId)?.fields.callerName ?? "call"} handled`,
-    })),
-  ].sort((left, right) => right.at.localeCompare(left.at)).slice(0, 5);
-  const activityRows = activities.map((activity) => `<li><span>${escapeHtml(activity.text)}</span><time>${escapeHtml(formatCompactDate(activity.at, input.config.timezone))}</time></li>`).join("") || `<li><span>No activity yet</span></li>`;
-  const upcomingAppointments = input.calls
-    .filter((call) => call.fields.requestedStart && Date.parse(call.fields.requestedStart) >= nowMs && Date.parse(call.fields.requestedStart) < nowMs + 7 * 24 * 60 * 60_000)
-    .sort((left, right) => left.fields.requestedStart!.localeCompare(right.fields.requestedStart!));
-  const bookedAppointmentCount = upcomingAppointments.filter((call) => call.outcome === "booked").length;
-  const proposedAppointmentCount = upcomingAppointments.length - bookedAppointmentCount;
-  const pipelineCard = (call: CallRecord | undefined, label: string, meta: string, urgent = false): string => {
-    if (!call) return "";
-    return `<a class="pipeline-card ${urgent ? "urgent" : ""}" href="${dashboardLink("pipeline", call.id)}#call-preview"><span class="pipeline-card-top"><strong>${escapeHtml(call.fields.callerName ?? "Unknown caller")}</strong><span class="pill ${urgent ? "danger" : ""}">${escapeHtml(label)}</span></span><span>${escapeHtml(call.fields.problemDescription || "No summary captured")}</span><small>${escapeHtml(meta)}</small></a>`;
-  };
-  const needsReplyCards = actionableTasks.map((task) => pipelineCard(callsById.get(task.callId), task.priority === "high" ? "Urgent" : "Follow up", task.reason, task.priority === "high")).join("");
-  const waitingCards = snoozedTasks.map((task) => pipelineCard(callsById.get(task.callId), "Waiting", `Returns ${formatCompactDate(task.dueAt, input.config.timezone)}`)).join("");
-  const bookedCards = upcomingAppointments.filter((call) => call.outcome === "booked").map((call) => pipelineCard(call, "Booked", formatDate(call.fields.requestedStart!, input.config.timezone))).join("");
-  const handledCards = completedTasks.filter((task) => callsById.get(task.callId)?.outcome !== "booked").slice(0, 8).map((task) => pipelineCard(callsById.get(task.callId), "Handled", formatCompactDate(task.completedAt ?? task.updatedAt, input.config.timezone))).join("");
-  const pipelineColumn = (title: string, count: number, cards: string, empty: string): string => `<section class="pipeline-column"><header><span>${escapeHtml(title)}</span><strong>${count}</strong></header><div>${cards || `<p class="pipeline-empty">${escapeHtml(empty)}</p>`}</div></section>`;
-  const pipelineBoard = `<section class="workspace-panel pipeline-panel"><div class="section-heading"><div><p class="eyebrow">Pipeline</p><h2>Every job at a glance</h2><p class="small">System-sorted from real call and follow-up status. Open a card to act on it.</p></div></div><div class="pipeline-board">${pipelineColumn("Needs reply", actionableTasks.length, needsReplyCards, "Nothing needs a response.")}${pipelineColumn("Waiting", snoozedTasks.length, waitingCards, "Nothing is snoozed.")}${pipelineColumn("Booked", upcomingAppointments.filter((call) => call.outcome === "booked").length, bookedCards, "No upcoming bookings.")}${pipelineColumn("Handled", completedTasks.filter((task) => callsById.get(task.callId)?.outcome !== "booked").length, handledCards, "No completed follow-ups yet.")}</div></section>`;
-  const dateKey = (value: string | Date): string => new Intl.DateTimeFormat("en-CA", { timeZone: input.config.timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(typeof value === "string" ? new Date(value) : value);
-  const calendarDays = Array.from({ length: 7 }, (_, index) => {
-    const day = new Date(nowMs + index * 24 * 60 * 60_000);
-    const key = dateKey(day);
-    const appointments = upcomingAppointments.filter((call) => dateKey(call.fields.requestedStart!) === key);
-    const dayLabel = new Intl.DateTimeFormat("en-US", { timeZone: input.config.timezone, weekday: "short" }).format(day);
-    const dateLabel = new Intl.DateTimeFormat("en-US", { timeZone: input.config.timezone, month: "short", day: "numeric" }).format(day);
-    const events = appointments.map((call) => `<a class="calendar-event" href="${dashboardLink("calendar", call.id)}#call-preview"><strong>${escapeHtml(new Intl.DateTimeFormat("en-US", { timeZone: input.config.timezone, hour: "numeric", minute: "2-digit" }).format(new Date(call.fields.requestedStart!)))}</strong><span>${escapeHtml(call.fields.callerName ?? "Unknown caller")}</span><small>${escapeHtml(call.outcome === "booked" ? "Booked" : "Awaiting confirmation")}</small></a>`).join("");
-    return `<section class="calendar-day ${index === 0 ? "today" : ""}"><header><span>${escapeHtml(dayLabel)}</span><strong>${escapeHtml(dateLabel)}</strong></header><div>${events || `<span class="calendar-empty">No appointments</span>`}</div></section>`;
-  }).join("");
-  const calendarBoard = `<section class="workspace-panel calendar-panel"><div class="section-heading"><div><p class="eyebrow">Calendar</p><h2>Next seven days</h2><p class="small">Booked and proposed appointment times from the calls Front Office handled.</p></div></div><div class="calendar-board">${calendarDays}</div></section>`;
-  const billingAction = !preview && input.account.role !== "member" && input.checkoutConfigured && !paid ? `<form class="inline-form" method="post" action="/app/billing/checkout"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><button>Start $${(input.config.flatMonthlyPriceCents / 100).toFixed(0)} plan</button></form>` : "";
-  const portalAction = !preview && input.account.role !== "member" && paid ? `<form class="inline-form" method="post" action="/app/billing/portal"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><button>Manage billing or cancel</button></form>` : "";
-  const setupGuide = input.account.role === "member" ? "" : `<details class="setup-guide" ${setupComplete < 3 ? "open" : ""}><summary><span><strong>Setup ${setupComplete}/3 complete</strong><small>${setupComplete === 3 ? "Setup saved. Activation is checked separately." : "Finish these steps before customer traffic starts"}</small></span><span>${setupComplete === 3 ? "Ready" : "Continue"}</span></summary><div class="setup-steps"><span class="${shopRulesSaved ? "done" : ""}">${shopRulesSaved ? "✓ Call setup saved" : preview ? "Shop rules" : '<a href="/app/setup">Set your call rules</a>'}</span><span class="${input.googleConnected ? "done" : ""}">${input.googleConnected ? "✓" : "2"} ${input.googleConnected ? "Calendar connected" : preview ? "Connect calendar during setup" : '<a href="/app/integrations/google/start">Connect Google Calendar</a>'}</span><span class="${paid ? "done" : ""}">${paid ? "✓ Subscription active" : "3 Start subscription"}</span>${billingAction}${portalAction}${preview ? "" : '<a href="/app/setup">Edit call setup</a><a href="/app/team">Team & calendars</a>'}</div>${preview || input.account.status === "active" ? "" : "<p style=\"padding:0 14px 14px\">We’ll turn the line on after a quick setup check. Your dashboard will show when coverage is on. A test call is optional.</p>"}</details>`;
-  const undo = recentlyCompleted && !preview ? `<div class="toast" role="status"><span>Marked handled.</span><form class="inline-form" method="post" action="/app/calls/${encodeURIComponent(recentlyCompleted.callId)}/task/reopen"><input type="hidden" name="csrf" value="${escapeHtml(input.csrf)}"><button>Undo</button></form></div>` : "";
-  const demoNotice = preview ? `<div class="demo-notice"><strong>Read-only demo</strong><span>Synthetic calls only. Real owners can complete and snooze work.</span></div>` : "";
-  const sidebar = `<aside class="app-sidebar"><a class="app-mark" href="${dashboardLink("today")}"><span>FO</span><strong>Front Office</strong></a><nav aria-label="Main navigation"><a class="${view === "today" ? "active" : ""}" href="${dashboardLink("today")}">${dashboardIcon("today")}<span>Today</span>${actionableTasks.length ? `<b>${actionableTasks.length}</b>` : ""}</a><a class="${view === "pipeline" ? "active" : ""}" href="${dashboardLink("pipeline")}">${dashboardIcon("pipeline")}<span>Pipeline</span></a><a class="${view === "calendar" ? "active" : ""}" href="${dashboardLink("calendar")}">${dashboardIcon("calendar")}<span>Calendar</span></a><a href="${dashboardLink("today")}#recent-calls">${dashboardIcon("calls")}<span>Calls</span></a></nav><div class="sidebar-bottom">${preview ? `<a href="/">Back to site</a><a href="/signup">Get started</a>` : `<a href="/app/settings">${dashboardIcon("settings")}<span>Settings</span></a><a href="/app/team">Team & calendars</a><a href="/logout">Sign out</a>`}</div></aside>`;
-  const alertsOff = !preview && input.config.ownerNotificationRefs.length === 0
-    ? `<section class="alerts-off" role="alert" style="border:2px solid #b42318;background:#fff4f2;border-radius:14px;padding:14px 16px;margin-bottom:14px"><strong>Urgent alerts are off.</strong> <span>Emergencies will only appear here, and your line can’t be turned on until you add a mobile number for alerts.</span> <a href="/app/setup">Turn on alerts</a></section>`
-    : "";
-  const overview = `<section class="overview-grid" aria-label="Shop overview"><article><span>Coverage</span><strong class="coverage-state ${input.account.status === "active" && !input.config.paused ? "on" : ""}"><i></i>${input.account.status === "active" && !input.config.paused ? "On" : "Pending"}</strong><small>AI line status</small></article><article><span>Needs attention</span><strong>${actionableTasks.length}</strong><small>${actionableTasks.filter((task) => task.priority === "high").length} urgent</small></article><article><span>Next 7 days</span><strong>${upcomingAppointments.length}</strong><small>${bookedAppointmentCount} booked${proposedAppointmentCount ? ` · ${proposedAppointmentCount} proposed` : ""}</small></article><article><span>AI minutes left</span><strong>${remaining}</strong><small>${input.usage.billableCalls} calls handled</small></article></section>`;
-  const todayView = `<div class="dashboard-shell"><div class="dashboard-primary"><section id="inbox" class="inbox-panel"><div class="section-heading"><div><p class="eyebrow">Today</p><h2>Needs your attention</h2><p class="small">Front Office sorts this automatically. Nothing disappears until it is handled or safely snoozed.</p></div><strong>${actionableTasks.length}</strong></div><div class="inbox-list">${taskRows}</div></section><section id="recent-calls" class="recent-panel"><div class="section-heading"><div><p class="eyebrow">History</p><h2>Recent calls</h2></div><span>${input.calls.length} shown</span></div><div class="recent-list">${recentCalls}</div></section></div><aside class="dashboard-side">${callPreview}<section class="activity-panel"><div class="section-heading"><div><p class="eyebrow">Automatic record</p><h2>Recent activity</h2></div></div><ul>${activityRows}</ul></section><section class="usage-panel"><div><strong>${remaining}</strong><span>AI minutes left <details class="info-tip"><summary aria-label="What are AI minutes?">i</summary><p>Only connected AI call time counts.</p></details></span></div><div><strong>${input.usage.billableCalls}</strong><span>handled calls</span></div><div><strong>$${(projectedOverage / 100).toFixed(2)}</strong><span>current overage</span></div></section></aside></div>`;
-  const alternateView = `<div class="workspace-shell">${view === "pipeline" ? pipelineBoard : calendarBoard}<aside class="workspace-side">${callPreview}</aside></div>`;
-  const coach = view === "today" ? `<details class="coach-tip" data-dashboard-tip><summary><strong>How Today works</strong><span>Tap for help</span></summary><p>Urgent and overdue work stays at the top. Check it off when handled or choose Later.</p></details>` : "";
-  const mobileNav = `<nav class="mobile-app-nav" aria-label="Dashboard"><a class="${view === "today" ? "active" : ""}" href="${dashboardLink("today")}">${dashboardIcon("today")}<span>Today</span></a><a class="${view === "pipeline" ? "active" : ""}" href="${dashboardLink("pipeline")}">${dashboardIcon("pipeline")}<span>Pipeline</span></a><a class="${view === "calendar" ? "active" : ""}" href="${dashboardLink("calendar")}">${dashboardIcon("calendar")}<span>Calendar</span></a>${preview ? `<a href="/signup">${dashboardIcon("settings")}<span>Start</span></a>` : `<a href="/app/settings">${dashboardIcon("settings")}<span>Settings</span></a>`}</nav>`;
-  return layout("Owner dashboard", `<div class="owner-app">${sidebar}<div class="app-content"><header class="app-header"><div><p class="eyebrow">${escapeHtml(input.config.businessName)}</p><h1>${view === "today" ? "Today" : view === "pipeline" ? "Pipeline" : "Calendar"}</h1></div><div class="header-status"><span class="coverage-state ${input.account.status === "active" && !input.config.paused ? "on" : ""}"><i></i>${input.account.status === "active" && !input.config.paused ? "AI coverage on" : "Activation pending"}</span></div></header><main class="dashboard-main">${demoNotice}${alertsOff}${overview}${setupGuide}${undo}${coach}${view === "today" ? todayView : alternateView}</main></div></div>${mobileNav}`);
+  return renderOwnerApp(input);
 }
 
 export function renderStart(error = "", values: Record<string, string> = {}): string {
@@ -261,7 +158,7 @@ export function renderSimulator(results: SimulationResult[] | null, csrf: string
 
 export function renderPrivacy(config: BusinessConfig): string {
   const support = config.supportEmail ? `<a href="mailto:${escapeHtml(config.supportEmail)}">${escapeHtml(config.supportEmail)}</a>` : "the support contact supplied during onboarding";
-  return layout("Privacy", `<header><div><p class="eyebrow">${escapeHtml(config.businessName)}</p><h1>Privacy notice</h1></div><nav><a href="/terms">Terms</a></nav></header><main><section><h2>What is collected</h2><p>Owner accounts store encrypted contact and business settings plus a one-way password hash. The call service may store caller phone number, name, service address, problem description, transcript, recording link, call outcome, booking evidence, and notification status.</p><h2>Who processes it</h2><p>The configured voice, telephony/SMS, calendar, hosting, database, and payment providers process only the data needed for their role. The service does not sell caller or owner data.</p><h2>SMS consent data</h2><p>Phone numbers and SMS opt-in or consent records are not sold, rented, or shared with third parties or affiliates for marketing or promotional purposes. They are shared only with service providers that must process them to operate the requested messaging service.</p><h2>Retention and deletion</h2><p>Call records are retained for ${config.dataRetentionDays} days unless legal or customer obligations require a different period. The owner can delete a call immediately from its protected detail page. Appointments written to the owner's Google Calendar are kept in that calendar and managed by the owner; deleting a call record does not remove them. Contact ${support} for access, correction, export, or deletion requests.</p><h2>Recordings</h2><p>Calls answered for the business are recorded and transcribed so the owner can follow up. If a caller objects to being recorded, that call's recording is deleted after the call.</p></section></main>`);
+  return layout("Privacy", `<header><div><p class="eyebrow">${escapeHtml(config.businessName)}</p><h1>Privacy notice</h1></div><nav><a href="/terms">Terms</a></nav></header><main><section><h2>What is collected</h2><p>Owner accounts store encrypted contact and business settings plus a one-way password hash. The call service may store caller phone number, name, service address, problem description, transcript, recording link, call outcome, booking evidence, and notification status.</p><h2>Who processes it</h2><p>The configured voice, telephony/SMS, calendar, hosting, database, and payment providers process only the data needed for their role. The service does not sell caller or owner data.</p><h2>SMS consent data</h2><p>Phone numbers and SMS opt-in or consent records are not sold, rented, or shared with third parties or affiliates for marketing or promotional purposes. They are shared only with service providers that must process them to operate the requested messaging service.</p><h2>Retention and deletion</h2><p>Call records are retained for ${config.dataRetentionDays} days unless legal or customer obligations require a different period. The owner can delete a call immediately from its protected detail page. Appointments written to the owner's Google Calendar are kept in that calendar and managed by the owner; deleting a call record does not remove them. Contact ${support} for access, correction, export, or deletion requests.</p><h2>Recordings</h2><p>Calls answered for the business are transcribed so the owner can follow up, and recorded unless the business has chosen transcript-only. If a call is transferred to the business, the caller may hear a short recording notice first. If a caller objects to being recorded, that call's recording is deleted after the call.</p></section></main>`);
 }
 
 export function renderTerms(config: BusinessConfig): string {

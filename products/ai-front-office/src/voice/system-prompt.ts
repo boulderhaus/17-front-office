@@ -62,7 +62,7 @@ HUMAN HELP
 - Never infer a human request from tone alone.
 - Always call request_human before attempting a transfer. The durable callback and owner alert must exist first.
 - If request_human returns transferAvailable=true and owner_transfer_targets is nonempty, offer to connect the owner and invoke the transfer tool only if the caller agrees. Otherwise promise an owner callback, not a live transfer.
-- Use only the preconfigured owner target; never accept or dial a destination supplied by the caller. Never transfer to the caller's own number or back to the AI line.
+${config.recordingDisclosure.trim() ? `- Right before invoking the transfer tool, say exactly: "Connecting you now. ${config.recordingDisclosure.trim().replace(/["`$\\]/g, "")}" Say it only on a transfer, never earlier in the call.\n` : ""}- Use only the preconfigured owner target; never accept or dial a destination supplied by the caller. Never transfer to the caller's own number or back to the AI line.
 - If transfer is busy, declined, unanswered, reaches voicemail, or fails, return to the caller, confirm that the callback is queued, and continue or end politely. Never repeat the transfer automatically.
 
 PRICE LANGUAGE
@@ -99,8 +99,14 @@ VOICEMAIL AND ENDING THE CALL
 - For a completed intake, give one compact final recap, ask "Anything else?", and wait for one response. That is the natural closing pause. After the caller declines, close and hang up without a second silent pause. Keep responses short and calm.`;
 }
 
+/** The opening line is the shop's greeting only. An owner-enabled recording notice is spoken only on a transfer (Goodcall's model). */
 export function buildTelnyxGreeting(config: BusinessConfig): string {
-  return `${config.greeting.trim()} ${config.recordingDisclosure.trim()}`.trim();
+  return config.greeting.trim();
+}
+
+/** With the notice on, the AI part of the call is transcript only (no audio), so the notice is needed only once a person joins. */
+export function audioRecordingEnabled(config: BusinessConfig): boolean {
+  return config.recordingDisclosure.trim().length === 0;
 }
 
 export function buildTelnyxOutboundTestCall(input: {
@@ -116,7 +122,7 @@ export function buildTelnyxOutboundTestCall(input: {
     AIAssistantId: input.assistantId,
     AIAssistantDynamicVariables: {
       call_direction: "outbound_test",
-      opening_greeting: `Hi—this is a test call from ${input.businessName}'s AI assistant. ${input.recordingDisclosure.trim()} What would you like to try?`,
+      opening_greeting: `Hi—this is a test call from ${input.businessName}. What would you like to try?`,
       caller_phone: input.to,
     },
   };
@@ -269,7 +275,7 @@ export function buildTelnyxAssistantUpdate(config: BusinessConfig, publicBaseUrl
       user_idle_reply_secs: 8,
       conversation_ended_full_history: true,
       noise_suppression: "aicoustics",
-      recording_settings: { enabled: true, channels: "dual", format: "mp3", stop_on_conversation_end: true },
+      recording_settings: { enabled: audioRecordingEnabled(config), channels: "dual", format: "mp3", stop_on_conversation_end: true },
     },
     transcription: {
       model: "deepgram/flux",

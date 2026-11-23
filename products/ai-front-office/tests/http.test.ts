@@ -94,12 +94,11 @@ describe("HTTP boundary", () => {
     expect(html).toContain("Recent activity");
     expect(html).toContain("Jamie R.");
     expect(html).toContain("Suncoast Heating Demo");
-    expect(html).toContain('class="mobile-app-nav"');
-    expect(html).toContain('class="app-sidebar"');
+    expect(html).toContain('class="fo-tabs"');
+    expect(html).toContain('class="fo-side"');
     expect(html).toContain('aria-label="Main navigation"');
     expect(html).toContain("Next 7 days");
-    expect(html).toContain('grid-template-areas:"inbox" "call" "recent" "activity" "usage"');
-    expect(html.indexOf('id="inbox"')).toBeLessThan(html.indexOf('id="call-preview"'));
+    expect(html.indexOf("Needs your attention")).toBeLessThan(html.indexOf('id="detail"'));
     expect(html).not.toContain("task/complete");
     expect(html).not.toContain('method="post"');
 
@@ -549,7 +548,8 @@ describe("HTTP boundary", () => {
     expect(dashboard.status).toBe(200);
     const dashboardHtml = await dashboard.text();
     expect(dashboardHtml).toContain("196");
-    expect(dashboardHtml).toContain("AI minutes left");
+    expect(dashboardHtml).toContain("Minutes left");
+    expect(dashboardHtml).not.toMatch(/\bAI\b/);
     expect(dashboardHtml).toContain("Needs your attention");
     expect(dashboardHtml).toContain("Urgent callback requested");
     const taskCsrf = /task\/complete"><input type="hidden" name="csrf" value="([^"]+)"/.exec(dashboardHtml)?.[1];

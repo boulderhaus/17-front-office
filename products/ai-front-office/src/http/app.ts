@@ -10,6 +10,7 @@ import { CallService } from "../application/call-service.js";
 import { approvedTransferTargets } from "../application/transfer-policy.js";
 import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
+import { renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
 import { approvedAnswer } from "../domain/approved-answer.js";
 import { isExplicitHumanRequest } from "../domain/human-request.js";
 import { saveAssistantConfig } from "../adapters/assistant-config.js";
@@ -697,15 +698,22 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
         dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary"),
       ]);
-      return sendHtml(response, 200, renderConfig(config, session.csrf, {
-        googleAvailable: anyGoogleClient(dependencies.env),
-        googleConnected,
-        ownerPhoneConfigured: Boolean(ownerPhone),
-        weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
-        dailySmsAvailable: Boolean(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID),
-        realtimeSmsAvailable: Boolean(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID),
-        directBookingAvailable: dependencies.env.DIRECT_BOOKING_BETA,
-      }, "owner"));
+      return sendHtml(response, 200, renderOwnerSettings({
+        account,
+        config,
+        subscription: await dependencies.store.getSubscription(account.tenantId),
+        csrf: session.csrf,
+        saved: url.searchParams.get("saved") === "1",
+        integrations: {
+          googleAvailable: anyGoogleClient(dependencies.env),
+          googleConnected,
+          ownerPhoneConfigured: Boolean(ownerPhone),
+          weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
+          dailySmsAvailable: Boolean(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID),
+          realtimeSmsAvailable: Boolean(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID),
+          directBookingAvailable: dependencies.env.DIRECT_BOOKING_BETA,
+        },
+      }));
     }
     if (method === "POST" && url.pathname === "/app/config") {
       const form = parseForm(await readBody(request, 64_000));
@@ -775,7 +783,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         throw error;
       }
       });
-      return redirect(response, "/app/settings");
+      return redirect(response, "/app/settings?saved=1");
     }
     if (method === "GET" && url.pathname === "/app/account/export") {
       if (member) throw new HttpError(403, "Only the owner can export the shop's data");
@@ -950,7 +958,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         dependencies.store.listToolEvents(call.id),
         dependencies.store.listNotifications(call.id),
       ]);
-      return sendHtml(response, 200, renderCallDetail({ config, call, booking, callbackTask, events, notifications, csrf: session.csrf, surface: "owner", canDelete: !member }));
+      const recordingUrl = call.recordingUrl?.startsWith("https://") ? call.recordingUrl.replace("/admin/provider/", "/app/provider/") : null;
+      return sendHtml(response, 200, renderOwnerCallRecord({ account, config, call, booking, callbackTask, notifications, recordingUrl, csrf: session.csrf, canDelete: !member }));
     }
     throw new HttpError(404, "Not found");
   }
@@ -1853,7 +1862,8 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
     ownerDailySmsHour,
     ownerRealtimeSmsEnabled: form.has("ownerRealtimeSmsEnabled"),
     requireDiagnosticFeeAcceptance: form.has("requireDiagnosticFeeAcceptance"),
-    recordingDisclosure: (form.get("recordingDisclosure") ?? "").trim().slice(0, 1_000),
+    // Owner settings send a simple on/off; the platform admin form sends the text itself.
+    recordingDisclosure: form.has("recordingDisclosure") ? (form.get("recordingDisclosure") ?? "").trim().slice(0, 1_000) : form.get("recordingNotice") === "on" ? RECORDING_NOTICE : "",
     dataRetentionDays,
     supportEmail,
     flatMonthlyPriceCents: Math.round(monthlyDollars * 100),

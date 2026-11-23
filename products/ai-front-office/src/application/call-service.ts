@@ -12,6 +12,7 @@ import type {
 } from "../domain/models.js";
 import { evaluateServiceArea, isInServiceArea } from "../domain/config.js";
 import { triageEmergency } from "../domain/triage.js";
+import { audioRecordingEnabled } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import { BookingCoordinator } from "./booking-coordinator.js";
 import { redactError, withRetry } from "./retry.js";
@@ -489,7 +490,7 @@ export class CallService {
       }
     }
     const qualityFlags = call.fields.humanRequested || emergency.emergency
-      ? this.handoffQualityFlags(call)
+      ? this.handoffQualityFlags(call, config)
       : this.bookingQualityFlags(call, booking, config, confirmationQueued);
     if (booking) {
       booking = { ...booking, verificationFailures: qualityFlags, updatedAt: this.clock.now().toISOString() };
@@ -575,7 +576,7 @@ export class CallService {
   private bookingQualityFlags(call: CallRecord, booking: BookingRecord | null, config: BusinessConfig, confirmationQueued: boolean): string[] {
     const flags: string[] = [];
     if (!call.transcript?.trim()) flags.push("transcript_missing");
-    if (!call.recordingUrl) flags.push("recording_missing");
+    if (!call.recordingUrl && audioRecordingEnabled(config)) flags.push("recording_missing");
     if (!call.fields.callerName?.trim()) flags.push("caller_name_missing");
     if (!isAllowedCustomerNumber(call.fields.callbackNumber ?? call.fromNumber)) flags.push("callback_number_invalid");
     if (!call.fields.address?.trim()) flags.push("service_address_missing");
@@ -587,10 +588,10 @@ export class CallService {
     return [...new Set(flags)];
   }
 
-  private handoffQualityFlags(call: CallRecord): string[] {
+  private handoffQualityFlags(call: CallRecord, config: BusinessConfig): string[] {
     const flags: string[] = [];
     if (!call.transcript?.trim()) flags.push("transcript_missing");
-    if (!call.recordingUrl) flags.push("recording_missing");
+    if (!call.recordingUrl && audioRecordingEnabled(config)) flags.push("recording_missing");
     if (!isAllowedCustomerNumber(call.fields.callbackNumber ?? call.fromNumber)) flags.push("callback_number_invalid");
     if (!call.fields.problemDescription.trim()) flags.push("problem_description_missing");
     return flags;
