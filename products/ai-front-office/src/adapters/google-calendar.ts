@@ -160,5 +160,6 @@ function isWithinBookableHours(value: Date, timeZone: string, hours: BusinessCon
     const [hour = "0", minuteValue = "0"] = time.split(":");
     return Number(hour) * 60 + Number(minuteValue);
   };
-  return minute >= toMinute(hours.weekdayStart) && minute < toMinute(hours.weekdayEnd);
+  const end = weekday === "Sat" && !hours.weekends && hours.saturdayEnd ? hours.saturdayEnd : hours.weekdayEnd;
+  return minute >= toMinute(hours.weekdayStart) && minute < toMinute(end);
 }

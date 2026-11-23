@@ -41,7 +41,9 @@ function Workspace({ base }: { base: "/app" | "/demo" }) {
   return (
     <ModeContext.Provider value={mode}>
       <Routes>
-        <Route index element={<Screen title="Today">{ready(<TodayPage />)}</Screen>} />
+        <Route index element={<Screen title="Calls">{ready(<TodayPage />)}</Screen>} />
+        {/* "Calls" is the home screen; /calls is an alias so a typed or shared link lands there too. */}
+        <Route path="calls" element={<Navigate to={base} replace />} />
         {!preview && <Route path="start" element={dashboard.data ? <StartPage /> : <div className="mx-auto max-w-xl p-4">{ready(null)}</div>} />}
         <Route path="jobs" element={<Screen title="Jobs">{ready(<JobsPage />)}</Screen>} />
         <Route path="calendar" element={<Screen title="Calendar">{ready(<CalendarPage />)}</Screen>} />

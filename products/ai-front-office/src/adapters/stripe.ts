@@ -11,6 +11,8 @@ export interface StripeEvent {
 
 export interface StripePrices {
   base: string;
+  /** The second plan ("Busy season"). */
+  plus?: string;
   dailySms?: string;
   realtimeSms?: string;
 }
@@ -31,6 +33,11 @@ export class StripeBillingClient {
   constructor(private readonly secretKey: string, private readonly prices: StripePrices, private readonly fetcher: typeof fetch = fetch) {}
 
   get basePriceId(): string { return this.prices.base; }
+
+  /** True when a subscription's prices include one of our plans (not just an add-on or a stranger's price). */
+  hasPlanPrice(priceIds: string[]): boolean {
+    return priceIds.includes(this.prices.base) || (this.prices.plus !== undefined && priceIds.includes(this.prices.plus));
+  }
 
   private async findPortalConfiguration(): Promise<string | null> {
     const response = await withTimeout(this.fetcher("https://api.stripe.com/v1/billing_portal/configurations?active=true&limit=100", {
@@ -70,12 +77,12 @@ export class StripeBillingClient {
     return data.url;
   }
 
-  async createCheckout(input: { tenantId: string; email: string; customerId?: string | null; successUrl: string; cancelUrl: string; idempotencyKey: string; dailySms: boolean; realtimeSms: boolean; now?: Date; trialDays?: number; submitMessage?: string }): Promise<{ id: string; url: string; expiresAt: string }> {
+  async createCheckout(input: { tenantId: string; email: string; customerId?: string | null; successUrl: string; cancelUrl: string; idempotencyKey: string; dailySms: boolean; realtimeSms: boolean; now?: Date; trialDays?: number; submitMessage?: string; plan?: "standard" | "plus"; couponId?: string | null }): Promise<{ id: string; url: string; expiresAt: string }> {
     // Sessions expire in ~31 minutes (Stripe's minimum is 30) so a stale one cannot be paid later.
     const expiresAt = Math.floor((input.now ?? new Date()).getTime() / 1_000) + 31 * 60;
     const body = new URLSearchParams({
       mode: "subscription",
-      "line_items[0][price]": this.prices.base,
+      "line_items[0][price]": input.plan === "plus" ? requiredPrice(this.prices.plus, "second plan") : this.prices.base,
       "line_items[0][quantity]": "1",
       // A returning shop keeps its Stripe customer instead of getting a second one.
       ...(input.customerId ? { customer: input.customerId } : { customer_email: input.email }),
@@ -89,6 +96,8 @@ export class StripeBillingClient {
       payment_method_collection: "always",
     });
     if (input.trialDays && input.trialDays > 0) body.set("subscription_data[trial_period_days]", String(Math.floor(input.trialDays)));
+    // First month half off: a once-only coupon on the first invoice. Never alongside a trial (it would land on the $0 invoice).
+    else if (input.couponId) body.set("discounts[0][coupon]", input.couponId);
     // Said again on Stripe's page, right above the button, so nobody is surprised by the charge date.
     if (input.submitMessage) body.set("custom_text[submit][message]", input.submitMessage.slice(0, 1_000));
     let lineItem = 1;

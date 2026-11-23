@@ -89,7 +89,7 @@ export interface ApiDashboard {
   googleAvailable: boolean
   paid: boolean
   checkoutConfigured: boolean
-  billing: { status: string; trialEndsAt: string | null; chargeNote: string | null }
+  billing: { status: string; trialEndsAt: string | null; chargeNote: string | null; planId: PlanId; plans: ApiPlan[] }
   onboarding: { hoursSet: boolean; completed: boolean }
   /** Spam and calls under 15 seconds are left out of billedMinutes; the counts say how many. */
   usage: { billedMinutes: number; billableCalls: number; excludedSpamCalls: number; excludedShortCalls: number }
@@ -98,6 +98,11 @@ export interface ApiDashboard {
   calls: ApiCall[]
   tasks: ApiTask[]
 }
+
+export type PlanId = "standard" | "plus"
+
+/** A plan on the card step: cheapest first and picked by default. chargeNote is the line under the button. */
+export interface ApiPlan { id: PlanId; label: string; priceCents: number; firstMonthCents: number; blurb: string; chargeNote: string }
 
 export interface Activation {
   status: "live" | "waiting" | "blocked" | "failed"
@@ -120,7 +125,9 @@ export interface ApiSettings {
   values: SettingsValues
   status: string
   businessName: string
-  plan: { flatMonthlyPriceCents: number; includedMinutes: number; overageCentsPerMinute: number; paid: boolean }
+  /** This shop's id, for its own calls export. */
+  shopId: string
+  plan: { label: string; flatMonthlyPriceCents: number; includedMinutes: number; overageCentsPerMinute: number; paid: boolean }
   integrations: {
     googleAvailable: boolean
     googleConnected: boolean

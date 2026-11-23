@@ -854,11 +854,13 @@ describe("HTTP boundary", () => {
     expect(landingHtml).toContain("$100 after job expenses");
     expect(landingHtml).toContain("Go live in 3 taps");
     expect(landingHtml).toContain("EXAMPLE CALL");
-    for (const item of ["Phone rings", "Front Office picks up", "New job: no cooling, 41 Palm Ave", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
+    for (const item of ["Phone rings", "Front Office picks up", "What you get by text", "New job from Maria G.", "AC not cooling · 41 Palm Ave, Sarasota", "Wants someone today", "Tap to call back", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
     // The example loops with CSS only and holds still for people who turn motion off.
     expect(landingHtml).toContain("@keyframes demoFrame");
     expect(landingHtml).toMatch(/prefers-reduced-motion:reduce\)\{[^}]*\}[^@]*\.frame\{position:static;opacity:1;animation:none/);
-    for (const question of ["Will it sound like a robot?", "Do I keep my number?", "What if it’s an emergency?", "Can I cancel anytime?"]) expect(landingHtml).toContain(question);
+    for (const question of ["Will it sound like a robot?", "Do I keep my number?", "What if it’s an emergency?", "Can I cancel anytime?", "What if I cancel?"]) expect(landingHtml).toContain(question);
+    expect(landingHtml).toContain("Your Front Office number keeps taking messages for 30 days and texts them to you, so no customer hits a dead line. You can export your calls anytime.");
+    expect(landingHtml).not.toMatch(/unlimited/i);
     expect(landingHtml).toContain('Front Office is a product of <a href="https://bydutchworks.com"');
     expect(landingHtml).not.toMatch(/\s—\s/);
     expect(landingHtml).not.toContain("ServiceTitan’s contractor benchmarks");
@@ -868,7 +870,7 @@ describe("HTTP boundary", () => {
     // 10DLC opt-in: a separate, unchecked, optional box naming the brand and the message type.
     expect(signupPage).toMatch(/<input name="ownerSmsConsent" type="checkbox" value="yes" >/);
     expect(signupPage).not.toContain('name="ownerSmsConsent" type="checkbox" value="yes" required');
-    for (const phrase of ["Front Office by Dutchworks LLC", "account notifications", "Message frequency varies", "Msg &amp; data rates may apply", "Reply STOP to opt out, HELP for help", "Consent is not a condition of purchase", "We will not share mobile information with third parties for promotional or marketing purposes", 'href="/terms"', 'href="/privacy"']) {
+    for (const phrase of ["Send me Front Office account notifications by text (new calls, appointments)", "optional", "you agree to receive SMS account notifications from Front Office by Dutchworks LLC", "Msg frequency varies", "Msg &amp; data rates may apply", "Reply STOP to opt out, HELP for help", "Not required to sign up", "We won’t share mobile info with third parties for marketing", 'href="/terms"', 'href="/privacy"']) {
       expect(signupPage).toContain(phrase);
     }
     expect(signupPage.slice(signupPage.indexOf('name="ownerSmsConsent"'), signupPage.indexOf("</label>", signupPage.indexOf('name="ownerSmsConsent"')))).not.toMatch(/\balerts?\b/i);
@@ -910,7 +912,7 @@ describe("HTTP boundary", () => {
     }
     expect(await store.listPilotSignups(10)).toHaveLength(0);
     const landing = await (await fetch(`${baseUrl}/`)).text();
-    expect(landing).toContain("Get the $49 plan");
+    expect(landing).toContain("Get started for $49.99");
     expect(landing).not.toMatch(/free trial|founding pilot/i);
   });
 

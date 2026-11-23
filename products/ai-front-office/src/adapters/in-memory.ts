@@ -489,7 +489,8 @@ function isWithinBookableHours(start: string, timeZone: string, hours: BusinessC
     const [h = "0", m = "0"] = value.split(":");
     return Number(h) * 60 + Number(m);
   };
-  return minute >= toMinute(hours.weekdayStart) && minute < toMinute(hours.weekdayEnd);
+  const end = weekday === "Sat" && !hours.weekends && hours.saturdayEnd ? hours.saturdayEnd : hours.weekdayEnd;
+  return minute >= toMinute(hours.weekdayStart) && minute < toMinute(end);
 }
 
 export class CapturingNotificationSender implements NotificationPort {

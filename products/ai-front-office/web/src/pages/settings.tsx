@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react"
 import { Link } from "react-router-dom"
-import { CheckCircle2, Download, LogOut, Users } from "lucide-react"
+import { CheckCircle2, Download, FileSpreadsheet, LogOut, Users } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { api, useApi } from "@/lib/api"
+import { money } from "@/lib/format"
 import { useMode } from "@/lib/mode"
 import type { ApiSettings, SettingsValues } from "@/lib/types"
 import { cn, tapWidth } from "@/lib/utils"
@@ -225,7 +226,7 @@ export function SettingsPage() {
           <span aria-hidden className="absolute inset-x-0 top-0 h-1 bg-brand-yellow" />
           <CardHeader><CardTitle className="text-base">Plan</CardTitle></CardHeader>
           <CardContent className="grid gap-3">
-            <p className="text-sm"><strong className="text-2xl font-semibold tracking-tight">${Math.round(plan.flatMonthlyPriceCents / 100)}</strong>/month · {plan.includedMinutes} minutes · ${(plan.overageCentsPerMinute / 100).toFixed(2)}/min after</p>
+            <p className="text-sm"><span className="block text-[13px] font-semibold text-muted-foreground">{plan.label}</span><strong className="text-2xl font-semibold tracking-tight">{money(plan.flatMonthlyPriceCents)}</strong>/month · {plan.includedMinutes} minutes · ${(plan.overageCentsPerMinute / 100).toFixed(2)}/min after</p>
             <form method="post" action={plan.paid ? "/app/billing/portal" : "/app/billing/checkout"}>
               <input type="hidden" name="csrf" value={csrf} />
               <Button size="tap" variant={plan.paid ? "outline" : "brand"} className={tapWidth}>{plan.paid ? "Manage billing or cancel" : "Start your plan"}</Button>
@@ -239,7 +240,8 @@ export function SettingsPage() {
         <Card>
           <CardHeader><CardTitle className="text-base">Your data</CardTitle></CardHeader>
           <CardContent className="grid gap-2.5">
-            <Button size="tap" variant="outline" asChild><a href="/app/account/export"><Download />Download everything</a></Button>
+            <Button size="tap" variant="outline" className={tapWidth} asChild><a href={`/api/app/shops/${encodeURIComponent(settings.data.shopId)}/calls.csv`} download><FileSpreadsheet />Export my calls (CSV)</a></Button>
+            <Button size="tap" variant="outline" className={tapWidth} asChild><a href="/app/account/export"><Download />Download everything</a></Button>
             <form method="post" action="/app/account/sign-out-everywhere">
               <input type="hidden" name="csrf" value={csrf} />
               <Button size="tap" variant="outline" className={tapWidth}>Sign out on every device</Button>
@@ -257,7 +259,7 @@ export function SettingsPage() {
             </details>
           </CardContent>
         </Card>
-        <p className="px-1 text-xs text-muted-foreground"><Link to="/app">Back to Today</Link></p>
+        <p className="px-1 text-xs text-muted-foreground"><Link to="/app">Back to Calls</Link></p>
       </aside>
     </div>
   )
