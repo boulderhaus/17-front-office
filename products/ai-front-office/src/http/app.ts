@@ -572,6 +572,15 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         view: ownerDashboardView(url.searchParams.get("view")),
       }));
     }
+    if (method === "POST" && url.pathname === "/app/billing/portal") {
+      const form = parseForm(await readBody(request, 8_000));
+      if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      const subscription = await dependencies.store.getSubscription(account.tenantId);
+      if (!stripeClient || !subscription?.providerCustomerId) throw new HttpError(409, "No paid subscription to manage yet");
+      const portalUrl = await stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`)
+        .catch(() => { throw new HttpError(502, "Billing could not be opened. Please retry; your subscription has not changed."); });
+      return redirect(response, portalUrl);
+    }
     if (method === "POST" && url.pathname === "/app/billing/checkout") {
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
@@ -1374,7 +1383,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const config = await dependencies.store.getConfig(tenantId);
     if (config.paused) throw new HttpError(503, "Service is paused");
     if (dependencies.env.PROVIDER_TEST_MODE) return;
-    if (tenantId !== dependencies.env.DEFAULT_TENANT_ID) return;
+    if (tenantId !== dependencies.env.DEFAULT_TENANT_ID) {
+      const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
+      const subscription = await dependencies.store.getSubscription(tenantId);
+      if (account?.status !== "active") throw new HttpError(503, "Shop activation is not complete");
+      if (subscription?.status !== "active" && subscription?.status !== "trialing") throw new HttpError(402, "An active subscription is required for customer traffic");
+      return;
+    }
     const report = await getActivationReport();
     if (!report.go) throw new HttpError(503, "Commercial activation gate is not satisfied");
   }

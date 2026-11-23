@@ -3,6 +3,19 @@ import { describe, expect, it, vi } from "vitest";
 import { StripeBillingClient, subscriptionFromStripeEvent, verifyStripeWebhook } from "../src/adapters/stripe.js";
 
 describe("Stripe billing boundary", () => {
+  it("creates a cancellation-enabled portal for the server-selected customer only", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "bpc_synthetic" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ url: "https://billing.stripe.com/p/session/synthetic" }), { status: 200 }));
+    const client = new StripeBillingClient("sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", { base: "price_base" }, fetchMock as unknown as typeof fetch);
+    expect(await client.createPortal("cus_synthetic", "https://example.com/app")).toContain("https://billing.stripe.com/");
+    const configuration = fetchMock.mock.calls[0]![1]?.body as URLSearchParams;
+    expect(configuration.get("features[subscription_cancel][enabled]")).toBe("true");
+    expect(configuration.get("features[subscription_cancel][mode]")).toBe("at_period_end");
+    const session = fetchMock.mock.calls[1]![1]?.body as URLSearchParams;
+    expect(session.get("customer")).toBe("cus_synthetic");
+    expect(session.get("return_url")).toBe("https://example.com/app");
+  });
   it("adds selected recurring prices to checkout and safely syncs an active subscription", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ url: "https://checkout.stripe.com/synthetic" }), { status: 200 }))

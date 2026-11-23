@@ -681,10 +681,14 @@ describe("HTTP boundary", () => {
     expect(landing.status).toBe(200);
     const landingHtml = await landing.text();
     expect(landingHtml).toContain("When you’re on a job, we answer the phone.");
-    expect(landingHtml).toContain("Don’t buy a call center to catch a missed call.");
+    const landingText = landingHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+    expect(landingText).toContain("Don’t buy a call center to catch a missed call.");
     expect(landingHtml).toContain("Five-person shop?");
-    expect(landingHtml).toContain("One new paying customer can cover the month.");
-    expect(landingHtml).toContain("ten recovered missed or after-hours calls for one completed job");
+    expect(landingText).toContain("One new paying customer can cover the month.");
+    expect(landingHtml).toContain("$100 after job expenses");
+    expect(landingHtml).toContain("Get started for $49/month");
+    expect(landingHtml).toContain("EXAMPLE OWNER ALERT");
+    expect(landingHtml).not.toContain("ServiceTitan’s contractor benchmarks");
     expect(landingHtml).toContain("Optional: try a test call.");
     expect(landingHtml).toContain("automated checks either way");
     expect(landingHtml).not.toContain("approve the setup before it ever answers a customer");

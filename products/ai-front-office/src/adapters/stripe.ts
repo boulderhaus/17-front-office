@@ -16,7 +16,33 @@ export interface StripePrices {
 }
 
 export class StripeBillingClient {
+  private portalConfiguration: string | null = null;
   constructor(private readonly secretKey: string, private readonly prices: StripePrices, private readonly fetcher: typeof fetch = fetch) {}
+
+  async createPortal(customerId: string, returnUrl: string): Promise<string> {
+    if (!this.portalConfiguration) {
+      const body = new URLSearchParams({
+        "business_profile[headline]": "Manage your Front Office subscription",
+        "features[subscription_cancel][enabled]": "true",
+        "features[subscription_cancel][mode]": "at_period_end",
+        "features[payment_method_update][enabled]": "true",
+        "features[invoice_history][enabled]": "true",
+      });
+      const response = await withTimeout(this.fetcher("https://api.stripe.com/v1/billing_portal/configurations", {
+        method: "POST", headers: { authorization: `Bearer ${this.secretKey}`, "content-type": "application/x-www-form-urlencoded", "idempotency-key": "front-office-portal-v1" }, body,
+      }), 6_000);
+      const data = await response.json() as { id?: string };
+      if (!response.ok || !data.id) throw new Error(`Stripe billing portal configuration failed with HTTP ${response.status}`);
+      this.portalConfiguration = data.id;
+    }
+    const response = await withTimeout(this.fetcher("https://api.stripe.com/v1/billing_portal/sessions", {
+      method: "POST", headers: { authorization: `Bearer ${this.secretKey}`, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ customer: customerId, configuration: this.portalConfiguration, return_url: returnUrl }),
+    }), 6_000);
+    const data = await response.json() as { url?: string };
+    if (!response.ok || !data.url?.startsWith("https://billing.stripe.com/")) throw new Error(`Stripe billing portal failed with HTTP ${response.status}`);
+    return data.url;
+  }
 
   async createCheckout(input: { tenantId: string; email: string; successUrl: string; cancelUrl: string; idempotencyKey: string; dailySms: boolean; realtimeSms: boolean }): Promise<string> {
     const body = new URLSearchParams({
