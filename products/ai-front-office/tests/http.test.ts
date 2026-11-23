@@ -80,8 +80,8 @@ describe("HTTP boundary", () => {
     expect(signupWizard.status).toBe(200);
     expect(signupWizard.headers.get("content-type")).toContain("text/javascript");
     expect(await signupWizard.text()).toContain("wizard-progress");
-    expect((await fetch(`${baseUrl}/tools/check-availability`, { method: "POST", body: "{}" })).status).toBe(401);
-    expect(logs.some((entry) => entry.event === "request_completed" && entry.status === 401)).toBe(true);
+    expect((await fetch(`${baseUrl}/tools/check-availability`, { method: "POST", body: "{}" })).status).toBe(200);
+    expect(logs.some((entry) => entry.event === "tool_request_failed" && entry.status === 401)).toBe(true);
   });
 
   it("shows a public read-only owner dashboard with synthetic data", async () => {
@@ -175,7 +175,8 @@ describe("HTTP boundary", () => {
         problem_description: "The phone audio is loud",
       }),
     });
-    expect(rejected.status).toBe(409);
+    expect(rejected.status).toBe(200);
+    expect(await rejected.json()).toMatchObject({ ok: false, status: "unavailable" });
     expect(await store.getCallByProviderId("volume-comment")).toBeNull();
 
     const accepted = await fetch(`${baseUrl}/tools/request-human`, {
@@ -211,7 +212,8 @@ describe("HTTP boundary", () => {
           problem_description: "Routine maintenance",
         }),
       });
-      expect(response.status).toBe(409);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ ok: false, status: "unavailable" });
       expect(await store.getCallByProviderId(providerCallId)).toBeNull();
     }
   });
@@ -229,7 +231,8 @@ describe("HTTP boundary", () => {
         problem_description: "The basement smells like gas",
       }),
     });
-    expect(beforeTriage.status).toBe(409);
+    expect(beforeTriage.status).toBe(200);
+    expect(await beforeTriage.json()).toMatchObject({ ok: false, status: "unavailable" });
 
     const triage = await fetch(`${baseUrl}/tools/triage`, {
       method: "POST",
@@ -380,7 +383,8 @@ describe("HTTP boundary", () => {
     const mismatchResponse = await fetch(`${baseUrl}/tools/save-intake`, {
       method: "POST", headers: { ...signedHeaders(intake, privateKey, clock.now()), "x-telnyx-call-control-id": "v3:other-call" }, body: intake,
     });
-    expect(mismatchResponse.status).toBe(401);
+    expect(mismatchResponse.status).toBe(200);
+    expect(await mismatchResponse.json()).toMatchObject({ ok: false, status: "unavailable" });
 
     const conversationEnded = new URLSearchParams({
       CallStatus: "conversation_ended",
@@ -968,12 +972,19 @@ describe("HTTP boundary", () => {
       headers: { authorization: `Bearer ${toolToken}`, "content-type": "application/json" },
       body: JSON.stringify({ provider_call_id: "gate", window_start: "2026-01-15T15:00:00Z", window_end: "2026-01-15T18:00:00Z" }),
     });
-    expect((await invoke()).status).toBe(503);
+    expect(await refused(invoke)).toBe(true);
     await store.saveConfig({ ...createDemoConfig(), paused: false });
-    expect((await invoke()).status).toBe(503);
+    expect(await refused(invoke)).toBe(true);
     expect((await fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", body: "{}" })).status).toBe(503);
   });
 });
+
+/** A refused voice tool still answers 200 (Telnyx only reads 2xx bodies) with the plain-English failure. */
+async function refused(invoke: () => Promise<Response>): Promise<boolean> {
+  const response = await invoke();
+  const body = await response.json() as { ok?: unknown; say?: unknown };
+  return response.status === 200 && body.ok === false && typeof body.say === "string";
+}
 
 function signedHeaders(body: string, privateKey: KeyObject, now: Date): Record<string, string> {
   const timestamp = String(Math.floor(now.getTime() / 1_000));

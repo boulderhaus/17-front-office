@@ -158,22 +158,23 @@ describe("tool results the model can always read", () => {
     vi.spyOn(store, "getConfig").mockImplementation(() => new Promise(() => undefined));
     const response = await availability("slow-call");
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ ok: false, status: "unavailable" });
+    // Terminal: the deadline means take a message, not "try again".
+    expect(await response.json()).toMatchObject({ ok: false, status: "limit_reached" });
   });
 
-  it("keeps rejection statuses but always explains them", async () => {
+  it("answers rejections with 200 so the provider hands the explanation to the model", async () => {
     const unauthenticated = await post("/tools/check-availability", {}, { "content-type": "application/json" });
-    expect(unauthenticated.status).toBe(401);
+    expect(unauthenticated.status).toBe(200);
     expect(await unauthenticated.json()).toMatchObject({ ok: false, status: "unavailable", say: expect.any(String) });
 
     const notExplicit = await post("/tools/request-human", { provider_call_id: "loud", from_number: "+15555550110", reason: "explicit_request", caller_quote: "why is this so loud" });
-    expect(notExplicit.status).toBe(409);
+    expect(notExplicit.status).toBe(200);
     const body = await notExplicit.json() as Record<string, unknown>;
     expect(body).toMatchObject({ ok: false });
     expect(String(body.say).length).toBeGreaterThan(0);
 
     const invalid = await post("/tools/approved-answer", { provider_call_id: "bad", kind: "discount", key: "x" });
-    expect(invalid.status).toBe(400);
+    expect(invalid.status).toBe(200);
     expect(await invalid.json()).toMatchObject({ ok: false, say: expect.any(String), instruction: expect.any(String) });
   });
 });

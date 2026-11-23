@@ -8,7 +8,7 @@ import { z } from "zod";
 import { renderAdminResetLink, renderCallbackLink, renderForgotPassword, renderResetPassword, renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms } from "../admin/render.js";
 import { buildActivationReport, shopActivationBlockers, type ActivationReport } from "../application/readiness.js";
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
-import { CallService } from "../application/call-service.js";
+import { CallService, ToolWriteInProgressError } from "../application/call-service.js";
 import { approvedTransferTargets } from "../application/transfer-policy.js";
 import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
@@ -38,7 +38,7 @@ import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignu
 import type { OwnerSession } from "../security/owner-auth.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
 import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
-import { TOOL_DEADLINE_MS, TOOL_ROUTES, ToolCallBudget, toolFailure, toolLimitReached, type VoiceToolName } from "../voice/tool-results.js";
+import { MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_ROUTES, toolFailure, toolLimitReached, withinToolBudget, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
 import { callScreeningSetting, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import { TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
 import { carrierFamily, forwardingOffInstruction, type CarrierFamily, type CarrierInfo } from "../domain/forwarding.js";
@@ -209,14 +209,23 @@ export interface AppDependencies {
   ownerWeb?: { dir: string };
   /** PostHog product analytics + error tracking; a no-op when POSTHOG_KEY is unset. */
   telemetry?: Telemetry;
-  /** How long a voice tool may run before it answers "unavailable" (tests shorten it). */
+  /** How long a voice tool may run before it is aborted and answers take-a-message (tests shorten it). */
   toolDeadlineMs?: number;
 }
 
-/** A voice tool used up its per-call budget: answer 200 with the fixed take-a-message result. */
+/** An authenticated voice tool call whose budget is already charged, before its arguments are parsed. */
+interface ToolRequest {
+  rawBody: string;
+  /** The provider call id the budget was charged to. */
+  callId: string;
+  /** Fires at the tool deadline; passed to provider HTTP calls and checked before every write. */
+  signal: AbortSignal;
+}
+
+/** A voice tool must not run (budget spent, no call id, rate limit, deadline): answer 200 take-a-message. */
 class ToolLimitError extends Error {
-  constructor(readonly tool: VoiceToolName) {
-    super(`${tool} call limit reached`);
+  constructor(readonly tool: VoiceToolName, readonly reason: ToolLimitReason) {
+    super(`${tool} stopped: ${reason}`);
   }
 }
 
@@ -374,7 +383,6 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   const deletionService = new DataDeletionService(dependencies.store, recordingClient);
   const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
   const limiter = new RateLimiter();
-  const toolBudget = new ToolCallBudget();
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));
   const telemetry = dependencies.telemetry ?? noopTelemetry;
   const graceContext: GraceContext = { store: dependencies.store, env: dependencies.env, clock: dependencies.clock, fetcher: dependencies.fetcher, log };
@@ -401,13 +409,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   return (request, response) => {
     void handle(request, response).catch((error: unknown) => {
       const requestId = response.getHeader("x-request-id") ?? request.headers["x-request-id"] ?? "unassigned";
-      const tool = toolForPath(new URL(request.url ?? "/", "http://localhost").pathname);
-      if (error instanceof ToolLimitError) {
-        log({ level: "warn", event: "tool_call_limit_reached", requestId, tool: error.tool });
-        if (!response.headersSent) sendJson(response, 200, toolLimitReached(error.tool));
-        else response.end();
-        return;
-      }
+      const tool = request.method === "POST" ? toolForPath(new URL(request.url ?? "/", "http://localhost").pathname) : null;
+      if (tool) return answerToolError(tool, error, response, String(requestId));
       const status = error instanceof HttpError ? error.status : error instanceof z.ZodError ? 400 : 500;
       const message = error instanceof HttpError || error instanceof z.ZodError ? error.message : "Internal server error";
       log({ level: status >= 500 ? "error" : "warn", event: "request_failed", requestId, status, error: safeError(error) });
@@ -416,32 +419,85 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         telemetry.captureException(error, { route: routeKey(pathname), method: request.method ?? "GET", status, requestId: String(requestId) });
       }
       if (response.headersSent) response.end();
-      // A voice tool always answers in plain English so the model never retries an unreadable
-      // result. Deliberate rejections keep their status; an unexpected failure answers 200.
-      else if (tool) sendJson(response, status === 500 ? 200 : status, { ...toolFailure(tool), error: message, request_id: requestId });
       else sendJson(response, status, { error: message, request_id: requestId });
     });
   };
 
-  /** Run a voice tool, answering "unavailable" before the provider's webhook timeout if it hangs. */
-  async function runTool(tool: VoiceToolName, work: () => Promise<void>, response: ServerResponse): Promise<void> {
+  /**
+   * The provider only hands a tool's body to the model on 2xx, so every voice tool failure answers 200 with
+   * the fixed plain-English result; anything else reads as unreadable and the model retries. The real status
+   * is logged here only. Error text (validation messages can quote the caller) never reaches the model.
+   */
+  function answerToolError(tool: VoiceToolName, error: unknown, response: ServerResponse, requestId: string): void {
+    if (error instanceof ToolLimitError) {
+      log({ level: "warn", event: "tool_call_limited", requestId, tool, reason: error.reason });
+    } else {
+      const status = error instanceof HttpError ? error.status : error instanceof z.ZodError ? 400 : error instanceof ToolWriteInProgressError ? 409 : 500;
+      log({ level: status >= 500 ? "error" : "warn", event: "tool_request_failed", requestId, tool, status, error: safeError(error) });
+      if (status >= 500) telemetry.captureException(error, { route: `tool:${tool}`, method: "POST", status, requestId });
+    }
+    if (response.headersSent) {
+      response.end();
+      return;
+    }
+    sendJson(response, 200, error instanceof ToolLimitError ? toolLimitReached(tool) : toolFailure(tool));
+  }
+
+  /**
+   * Run a voice tool under a deadline just inside the provider's webhook timeout. When it fires, in-flight
+   * provider HTTP calls are aborted, no further writes happen, and the model gets the terminal take-a-message
+   * result (not an "unavailable" that invites a retry).
+   */
+  async function runTool(tool: VoiceToolName, request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), dependencies.toolDeadlineMs ?? TOOL_DEADLINE_MS); });
-    const running = work();
+    const deadline = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort(new ToolLimitError(tool, "deadline"));
+        resolve("timeout");
+      }, dependencies.toolDeadlineMs ?? TOOL_DEADLINE_MS);
+    });
+    const running = handleToolRoute(tool, request, response, url, controller.signal);
     try {
       if (await Promise.race([running.then(() => "done" as const), deadline]) === "done") return;
     } finally {
       clearTimeout(timer);
     }
-    // The late handler can no longer answer; drop whatever it ends with.
-    running.catch(() => undefined);
-    log({ level: "warn", event: "tool_deadline_exceeded", tool });
-    if (!response.headersSent) sendJson(response, 200, toolFailure(tool));
+    // The late handler can no longer answer; it stops at its next abort check.
+    running.catch((error: unknown) => {
+      if (!(error instanceof ToolLimitError)) log({ level: "warn", event: "tool_late_failure", tool, error: safeError(error) });
+    });
+    throw new ToolLimitError(tool, "deadline");
   }
 
-  /** Count one authenticated tool call against its per-call budget. */
-  function spendToolBudget(providerCallId: string, tool: VoiceToolName): void {
-    if (!toolBudget.take(providerCallId, tool)) throw new ToolLimitError(tool);
+  /**
+   * The call id the budget is charged to, from the provider header (never the unparsed body) in production.
+   * Demo bearer requests without the header fall back to the body's provider_call_id.
+   */
+  function toolCallId(request: IncomingMessage, rawBody: string): string | null {
+    const usable = (value: unknown): string | null =>
+      typeof value === "string" && value.trim().length > 0 && value.length <= MAX_PROVIDER_CALL_ID_LENGTH ? value : null;
+    const header = singleHeader(request.headers["x-telnyx-call-control-id"]);
+    if (header !== undefined) return usable(header);
+    if (!(dependencies.env.DEMO_MODE && bearerMatches(request, dependencies.env.TOOL_TOKEN))) return null;
+    try {
+      const payload = unwrapToolPayload(JSON.parse(rawBody));
+      return payload && typeof payload === "object" ? usable((payload as Record<string, unknown>).provider_call_id) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Charge one call against the durable per-call budget. Fails closed: no count, no tool. */
+  async function spendToolBudget(providerCallId: string, tool: VoiceToolName): Promise<void> {
+    let count: number;
+    try {
+      count = await dependencies.store.incrementToolCallCount(providerCallId, tool, dependencies.clock.now().toISOString());
+    } catch (error) {
+      log({ level: "error", event: "tool_budget_unavailable", tool, error: safeError(error) });
+      throw new ToolLimitError(tool, "budget_unavailable");
+    }
+    if (!withinToolBudget(tool, count)) throw new ToolLimitError(tool, "budget");
   }
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -725,41 +781,62 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (url.pathname.startsWith("/texml/voicemail")) return handleVoicemail(request, response, url);
     if (method === "POST" && url.pathname === "/webhooks/stripe") return handleStripe(request, response);
     const tool = method === "POST" ? toolForPath(url.pathname) : null;
-    if (tool) return runTool(tool, () => handleToolRoute(request, response, url), response);
+    if (tool) return runTool(tool, request, response, url);
     if (url.pathname.startsWith("/admin")) return handleAdmin(request, response, url);
     throw new HttpError(404, "Not found");
   }
 
-  async function handleToolRoute(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
-    if (url.pathname === "/tools/save-intake") return handleIntake(request, response);
-    if (url.pathname === "/tools/approved-answer") {
-      const rawBody = await readBody(request);
-      requireProviderAuth(request, rawBody);
-      enforceProviderRate(request, "tool:approved-answer");
-      const input = baseToolSchema.extend({ kind: z.enum(["price", "answer"]), key: z.string().max(120) }).strict().parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
-      requireMatchingCallHeader(request, input.provider_call_id);
-      spendToolBudget(input.provider_call_id, "get_approved_answer");
+  /**
+   * Order matters: authenticate, take the call id from the provider header, rate-limit and charge the durable
+   * per-call budget, and only then parse. Invalid arguments therefore count toward the cap, and a call with no
+   * id never runs a tool or shares a bucket with other shops.
+   */
+  async function handleToolRoute(tool: VoiceToolName, request: IncomingMessage, response: ServerResponse, url: URL, signal: AbortSignal): Promise<void> {
+    const rawBody = await readBody(request);
+    requireProviderAuth(request, rawBody);
+    const callId = toolCallId(request, rawBody);
+    if (!callId) throw new ToolLimitError(tool, "missing_call_id");
+    // Per call, never per IP: Telnyx sends every shop's tool calls from the same addresses.
+    if (!limiter.allow(`provider:${callId}:${tool}`, 240, 60_000)) throw new ToolLimitError(tool, "rate_limited");
+    await spendToolBudget(callId, tool);
+    signal.throwIfAborted();
+    const context: ToolRequest = { rawBody, callId, signal };
+    const result = await toolResult(url.pathname, context);
+    signal.throwIfAborted();
+    if (!response.headersSent) sendJson(response, 200, result);
+  }
+
+  async function toolResult(pathname: string, tool: ToolRequest): Promise<unknown> {
+    if (pathname === "/tools/save-intake") return handleIntake(tool);
+    if (pathname === "/tools/approved-answer") {
+      const input = baseToolSchema.extend({ kind: z.enum(["price", "answer"]), key: z.string().max(120) }).strict().parse(toolPayload(tool));
+      requireToolCallId(tool, input.provider_call_id);
       const tenantId = await tenantForCall(input.provider_call_id);
       await requireOperational(tenantId);
-      return sendJson(response, 200, { ...approvedAnswer(await dependencies.store.getConfig(tenantId), input.kind, input.key), wrap_up: await service.wrapUp(input.provider_call_id) });
+      return { ...approvedAnswer(await dependencies.store.getConfig(tenantId), input.kind, input.key), wrap_up: await service.wrapUp(input.provider_call_id) };
     }
-    if (url.pathname === "/tools/check-service-area") return handleServiceArea(request, response);
-    if (url.pathname === "/tools/check-availability") return handleAvailability(request, response);
-    if (url.pathname === "/tools/triage") return handleTriage(request, response);
-    if (url.pathname === "/tools/book") return handleBooking(request, response);
-    if (url.pathname === "/tools/request-human") return handleHandoff(request, response);
-    if (url.pathname === "/tools/mark-spam") {
-      const rawBody = await readBody(request);
-      requireProviderAuth(request, rawBody);
-      enforceProviderRate(request, "tool:mark-spam");
-      const input = baseToolSchema.extend({ from_number: z.string().min(3).max(40), category: z.enum(SPAM_CATEGORIES), caller_quote: z.string().min(1).max(500) }).parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
-      requireMatchingCallHeader(request, input.provider_call_id);
-      spendToolBudget(input.provider_call_id, "mark_spam_call");
+    if (pathname === "/tools/check-service-area") return handleServiceArea(tool);
+    if (pathname === "/tools/check-availability") return handleAvailability(tool);
+    if (pathname === "/tools/triage") return handleTriage(tool);
+    if (pathname === "/tools/book") return handleBooking(tool);
+    if (pathname === "/tools/request-human") return handleHandoff(tool);
+    if (pathname === "/tools/mark-spam") {
+      const input = baseToolSchema.extend({ from_number: z.string().min(3).max(40), category: z.enum(SPAM_CATEGORIES), caller_quote: z.string().min(1).max(500) }).parse(toolPayload(tool));
+      requireToolCallId(tool, input.provider_call_id);
       const tenantId = await tenantForCall(input.provider_call_id);
       await requireOperational(tenantId);
-      return sendJson(response, 200, await service.markSpam({ tenantId, providerCallId: input.provider_call_id, fromNumber: input.from_number, category: input.category, callerQuote: input.caller_quote }));
+      return service.markSpam({ tenantId, providerCallId: input.provider_call_id, fromNumber: input.from_number, category: input.category, callerQuote: input.caller_quote });
     }
     throw new HttpError(404, "Not found");
+  }
+
+  function toolPayload(tool: ToolRequest): unknown {
+    return unwrapToolPayload(parseJson<unknown>(tool.rawBody));
+  }
+
+  /** The signed payload must name the call the budget was charged to. */
+  function requireToolCallId(tool: ToolRequest, providerCallId: string): void {
+    if (providerCallId !== tool.callId) throw new HttpError(401, "Telnyx call identifier does not match the signed tool payload");
   }
 
   // ---- React owner app (web/dist) ----------------------------------------------
@@ -2202,13 +2279,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     });
   }
 
-  async function handleIntake(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const rawBody = await readBody(request);
-    requireProviderAuth(request, rawBody);
-    enforceProviderRate(request, "tool:save-intake");
-    const input = intakeSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
-    requireMatchingCallHeader(request, input.provider_call_id);
-    spendToolBudget(input.provider_call_id, "save_intake");
+  async function handleIntake(tool: ToolRequest): Promise<unknown> {
+    const input = intakeSchema.parse(toolPayload(tool));
+    requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
     const result = await service.saveIntake({
@@ -2230,17 +2303,14 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         ...(input.confidence === undefined ? {} : { confidence: input.confidence }),
       },
       ...(input.recording_disclosure_declined === undefined ? {} : { recordingDisclosureDeclined: input.recording_disclosure_declined }),
+      signal: tool.signal,
     });
-    sendJson(response, 200, result);
+    return result;
   }
 
-  async function handleAvailability(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const rawBody = await readBody(request);
-    requireProviderAuth(request, rawBody);
-    enforceProviderRate(request, "tool:check-availability");
-    const input = availabilitySchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
-    requireMatchingCallHeader(request, input.provider_call_id);
-    spendToolBudget(input.provider_call_id, "check_availability");
+  async function handleAvailability(tool: ToolRequest): Promise<unknown> {
+    const input = availabilitySchema.parse(toolPayload(tool));
+    requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
     const result = await service.checkAvailability({
@@ -2248,17 +2318,14 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       providerCallId: input.provider_call_id,
       windowStart: input.window_start,
       windowEnd: input.window_end,
+      signal: tool.signal,
     });
-    sendJson(response, 200, { ...result, wrap_up: await service.wrapUp(input.provider_call_id) });
+    return { ...result, wrap_up: await service.wrapUp(input.provider_call_id) };
   }
 
-  async function handleServiceArea(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const rawBody = await readBody(request);
-    requireProviderAuth(request, rawBody);
-    enforceProviderRate(request, "tool:check-service-area");
-    const input = serviceAreaSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
-    requireMatchingCallHeader(request, input.provider_call_id);
-    spendToolBudget(input.provider_call_id, "check_service_area");
+  async function handleServiceArea(tool: ToolRequest): Promise<unknown> {
+    const input = serviceAreaSchema.parse(toolPayload(tool));
+    requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
     const result = await service.checkServiceArea({
@@ -2266,16 +2333,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       providerCallId: input.provider_call_id,
       address: input.address,
     });
-    sendJson(response, 200, { ...result, wrap_up: await service.wrapUp(input.provider_call_id) });
+    return { ...result, wrap_up: await service.wrapUp(input.provider_call_id) };
   }
 
-  async function handleTriage(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const rawBody = await readBody(request);
-    requireProviderAuth(request, rawBody);
-    enforceProviderRate(request, "tool:triage");
-    const input = triageSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
-    requireMatchingCallHeader(request, input.provider_call_id);
-    spendToolBudget(input.provider_call_id, "triage_call");
+  async function handleTriage(tool: ToolRequest): Promise<unknown> {
+    const input = triageSchema.parse(toolPayload(tool));
+    requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
     const result = await service.triageCall({
@@ -2287,16 +2350,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       ...(input.llm_score === undefined ? {} : { llmScore: input.llm_score }),
       ...(input.llm_reason === undefined ? {} : { llmReason: input.llm_reason }),
     });
-    sendJson(response, 200, { ...result, wrap_up: await service.wrapUp(input.provider_call_id) });
+    return { ...result, wrap_up: await service.wrapUp(input.provider_call_id) };
   }
 
-  async function handleBooking(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const rawBody = await readBody(request);
-    requireProviderAuth(request, rawBody);
-    enforceProviderRate(request, "tool:book");
-    const input = bookingSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
-    requireMatchingCallHeader(request, input.provider_call_id);
-    spendToolBudget(input.provider_call_id, "book_slot");
+  async function handleBooking(tool: ToolRequest): Promise<unknown> {
+    const input = bookingSchema.parse(toolPayload(tool));
+    requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
     const result = await service.bookConfirmedSlot({
@@ -2310,17 +2369,14 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       problemDescription: input.problem_description,
       explicitConfirmation: input.explicit_confirmation,
       diagnosticFeeAccepted: input.diagnostic_fee_accepted,
+      signal: tool.signal,
     });
-    sendJson(response, 200, { ...result, wrap_up: await service.wrapUp(input.provider_call_id) });
+    return { ...result, wrap_up: await service.wrapUp(input.provider_call_id) };
   }
 
-  async function handleHandoff(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const rawBody = await readBody(request);
-    requireProviderAuth(request, rawBody);
-    enforceProviderRate(request, "tool:request-human");
-    const input = handoffSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
-    requireMatchingCallHeader(request, input.provider_call_id);
-    spendToolBudget(input.provider_call_id, "request_human");
+  async function handleHandoff(tool: ToolRequest): Promise<unknown> {
+    const input = handoffSchema.parse(toolPayload(tool));
+    requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
     if (input.reason === "explicit_request") {
@@ -2349,7 +2405,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (approved.length) await dependencies.store.saveIntegrationSecret(tenantId, "transfer", key, "issued");
       return approved;
     });
-    sendJson(response, 200, { ...result, wrap_up: await service.wrapUp(input.provider_call_id), transferAvailable: targets.length > 0, transferTargets: targets, message: targets.length ? "Owner alert and callback are saved. Offer one warm transfer to the configured Owner target. If it fails, return to the caller; the callback remains open." : result.message });
+    return { ...result, wrap_up: await service.wrapUp(input.provider_call_id), transferAvailable: targets.length > 0, transferTargets: targets, message: targets.length ? "Owner alert and callback are saved. Offer one warm transfer to the configured Owner target. If it fails, return to the caller; the callback remains open." : result.message };
   }
 
   async function handleAdmin(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
@@ -2691,12 +2747,6 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return dependencies.env.DEFAULT_TENANT_ID;
     }
     throw new HttpError(403, "Webhook assistant is not assigned to a tenant");
-  }
-
-  function requireMatchingCallHeader(request: IncomingMessage, providerCallId: string): void {
-    if (dependencies.env.DEMO_MODE && bearerMatches(request, dependencies.env.TOOL_TOKEN)) return;
-    const headerCallId = singleHeader(request.headers["x-telnyx-call-control-id"]);
-    if (!headerCallId || headerCallId !== providerCallId) throw new HttpError(401, "Telnyx call identifier does not match the signed tool payload");
   }
 
   function enforceProviderRate(request: IncomingMessage, route: string): void {

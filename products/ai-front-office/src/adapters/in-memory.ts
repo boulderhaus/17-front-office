@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
-import type { CalendarPort, NotificationPort, Store } from "../ports.js";
+import { createHash, randomUUID } from "node:crypto";
+import type { CalendarPort, CallOptions, CreateEventOptions, NotificationPort, Store, ToolClaim } from "../ports.js";
 import type {
   AvailabilitySlot,
   BookingAttempt,
@@ -63,6 +63,8 @@ export class InMemoryStore implements Store {
   readonly providerRoutes = new Map<string, ProviderRoute>();
   readonly subscriptions = new Map<string, SubscriptionRecord>();
   readonly retentionFailures = new Map<string, string>();
+  readonly toolCallCounts = new Map<string, { count: number; updatedAt: string }>();
+  readonly toolResults = new Map<string, { result: string | null; claimedAt: string; createdAt: string }>();
   readonly #mutex = new KeyedMutex();
 
   async ping(): Promise<void> {}
@@ -442,10 +444,63 @@ export class InMemoryStore implements Store {
     }
     return purged;
   }
+
+  async incrementToolCallCount(providerCallId: string, tool: string, now: string): Promise<number> {
+    const key = `${providerCallId}\u0000${tool}`;
+    const count = (this.toolCallCounts.get(key)?.count ?? 0) + 1;
+    this.toolCallCounts.set(key, { count, updatedAt: now });
+    return count;
+  }
+
+  async claimToolResult(providerCallId: string, idempotencyKey: string, now: string, staleBefore: string): Promise<ToolClaim> {
+    const key = `${providerCallId}\u0000${idempotencyKey}`;
+    const existing = this.toolResults.get(key);
+    if (!existing) {
+      this.toolResults.set(key, { result: null, claimedAt: now, createdAt: now });
+      return { status: "claimed" };
+    }
+    if (existing.result === null && Date.parse(existing.claimedAt) < Date.parse(staleBefore)) {
+      existing.claimedAt = now;
+      return { status: "claimed" };
+    }
+    return existing.result === null ? { status: "pending" } : { status: "done", result: JSON.parse(existing.result) as unknown };
+  }
+
+  async getToolResult(providerCallId: string, idempotencyKey: string): Promise<{ status: "pending" } | { status: "done"; result: unknown } | null> {
+    const existing = this.toolResults.get(`${providerCallId}\u0000${idempotencyKey}`);
+    if (!existing) return null;
+    return existing.result === null ? { status: "pending" } : { status: "done", result: JSON.parse(existing.result) as unknown };
+  }
+
+  async completeToolResult(providerCallId: string, idempotencyKey: string, result: unknown, _now: string): Promise<void> {
+    const existing = this.toolResults.get(`${providerCallId}\u0000${idempotencyKey}`);
+    // Serialized like the jsonb column, so both stores hand back the same value.
+    if (existing && existing.result === null) existing.result = JSON.stringify(result ?? null);
+  }
+
+  async releaseToolResult(providerCallId: string, idempotencyKey: string): Promise<void> {
+    const key = `${providerCallId}\u0000${idempotencyKey}`;
+    if (this.toolResults.get(key)?.result === null) this.toolResults.delete(key);
+  }
+
+  async purgeToolLedger(before: string): Promise<number> {
+    let purged = 0;
+    for (const [key, entry] of this.toolCallCounts) {
+      if (Date.parse(entry.updatedAt) >= Date.parse(before)) continue;
+      this.toolCallCounts.delete(key);
+      purged += 1;
+    }
+    for (const [key, entry] of this.toolResults) {
+      if (Date.parse(entry.createdAt) >= Date.parse(before)) continue;
+      this.toolResults.delete(key);
+      purged += 1;
+    }
+    return purged;
+  }
 }
 
 export class InMemoryCalendar implements CalendarPort {
-  readonly events: Array<{ slot: AvailabilitySlot; eventId: string }> = [];
+  readonly events: Array<{ slot: AvailabilitySlot; eventId: string; idempotencyKey?: string }> = [];
   failAvailability = false;
   failCreate: "none" | "known" | "unknown" = "none";
   failVerify = false;
@@ -458,7 +513,8 @@ export class InMemoryCalendar implements CalendarPort {
     bookableHours: BusinessConfig["bookableHours"];
     minimumLeadTimeMinutes: number;
     now: string;
-  }): Promise<AvailabilitySlot[]> {
+  }, options?: CallOptions): Promise<AvailabilitySlot[]> {
+    options?.signal?.throwIfAborted();
     if (this.failAvailability) throw new Error("Calendar unavailable");
     const earliest = Date.parse(input.now) + input.minimumLeadTimeMinutes * 60_000;
     const start = new Date(Math.max(Date.parse(input.windowStart), earliest));
@@ -470,23 +526,34 @@ export class InMemoryCalendar implements CalendarPort {
     return available ? [slot] : [];
   }
 
-  async isFree(input: { tenantId: string; slot: AvailabilitySlot }): Promise<boolean> {
+  async isFree(input: { tenantId: string; slot: AvailabilitySlot }, options?: CallOptions): Promise<boolean> {
+    options?.signal?.throwIfAborted();
     if (this.failAvailability) throw new Error("Calendar unavailable");
     const start = Date.parse(input.slot.start);
     const end = Date.parse(input.slot.end);
     return !this.events.some((event) => start < Date.parse(event.slot.end) && end > Date.parse(event.slot.start));
   }
 
-  async createEvent(attempt: BookingAttempt): Promise<{ status: "confirmed" | "unknown"; providerEventId: string | null }> {
+  async createEvent(attempt: BookingAttempt, options?: CreateEventOptions): Promise<{ status: "confirmed" | "unknown"; providerEventId: string | null }> {
+    options?.signal?.throwIfAborted();
     if (this.failCreate === "known") throw new Error("Calendar rejected event");
     if (this.failCreate === "unknown") return { status: "unknown", providerEventId: null };
+    // Like Google's 409 on a client-chosen id: the same idempotency key is the same event.
+    const eventId = `demo-${createHash("sha256").update(attempt.idempotencyKey).digest("hex").slice(0, 32)}`;
+    if (this.events.some((event) => event.eventId === eventId)) return { status: "confirmed", providerEventId: eventId };
     if (!(await this.isFree({ tenantId: attempt.tenantId, slot: attempt.slot }))) throw new Error("Calendar conflict");
-    const eventId = `demo-${randomUUID()}`;
-    this.events.push({ slot: structuredClone(attempt.slot), eventId });
+    options?.onDispatch?.(eventId);
+    this.events.push({ slot: structuredClone(attempt.slot), eventId, idempotencyKey: attempt.idempotencyKey });
     return { status: "confirmed", providerEventId: eventId };
   }
 
-  async verifyEvent(input: { providerEventId: string; slot: AvailabilitySlot }): Promise<boolean> {
+  async findEvent(attempt: BookingAttempt, options?: CallOptions): Promise<string | null> {
+    options?.signal?.throwIfAborted();
+    return this.events.find((event) => event.idempotencyKey === attempt.idempotencyKey)?.eventId ?? null;
+  }
+
+  async verifyEvent(input: { providerEventId: string; slot: AvailabilitySlot }, options?: CallOptions): Promise<boolean> {
+    options?.signal?.throwIfAborted();
     if (this.failVerify) return false;
     return this.events.some((event) => event.eventId === input.providerEventId && event.slot.start === input.slot.start && event.slot.end === input.slot.end);
   }

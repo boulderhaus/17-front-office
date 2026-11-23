@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   AvailabilitySlot,
   BookingRecord,
@@ -21,6 +21,18 @@ import { callbackLinkToken, ownerCallSms, urgentReason } from "../domain/owner-s
 
 /** Sticky quality flag: a spam mark was refused or undone, so this call always counts and reaches the owner. */
 const SPAM_REFUSED = "spam_refused";
+
+type BookSlotResult = { status: "confirmed" | "pending" | "conflict" | "unknown"; message: string };
+
+/** A claimed write whose owner has been quiet this long is presumed dead and may be taken over. */
+const TOOL_CLAIM_STALE_MS = 30_000;
+
+/** The same voice-tool write is in progress elsewhere; the HTTP layer answers a plain-English refusal. */
+export class ToolWriteInProgressError extends Error {
+  constructor() {
+    super("The same tool write is already in progress");
+  }
+}
 
 function appendFlag(flags: string[], flag: string): string[] {
   return flags.includes(flag) ? flags : [...flags, flag];
@@ -96,15 +108,56 @@ export class CallService {
     });
   }
 
+  /**
+   * Idempotent on call + payload: a late or repeated identical save returns the first result and writes
+   * nothing. `signal` is the voice tool deadline; nothing is written once it fires.
+   */
   async saveIntake(input: {
     tenantId: string;
     providerCallId: string;
     fromNumber: string;
     fields: Partial<CollectedCallFields>;
     recordingDisclosureDeclined?: boolean;
+    signal?: AbortSignal | undefined;
   }): Promise<{ status: "saved"; missing: string[]; wrap_up: boolean }> {
+    input.signal?.throwIfAborted();
     await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
-    return this.store.withLock(`call:${input.providerCallId}`, () => this.saveIntakeClaimed(input));
+    const key = toolResultKey("save_intake", input.providerCallId, { fields: input.fields, declined: input.recordingDisclosureDeclined ?? null });
+    return this.store.withLock(`call:${input.providerCallId}`, async () => {
+      const prior = await this.claimToolWrite<{ status: "saved"; missing: string[] }>(input.providerCallId, key, input.signal);
+      if (prior) {
+        const call = await this.store.getCallByProviderId(input.providerCallId);
+        return { ...prior.result, wrap_up: call ? this.wrapUpFor(call) : false };
+      }
+      let result: { status: "saved"; missing: string[]; wrap_up: boolean };
+      try {
+        result = await this.saveIntakeClaimed(input);
+      } catch (error) {
+        await this.store.releaseToolResult(input.providerCallId, key).catch(() => undefined);
+        throw error;
+      }
+      await this.store.completeToolResult(input.providerCallId, key, { status: result.status, missing: result.missing }, this.clock.now().toISOString());
+      return result;
+    });
+  }
+
+  /**
+   * Claim a voice-tool write before its side effect. Returns null when this caller won and must write (then
+   * complete or release the claim), or the finished result of the write that already happened. A write still
+   * in progress elsewhere gets a short wait, then ToolWriteInProgressError (a plain-English refusal).
+   */
+  private async claimToolWrite<T>(providerCallId: string, key: string, signal?: AbortSignal): Promise<{ result: T } | null> {
+    const now = this.clock.now();
+    const claim = await this.store.claimToolResult(providerCallId, key, now.toISOString(), new Date(now.getTime() - TOOL_CLAIM_STALE_MS).toISOString());
+    if (claim.status === "claimed") return null;
+    if (claim.status === "done") return { result: claim.result as T };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      signal?.throwIfAborted();
+      const current = await this.store.getToolResult(providerCallId, key);
+      if (current?.status === "done") return { result: current.result as T };
+    }
+    throw new ToolWriteInProgressError();
   }
 
   /**
@@ -182,6 +235,7 @@ export class CallService {
     };
     // An emergency or a request for a person means this was never spam.
     const call = emergency.emergency || fields.humanRequested ? withoutSpamMark(updated) : updated;
+    input.signal?.throwIfAborted();
     await this.store.saveCall(call);
     if (emergency.emergency) await this.queueHumanHandoffClaimed({ tenantId: input.tenantId, providerCallId: input.providerCallId, fromNumber: call.fromNumber, problemDescription: fields.problemDescription, urgent: emergency });
     const missing = [
@@ -200,7 +254,10 @@ export class CallService {
     providerCallId: string;
     windowStart: string;
     windowEnd: string;
+    signal?: AbortSignal | undefined;
   }): Promise<{ slots: AvailabilitySlot[]; status: "available" | "pending" | "invalid_window"; message: string; spokenSummary: string | null; timezone: string }> {
+    const signal = input.signal;
+    signal?.throwIfAborted();
     const config = await this.store.getConfig(input.tenantId);
     const call = await this.ensureCall(input.tenantId, input.providerCallId, "unknown", this.clock.now().toISOString());
     if (call.emergency?.emergency) return { slots: [], status: "pending", message: "Emergency escalation is active. Do not offer appointments; the owner has been alerted.", spokenSummary: null, timezone: config.timezone };
@@ -226,15 +283,18 @@ export class CallService {
           bookableHours: config.bookableHours,
           minimumLeadTimeMinutes: config.minimumLeadTimeMinutes,
           now: this.clock.now().toISOString(),
-        }),
-        { attempts: 2, baseDelayMs: 50, maxDelayMs: 100, timeoutMs: 2_500 },
+        }, { signal }),
+        { attempts: 2, baseDelayMs: 50, maxDelayMs: 100, timeoutMs: 2_500, shouldRetry: () => !signal?.aborted },
       );
+      // Slots offered after the deadline were never heard by the caller: book_slot must not accept them.
+      signal?.throwIfAborted();
       const spokenSummary = slots.length > 0 ? formatSpokenSlots(slots, config.timezone, this.clock.now()) : null;
       await this.audit(call, "calendar.availability", started, "success", { count: slots.length, offeredStarts: slots.map((slot) => slot.start) }, null);
       return slots.length > 0
         ? { slots, status: "available", message: "Read spokenSummary exactly once, then ask the caller to choose one of these exact slots.", spokenSummary, timezone: config.timezone }
         : { slots: [], status: "pending", message: "No confirmed slot is available. Tell the caller the owner will follow up.", spokenSummary: null, timezone: config.timezone };
     } catch (error) {
+      signal?.throwIfAborted();
       await this.audit(call, "calendar.availability", started, "failed", {}, redactError(error));
       return { slots: [], status: "pending", message: "The calendar could not be confirmed. Tell the caller the owner will follow up.", spokenSummary: null, timezone: config.timezone };
     }
@@ -300,15 +360,28 @@ export class CallService {
     problemDescription: string;
     explicitConfirmation: boolean;
     diagnosticFeeAccepted: boolean;
+    /** The voice tool deadline: nothing is written once it fires, except the truth about a calendar write already sent. */
+    signal?: AbortSignal | undefined;
   }): Promise<{ status: "confirmed" | "pending" | "conflict" | "unknown"; message: string }> {
+    input.signal?.throwIfAborted();
     await this.ensureCall(input.tenantId, input.providerCallId, input.callbackNumber, this.clock.now().toISOString());
     return this.store.withLock(`call:${input.providerCallId}`, () => this.bookConfirmedSlotClaimed(input));
   }
 
-  private async bookConfirmedSlotClaimed(input: Parameters<CallService["bookConfirmedSlot"]>[0]): Promise<{ status: "confirmed" | "pending" | "conflict" | "unknown"; message: string }> {
+  /**
+   * Idempotent on call + slot once a booking is attempted (calendar write or owner-confirmation queue). The write
+   * is claimed in the ledger before its side effect, so only one worker performs it; a late or repeated
+   * book_slot for the same slot returns the first result and writes nothing, so it can never double-book.
+   * Validation refusals are not stored, so the caller can still confirm and try again.
+   */
+  private async bookConfirmedSlotClaimed(input: Parameters<CallService["bookConfirmedSlot"]>[0]): Promise<BookSlotResult> {
+    const key = toolResultKey("book_slot", input.providerCallId, Number.isFinite(Date.parse(input.slotStart)) ? new Date(input.slotStart).toISOString() : input.slotStart);
+    const finished = await this.store.getToolResult(input.providerCallId, key);
+    if (finished?.status === "done") return finished.result as BookSlotResult;
     const config = await this.store.getConfig(input.tenantId);
     let call = await this.store.getCallByProviderId(input.providerCallId);
     if (!call || call.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
+    input.signal?.throwIfAborted();
     call = {
       ...call,
       fields: {
@@ -363,6 +436,7 @@ export class CallService {
       fields: { ...call.fields, requestedStart: input.slotStart, explicitSlotConfirmation: input.explicitConfirmation },
       updatedAt: this.clock.now().toISOString(),
     };
+    input.signal?.throwIfAborted();
     await this.store.saveCall(call);
     if (config.requireDiagnosticFeeAcceptance && config.priceSnippets.length === 0) {
       await this.queuePendingBooking(call, input.slotStart, config, "No owner-approved diagnostic fee is configured");
@@ -372,31 +446,54 @@ export class CallService {
       await this.queuePendingBooking(call, input.slotStart, config, "Diagnostic fee was not explicitly accepted");
       return { status: "pending", message: "Do not book until the caller explicitly accepts the owner-approved diagnostic fee." };
     }
-    if (config.bookingMode === "confirm") {
-      await this.queuePendingBooking(call, input.slotStart, config, "Owner confirmation mode is active");
-      await this.ensureCallbackTask(call, config, "Confirm requested appointment", false);
-      return { status: "pending", message: "The requested time is saved for owner confirmation. Do not say it is booked." };
+    // Only the claim winner performs the write below; everyone else gets its result.
+    const prior = await this.claimToolWrite<BookSlotResult>(input.providerCallId, key, input.signal);
+    if (prior) return prior.result;
+    const complete = async (result: BookSlotResult) => {
+      await this.store.completeToolResult(input.providerCallId, key, result, this.clock.now().toISOString());
+      return result;
+    };
+    let booking: BookingRecord;
+    try {
+      if (config.bookingMode === "confirm") {
+        await this.queuePendingBooking(call, input.slotStart, config, "Owner confirmation mode is active");
+        await this.ensureCallbackTask(call, config, "Confirm requested appointment", false);
+        return await complete({ status: "pending", message: "The requested time is saved for owner confirmation. Do not say it is booked." });
+      }
+      booking = await this.#booking.book({
+        tenantId: input.tenantId,
+        callId: call.id,
+        providerCallId: input.providerCallId,
+        requestedStart: input.slotStart,
+        durationMinutes: config.defaultServiceDurationMinutes,
+        callerName: input.callerName,
+        callbackNumber: input.callbackNumber,
+        address: input.address,
+        problemDescription: input.problemDescription,
+      }, { signal: input.signal });
+    } catch (error) {
+      // Nothing was written (an abort after dispatch returns an "unknown" booking instead of throwing).
+      await this.store.releaseToolResult(input.providerCallId, key).catch(() => undefined);
+      throw error;
     }
-    const booking = await this.#booking.book({
-      tenantId: input.tenantId,
-      callId: call.id,
-      providerCallId: input.providerCallId,
-      requestedStart: input.slotStart,
-      durationMinutes: config.defaultServiceDurationMinutes,
-      callerName: input.callerName,
-      callbackNumber: input.callbackNumber,
-      address: input.address,
-      problemDescription: input.problemDescription,
-    });
     const message = booking.status === "confirmed"
       ? `The appointment is confirmed for ${formatLocalDateTime(booking.requestedStart!, config.timezone)}.`
       : booking.status === "conflict"
         ? "That time is no longer available. Do not promise it; offer another slot or queue owner follow-up."
         : "The calendar result could not be confirmed. Tell the caller the owner will follow up.";
+    const result: BookSlotResult = { status: booking.status === "checking" ? "pending" : booking.status, message };
+    if (booking.status === "pending" || booking.status === "checking") {
+      // Nothing reached the calendar, so a retry may try again.
+      await this.store.releaseToolResult(input.providerCallId, key).catch(() => undefined);
+    } else {
+      // A calendar write was attempted: record the outcome even past the deadline, so a write that landed late
+      // is reported truthfully next time and never repeated.
+      await complete(result);
+    }
     if (booking.status === "confirmed" && booking.writeVerifiedAt) {
       await this.completeCallbackTask(call.id, "verified_booking");
     }
-    return { status: booking.status === "checking" ? "pending" : booking.status, message };
+    return result;
   }
 
   async queueHumanHandoff(input: {
@@ -994,4 +1091,21 @@ export function callerSpeech(transcript: string | null): string {
     if (speaker === "caller") lines.push(line.trim());
   }
   return lines.filter(Boolean).join("\n");
+}
+
+/** Idempotency key for a voice-tool write: tool + provider call + a hash of what makes the write unique. */
+export function toolResultKey(tool: string, providerCallId: string, payload: unknown): string {
+  return `${tool}:${providerCallId}:${createHash("sha256").update(canonicalJson(payload)).digest("hex")}`;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }

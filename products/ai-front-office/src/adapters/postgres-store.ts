@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import pg from "pg";
-import type { Store } from "../ports.js";
+import type { Store, ToolClaim } from "../ports.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, CustomerRecord, OutboxNotification, OwnerAccount, OwnerWorkspaceInput, PilotSignup, ProviderRoute, SubscriptionRecord, ToolEvent, UsageSummary } from "../domain/models.js";
 import { CryptoBox } from "../security/crypto-box.js";
 import { normalizeBusinessConfig } from "../domain/config.js";
@@ -738,6 +738,58 @@ export class PostgresStore implements Store {
   async purgeWebhookEvents(before: string): Promise<number> {
     const result = await this.#pool.query("DELETE FROM webhook_events WHERE received_at < $1", [before]);
     return result.rowCount ?? 0;
+  }
+
+  async incrementToolCallCount(providerCallId: string, tool: string, now: string): Promise<number> {
+    const result = await this.#pool.query(
+      `INSERT INTO tool_call_budgets(provider_call_id, tool, call_count, updated_at) VALUES ($1, $2, 1, $3)
+       ON CONFLICT (provider_call_id, tool) DO UPDATE SET call_count = tool_call_budgets.call_count + 1, updated_at = EXCLUDED.updated_at
+       RETURNING call_count`,
+      [providerCallId, tool, now],
+    );
+    const count = Number(result.rows[0]?.call_count);
+    if (!Number.isInteger(count) || count < 1) throw new Error("Tool budget increment returned no count");
+    return count;
+  }
+
+  async claimToolResult(providerCallId: string, idempotencyKey: string, now: string, staleBefore: string): Promise<ToolClaim> {
+    // One statement: insert the pending claim, or take over a pending claim whose owner went quiet.
+    const claimed = await this.#pool.query(
+      `INSERT INTO tool_results(provider_call_id, idempotency_key, result, claimed_at, created_at) VALUES ($1, $2, NULL, $3, $3)
+       ON CONFLICT (provider_call_id, idempotency_key) DO UPDATE SET claimed_at = EXCLUDED.claimed_at
+         WHERE tool_results.result IS NULL AND tool_results.claimed_at < $4
+       RETURNING provider_call_id`,
+      [providerCallId, idempotencyKey, now, staleBefore],
+    );
+    if (claimed.rowCount === 1) return { status: "claimed" };
+    return (await this.getToolResult(providerCallId, idempotencyKey)) ?? { status: "pending" };
+  }
+
+  async getToolResult(providerCallId: string, idempotencyKey: string): Promise<{ status: "pending" } | { status: "done"; result: unknown } | null> {
+    const result = await this.#pool.query(
+      "SELECT result::text AS result FROM tool_results WHERE provider_call_id = $1 AND idempotency_key = $2",
+      [providerCallId, idempotencyKey],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return row.result === null ? { status: "pending" } : { status: "done", result: JSON.parse(String(row.result)) as unknown };
+  }
+
+  async completeToolResult(providerCallId: string, idempotencyKey: string, value: unknown, now: string): Promise<void> {
+    await this.#pool.query(
+      "UPDATE tool_results SET result = $3::jsonb, completed_at = $4 WHERE provider_call_id = $1 AND idempotency_key = $2 AND result IS NULL",
+      [providerCallId, idempotencyKey, JSON.stringify(value ?? null), now],
+    );
+  }
+
+  async releaseToolResult(providerCallId: string, idempotencyKey: string): Promise<void> {
+    await this.#pool.query("DELETE FROM tool_results WHERE provider_call_id = $1 AND idempotency_key = $2 AND result IS NULL", [providerCallId, idempotencyKey]);
+  }
+
+  async purgeToolLedger(before: string): Promise<number> {
+    const budgets = await this.#pool.query("DELETE FROM tool_call_budgets WHERE updated_at < $1", [before]);
+    const results = await this.#pool.query("DELETE FROM tool_results WHERE created_at < $1", [before]);
+    return (budgets.rowCount ?? 0) + (results.rowCount ?? 0);
   }
 
   private mapCall(row: Row): CallRecord {
