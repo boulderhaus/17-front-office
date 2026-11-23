@@ -28,7 +28,8 @@ export function derive(data: ApiDashboard) {
     .sort((left, right) => left.fields.requestedStart!.localeCompare(right.fields.requestedStart!))
   const booked = upcoming.filter((call) => call.outcome === "booked")
   const used = data.usage.countedCalls
-  const included = data.usage.includedCalls
+  // With Unlimited, the meter runs to fair use (3× the plan's calls) instead.
+  const included = data.usage.fairUseCalls ?? data.usage.includedCalls
   const remaining = Math.max(0, included - used)
   const extraCalls = data.usage.extraCalls
   const due = (task: ApiTask) => (Date.parse(task.dueAt) <= nowMs ? "Due now" : `Due ${compactDate(task.dueAt, tz)}`)

@@ -6,7 +6,7 @@ import { CallService } from "../src/application/call-service.js";
 import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
 import { createRequestHandler } from "../src/http/app.js";
-import { callbackLinkMatches, callbackLinkToken, callerShortName, gsm7, ownerCallSms, readCallbackLinkToken, streetAndCity, urgentReason } from "../src/domain/owner-sms.js";
+import { callbackLinkMatches, callbackLinkToken, callerFirstName, gsm7, ownerCallSms, readCallbackLinkToken, shortWhen, streetAndCity, urgentReason } from "../src/domain/owner-sms.js";
 import type { CollectedCallFields, EmergencyDecision } from "../src/domain/models.js";
 
 const fields: CollectedCallFields = {
@@ -18,13 +18,12 @@ const GSM7_ONE_SEGMENT = /^[A-Za-z0-9 !"#%&'()*+,\-./:;<=>?@$_\n]+$/;
 
 describe("owner new-call text", () => {
   it("reads in short lines with a blank line before the link, and never includes the caller's number", () => {
-    const body = ownerCallSms({ shop: "Suncoast Heating", call: { fields, emergency: null }, wants: "Wants someone today", link: "https://front-office.example/c/abc" });
+    const body = ownerCallSms({ call: { fields, emergency: null }, wants: "Wants someone today", link: "https://front-office.example/c/abc" });
     expect(body).toBe([
-      "Front Office - Suncoast Heating",
-      "New call: Maria G.",
-      "AC not cooling",
-      "41 Palm Ave, Sarasota",
-      "Wants someone today",
+      "New call: Maria",
+      "- AC not cooling",
+      "- 41 Palm Ave, Sarasota",
+      "- Wants someone today",
       "",
       "Call back: https://front-office.example/c/abc",
     ].join("\n"));
@@ -32,10 +31,22 @@ describe("owner new-call text", () => {
     expect(body).toMatch(GSM7_ONE_SEGMENT);
   });
 
-  it("starts urgent calls with URGENT and the reason", () => {
+  it("says when the AI booked a time and links the confirmation", () => {
+    const body = ownerCallSms({ call: { fields: { ...fields, callerName: "Bob Smith" }, emergency: null }, booked: "tomorrow 10a", link: "https://front-office.example/c/abc" });
+    expect(body).toBe([
+      "New call: Bob",
+      "- AC not cooling",
+      "- 41 Palm Ave, Sarasota",
+      "- Booked tomorrow 10a",
+      "",
+      "Confirmation: https://front-office.example/c/abc",
+    ].join("\n"));
+  });
+
+  it("starts urgent calls with URGENT and the reason, then the same bullets", () => {
     const emergency: EmergencyDecision = { emergency: true, severity: "urgent", score: 0.9, evidence: ["gas smell"], immediateInstruction: null };
-    const body = ownerCallSms({ shop: "Suncoast Heating", call: { fields, emergency }, urgentReason: urgentReason({ fields, emergency }, false), link: "https://x.example/c/t" });
-    expect(body.split("\n")[0]).toBe("URGENT: gas smell");
+    const body = ownerCallSms({ call: { fields, emergency }, urgentReason: urgentReason({ fields, emergency }, false), wants: "Wants someone today", link: "https://x.example/c/t" });
+    expect(body).toBe(["URGENT: gas smell", "- AC not cooling", "- 41 Palm Ave, Sarasota", "- Wants someone today", "", "Call back: https://x.example/c/t"].join("\n"));
     expect(urgentReason({ fields, emergency: { ...emergency, severity: "life_safety", evidence: ["carbon monoxide"] } }, false)).toBe("safety risk, carbon monoxide");
     expect(urgentReason({ fields, emergency: null }, true)).toBe("caller asked for you");
     expect(urgentReason({ fields, emergency: null }, false)).toBeNull();
@@ -43,16 +54,29 @@ describe("owner new-call text", () => {
 
   it("keeps the problem to about 40 characters and everything GSM-7", () => {
     const long = { ...fields, callerName: "Jo", problemDescription: "Upstairs unit blowing warm air since Tuesday, thermostat says “cool” — maybe refrigerant", address: null };
-    const body = ownerCallSms({ shop: "Joe’s Heating · Cooling", call: { fields: long, emergency: null }, link: "https://x.example/c/t" });
+    const body = ownerCallSms({ call: { fields: long, emergency: null }, link: "https://x.example/c/t" });
     const lines = body.split("\n");
-    expect(lines[0]).toBe("Front Office - Joe's Heating - Cooling");
-    expect(lines[1]).toBe("New call: Jo");
-    expect(lines[2]!.length).toBeLessThanOrEqual(40);
-    expect(lines[2]).toMatch(/\.\.\.$/);
+    expect(lines[0]).toBe("New call: Jo");
+    expect(lines[1]!.length).toBeLessThanOrEqual(42);
+    expect(lines[1]).toMatch(/^- .*\.\.\.$/);
+    expect(lines.slice(2)).toEqual(["", "Call back: https://x.example/c/t"]);
     expect(body).toMatch(GSM7_ONE_SEGMENT);
     expect(gsm7("75¢ “quote” – Ñandú")).toBe('75 "quote" - Nandu');
-    expect(callerShortName(null)).toBe("Unknown caller");
+    expect(callerFirstName(null)).toBe("Unknown caller");
+    expect(callerFirstName("  josé  maría lópez ")).toBe("jose");
     expect(streetAndCity("")).toBeNull();
+  });
+
+  it("writes times short, in the shop's timezone", () => {
+    const now = new Date("2026-11-23T15:00:00Z"); // Monday 10 AM in New York
+    const tz = "America/New_York";
+    expect(shortWhen("2026-11-23T20:00:00Z", now, tz)).toBe("today 3p");
+    expect(shortWhen("2026-11-24T15:00:00Z", now, tz)).toBe("tomorrow 10a");
+    expect(shortWhen("2026-11-24T15:30:00Z", now, tz)).toBe("tomorrow 10:30a");
+    expect(shortWhen("2026-11-25T19:00:00Z", now, tz)).toBe("Wed 2p");
+    expect(shortWhen("2026-12-04T17:00:00Z", now, tz)).toBe("Dec 4 12p");
+    // Late evening UTC is still "today" in Los Angeles.
+    expect(shortWhen("2026-11-24T04:00:00Z", new Date("2026-11-23T20:00:00Z"), "America/Los_Angeles")).toBe("today 8p");
   });
 });
 
@@ -78,8 +102,8 @@ describe("owner new-call text, end to end", () => {
     });
     const sms = [...store.notifications.values()].find((item) => item.channel === "sms" && item.callId === call.id)!;
     const lines = sms.body.split("\n");
-    expect(lines.slice(0, 6)).toEqual(["Front Office - Suncoast Heating", "New call: Maria G.", "AC not cooling", "41 Palm Ave, Sarasota", "Wants someone today", ""]);
-    expect(lines[6]).toMatch(/^Call back: https:\/\/front-office\.example\/c\/[A-Za-z0-9_-]{22}\.[0-9a-z]+\.[A-Za-z0-9_-]{22}$/);
+    expect(lines.slice(0, 5)).toEqual(["New call: Maria", "- AC not cooling", "- 41 Palm Ave, Sarasota", "- Wants someone today", ""]);
+    expect(lines[5]).toMatch(/^Call back: https:\/\/front-office\.example\/c\/[A-Za-z0-9_-]{22}\.[0-9a-z]+\.[A-Za-z0-9_-]{22}$/);
     expect(sms.body).not.toMatch(/555.?0142|\+1/);
     expect(sms.body).toMatch(GSM7_ONE_SEGMENT);
 
@@ -88,7 +112,7 @@ describe("owner new-call text, end to end", () => {
     await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("no address");
-    const path = new URL(lines[6]!.slice("Call back: ".length)).pathname;
+    const path = new URL(lines[5]!.slice("Call back: ".length)).pathname;
     const page = await fetch(`http://127.0.0.1:${address.port}${path}`);
     expect(page.status).toBe(200);
     expect(page.headers.get("cache-control")).toContain("no-store");

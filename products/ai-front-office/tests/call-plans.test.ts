@@ -7,7 +7,7 @@ import { LeadGuaranteeService, OverageBillingService, recordFirstPaid } from "..
 import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig, normalizeBusinessConfig } from "../src/domain/config.js";
 import type { CallRecord, CollectedCallFields } from "../src/domain/models.js";
-import { planBlurb, planCatalog, planForPriceIds } from "../src/domain/plans.js";
+import { knownPlans, planBlurb, planForPriceIds } from "../src/domain/plans.js";
 import { isQualifyingLead, lastClosedBillingPeriod } from "../src/domain/usage.js";
 import { createRequestHandler, createStripeClient } from "../src/http/app.js";
 import { planStripeSetup } from "../scripts/create-stripe-plans.js";
@@ -333,7 +333,7 @@ describe("plan changes and the guarantee over HTTP", () => {
     await shop.post("/api/app/billing/plan", { plan: "fleet" });
     const settings = await (await fetch(`${baseUrl}/api/app/settings`, { headers: { cookie: shop.cookie } })).json() as { csrf: string; values: Record<string, unknown>; plan: { id: string; includedCalls: number; plans: unknown[] } };
     expect(settings.plan).toMatchObject({ id: "fleet", includedCalls: 500 });
-    expect(settings.plan.plans).toHaveLength(4);
+    expect(settings.plan.plans).toHaveLength(3);
     const saved = await fetch(`${baseUrl}/api/app/settings`, { method: "PUT", headers: { cookie: shop.cookie, "content-type": "application/json", "x-csrf-token": settings.csrf }, body: JSON.stringify({ ...settings.values, greeting: "Thanks for calling Synthetic Air." }) });
     expect(saved.status).toBe(200);
     expect(await store.getConfig(shop.tenantId)).toMatchObject({ planId: "fleet", flatMonthlyPriceCents: 34_999, includedCalls: 500 });
@@ -389,18 +389,18 @@ describe("plan changes and the guarantee over HTTP", () => {
 });
 
 describe("scripts/create-stripe-plans.ts", () => {
-  it("plans the four monthly prices by lookup key and the 50%-once coupon from the approved defaults", () => {
+  it("plans the monthly prices by lookup key and the 50%-once coupon from the approved defaults", () => {
     const setup = planStripeSetup({});
     expect(setup.productName).toBe("Front Office");
-    expect(setup.prices.map((price) => [price.envName, price.label, price.unitAmount, price.includedCalls, price.lookupKey])).toEqual([
+    expect(setup.prices.filter((price) => price.kind === "plan").map((price) => [price.envName, price.label, price.unitAmount, price.includedCalls, price.lookupKey])).toEqual([
       ["STRIPE_PRICE_ID_SOLO", "Solo", 4_999, 60, "front_office_solo_4999_monthly"],
-      ["STRIPE_PRICE_ID_PRO", "Pro", 9_999, 125, "front_office_pro_9999_monthly"],
       ["STRIPE_PRICE_ID_TEAM", "Team", 17_999, 250, "front_office_team_17999_monthly"],
       ["STRIPE_PRICE_ID_FLEET", "Fleet", 34_999, 500, "front_office_fleet_34999_monthly"],
     ]);
     expect(setup.coupon).toEqual({ id: "front_office_first_month_50", percentOff: 50 });
     // A new price gets a new lookup key, so an old price is never reused for a new amount.
-    expect(planStripeSetup({ PLAN_PRO_PRICE_CENTS: "10999" }).prices[1]!.lookupKey).toBe("front_office_pro_10999_monthly");
+    expect(planStripeSetup({ PLAN_TEAM_PRICE_CENTS: "18999" }).prices[1]!.lookupKey).toBe("front_office_team_18999_monthly");
+    expect(planStripeSetup({ PLAN_TEAM_UNLIMITED_CENTS: "8000" }).prices[4]!.lookupKey).toBe("front_office_unlimited_team_8000_monthly");
   });
 });
 
@@ -573,7 +573,7 @@ describe("money-path hardening (review fixes)", () => {
       STRIPE_SECRET_KEY: "sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", STRIPE_WEBHOOK_SECRET: "whsec_synthetic_abcdefghijklmnopqrstuvwxyz",
       STRIPE_PRICE_ID: "price_standard_old", STRIPE_PRICE_ID_SOLO: "price_solo_new", STRIPE_PRICE_ID_PLUS: "price_plus_old", STRIPE_PRICE_ID_PRO: "price_pro_new",
     });
-    const plans = planCatalog(env);
+    const plans = knownPlans(env);
     expect(planForPriceIds(plans, ["price_plus_old"])?.id).toBe("pro");
     expect(planForPriceIds(plans, ["price_standard_old"])?.id).toBe("solo");
     expect(plans.find((plan) => plan.id === "pro")!.priceId).toBe("price_pro_new"); // new sales use the new price

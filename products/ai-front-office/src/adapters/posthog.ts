@@ -20,6 +20,7 @@ export type ServerEvent =
   | "onboarding_completed"
   | "subscription_status_changed"
   | "plan_changed"
+  | "unlimited_changed"
   | "lead_guarantee_refunded";
 
 export type SafeValue = string | number | boolean | null;

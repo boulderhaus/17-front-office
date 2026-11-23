@@ -332,15 +332,15 @@ function UsageCard({ dashboard }: { dashboard: ApiDashboard }) {
     <Card>
       <CardContent className="grid gap-2.5">
         <div className="flex items-baseline justify-between">
-          <h2 className="text-base font-semibold">Calls left</h2>
+          <h2 className="text-base font-semibold">{usage.unlimited ? "Unlimited calls" : "Calls left"}</h2>
           <strong className="tabular text-3xl font-semibold tracking-tight">{d.remaining}</strong>
         </div>
         <Progress value={Math.min(100, Math.round((d.used / Math.max(1, d.included)) * 100))} aria-label={`${d.used} of ${d.included} included calls answered`} className="h-2 [&>div]:bg-brand-ink" />
-        <p className="text-[13px] text-muted-foreground">{d.used} of {d.included} calls answered this period</p>
+        <p className="text-[13px] text-muted-foreground">{usage.unlimited ? `${d.used} answered this period. Fair use is up to ${d.included}.` : `${d.used} of ${d.included} calls answered this period`}</p>
         {usage.extraCalls > 0 && (
           <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">
             <strong className="font-semibold">Extra calls this month: {usage.extraCalls} × {perCall(usage.overageCentsPerCall)}</strong>
-            <span className="block text-[13px]">{money(usage.extraCents)} so far, billed after the month ends. A bigger plan may cost less: <Link className="font-semibold underline underline-offset-4" to={`${base}/settings`}>change plans</Link>.</span>
+            <span className="block text-[13px]">{money(usage.extraCents)} so far, billed after the month ends. {usage.unlimited ? "You’re past fair use. " : ""}A bigger plan{usage.unlimited ? "" : " or Unlimited calls"} may cost less: <Link className="font-semibold underline underline-offset-4" to={`${base}/settings`}>change plans</Link>.</span>
           </p>
         )}
         {leads > 0 && <p className="text-[13px] text-muted-foreground">You’ve had {leads} real {leads === 1 ? "lead" : "leads"} this month.</p>}

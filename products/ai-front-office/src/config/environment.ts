@@ -80,13 +80,17 @@ const schema = z.object({
   STRIPE_SECRET_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().min(20).optional()),
   STRIPE_WEBHOOK_SECRET: z.preprocess((value) => value === "" ? undefined : value, z.string().min(20).optional()),
   STRIPE_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
-  /** Pro plan, old name. Used when STRIPE_PRICE_ID_PRO is unset. */
+  /** Pro plan, old name. Used when STRIPE_PRICE_ID_PRO is unset. Pro is no longer sold; its prices stay recognized. */
   STRIPE_PRICE_ID_PLUS: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
-  /** The four monthly plan prices (scripts/create-stripe-plans.ts). Solo falls back to STRIPE_PRICE_ID, Pro to STRIPE_PRICE_ID_PLUS. A plan without a price isn't sold. */
+  /** The monthly plan prices (scripts/create-stripe-plans.ts). Solo falls back to STRIPE_PRICE_ID. Pro is legacy (recognized, never sold) and falls back to STRIPE_PRICE_ID_PLUS. A plan without a price isn't sold. */
   STRIPE_PRICE_ID_SOLO: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   STRIPE_PRICE_ID_PRO: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   STRIPE_PRICE_ID_TEAM: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   STRIPE_PRICE_ID_FLEET: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
+  /** The Unlimited calls add-on, one monthly price per plan (a second subscription item). Unset: that plan doesn't offer it. */
+  STRIPE_PRICE_ID_UNLIMITED_SOLO: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
+  STRIPE_PRICE_ID_UNLIMITED_TEAM: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
+  STRIPE_PRICE_ID_UNLIMITED_FLEET: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   /** Coupon applied once at checkout (50% off, duration once): "first month half off". Created by scripts/create-stripe-plans.ts. */
   STRIPE_FIRST_MONTH_COUPON_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().regex(/^[A-Za-z0-9_-]{1,200}$/).optional()),
   /** Limited-time switch for the first-month offer. false: no coupon at checkout and no "half off" copy anywhere. */
@@ -108,6 +112,10 @@ const schema = z.object({
   PLAN_FLEET_LABEL: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(40).default("Fleet")),
   PLAN_FLEET_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(34_999)),
   PLAN_FLEET_CALLS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(1).max(100_000).default(500)),
+  /** What the Unlimited add-on adds to each plan per month. Must match the STRIPE_PRICE_ID_UNLIMITED_* prices. */
+  PLAN_SOLO_UNLIMITED_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(5_000)),
+  PLAN_TEAM_UNLIMITED_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(7_500)),
+  PLAN_FLEET_UNLIMITED_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(12_500)),
   /** Each answered call past the plan's included calls, billed at the end of the billing period. */
   OVERAGE_CENTS_PER_CALL: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(0).max(1_000).default(75)),
   STRIPE_DAILY_SMS_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
@@ -135,7 +143,7 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
   }
   const stripeValues = [parsed.STRIPE_SECRET_KEY, parsed.STRIPE_WEBHOOK_SECRET, parsed.STRIPE_PRICE_ID_SOLO ?? parsed.STRIPE_PRICE_ID].filter(Boolean).length;
   if (stripeValues !== 0 && stripeValues !== 3) throw new Error("STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and STRIPE_PRICE_ID_SOLO (or STRIPE_PRICE_ID) must be configured together");
-  if ((parsed.STRIPE_DAILY_SMS_PRICE_ID || parsed.STRIPE_REALTIME_SMS_PRICE_ID || parsed.STRIPE_PRICE_ID_PLUS || parsed.STRIPE_PRICE_ID_PRO || parsed.STRIPE_PRICE_ID_TEAM || parsed.STRIPE_PRICE_ID_FLEET || parsed.STRIPE_FIRST_MONTH_COUPON_ID) && stripeValues !== 3) {
+  if ((parsed.STRIPE_DAILY_SMS_PRICE_ID || parsed.STRIPE_REALTIME_SMS_PRICE_ID || parsed.STRIPE_PRICE_ID_PLUS || parsed.STRIPE_PRICE_ID_PRO || parsed.STRIPE_PRICE_ID_TEAM || parsed.STRIPE_PRICE_ID_FLEET || parsed.STRIPE_PRICE_ID_UNLIMITED_SOLO || parsed.STRIPE_PRICE_ID_UNLIMITED_TEAM || parsed.STRIPE_PRICE_ID_UNLIMITED_FLEET || parsed.STRIPE_FIRST_MONTH_COUPON_ID) && stripeValues !== 3) {
     throw new Error("Stripe add-on prices, the bigger plans and the first-month coupon require the base Stripe configuration");
   }
   if (Boolean(parsed.RESEND_API_KEY) !== Boolean(parsed.RESEND_FROM_EMAIL)) {

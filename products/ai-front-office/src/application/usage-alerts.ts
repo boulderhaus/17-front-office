@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { formatEmailBody } from "../adapters/resend.js";
 import type { BusinessConfig, OutboxNotification, UsageSummary } from "../domain/models.js";
+import { fairUseCalls } from "../domain/plans.js";
 import { currentBillingPeriod, dueUsageAlerts } from "../domain/usage.js";
 import type { Clock, Store } from "../ports.js";
 
@@ -27,7 +28,7 @@ export class UsageAlertService {
     const now = this.clock.now();
     const [periodStart, periodEnd] = currentBillingPeriod(now, subscription?.currentPeriodEnd);
     const usage = await this.store.getUsageSummary(tenantId, periodStart, periodEnd);
-    const due = dueUsageAlerts(usage.billableCalls, config.includedCalls, config.usageAlertPercent);
+    const due = dueUsageAlerts(usage.billableCalls, callAllowance(config), config.usageAlertPercent);
     if (due.length === 0) return 0;
 
     // One message per threshold, to one place: the owner's alert phone, or their sign-in email.
@@ -59,11 +60,21 @@ export class UsageAlertService {
  * "Front Office: you've answered 45 of your 60 calls this month. Extra calls are $0.75 each. Change plans in Settings."
  * Dollars, never "¢": ¢ is outside GSM-7 and would double the SMS segments.
  */
-export function usageAlertText(config: Pick<BusinessConfig, "includedCalls" | "overageCentsPerCall">, usage: Pick<UsageSummary, "billableCalls">, percent: number): { subject: string; sms: string } {
-  const included = config.includedCalls;
-  const sms = `Front Office: you've answered ${usage.billableCalls} of your ${included} calls this month. Extra calls are $${(config.overageCentsPerCall / 100).toFixed(2)} each. Change plans in Settings.`;
+export function usageAlertText(config: Pick<BusinessConfig, "includedCalls" | "overageCentsPerCall" | "unlimitedCalls">, usage: Pick<UsageSummary, "billableCalls">, percent: number): { subject: string; sms: string } {
+  const included = callAllowance(config);
+  const rate = `$${(config.overageCentsPerCall / 100).toFixed(2)}`;
+  // With Unlimited, the limit that matters is fair use (3× the plan's calls); past it, calls are billed again.
+  const sms = config.unlimitedCalls
+    ? `Front Office: you've answered ${usage.billableCalls} of your ${included} fair-use calls this month. Past that, calls are ${rate} each. Change plans in Settings.`
+    : `Front Office: you've answered ${usage.billableCalls} of your ${included} calls this month. Extra calls are ${rate} each. Change plans in Settings.`;
+  const kind = config.unlimitedCalls ? "fair-use calls" : "calls";
   return {
-    subject: percent >= 100 ? `Front Office: you've answered all ${included} of your calls this month` : `Front Office: you've answered ${usage.billableCalls} of your ${included} calls`,
+    subject: percent >= 100 ? `Front Office: you've answered all ${included} of your ${kind} this month` : `Front Office: you've answered ${usage.billableCalls} of your ${included} ${kind}`,
     sms,
   };
+}
+
+/** Calls a period can use before anything extra is billed: the plan's calls, or fair use with Unlimited. */
+export function callAllowance(config: Pick<BusinessConfig, "includedCalls" | "unlimitedCalls">): number {
+  return config.unlimitedCalls ? fairUseCalls(config.includedCalls) : config.includedCalls;
 }

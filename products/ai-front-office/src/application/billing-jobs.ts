@@ -1,6 +1,6 @@
 import type { GuaranteeRefund, StripeBillingClient } from "../adapters/stripe.js";
 import type { PlanId } from "../domain/plans.js";
-import { extraCalls, isQualifyingLead, lastClosedBillingPeriod } from "../domain/usage.js";
+import { extraCallsWithUnlimited, isQualifyingLead, lastClosedBillingPeriod } from "../domain/usage.js";
 import type { Clock, Store } from "../ports.js";
 
 const DAY_MS = 24 * 60 * 60_000;
@@ -31,6 +31,29 @@ export async function firstPaidAt(store: Store, tenantId: string): Promise<strin
   return store.getIntegrationSecret(tenantId, "billing", "first_paid_at");
 }
 
+/** When the Unlimited add-on was on: [from, to) windows, to = null while it still is. Append-only. */
+export interface UnlimitedWindow { from: string; to: string | null }
+
+export async function unlimitedWindows(store: Store, tenantId: string): Promise<UnlimitedWindow[]> {
+  const raw = await store.getIntegrationSecret(tenantId, "billing", "unlimited_windows");
+  return raw ? JSON.parse(raw) as UnlimitedWindow[] : [];
+}
+
+/**
+ * Record that Stripe bills (on) or stopped billing (off) the Unlimited add-on at `at`. Idempotent: on with a
+ * window already open, or off with none open, changes nothing. The overage job uses these windows, so calls made
+ * before the add-on was turned on still count against the plan's included calls.
+ */
+export async function recordUnlimited(store: Store, tenantId: string, on: boolean, at: string): Promise<void> {
+  const windows = await unlimitedWindows(store, tenantId);
+  const last = windows.at(-1);
+  const open = last && last.to === null ? last : null;
+  if (on === Boolean(open)) return;
+  if (on) windows.push({ from: at, to: null });
+  else if (open) open.to = Date.parse(at) > Date.parse(open.from) ? at : open.from;
+  await store.saveIntegrationSecret(tenantId, "billing", "unlimited_windows", JSON.stringify(windows));
+}
+
 /** One closed period's overage record. The allowance and rate are snapshotted when the period is first seen closed. */
 interface OverageMarker {
   state: "none" | "invoice_created" | "billed";
@@ -48,7 +71,8 @@ interface OverageMarker {
 
 /**
  * Period-end overage: once a billing period closes, every counted call past the period's included calls is
- * billed once as its own Stripe invoice (N × $0.75), charged to the subscription's card. "Nothing extra" is not
+ * billed once as its own Stripe invoice (N × $0.75). With the Unlimited add-on, calls made while it was on are
+ * free up to fair use (3× the period's included calls), charged to the subscription's card. "Nothing extra" is not
  * final: the period is re-counted (late call records) until the lookback ends. Runs on every replica under the
  * shop's billing lock; a per-period marker plus Stripe idempotency keys make it bill once.
  */
@@ -104,7 +128,14 @@ export class OverageBillingService {
         calls = saved.calls;
       } else {
         const usage = await this.store.getUsageSummary(tenantId, usageFrom, periodEnd);
-        calls = extraCalls(usage.billableCalls, snapshot.includedCalls);
+        // Calls made while the Unlimited add-on was on are covered up to fair use; the rest use the plan's calls.
+        let covered = 0;
+        for (const window of await unlimitedWindows(this.store, tenantId)) {
+          const from = Math.max(Date.parse(window.from), Date.parse(usageFrom));
+          const to = Math.min(window.to === null ? Infinity : Date.parse(window.to), Date.parse(periodEnd));
+          if (to > from) covered += (await this.store.getUsageSummary(tenantId, new Date(from).toISOString(), new Date(to).toISOString())).billableCalls;
+        }
+        calls = extraCallsWithUnlimited({ countedCalls: usage.billableCalls, callsWithoutUnlimited: usage.billableCalls - covered, includedCalls: snapshot.includedCalls });
       }
       if (calls <= 0) {
         // Not final: a late call record can still push the period over, until the lookback ends.

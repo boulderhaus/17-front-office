@@ -14,8 +14,8 @@ import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
 import { renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
 import { chargeSentence, isPaidStatus } from "../domain/billing.js";
-import { introCouponId, legacyPlanPriceIds, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, type Plan, type PlanId } from "../domain/plans.js";
-import { GuaranteeError, LeadGuaranteeService, recordFirstPaid } from "../application/billing-jobs.js";
+import { currentPlan, hasUnlimitedPrice, introCouponId, knownPlans, legacyPlanPriceIds, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, unlimitedPriceIds, type Plan, type PlanId } from "../domain/plans.js";
+import { GuaranteeError, LeadGuaranteeService, recordFirstPaid, recordUnlimited } from "../application/billing-jobs.js";
 import { callbackLinkMatches, readCallbackLinkToken } from "../domain/owner-sms.js";
 import { callsCsv } from "./calls-csv.js";
 import { hoursFromChoice } from "../domain/hours.js";
@@ -393,18 +393,27 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   const trialDays = dependencies.env.STRIPE_TRIAL_DAYS;
   /** The plans for sale, Solo first; prices, labels and included calls come from config so they can change without a deploy. */
   const plans = planCatalog(dependencies.env);
+  /** Plans for sale plus legacy Pro: what an existing subscription can be on. Never offered. */
+  const known = knownPlans(dependencies.env);
   const couponId = introCouponId(dependencies.env);
-  const planCharge = (plan: Plan, timezone?: string): string => chargeSentence({ now: dependencies.clock.now(), trialDays, priceCents: plan.priceCents, firstMonthCents: plan.firstMonthCents, ...(timezone ? { timezone } : {}) });
+  /** The line under the card button, for a plan with or without the Unlimited add-on (the coupon covers both). */
+  const planCharge = (plan: Plan, timezone?: string, unlimited = false): string => {
+    const total = unlimited && plan.unlimited ? plan.unlimited : plan;
+    return chargeSentence({ now: dependencies.clock.now(), trialDays, priceCents: total.priceCents, firstMonthCents: total.firstMonthCents, ...(timezone ? { timezone } : {}) });
+  };
   /** The plans as the owner app shows them; empty without Stripe (nothing to buy). */
   const apiPlans = (timezone?: string): ApiPlan[] => stripeClient ? plans.map((plan) => ({
     id: plan.id, label: plan.label, priceCents: plan.priceCents, firstMonthCents: plan.firstMonthCents, includedCalls: plan.includedCalls,
     overageCentsPerCall: plan.overageCentsPerCall, blurb: plan.blurb, who: plan.who, chargeNote: planCharge(plan, timezone),
+    unlimited: plan.unlimited ? { addOnCents: plan.unlimited.addOnCents, priceCents: plan.unlimited.priceCents, firstMonthCents: plan.unlimited.firstMonthCents, fairUseCalls: plan.unlimited.fairUseCalls, chargeNote: planCharge(plan, timezone, true) } : null,
   })) : [];
   const signupPage = (error = "", values: Record<string, string> = {}): string => renderOwnerSignup(error, values, {
     supportEmail: dependencies.env.SUPPORT_EMAIL ?? null,
     chargeNote: stripeClient ? planCharge(plans[0]!) : null,
-    plans: stripeClient ? plans.map((plan) => ({ ...plan, chargeNote: planCharge(plan) })) : [],
+    plans: stripeClient ? plans.map((plan) => ({ ...plan, chargeNote: planCharge(plan), unlimitedChargeNote: plan.unlimited ? planCharge(plan, undefined, true) : null })) : [],
   });
+  /** The add-on can be bought only where this plan's Unlimited price exists. */
+  const wantsUnlimited = (plan: Plan, value: unknown): boolean => Boolean(plan.unlimited) && (value === "yes" || value === "1" || value === "on" || value === true);
 
   return (request, response) => {
     void handle(request, response).catch((error: unknown) => {
@@ -587,7 +596,14 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (!limiter.allow(`${ip}:team-join`, 12, 60 * 60_000)) throw new HttpError(429, "Too many invitation attempts");
       return joinTeam(request, response, url, dependencies);
     }
-    if (method === "GET" && url.pathname === "/signup") return sendHtml(response, 200, analyticsPage(signupPage()));
+    if (method === "GET" && url.pathname === "/signup") {
+      // The pricing page's picks carry over: ?unlimited=1 and ?plan=team preselect the form.
+      const preset: Record<string, string> = {};
+      if (url.searchParams.get("unlimited") === "1") preset.unlimited = "yes";
+      const presetPlan = normalizePlanId(url.searchParams.get("plan"));
+      if (presetPlan && plans.some((plan) => plan.id === presetPlan)) preset.plan = presetPlan;
+      return sendHtml(response, 200, analyticsPage(signupPage("", preset)));
+    }
     if (method === "POST" && url.pathname === "/signup") {
       if (!limiter.allow(`${ip}:owner-signup`, 5, 60 * 60_000)) throw new HttpError(429, "Too many signup attempts from this connection");
       const form = parseForm(await readBody(request, 48_000));
@@ -634,6 +650,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         ...createDemoConfig(tenantId),
         paused: true,
         planId: plan.id,
+        // Off unless the owner turned it on (pricing page or this form).
+        unlimitedCalls: wantsUnlimited(plan, form.get("unlimited")),
         includedCalls: plan.includedCalls,
         overageCentsPerCall: plan.overageCentsPerCall,
         flatMonthlyPriceCents: plan.priceCents,
@@ -941,7 +959,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const model = apiDashboard({
       account, config, calls, tasks, usage, googleConnected, subscription, csrf, lineNumber, ownerMobile,
       googleAvailable: anyGoogleClient(dependencies.env),
-      chargeNote: stripeClient ? planCharge(pickPlan(plans, config.planId), config.timezone) : null,
+      chargeNote: stripeClient ? planCharge(currentPlan(known, config.planId), config.timezone, config.unlimitedCalls === true) : null,
       plans: apiPlans(config.timezone),
       guarantee: await guarantee.status(account.tenantId),
       onboarding: { hoursSet: Boolean(hoursSetAt), completed: Boolean(completedAt) },
@@ -1100,6 +1118,14 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       await changePlan(account, plan);
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
     }
+    if (method === "POST" && url.pathname === "/api/app/billing/unlimited") {
+      if (!owner) throw new HttpError(403, "Only the owner can change Unlimited calls");
+      const body = await readApiJson(request, session, 1_000) as { on?: unknown };
+      if (typeof body.on !== "boolean") throw new HttpError(400, "Say on or off");
+      if (!limiter.allow(`plan-change:${account.tenantId}`, 10, 60 * 60_000)) throw new HttpError(429, "That’s a lot of plan changes. Please try again in a bit.");
+      await setUnlimited(account, body.on);
+      return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    }
     if (method === "POST" && url.pathname === "/api/app/billing/lead-refund") {
       if (!owner) throw new HttpError(403, "Only the owner can request the refund");
       await readApiJson(request, session, 1_000);
@@ -1134,7 +1160,17 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         status: account.status,
         businessName: config.businessName,
         shopId: account.tenantId,
-        plan: { id: pickPlan(plans, config.planId).id, label: pickPlan(plans, config.planId).label, flatMonthlyPriceCents: config.flatMonthlyPriceCents, includedCalls: config.includedCalls, overageCentsPerCall: config.overageCentsPerCall, paid: isPaidStatus(subscription?.status), plans: apiPlans(config.timezone) },
+        plan: (() => {
+          const current = currentPlan(known, config.planId);
+          return {
+            id: current.id, label: current.label, flatMonthlyPriceCents: config.flatMonthlyPriceCents, includedCalls: config.includedCalls, overageCentsPerCall: config.overageCentsPerCall,
+            paid: isPaidStatus(subscription?.status), plans: apiPlans(config.timezone),
+            // Legacy Pro keeps working but is no longer sold: the owner sees it as current and can move to Solo, Team or Fleet.
+            sold: current.sold,
+            unlimited: config.unlimitedCalls === true,
+            unlimitedOffer: current.unlimited ? { addOnCents: current.unlimited.addOnCents, priceCents: current.unlimited.priceCents, fairUseCalls: current.unlimited.fairUseCalls } : null,
+          };
+        })(),
         integrations: {
           googleAvailable: anyGoogleClient(dependencies.env),
           googleConnected,
@@ -1233,6 +1269,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     updated.planId = current.planId ?? "solo";
     updated.includedCalls = current.includedCalls;
     updated.overageCentsPerCall = current.overageCentsPerCall;
+    updated.unlimitedCalls = current.unlimitedCalls === true;
     updated.customerSmsEnabled = current.customerSmsEnabled;
     if (updated.ownerWeeklyEmailEnabled && !(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL)) {
       throw new HttpError(503, "Weekly email delivery is not configured yet");
@@ -1426,7 +1463,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       }
       const returnTo = form.get("from") === "start" ? "start" : "app";
       const requested = normalizePlanId(form.get("plan"));
-      const target = await startCheckout(account, returnTo, requested && plans.some((plan) => plan.id === requested) ? requested : undefined);
+      const unlimitedField = form.get("unlimited");
+      const target = await startCheckout(account, returnTo, requested && plans.some((plan) => plan.id === requested) ? requested : undefined, unlimitedField === null ? undefined : unlimitedField === "yes");
       const appUrl = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`;
       telemetry.capture("checkout_started", account.id, account.tenantId, {
         result: target === appUrl || target.endsWith("/app/start") ? "already_active" : target.endsWith("checkout=processing") ? "processing" : target.startsWith("https://checkout.stripe.com") ? "stripe_session" : "billing_portal",
@@ -1614,7 +1652,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   }
 
   /** Stripe Checkout for this shop, or where to go instead (already paid, payment processing, fix billing). */
-  async function startCheckout(account: OwnerAccount, returnTo: "start" | "app", planChoice?: PlanId): Promise<string> {
+  async function startCheckout(account: OwnerAccount, returnTo: "start" | "app", planChoice?: PlanId, unlimitedChoice?: boolean): Promise<string> {
     if (!stripeClient) throw new HttpError(503, "Checkout is not configured yet");
     // Same lock as the billing webhook, so a payment cannot land between this read and a new session.
     return dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
@@ -1630,16 +1668,17 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (subscription?.providerSubscriptionId && subscription.status !== "canceled") return `${app}?checkout=processing`;
       let config = await dependencies.store.getConfig(account.tenantId);
       const plan = pickPlan(plans, planChoice ?? config.planId);
-      if (!isOnPlan(config, plan)) {
+      const unlimited = wantsUnlimited(plan, unlimitedChoice ?? config.unlimitedCalls === true);
+      if (!isOnPlan(config, plan, unlimited)) {
         // Remember the pick, so the card screen shows it again and the dashboard shows the right price.
         config = await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
-          const next = onPlan(await dependencies.store.getConfig(account.tenantId), plan);
+          const next = onPlan(await dependencies.store.getConfig(account.tenantId), plan, unlimited);
           await dependencies.store.saveConfig(next);
           return next;
         });
       }
       // The open session is reused only for the same plan and add-ons.
-      const addOns = `${plan.id}:${config.ownerDailySmsEnabled ? 1 : 0}${config.ownerRealtimeSmsEnabled ? 1 : 0}`;
+      const addOns = `${plan.id}${unlimited ? "+unlimited" : ""}:${config.ownerDailySmsEnabled ? 1 : 0}${config.ownerRealtimeSmsEnabled ? 1 : 0}`;
       const now = dependencies.clock.now();
       const savedOpen = await dependencies.store.getIntegrationSecret(account.tenantId, "stripe", "open_checkout");
       const open = savedOpen ? JSON.parse(savedOpen) as { id: string; url: string; expiresAt: string; addOns: string } : null;
@@ -1664,8 +1703,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         now,
         trialDays,
         plan: plan.id,
+        unlimited,
         couponId,
-        submitMessage: planCharge(plan, config.timezone),
+        submitMessage: planCharge(plan, config.timezone, unlimited),
       });
       await dependencies.store.saveIntegrationSecret(account.tenantId, "stripe", "open_checkout", JSON.stringify({ ...created, addOns }));
       return created.url;
@@ -1726,17 +1766,21 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         dependencies.store.getSubscription(account.tenantId),
         dependencies.store.getConfig(account.tenantId),
       ]);
-      if (isOnPlan(config, plan)) return;
-      if (subscription?.providerSubscriptionId && subscription.status !== "canceled") {
+      // Unlimited stays on across a plan change, at the new plan's add-on price (off where the plan has none).
+      const unlimited = wantsUnlimited(plan, config.unlimitedCalls === true);
+      if (isOnPlan(config, plan, unlimited)) return;
+      const live = Boolean(subscription?.providerSubscriptionId && subscription.status !== "canceled");
+      if (live) {
         if (!stripeClient) throw new HttpError(503, "Plan changes aren’t available yet");
-        await stripeClient.changePlan(subscription.providerSubscriptionId, plan.id).catch((error) => {
+        await stripeClient.changePlan(subscription!.providerSubscriptionId!, plan.id, { unlimited }).catch((error) => {
           log({ level: "error", event: "plan_change_failed", tenantId: account.tenantId, plan: plan.id, error: safeError(error) });
           throw new HttpError(502, "Your plan couldn’t be changed just now. Nothing was changed; please try again.");
         });
       }
       await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
-        await dependencies.store.saveConfig(onPlan(await dependencies.store.getConfig(account.tenantId), plan));
+        await dependencies.store.saveConfig(onPlan(await dependencies.store.getConfig(account.tenantId), plan, unlimited));
       });
+      if (live) await recordUnlimited(dependencies.store, account.tenantId, unlimited, dependencies.clock.now().toISOString());
       log({ level: "info", event: "plan_changed", tenantId: account.tenantId, from: config.planId ?? "solo", to: plan.id });
       telemetry.capture("plan_changed", account.id, account.tenantId, { from: config.planId ?? "solo", to: plan.id });
     });
@@ -1744,12 +1788,46 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
 
   /** Keep the shop's plan and price in step with what Stripe says it is paying for (e.g. a switch in the billing portal). */
   async function syncPlan(tenantId: string, priceIds: string[]): Promise<void> {
-    const plan = planForPriceIds(plans, priceIds);
+    const plan = planForPriceIds(known, priceIds);
     if (!plan) return;
+    // Stripe is the truth for the add-on too: its item on the subscription means Unlimited is on, from now.
+    const unlimited = hasUnlimitedPrice(known, priceIds);
     await dependencies.store.withLock(`config:${tenantId}`, async () => {
       const current = await dependencies.store.getConfig(tenantId);
-      if (isOnPlan(current, plan)) return;
-      await dependencies.store.saveConfig(onPlan(current, plan));
+      if (isOnPlan(current, plan, unlimited)) return;
+      await dependencies.store.saveConfig(onPlan(current, plan, unlimited));
+    });
+    await recordUnlimited(dependencies.store, tenantId, unlimited, dependencies.clock.now().toISOString());
+  }
+
+  /**
+   * The owner turns the Unlimited add-on on or off in Settings. A paying shop's Stripe subscription changes first
+   * (the add-on item is added or removed, prorated, the difference invoiced now); only then is the shop saved and
+   * the add-on's window recorded for the overage job. Before paying it is just remembered for checkout.
+   */
+  async function setUnlimited(account: OwnerAccount, on: boolean): Promise<void> {
+    await dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
+      const [subscription, config] = await Promise.all([
+        dependencies.store.getSubscription(account.tenantId),
+        dependencies.store.getConfig(account.tenantId),
+      ]);
+      const plan = currentPlan(known, config.planId);
+      if (on && !plan.unlimited) throw new HttpError(409, plan.sold ? "Unlimited calls aren’t available on this plan yet." : `Unlimited calls aren’t available on ${plan.label}. Switch to Solo, Team or Fleet to add it.`);
+      if ((config.unlimitedCalls === true) === on) return;
+      const live = Boolean(subscription?.providerSubscriptionId && subscription.status !== "canceled");
+      if (live) {
+        if (!stripeClient) throw new HttpError(503, "Plan changes aren’t available yet");
+        await stripeClient.changePlan(subscription!.providerSubscriptionId!, plan.id, { unlimited: on }).catch((error) => {
+          log({ level: "error", event: "unlimited_change_failed", tenantId: account.tenantId, on, error: safeError(error) });
+          throw new HttpError(502, "Unlimited calls couldn’t be changed just now. Nothing was changed; please try again.");
+        });
+      }
+      await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
+        await dependencies.store.saveConfig({ ...await dependencies.store.getConfig(account.tenantId), unlimitedCalls: on });
+      });
+      if (live) await recordUnlimited(dependencies.store, account.tenantId, on, dependencies.clock.now().toISOString());
+      log({ level: "info", event: "unlimited_changed", tenantId: account.tenantId, on });
+      telemetry.capture("unlimited_changed", account.id, account.tenantId, { on, plan: plan.id });
     });
   }
 
@@ -2824,17 +2902,19 @@ export function createStripeClient(env: Environment, fetcher: typeof fetch): Str
     ...(prices.team ? { team: prices.team } : {}),
     ...(prices.fleet ? { fleet: prices.fleet } : {}),
     legacy: Object.values(legacyPlanPriceIds(env)).flat(),
+    unlimited: Object.fromEntries(Object.entries(unlimitedPriceIds(env)).filter(([, price]) => Boolean(price))) as Partial<Record<PlanId, string>>,
     ...(env.STRIPE_DAILY_SMS_PRICE_ID ? { dailySms: env.STRIPE_DAILY_SMS_PRICE_ID } : {}),
     ...(env.STRIPE_REALTIME_SMS_PRICE_ID ? { realtimeSms: env.STRIPE_REALTIME_SMS_PRICE_ID } : {}),
   }, fetcher);
 }
 
 /** The shop's config on a plan: label lives in the catalog; price, included calls and overage are saved with the shop. */
-function onPlan(config: BusinessConfig, plan: Plan): BusinessConfig {
-  return { ...config, planId: plan.id, flatMonthlyPriceCents: plan.priceCents, includedCalls: plan.includedCalls, overageCentsPerCall: plan.overageCentsPerCall };
+function onPlan(config: BusinessConfig, plan: Plan, unlimited = config.unlimitedCalls === true): BusinessConfig {
+  return { ...config, planId: plan.id, flatMonthlyPriceCents: plan.priceCents, includedCalls: plan.includedCalls, overageCentsPerCall: plan.overageCentsPerCall, unlimitedCalls: unlimited && Boolean(plan.unlimited) };
 }
-function isOnPlan(config: BusinessConfig, plan: Plan): boolean {
-  return config.planId === plan.id && config.flatMonthlyPriceCents === plan.priceCents && config.includedCalls === plan.includedCalls && config.overageCentsPerCall === plan.overageCentsPerCall;
+function isOnPlan(config: BusinessConfig, plan: Plan, unlimited = config.unlimitedCalls === true): boolean {
+  return config.planId === plan.id && config.flatMonthlyPriceCents === plan.priceCents && config.includedCalls === plan.includedCalls && config.overageCentsPerCall === plan.overageCentsPerCall
+    && (config.unlimitedCalls === true) === (unlimited && Boolean(plan.unlimited));
 }
 
 function routeKey(pathname: string): string {

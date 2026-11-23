@@ -109,7 +109,7 @@ describe("three taps to a live line", () => {
     return fetch(`${baseUrl}${path}`, { method: "POST", headers: { cookie, "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify(body) });
   }
 
-  // Pro on the old STRIPE_PRICE_ID_PLUS name (the fallback), Team and Fleet on their own.
+  // Legacy Pro on the old STRIPE_PRICE_ID_PLUS name (recognized, never sold), Team and Fleet on their own.
   const PLANS = { STRIPE_PRICE_ID_PLUS: "price_plus_synthetic", STRIPE_PRICE_ID_TEAM: "price_team_synthetic", STRIPE_PRICE_ID_FLEET: "price_fleet_synthetic", STRIPE_FIRST_MONTH_COUPON_ID: "first_month_half_off" };
 
   it("goes from the signup form straight to Stripe: no trial, Solo, limited-time first month half off", async () => {
@@ -147,10 +147,12 @@ describe("three taps to a live line", () => {
     const { baseUrl, store, providers } = await start({ env: PLANS });
     const page = await (await fetch(`${baseUrl}/signup`)).text();
     expect(page).toMatch(/<input type="radio" name="plan" id="plan-solo" value="solo" checked>/);
-    for (const id of ["pro", "team", "fleet"]) expect(page).toMatch(new RegExp(`<input type="radio" name="plan" id="plan-${id}" value="${id}" >`));
+    for (const id of ["team", "fleet"]) expect(page).toMatch(new RegExp(`<input type="radio" name="plan" id="plan-${id}" value="${id}" >`));
+    // Pro is no longer sold.
+    expect(page).not.toContain('id="plan-pro"');
     // Bigger plans sit in a closed <details>: no extra tap for Solo.
-    expect(page).toMatch(/<details class="bigger"><summary>Bigger shop\? Pro, Team, Fleet<\/summary>/);
-    for (const text of ["Solo", "$49.99", "Limited time: first month half off", "60 answered calls a month, about 2 a day", "Pro", "$99.99", "125 calls a month · A busy owner", "Team", "$179.99", "About 5 people", "Fleet", "$349.99", "About 10 people", "Today: $24.99 (limited-time half off). Then $49.99/month. Cancel anytime.", "Today: $89.99 (limited-time half off). Then $179.99/month. Cancel anytime.", "Lead guarantee"]) expect(page).toContain(text);
+    expect(page).toMatch(/<details class="bigger"><summary>Bigger shop\? Team, Fleet<\/summary>/);
+    for (const text of ["Solo", "$49.99", "Limited time: first month half off", "60 answered calls a month, about 2 a day", "Team", "$179.99", "About 5 people", "Fleet", "$349.99", "About 10 people", "Today: $24.99 (limited-time half off). Then $49.99/month. Cancel anytime.", "Today: $89.99 (limited-time half off). Then $179.99/month. Cancel anytime.", "Lead guarantee"]) expect(page).toContain(text);
     expect(page).not.toMatch(/unlimited/i);
     // Terms are one line under the button, never a box to tick.
     expect(page).toContain("By continuing you agree to the");
@@ -166,23 +168,36 @@ describe("three taps to a live line", () => {
     expect(await store.getConfig(account.tenantId)).toMatchObject({ planId: "team", flatMonthlyPriceCents: 17_999, includedCalls: 250 });
   });
 
-  it("maps the old plan names: a form still sending plus buys Pro", async () => {
-    const { baseUrl, providers } = await start({ env: PLANS });
-    await signUp(baseUrl, { plan: "plus" });
-    const checkout = new URLSearchParams(providers.calls.find((call) => call.url.endsWith("/v1/checkout/sessions"))!.body!);
-    expect(checkout.get("line_items[0][price]")).toBe("price_plus_synthetic");
+  it("never sells Pro: a form still sending pro (or the old plus) buys Solo", async () => {
+    for (const plan of ["plus", "pro"]) {
+      const { baseUrl, providers } = await start({ env: PLANS });
+      await signUp(baseUrl, { plan });
+      const checkout = new URLSearchParams(providers.calls.find((call) => call.url.endsWith("/v1/checkout/sessions"))!.body!);
+      expect(checkout.get("line_items[0][price]")).toBe("price_synthetic");
+    }
   });
 
-  it("turns the line on for a bigger plan too, and offers every plan again on the card screen", async () => {
-    const { baseUrl } = await start({ env: PLANS, subscriptionPrice: "price_plus_synthetic" });
-    const { cookie } = await signUp(baseUrl, { plan: "pro" });
+  it("turns the line on for a bigger plan too, and offers Solo, Team and Fleet again on the card screen", async () => {
+    const { baseUrl } = await start({ env: PLANS, subscriptionPrice: "price_team_synthetic" });
+    const { cookie } = await signUp(baseUrl, { plan: "team" });
     const before = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie } })).json() as { billing: { planId: string; chargeNote: string; plans: Array<{ id: string; label: string; priceCents: number; firstMonthCents: number; includedCalls: number }> } };
-    expect(before.billing.planId).toBe("pro");
-    expect(before.billing.chargeNote).toBe("Today: $49.99 (limited-time half off). Then $99.99/month. Cancel anytime.");
-    expect(before.billing.plans.map((plan) => [plan.id, plan.priceCents, plan.firstMonthCents, plan.includedCalls])).toEqual([["solo", 4_999, 2_499, 60], ["pro", 9_999, 4_999, 125], ["team", 17_999, 8_999, 250], ["fleet", 34_999, 17_499, 500]]);
+    expect(before.billing.planId).toBe("team");
+    expect(before.billing.chargeNote).toBe("Today: $89.99 (limited-time half off). Then $179.99/month. Cancel anytime.");
+    expect(before.billing.plans.map((plan) => [plan.id, plan.priceCents, plan.firstMonthCents, plan.includedCalls])).toEqual([["solo", 4_999, 2_499, 60], ["team", 17_999, 8_999, 250], ["fleet", 34_999, 17_499, 500]]);
     const model = await (await api(baseUrl, cookie, "/api/app/onboarding/activate", { sessionId: "cs_test_synthetic1" })).json() as { activation: { status: string }; paid: boolean };
     expect(model.paid).toBe(true);
     expect(model.activation.status).toBe("live");
+  });
+
+  it("keeps a subscription already paying on the old Pro price working, on Pro", async () => {
+    const { baseUrl } = await start({ env: PLANS, subscriptionPrice: "price_plus_synthetic" });
+    const { cookie } = await signUp(baseUrl);
+    const model = await (await api(baseUrl, cookie, "/api/app/onboarding/activate", { sessionId: "cs_test_synthetic1" })).json() as { activation: { status: string }; paid: boolean; billing: { planId: string; plans: Array<{ id: string }> }; usage: { includedCalls: number } };
+    expect(model.paid).toBe(true);
+    expect(model.activation.status).toBe("live");
+    expect(model.billing.planId).toBe("pro");
+    expect(model.usage.includedCalls).toBe(125);
+    expect(model.billing.plans.map((plan) => plan.id)).toEqual(["solo", "team", "fleet"]);
   });
 
   it("switches the limited-time offer off everywhere with FIRST_MONTH_OFFER_ENABLED=false", async () => {
@@ -196,12 +211,13 @@ describe("three taps to a live line", () => {
     expect(checkout.get("custom_text[submit][message]")).toBe("Today: $49.99. Then $49.99/month. Cancel anytime.");
   });
 
-  it("only sells plans that have a Stripe price", async () => {
-    const { baseUrl } = await start({ env: { STRIPE_PRICE_ID_PRO: "price_pro_synthetic" } });
+  it("only sells plans that have a Stripe price, and never Pro", async () => {
+    const { baseUrl } = await start({ env: { STRIPE_PRICE_ID_PRO: "price_pro_synthetic", STRIPE_PRICE_ID_TEAM: "price_team_synthetic" } });
     const page = await (await fetch(`${baseUrl}/signup`)).text();
-    expect(page).toContain('id="plan-pro"');
-    expect(page).not.toContain('id="plan-team"');
-    expect(page).toContain("Bigger shop? Pro</summary>");
+    expect(page).toContain('id="plan-team"');
+    expect(page).not.toContain('id="plan-pro"');
+    expect(page).not.toContain('id="plan-fleet"');
+    expect(page).toContain("Bigger shop? Team</summary>");
   });
 
   it("keeps a free trial only when STRIPE_TRIAL_DAYS asks for one, and never spends the coupon on it", async () => {
@@ -344,10 +360,10 @@ describe("hours and charge wording", () => {
     expect(firstMonthCents(4_999, 50)).toBe(2_499);
     expect(firstMonthCents(9_999, 50)).toBe(4_999);
     expect(firstMonthCents(4_999, 0)).toBe(4_999);
-    const env = demoEnvironment({ PLAN_PRO_PRICE_CENTS: "12000", PLAN_TEAM_CALLS: "300" });
-    // Without Stripe all four show for display, Solo first, and no intro price is promised. Prices and calls come from env.
+    const env = demoEnvironment({ PLAN_SOLO_PRICE_CENTS: "5999", PLAN_TEAM_CALLS: "300" });
+    // Without Stripe the three plans for sale show for display, Solo first, and no intro price is promised. Prices and calls come from env.
     expect(planCatalog(env).map((plan) => [plan.id, plan.label, plan.priceCents, plan.firstMonthCents, plan.includedCalls, plan.overageCentsPerCall])).toEqual([
-      ["solo", "Solo", 4_999, 4_999, 60, 75], ["pro", "Pro", 12_000, 12_000, 125, 75], ["team", "Team", 17_999, 17_999, 300, 75], ["fleet", "Fleet", 34_999, 34_999, 500, 75],
+      ["solo", "Solo", 5_999, 5_999, 60, 75], ["team", "Team", 17_999, 17_999, 300, 75], ["fleet", "Fleet", 34_999, 34_999, 500, 75],
     ]);
     expect(money(4_999)).toBe("$49.99");
     expect(money(5_000)).toBe("$50");

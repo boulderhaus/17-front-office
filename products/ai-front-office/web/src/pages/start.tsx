@@ -5,8 +5,9 @@ import { BrandMark } from "@/components/app/bits"
 import { ForwardingCard } from "@/components/app/forwarding-card"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
+import { Switch } from "@/components/ui/switch"
 import { api } from "@/lib/api"
-import { formatPhone, LEAD_GUARANTEE, money, perCall } from "@/lib/format"
+import { FAIR_USE_LINE, formatPhone, LEAD_GUARANTEE, money, perCall } from "@/lib/format"
 import { useMode } from "@/lib/mode"
 import type { Activation, ApiDashboard, PlanId } from "@/lib/types"
 import { cn, tapWidth } from "@/lib/utils"
@@ -126,11 +127,15 @@ function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDa
   // The plan picked at signup, or Solo: picking costs no extra tap.
   const [picked, setPicked] = useState<PlanId>(plans.some((plan) => plan.id === dashboard.billing.planId) ? dashboard.billing.planId : plans[0]?.id ?? "solo")
   const [showAll, setShowAll] = useState(false)
+  // Unlimited calls: off unless the owner picked it (pricing page or signup). Solo without it is the default.
+  const [unlimited, setUnlimited] = useState(dashboard.billing.unlimited)
   if (confirming) {
     return <Card><CardContent className="flex items-center gap-3 text-[15px] font-medium"><Loader2 className="size-5 animate-spin" />Confirming your card…</CardContent></Card>
   }
   const plan = plans.find((item) => item.id === picked) ?? null
   const others = plans.filter((item) => item.id !== picked)
+  const withUnlimited = Boolean(unlimited && plan?.unlimited)
+  const shown = withUnlimited && plan?.unlimited ? plan.unlimited : plan
   return (
     <>
       <Heading title={<span className="marker">Add a card to turn on your line</span>}>Your Front Office line turns on the moment you’re back here. No extra button.</Heading>
@@ -143,12 +148,24 @@ function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDa
             <div className="grid gap-1">
               <div className="flex items-baseline justify-between gap-3">
                 <strong className="text-lg font-semibold">{plan.label}</strong>
-                <span><strong className="tabular text-3xl font-semibold tracking-tight">{money(plan.priceCents)}</strong><span className="text-sm text-muted-foreground">/month</span></span>
+                <span><strong className="tabular text-3xl font-semibold tracking-tight">{money(shown!.priceCents)}</strong><span className="text-sm text-muted-foreground">/month</span></span>
               </div>
-              <span className="text-[14px] text-muted-foreground">{plan.blurb}. Extra calls {perCall(plan.overageCentsPerCall)} each.</span>
-              {plan.firstMonthCents < plan.priceCents && <span className="text-[14px] font-semibold text-red-700">Limited time: first month half off</span>}
+              <span className="text-[14px] text-muted-foreground">{withUnlimited && plan.unlimited ? `Unlimited calls, fair use up to ${plan.unlimited.fairUseCalls.toLocaleString("en-US")} a month. Past that, ${perCall(plan.overageCentsPerCall)} each.` : `${plan.blurb}. Extra calls ${perCall(plan.overageCentsPerCall)} each.`}</span>
+              {shown!.firstMonthCents < shown!.priceCents && <span className="text-[14px] font-semibold text-red-700">Limited time: first month half off</span>}
             </div>
           ) : null}
+          {plan?.unlimited && (
+            <div className="grid gap-1 rounded-lg border-2 border-brand-ink/15 px-3 py-2.5">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <label htmlFor="card-unlimited" className="flex min-h-11 cursor-pointer items-center gap-2.5 text-[15px] font-semibold">
+                  <Switch id="card-unlimited" checked={unlimited} onCheckedChange={setUnlimited} />
+                  Unlimited calls
+                </label>
+                <span className="rounded border border-brand-ink/40 px-1.5 py-0.5 text-[13px] font-semibold">{FAIR_USE_LINE}</span>
+              </div>
+              <span className="text-[13px] text-muted-foreground">+{money(plan.unlimited.addOnCents)}/month. Turn it off anytime in Settings.</span>
+            </div>
+          )}
           {/* The picked plan is already chosen; bigger (or smaller) shops open one compact line. No extra tap for Solo. */}
           {others.length > 0 && (showAll ? (
             <div className="grid gap-2" role="radiogroup" aria-label="Other plans">
@@ -174,8 +191,9 @@ function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDa
               <input type="hidden" name="csrf" value={dashboard.csrf} />
               <input type="hidden" name="from" value="start" />
               {plan && <input type="hidden" name="plan" value={plan.id} />}
+              <input type="hidden" name="unlimited" value={withUnlimited ? "yes" : "no"} />
               <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")}>Add card<ArrowRight /></Button>
-              {(plan?.chargeNote ?? dashboard.billing.chargeNote) && <p className="text-center text-[15px] font-semibold text-balance md:text-left">{plan?.chargeNote ?? dashboard.billing.chargeNote}</p>}
+              {((withUnlimited ? plan?.unlimited?.chargeNote : plan?.chargeNote) ?? dashboard.billing.chargeNote) && <p className="text-center text-[15px] font-semibold text-balance md:text-left">{(withUnlimited ? plan?.unlimited?.chargeNote : plan?.chargeNote) ?? dashboard.billing.chargeNote}</p>}
             </form>
           ) : (
             <p className="text-sm text-muted-foreground">Checkout isn’t switched on yet. We’ll reach out to finish this with you.</p>

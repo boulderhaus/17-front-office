@@ -196,6 +196,11 @@ export interface BusinessConfig {
   includedCalls: number;
   /** Each counted call past includedCalls, billed at period end. */
   overageCentsPerCall: number;
+  /**
+   * The Unlimited calls add-on (a second Stripe subscription item): no extra-call charges up to 3× includedCalls.
+   * Before the first payment it is the owner's pick for checkout; after, it follows what Stripe bills.
+   */
+  unlimitedCalls?: boolean;
   /** Percent of included calls (50–95) that triggers the first usage alert each billing period; 100% always alerts. */
   usageAlertPercent: number;
   customerSmsEnabled: boolean;
