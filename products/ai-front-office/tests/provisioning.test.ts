@@ -277,7 +277,7 @@ describe("owner one-tap go-live", () => {
       await api("/api/app/line/business-number", { number: "9415550177" });
       const { plan } = (await dashboard()).line.business;
       expect(plan?.on).toBe("**004*19415550123#");
-      expect(plan?.off).toBe("##004#");
+      expect(plan?.off).toBe("##002#");
       expect(plan?.dialLink).toBe("tel:%2A%2A004%2A19415550123%23");
     });
 

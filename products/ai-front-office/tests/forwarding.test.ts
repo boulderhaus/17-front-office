@@ -22,7 +22,7 @@ describe("carrier family from a number lookup", () => {
 describe("one code per phone company", () => {
   it("always-forward uses the unconditional codes", () => {
     expect(forwardingPlan("verizon", "+19415550123", "always").on).toBe("*729415550123");
-    expect(forwardingPlan("gsm", "+19415550123", "always")).toMatchObject({ on: "**21*19415550123#", off: "##21#" });
+    expect(forwardingPlan("gsm", "+19415550123", "always")).toMatchObject({ on: "**21*19415550123#", off: "##002#" });
   });
   it("office lines get portal steps and human help, never a code", () => {
     const plan = forwardingPlan("office", "+19415550123", "overflow");
@@ -31,7 +31,7 @@ describe("one code per phone company", () => {
   });
   it("the off instruction names the exact code when we know the carrier", () => {
     expect(forwardingOffInstruction("verizon")).toContain("*73");
-    expect(forwardingOffInstruction("gsm")).toContain("##004#");
+    expect(forwardingOffInstruction("gsm")).toContain("##002#");
     expect(forwardingOffInstruction(null)).toContain("*73");
   });
 });

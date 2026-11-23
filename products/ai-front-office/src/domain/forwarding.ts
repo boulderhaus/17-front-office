@@ -70,8 +70,9 @@ export function forwardingPlan(family: CarrierFamily, frontOfficeNumber: string,
   }
   if (family === "gsm") {
     // **004 covers no answer, busy (tapping Decline) and no signal (attics, basements) in one code.
+    // ##002# clears every kind of forwarding, so the off code is right whichever one was set.
     const on = always ? `**21*1${digits}#` : `**004*1${digits}#`;
-    const off = always ? "##21#" : "##004#";
+    const off = "##002#";
     return {
       family, on, off, dialLink: telLink(on), offDialLink: telLink(off),
       what: always ? "Every call goes straight to Front Office." : `${ringTip} Same if you tap Decline or have no signal.`,
@@ -98,8 +99,8 @@ export function forwardingPlan(family: CarrierFamily, frontOfficeNumber: string,
 /** The one line we text an owner who stops paying, so callers never hit a dead number. */
 export function forwardingOffInstruction(family: CarrierFamily | null): string {
   if (family === "verizon") return "To stop forwarding, dial *73 on your business phone and press Call.";
-  if (family === "gsm") return "To stop forwarding, dial ##004# on your business phone and press Call.";
-  return "To stop forwarding, turn off call forwarding for your business number (dial *73 on Verizon, ##004# on AT&T or T-Mobile, or use your phone company’s website).";
+  if (family === "gsm") return "To stop forwarding, dial ##002# on your business phone and press Call.";
+  return "To stop forwarding, turn off call forwarding for your business number (dial *73 on Verizon, ##002# on AT&T or T-Mobile, or use your phone company’s website).";
 }
 
 /** Android dials * and # only when they are percent-encoded. */

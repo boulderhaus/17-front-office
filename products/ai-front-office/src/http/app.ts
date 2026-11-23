@@ -709,6 +709,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (method === "POST" && url.pathname === "/api/app/line/business-number") {
       if (!owner) throw new HttpError(403, "Only the owner can set up call forwarding");
       const body = await readApiJson(request, session, 1_000) as { number?: unknown; family?: unknown };
+      if (!limiter.allow(`business-number:${account.tenantId}`, 30, 60 * 60_000)) throw new HttpError(429, "Too many tries. Please try again in a bit.");
       const number = typeof body.number === "string" ? normalizeUsPhone(body.number) : null;
       if (!number) throw new HttpError(400, "Enter your business phone number, like (941) 555-0123");
       const lineNumber = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number");
@@ -1447,10 +1448,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "check"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "business_number"),
     ]);
-    let check: { startedAt: string; callControlId?: string | null } | null = null;
+    let check: { startedAt: string; method?: "auto" | "manual"; callControlId?: string | null } | null = null;
     try { check = checkJson ? JSON.parse(checkJson) : null; } catch { check = null; }
     const open = check && now.getTime() - Date.parse(check.startedAt) < FORWARDING_CHECK_WINDOW_MS;
-    const fromCheck = callerPhone === dependencies.env.TELNYX_FROM_NUMBER || (businessNumber !== null && callerPhone === businessNumber);
+    // Some carriers show the forwarding phone's own number; trust that only for our automatic check call.
+    const fromCheck = callerPhone === dependencies.env.TELNYX_FROM_NUMBER || (check?.method === "auto" && businessNumber !== null && callerPhone === businessNumber);
     await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "confirmed_at", now.toISOString());
     if (!open || !fromCheck) return "customer";
     await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check_inbound_call", callControlId);
