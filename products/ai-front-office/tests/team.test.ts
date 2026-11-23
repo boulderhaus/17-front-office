@@ -28,7 +28,7 @@ describe("team invitations and calendar rotation", () => {
     expect(await new TeamService(store, { now: () => new Date("2026-01-18T08:00:00Z") }).invitation(tenantId, second)).toBeNull();
   });
 
-  it("rotates only across free enabled calendars, and verifies on the calendar it wrote", async () => {
+  it("assigns only free enabled calendars, and verifies on the calendar it wrote", async () => {
     const store = new InMemoryStore();
     const tenantId = `shop_${randomUUID()}`;
     const account = owner(tenantId);
@@ -43,9 +43,11 @@ describe("team invitations and calendar rotation", () => {
     const attempt: BookingAttempt = { tenantId, callId: randomUUID(), providerCallId: "synthetic", callerName: "Synthetic Caller", callbackNumber: "+15555550100", address: "100 Main St", problemDescription: "Routine", idempotencyKey: "first", slot: { start: "2026-01-15T15:00:00.000Z", end: "2026-01-15T16:30:00.000Z" } };
     const first = await team.createEvent(attempt);
     expect(first.providerEventId).toMatch(/^fo-team:/);
-    expect(a.events).toHaveLength(1);
+    // Which teammate gets a job is ranked from its idempotency key (booking-dispatch.test.ts), not rotated.
+    expect(a.events.length + b.events.length).toBe(1);
     expect(await team.verifyEvent({ tenantId, providerEventId: first.providerEventId!, slot: attempt.slot })).toBe(true);
     await team.createEvent({ ...attempt, idempotencyKey: "second", callId: randomUUID() });
+    expect(a.events).toHaveLength(1);
     expect(b.events).toHaveLength(1);
     await store.updateOwnerAccountStatus(member.id, "suspended", now);
     await expect(team.createEvent({ ...attempt, idempotencyKey: "third" })).rejects.toThrow("No teammate remains");

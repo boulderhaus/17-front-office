@@ -2,7 +2,7 @@ import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
-import { CallService } from "../src/application/call-service.js";
+import { CallService, toolResultKey } from "../src/application/call-service.js";
 import { demoEnvironment, loadEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
 import type { AvailabilitySlot, BookingAttempt } from "../src/domain/models.js";
@@ -288,6 +288,18 @@ describe("the tool deadline aborts work and a late write lands at most once", ()
     expect(calendar.createCalls).toBe(1);
     expect(saveCall).not.toHaveBeenCalled();
     expect(saveBooking).not.toHaveBeenCalled();
+  });
+
+  it("lets only the claim winner write: a concurrent book_slot for the same slot gets a plain-English refusal", async () => {
+    const calendar = new GatedCalendar();
+    const { store, post } = await demoApp({ calendar });
+    const slot = await offeredSlot(post, "claimed-book");
+    // Another replica is mid-write on this exact slot.
+    expect((await store.claimToolResult("claimed-book", toolResultKey("book_slot", "claimed-book", new Date(slot).toISOString()), new Date().toISOString(), new Date(Date.now() - 30_000).toISOString())).status).toBe("claimed");
+    const response = await post("/tools/book", booking("claimed-book", slot));
+    expect(response.status).toBe(200);
+    expect(await json(response)).toMatchObject({ ok: false, status: "unavailable" });
+    expect(calendar.createCalls).toBe(0);
   });
 
   it("makes a repeated identical save_intake a no-op but applies a changed one", async () => {

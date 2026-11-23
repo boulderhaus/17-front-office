@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AvailabilitySlot, BookingAttempt, BusinessConfig } from "../domain/models.js";
-import type { CalendarPort, CallOptions } from "../ports.js";
+import type { CalendarPort, CallOptions, CreateEventOptions } from "../ports.js";
 import { withTimeout } from "../application/retry.js";
 
 interface GoogleCalendarOptions {
@@ -9,6 +9,15 @@ interface GoogleCalendarOptions {
   /** Google said the refresh token is revoked or expired: forget it so the owner is asked to reconnect. */
   onRevoked?: (tenantId: string) => Promise<void>;
   calendarId: string;
+}
+
+/**
+ * The event id we ask Google to use, derived only from the booking's idempotency key (shop, call, slot; never
+ * the teammate), so any retry or replica targets the same event and Google's 409 stops a second insert.
+ * Google accepts lowercase hex: it is inside the base32hex alphabet.
+ */
+export function googleEventId(idempotencyKey: string): string {
+  return createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 32);
 }
 
 export class GoogleCalendarAdapter implements CalendarPort {
@@ -47,10 +56,13 @@ export class GoogleCalendarAdapter implements CalendarPort {
     return (await this.queryBusy(input.tenantId, input.slot.start, input.slot.end, options?.signal)).length === 0;
   }
 
-  async createEvent(attempt: BookingAttempt, options?: CallOptions): Promise<{ status: "confirmed" | "unknown"; providerEventId: string | null }> {
+  async createEvent(attempt: BookingAttempt, options?: CreateEventOptions): Promise<{ status: "confirmed" | "unknown"; providerEventId: string | null }> {
     const signal = options?.signal;
     const accessToken = await this.accessToken(attempt.tenantId, signal);
-    const eventId = createHash("sha256").update(attempt.idempotencyKey).digest("hex").slice(0, 32);
+    const eventId = googleEventId(attempt.idempotencyKey);
+    signal?.throwIfAborted();
+    // From here the insert may land even if we never see the answer: hand the id over first.
+    options?.onDispatch?.(eventId);
     const response = await withTimeout(fetch(
       `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(this.options.calendarId)}/events?sendUpdates=none`,
       {
@@ -68,10 +80,25 @@ export class GoogleCalendarAdapter implements CalendarPort {
         }),
       },
     ), 5_000);
+    // 409 on our own deterministic id: an earlier attempt for this key already created the event.
     if (response.status === 409) return { status: "confirmed", providerEventId: eventId };
     if (!response.ok) throw new Error(`Google Calendar insert failed with HTTP ${response.status}`);
     const event = await response.json() as { id?: string };
     return { status: "confirmed", providerEventId: event.id ?? eventId };
+  }
+
+  async findEvent(attempt: BookingAttempt, options?: CallOptions): Promise<string | null> {
+    const signal = options?.signal;
+    const accessToken = await this.accessToken(attempt.tenantId, signal);
+    const eventId = googleEventId(attempt.idempotencyKey);
+    const response = await withTimeout(fetch(
+      `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(this.options.calendarId)}/events/${encodeURIComponent(eventId)}`,
+      { headers: { authorization: `Bearer ${accessToken}` }, signal: signal ?? null },
+    ), 4_000);
+    if (response.status === 404 || response.status === 410) return null;
+    if (!response.ok) throw new Error(`Google Calendar lookup failed with HTTP ${response.status}`);
+    const event = await response.json() as { status?: string };
+    return event.status === "cancelled" ? null : eventId;
   }
 
   async verifyEvent(input: { tenantId: string; providerEventId: string; slot: AvailabilitySlot }, options?: CallOptions): Promise<boolean> {

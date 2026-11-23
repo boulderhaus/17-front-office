@@ -8,7 +8,7 @@ import { z } from "zod";
 import { renderAdminResetLink, renderCallbackLink, renderForgotPassword, renderResetPassword, renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms } from "../admin/render.js";
 import { buildActivationReport, shopActivationBlockers, type ActivationReport } from "../application/readiness.js";
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
-import { CallService } from "../application/call-service.js";
+import { CallService, ToolWriteInProgressError } from "../application/call-service.js";
 import { approvedTransferTargets } from "../application/transfer-policy.js";
 import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
@@ -432,7 +432,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (error instanceof ToolLimitError) {
       log({ level: "warn", event: "tool_call_limited", requestId, tool, reason: error.reason });
     } else {
-      const status = error instanceof HttpError ? error.status : error instanceof z.ZodError ? 400 : 500;
+      const status = error instanceof HttpError ? error.status : error instanceof z.ZodError ? 400 : error instanceof ToolWriteInProgressError ? 409 : 500;
       log({ level: status >= 500 ? "error" : "warn", event: "tool_request_failed", requestId, tool, status, error: safeError(error) });
       if (status >= 500) telemetry.captureException(error, { route: `tool:${tool}`, method: "POST", status, requestId });
     }

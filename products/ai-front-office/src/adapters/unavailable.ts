@@ -14,6 +14,10 @@ export class UnavailableCalendar implements CalendarPort {
     throw new Error("Calendar integration is not configured");
   }
 
+  async findEvent(_attempt: BookingAttempt): Promise<string | null> {
+    throw new Error("Calendar integration is not configured");
+  }
+
   async verifyEvent(_input: { tenantId: string; providerEventId: string; slot: AvailabilitySlot }): Promise<boolean> {
     throw new Error("Calendar integration is not configured");
   }

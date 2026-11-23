@@ -94,17 +94,31 @@ export interface Store {
   purgeWebhookEvents(before: string): Promise<number>;
   /** Add one to this phone call's count for a voice tool and return the new count. Atomic across replicas. */
   incrementToolCallCount(providerCallId: string, tool: string, now: string): Promise<number>;
-  /** The stored result of a completed voice-tool write, by idempotency key. */
-  getToolResult(idempotencyKey: string): Promise<string | null>;
-  /** Store a voice-tool write's result once; a later save for the same key is ignored. */
-  saveToolResult(idempotencyKey: string, providerCallId: string, result: string, now: string): Promise<void>;
+  /**
+   * Claim a voice-tool write before its side effect. Exactly one caller gets "claimed"; others see the pending
+   * claim or the finished result. A pending claim older than `staleBefore` (its owner died) can be taken over.
+   */
+  claimToolResult(providerCallId: string, idempotencyKey: string, now: string, staleBefore: string): Promise<ToolClaim>;
+  /** A claimed write: still pending, or done with its stored result. */
+  getToolResult(providerCallId: string, idempotencyKey: string): Promise<{ status: "pending" } | { status: "done"; result: unknown } | null>;
+  /** Store the claimed write's result (JSON). Only a pending claim is completed; a finished one keeps its result. */
+  completeToolResult(providerCallId: string, idempotencyKey: string, result: unknown, now: string): Promise<void>;
+  /** Drop a pending claim whose write did not happen, so a retry may try again. */
+  releaseToolResult(providerCallId: string, idempotencyKey: string): Promise<void>;
   /** Drop tool budgets and results last touched before `before`. */
   purgeToolLedger(before: string): Promise<number>;
 }
 
+export type ToolClaim = { status: "claimed" } | { status: "pending" } | { status: "done"; result: unknown };
+
 /** Lets a voice tool's deadline cancel provider HTTP calls still in flight. */
 export interface CallOptions {
   signal?: AbortSignal | undefined;
+}
+
+export interface CreateEventOptions extends CallOptions {
+  /** Called with the event's provider id just before the insert is sent, so an abort can still record it. */
+  onDispatch?: ((providerEventId: string) => void) | undefined;
 }
 
 export interface CalendarPort {
@@ -119,7 +133,10 @@ export interface CalendarPort {
     now: string;
   }, options?: CallOptions): Promise<AvailabilitySlot[]>;
   isFree(input: { tenantId: string; slot: AvailabilitySlot }, options?: CallOptions): Promise<boolean>;
-  createEvent(attempt: BookingAttempt, options?: CallOptions): Promise<{ status: "confirmed" | "unknown"; providerEventId: string | null }>;
+  /** Inserts with an id derived only from attempt.idempotencyKey; a repeat of the same key never makes a second event. */
+  createEvent(attempt: BookingAttempt, options?: CreateEventOptions): Promise<{ status: "confirmed" | "unknown"; providerEventId: string | null }>;
+  /** The provider event id an earlier createEvent for this idempotency key left behind, or null. */
+  findEvent(attempt: BookingAttempt, options?: CallOptions): Promise<string | null>;
   verifyEvent(input: { tenantId: string; providerEventId: string; slot: AvailabilitySlot }, options?: CallOptions): Promise<boolean>;
   deleteEvent(input: { tenantId: string; providerEventId: string }): Promise<void>;
 }

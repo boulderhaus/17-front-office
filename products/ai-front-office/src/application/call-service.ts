@@ -22,6 +22,18 @@ import { callbackLinkToken, ownerCallSms, urgentReason } from "../domain/owner-s
 /** Sticky quality flag: a spam mark was refused or undone, so this call always counts and reaches the owner. */
 const SPAM_REFUSED = "spam_refused";
 
+type BookSlotResult = { status: "confirmed" | "pending" | "conflict" | "unknown"; message: string };
+
+/** A claimed write whose owner has been quiet this long is presumed dead and may be taken over. */
+const TOOL_CLAIM_STALE_MS = 30_000;
+
+/** The same voice-tool write is in progress elsewhere; the HTTP layer answers a plain-English refusal. */
+export class ToolWriteInProgressError extends Error {
+  constructor() {
+    super("The same tool write is already in progress");
+  }
+}
+
 function appendFlag(flags: string[], flag: string): string[] {
   return flags.includes(flag) ? flags : [...flags, flag];
 }
@@ -112,15 +124,40 @@ export class CallService {
     await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
     const key = toolResultKey("save_intake", input.providerCallId, { fields: input.fields, declined: input.recordingDisclosureDeclined ?? null });
     return this.store.withLock(`call:${input.providerCallId}`, async () => {
-      const stored = await this.store.getToolResult(key);
-      if (stored) {
+      const prior = await this.claimToolWrite<{ status: "saved"; missing: string[] }>(input.providerCallId, key, input.signal);
+      if (prior) {
         const call = await this.store.getCallByProviderId(input.providerCallId);
-        return { ...(JSON.parse(stored) as { status: "saved"; missing: string[] }), wrap_up: call ? this.wrapUpFor(call) : false };
+        return { ...prior.result, wrap_up: call ? this.wrapUpFor(call) : false };
       }
-      const result = await this.saveIntakeClaimed(input);
-      await this.store.saveToolResult(key, input.providerCallId, JSON.stringify({ status: result.status, missing: result.missing }), this.clock.now().toISOString());
+      let result: { status: "saved"; missing: string[]; wrap_up: boolean };
+      try {
+        result = await this.saveIntakeClaimed(input);
+      } catch (error) {
+        await this.store.releaseToolResult(input.providerCallId, key).catch(() => undefined);
+        throw error;
+      }
+      await this.store.completeToolResult(input.providerCallId, key, { status: result.status, missing: result.missing }, this.clock.now().toISOString());
       return result;
     });
+  }
+
+  /**
+   * Claim a voice-tool write before its side effect. Returns null when this caller won and must write (then
+   * complete or release the claim), or the finished result of the write that already happened. A write still
+   * in progress elsewhere gets a short wait, then ToolWriteInProgressError (a plain-English refusal).
+   */
+  private async claimToolWrite<T>(providerCallId: string, key: string, signal?: AbortSignal): Promise<{ result: T } | null> {
+    const now = this.clock.now();
+    const claim = await this.store.claimToolResult(providerCallId, key, now.toISOString(), new Date(now.getTime() - TOOL_CLAIM_STALE_MS).toISOString());
+    if (claim.status === "claimed") return null;
+    if (claim.status === "done") return { result: claim.result as T };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      signal?.throwIfAborted();
+      const current = await this.store.getToolResult(providerCallId, key);
+      if (current?.status === "done") return { result: current.result as T };
+    }
+    throw new ToolWriteInProgressError();
   }
 
   /**
@@ -332,18 +369,15 @@ export class CallService {
   }
 
   /**
-   * Idempotent on call + slot once a booking was attempted (calendar write or owner-confirmation queue): a late
-   * or repeated book_slot for the same slot returns the first result and writes nothing, so it can never
-   * double-book. Validation refusals are not stored, so the caller can still confirm and try again.
+   * Idempotent on call + slot once a booking is attempted (calendar write or owner-confirmation queue). The write
+   * is claimed in the ledger before its side effect, so only one worker performs it; a late or repeated
+   * book_slot for the same slot returns the first result and writes nothing, so it can never double-book.
+   * Validation refusals are not stored, so the caller can still confirm and try again.
    */
-  private async bookConfirmedSlotClaimed(input: Parameters<CallService["bookConfirmedSlot"]>[0]): Promise<{ status: "confirmed" | "pending" | "conflict" | "unknown"; message: string }> {
+  private async bookConfirmedSlotClaimed(input: Parameters<CallService["bookConfirmedSlot"]>[0]): Promise<BookSlotResult> {
     const key = toolResultKey("book_slot", input.providerCallId, Number.isFinite(Date.parse(input.slotStart)) ? new Date(input.slotStart).toISOString() : input.slotStart);
-    const stored = await this.store.getToolResult(key);
-    if (stored) return JSON.parse(stored) as { status: "confirmed" | "pending" | "conflict" | "unknown"; message: string };
-    const remember = async (result: { status: "confirmed" | "pending" | "conflict" | "unknown"; message: string }) => {
-      await this.store.saveToolResult(key, input.providerCallId, JSON.stringify(result), this.clock.now().toISOString());
-      return result;
-    };
+    const finished = await this.store.getToolResult(input.providerCallId, key);
+    if (finished?.status === "done") return finished.result as BookSlotResult;
     const config = await this.store.getConfig(input.tenantId);
     let call = await this.store.getCallByProviderId(input.providerCallId);
     if (!call || call.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
@@ -412,34 +446,54 @@ export class CallService {
       await this.queuePendingBooking(call, input.slotStart, config, "Diagnostic fee was not explicitly accepted");
       return { status: "pending", message: "Do not book until the caller explicitly accepts the owner-approved diagnostic fee." };
     }
-    if (config.bookingMode === "confirm") {
-      await this.queuePendingBooking(call, input.slotStart, config, "Owner confirmation mode is active");
-      await this.ensureCallbackTask(call, config, "Confirm requested appointment", false);
-      return remember({ status: "pending", message: "The requested time is saved for owner confirmation. Do not say it is booked." });
+    // Only the claim winner performs the write below; everyone else gets its result.
+    const prior = await this.claimToolWrite<BookSlotResult>(input.providerCallId, key, input.signal);
+    if (prior) return prior.result;
+    const complete = async (result: BookSlotResult) => {
+      await this.store.completeToolResult(input.providerCallId, key, result, this.clock.now().toISOString());
+      return result;
+    };
+    let booking: BookingRecord;
+    try {
+      if (config.bookingMode === "confirm") {
+        await this.queuePendingBooking(call, input.slotStart, config, "Owner confirmation mode is active");
+        await this.ensureCallbackTask(call, config, "Confirm requested appointment", false);
+        return await complete({ status: "pending", message: "The requested time is saved for owner confirmation. Do not say it is booked." });
+      }
+      booking = await this.#booking.book({
+        tenantId: input.tenantId,
+        callId: call.id,
+        providerCallId: input.providerCallId,
+        requestedStart: input.slotStart,
+        durationMinutes: config.defaultServiceDurationMinutes,
+        callerName: input.callerName,
+        callbackNumber: input.callbackNumber,
+        address: input.address,
+        problemDescription: input.problemDescription,
+      }, { signal: input.signal });
+    } catch (error) {
+      // Nothing was written (an abort after dispatch returns an "unknown" booking instead of throwing).
+      await this.store.releaseToolResult(input.providerCallId, key).catch(() => undefined);
+      throw error;
     }
-    const booking = await this.#booking.book({
-      tenantId: input.tenantId,
-      callId: call.id,
-      providerCallId: input.providerCallId,
-      requestedStart: input.slotStart,
-      durationMinutes: config.defaultServiceDurationMinutes,
-      callerName: input.callerName,
-      callbackNumber: input.callbackNumber,
-      address: input.address,
-      problemDescription: input.problemDescription,
-    }, { signal: input.signal });
     const message = booking.status === "confirmed"
       ? `The appointment is confirmed for ${formatLocalDateTime(booking.requestedStart!, config.timezone)}.`
       : booking.status === "conflict"
         ? "That time is no longer available. Do not promise it; offer another slot or queue owner follow-up."
         : "The calendar result could not be confirmed. Tell the caller the owner will follow up.";
+    const result: BookSlotResult = { status: booking.status === "checking" ? "pending" : booking.status, message };
+    if (booking.status === "pending" || booking.status === "checking") {
+      // Nothing reached the calendar, so a retry may try again.
+      await this.store.releaseToolResult(input.providerCallId, key).catch(() => undefined);
+    } else {
+      // A calendar write was attempted: record the outcome even past the deadline, so a write that landed late
+      // is reported truthfully next time and never repeated.
+      await complete(result);
+    }
     if (booking.status === "confirmed" && booking.writeVerifiedAt) {
       await this.completeCallbackTask(call.id, "verified_booking");
     }
-    const result = { status: booking.status === "checking" ? "pending" as const : booking.status, message };
-    // A calendar write was attempted: record the outcome even past the deadline, so a write that landed late is
-    // reported truthfully next time and never repeated. Nothing reached the calendar on "pending", so a retry may try again.
-    return booking.status === "pending" || booking.status === "checking" ? result : remember(result);
+    return result;
   }
 
   async queueHumanHandoff(input: {
@@ -1040,7 +1094,7 @@ export function callerSpeech(transcript: string | null): string {
 }
 
 /** Idempotency key for a voice-tool write: tool + provider call + a hash of what makes the write unique. */
-function toolResultKey(tool: string, providerCallId: string, payload: unknown): string {
+export function toolResultKey(tool: string, providerCallId: string, payload: unknown): string {
   return `${tool}:${providerCallId}:${createHash("sha256").update(canonicalJson(payload)).digest("hex")}`;
 }
 

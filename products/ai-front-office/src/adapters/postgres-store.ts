@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import pg from "pg";
-import type { Store } from "../ports.js";
+import type { Store, ToolClaim } from "../ports.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, CustomerRecord, OutboxNotification, OwnerAccount, OwnerWorkspaceInput, PilotSignup, ProviderRoute, SubscriptionRecord, ToolEvent, UsageSummary } from "../domain/models.js";
 import { CryptoBox } from "../security/crypto-box.js";
 import { normalizeBusinessConfig } from "../domain/config.js";
@@ -752,16 +752,38 @@ export class PostgresStore implements Store {
     return count;
   }
 
-  async getToolResult(idempotencyKey: string): Promise<string | null> {
-    const result = await this.#pool.query("SELECT result::text AS result FROM tool_results WHERE idempotency_key = $1", [idempotencyKey]);
-    return result.rows[0] ? String(result.rows[0].result) : null;
+  async claimToolResult(providerCallId: string, idempotencyKey: string, now: string, staleBefore: string): Promise<ToolClaim> {
+    // One statement: insert the pending claim, or take over a pending claim whose owner went quiet.
+    const claimed = await this.#pool.query(
+      `INSERT INTO tool_results(provider_call_id, idempotency_key, result, claimed_at, created_at) VALUES ($1, $2, NULL, $3, $3)
+       ON CONFLICT (provider_call_id, idempotency_key) DO UPDATE SET claimed_at = EXCLUDED.claimed_at
+         WHERE tool_results.result IS NULL AND tool_results.claimed_at < $4
+       RETURNING provider_call_id`,
+      [providerCallId, idempotencyKey, now, staleBefore],
+    );
+    if (claimed.rowCount === 1) return { status: "claimed" };
+    return (await this.getToolResult(providerCallId, idempotencyKey)) ?? { status: "pending" };
   }
 
-  async saveToolResult(idempotencyKey: string, providerCallId: string, value: string, now: string): Promise<void> {
-    await this.#pool.query(
-      "INSERT INTO tool_results(idempotency_key, provider_call_id, result, created_at) VALUES ($1, $2, $3::jsonb, $4) ON CONFLICT (idempotency_key) DO NOTHING",
-      [idempotencyKey, providerCallId, value, now],
+  async getToolResult(providerCallId: string, idempotencyKey: string): Promise<{ status: "pending" } | { status: "done"; result: unknown } | null> {
+    const result = await this.#pool.query(
+      "SELECT result::text AS result FROM tool_results WHERE provider_call_id = $1 AND idempotency_key = $2",
+      [providerCallId, idempotencyKey],
     );
+    const row = result.rows[0];
+    if (!row) return null;
+    return row.result === null ? { status: "pending" } : { status: "done", result: JSON.parse(String(row.result)) as unknown };
+  }
+
+  async completeToolResult(providerCallId: string, idempotencyKey: string, value: unknown, now: string): Promise<void> {
+    await this.#pool.query(
+      "UPDATE tool_results SET result = $3::jsonb, completed_at = $4 WHERE provider_call_id = $1 AND idempotency_key = $2 AND result IS NULL",
+      [providerCallId, idempotencyKey, JSON.stringify(value ?? null), now],
+    );
+  }
+
+  async releaseToolResult(providerCallId: string, idempotencyKey: string): Promise<void> {
+    await this.#pool.query("DELETE FROM tool_results WHERE provider_call_id = $1 AND idempotency_key = $2 AND result IS NULL", [providerCallId, idempotencyKey]);
   }
 
   async purgeToolLedger(before: string): Promise<number> {
