@@ -2,7 +2,7 @@ import { shopActivationBlockers } from "../src/application/readiness.js";
 import { isExplicitHumanRequest } from "../src/domain/human-request.js";
 import { RateLimiter } from "../src/http/security.js";
 import { describe, expect, it } from "vitest";
-import { createDemoConfig, evaluateServiceArea, isCoverageActive } from "../src/domain/config.js";
+import { createDemoConfig, evaluateServiceArea, isCoverageActive, normalizeServiceAreaInput } from "../src/domain/config.js";
 import { triageEmergency } from "../src/domain/triage.js";
 import { buildTelnyxAssistantUpdate, buildTelnyxOutboundTestCall, buildTelnyxTools, buildVoiceSystemPrompt } from "../src/voice/system-prompt.js";
 import { redactError } from "../src/application/retry.js";
@@ -204,5 +204,20 @@ describe("rate limiter capacity", () => {
     const limiter = new RateLimiter(3);
     for (const key of ["a", "b", "c"]) expect(limiter.allow(key, 5, 60_000, 0)).toBe(true);
     expect(limiter.allow("d", 5, 60_000, 1)).toBe(true);
+  });
+});
+
+describe("service area input", () => {
+  it("merges a separate state into the city an owner typed", () => {
+    expect(normalizeServiceAreaInput("Sarasota, FL, Venice, fl, 34236")).toEqual({ terms: ["Sarasota FL", "Venice FL", "34236"], errors: [] });
+    expect(normalizeServiceAreaInput("North Port FL\nEnglewood FL; 34236").terms).toEqual(["North Port FL", "Englewood FL", "34236"]);
+  });
+  it("rejects a city with no state instead of silently ignoring it", () => {
+    expect(normalizeServiceAreaInput("Sarasota, Venice").errors).toEqual(["Sarasota", "Venice"]);
+    expect(normalizeServiceAreaInput("3423").errors).toEqual(["3423"]);
+  });
+  it("still covers a normal address for a city-and-state term", () => {
+    const config = { ...createDemoConfig(), serviceAreaTerms: normalizeServiceAreaInput("Sarasota, FL").terms };
+    expect(evaluateServiceArea("100 Bay St, Sarasota, FL 34236", config).status).toBe("covered");
   });
 });

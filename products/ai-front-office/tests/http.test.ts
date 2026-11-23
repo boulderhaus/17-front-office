@@ -663,6 +663,23 @@ describe("HTTP boundary", () => {
     expect(setup).toContain("Connect Google Calendar");
   });
 
+  it("rejects setup service areas that would never match and saves the parsed terms", async () => {
+    const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Air", email: "area@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
+    const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
+    const page = await (await fetch(`${baseUrl}/app/setup`, { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
+    const save = (serviceAreaTerms: string) => fetch(`${baseUrl}/app/setup`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({
+      csrf, businessName: "Synthetic Air", serviceAreaTerms, timezone: "America/New_York", operationMode: "overflow", start: "17:00", end: "08:00",
+      bookStart: "08:00", bookEnd: "17:00", bookingMode: "confirm", greeting: "Hi, I'm the owner's AI assistant. How can I help?", prices: "", answers: "", disclosureApproved: "yes",
+    }) });
+    const rejected = await save("Sarasota, Venice");
+    expect(rejected.status).toBe(400);
+    expect((await rejected.json() as { error: string }).error).toContain("Add a state to: Sarasota, Venice");
+    expect((await save("Sarasota, FL, 34236")).status).toBe(303);
+    const account = await store.getOwnerAccountByEmail("area@synthetic.example");
+    expect((await store.getConfig(account!.tenantId)).serviceAreaTerms).toEqual(["Sarasota FL", "34236"]);
+  });
+
   it("persists owner-approved scripts and coverage rules from the admin form", async () => {
     const login = await fetch(`${baseUrl}/admin/login`, {
       method: "POST",
@@ -693,7 +710,7 @@ describe("HTTP boundary", () => {
         defaultServiceDurationMinutes: "60",
         emergencyThreshold: "0.8",
         maxCallsPerCallerPerDay: "7",
-        serviceAreaTerms: "Albany NY, 122",
+        serviceAreaTerms: "Albany NY, 12207",
         emergencyKeywords: "no heat, burst pipe",
         serviceCategories: "HVAC repair, maintenance",
         priceSnippets: "Diagnostic: The diagnostic visit is $89.",

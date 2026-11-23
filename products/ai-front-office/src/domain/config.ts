@@ -126,3 +126,25 @@ export function isCoverageActive(config: BusinessConfig, at: Date, ownerBusy: bo
   const end = parseTime(config.afterHours.weekdayEnd);
   return start <= end ? minuteOfDay >= start && minuteOfDay < end : minuteOfDay >= start || minuteOfDay < end;
 }
+
+/**
+ * Parse what an owner types ("Sarasota, FL, Venice FL, 34236") into exact
+ * coverage terms. A city without a state never matches anything, so it is an
+ * error rather than a silently ignored term.
+ */
+export function normalizeServiceAreaInput(raw: string): { terms: string[]; errors: string[] } {
+  const tokens = raw.split(/[,;\n]+/).map((token) => token.trim().replace(/\s+/g, " ")).filter(Boolean);
+  const merged: string[] = [];
+  for (const token of tokens) {
+    if (/^[A-Za-z]{2}$/.test(token) && merged.length > 0 && !/^\d{5}$/.test(merged.at(-1)!)) merged[merged.length - 1] = `${merged.at(-1)} ${token}`;
+    else merged.push(token);
+  }
+  const terms: string[] = [];
+  const errors: string[] = [];
+  for (const term of merged) {
+    if (/^\d{5}$/.test(term)) terms.push(term);
+    else if (/^[A-Za-z][A-Za-z .'-]* [A-Za-z]{2}$/.test(term)) terms.push(`${term.slice(0, -2).trimEnd()} ${term.slice(-2).toUpperCase()}`);
+    else errors.push(term);
+  }
+  return { terms: [...new Set(terms)].slice(0, 100), errors };
+}

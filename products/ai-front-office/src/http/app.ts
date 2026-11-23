@@ -16,7 +16,7 @@ import { saveAssistantConfig } from "../adapters/assistant-config.js";
 import { DataDeletionService } from "../application/data-deletion.js";
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
-import { createDemoConfig } from "../domain/config.js";
+import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import { clearOwnerSessionCookie, hashOwnerPassword, mintOwnerSession, ownerSessionCookie, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
 import { buildTelnyxGreeting } from "../voice/system-prompt.js";
@@ -412,13 +412,15 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         updatedAt: now,
       };
       const splitList = (value: string): string[] => value.split(",").map((item) => item.trim()).filter(Boolean).slice(0, 100);
+      const serviceArea = normalizeServiceAreaInput(parsed.data.serviceAreaTerms);
+      if (serviceArea.errors.length > 0) return sendHtml(response, 400, renderOwnerSignup(serviceAreaMessage(serviceArea.errors), values));
       const config: BusinessConfig = {
         ...createDemoConfig(tenantId),
         paused: true,
         businessName: parsed.data.businessName,
         greeting: form.has("greeting") ? parsed.data.greeting : `Thanks for calling ${parsed.data.businessName}. I’m the owner’s AI assistant. How can I help?`,
         timezone: parsed.data.timezone,
-        serviceAreaTerms: splitList(parsed.data.serviceAreaTerms),
+        serviceAreaTerms: serviceArea.terms,
         emergencyKeywords: splitList(parsed.data.emergencyKeywords),
         serviceCategories: splitList(parsed.data.serviceCategories),
         requireDiagnosticFeeAcceptance: false,
@@ -547,6 +549,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (!parsed.success || parsed.data.bookStart >= parsed.data.bookEnd) throw new HttpError(400, "Check the required answers and appointment hours");
       const data = parsed.data;
       if (!/\bAI\b/i.test(data.greeting)) throw new HttpError(400, "Your greeting must identify the AI assistant");
+      const serviceArea = normalizeServiceAreaInput(data.serviceAreaTerms);
+      if (serviceArea.errors.length > 0 || serviceArea.terms.length === 0) throw new HttpError(400, serviceAreaMessage(serviceArea.errors));
       try { new Intl.DateTimeFormat("en-US", { timeZone: data.timezone }).format(); } catch { throw new HttpError(400, "Choose a valid timezone"); }
       const phoneInput = form.get("ownerPhone")?.trim();
       const phone = phoneInput ? normalizeUsPhone(phoneInput) : null;
@@ -555,7 +559,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         const current = await dependencies.store.getConfig(account.tenantId);
         if (phone) await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner-primary", phone);
         if (form.get("ownerSmsConsent") === "yes" && !phone && !await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")) throw new HttpError(400, "Add a mobile number for text alerts");
-        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, businessName: data.businessName, timezone: data.timezone, serviceAreaTerms: data.serviceAreaTerms.split(",").map((v) => v.trim()).filter(Boolean), operationMode: data.operationMode, afterHours: { ...current.afterHours, weekdayStart: data.start, weekdayEnd: data.end }, bookableHours: { weekdayStart: data.bookStart, weekdayEnd: data.bookEnd, weekends: form.get("weekends") === "on" }, bookingMode: data.bookingMode, greeting: data.greeting, priceSnippets: parseLines(data.prices, 30).map((text, index) => ({ label: `Approved price ${index + 1}`, text })), approvedKnowledge: parseLines(data.answers, 30).map((text, index) => ({ topic: `Approved answer ${index + 1}`, text })), ownerNotificationRefs: form.get("ownerSmsConsent") === "yes" ? ["owner-primary"] : [], ownerTransferNumberRef: "owner-primary", warmTransferEnabled: form.get("warmTransferEnabled") === "on" });
+        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, businessName: data.businessName, timezone: data.timezone, serviceAreaTerms: serviceArea.terms, operationMode: data.operationMode, afterHours: { ...current.afterHours, weekdayStart: data.start, weekdayEnd: data.end }, bookableHours: { weekdayStart: data.bookStart, weekdayEnd: data.bookEnd, weekends: form.get("weekends") === "on" }, bookingMode: data.bookingMode, greeting: data.greeting, priceSnippets: parseLines(data.prices, 30).map((text, index) => ({ label: `Approved price ${index + 1}`, text })), approvedKnowledge: parseLines(data.answers, 30).map((text, index) => ({ topic: `Approved answer ${index + 1}`, text })), ownerNotificationRefs: form.get("ownerSmsConsent") === "yes" ? ["owner-primary"] : [], ownerTransferNumberRef: "owner-primary", warmTransferEnabled: form.get("warmTransferEnabled") === "on" });
       });
       return redirect(response, "/app?setup=saved");
     }
@@ -1575,6 +1579,12 @@ function timingSafeEqualBuffers(left: Buffer, right: Buffer): boolean {
   return mismatch === 0;
 }
 
+function serviceAreaMessage(errors: string[]): string {
+  return errors.length > 0
+    ? `Add a state to: ${errors.slice(0, 5).join(", ")}. Use a city and state ("Sarasota FL") or a 5-digit ZIP.`
+    : "Add at least one city and state or 5-digit ZIP.";
+}
+
 function configFromForm(current: BusinessConfig, form: URLSearchParams): BusinessConfig {
   const required = (name: string): string => {
     const value = form.get(name)?.trim();
@@ -1630,7 +1640,7 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
     answerAfterRings,
     bookingMode,
     warmTransferEnabled: form.get("warmTransferEnabled") === "on",
-    serviceAreaTerms: list("serviceAreaTerms"),
+    serviceAreaTerms: (() => { const area = normalizeServiceAreaInput(form.get("serviceAreaTerms") ?? ""); if (area.errors.length > 0) throw new HttpError(400, serviceAreaMessage(area.errors)); return area.terms; })(),
     emergencyKeywords: list("emergencyKeywords"),
     emergencyThreshold,
     minimumLeadTimeMinutes,
