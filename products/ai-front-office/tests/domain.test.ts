@@ -232,3 +232,11 @@ describe("owner setup beta controls", () => {
     expect(shown).toContain("warmTransferEnabled");
   });
 });
+
+describe("recording consent evidence", () => {
+  it("does not let the model preset consent on every intake save", () => {
+    const tools = buildTelnyxTools(createDemoConfig(), "https://front-office.example") as Array<{ webhook?: { name: string; preset_body_fields: Record<string, unknown> } }>;
+    const intake = tools.find((tool) => tool.webhook?.name === "save_intake")!;
+    expect(intake.webhook!.preset_body_fields).not.toHaveProperty("recording_disclosure_given");
+  });
+});

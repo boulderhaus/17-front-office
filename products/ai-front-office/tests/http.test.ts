@@ -345,6 +345,7 @@ describe("HTTP boundary", () => {
     expect(initBody.dynamic_variables.current_local_date).toBe("Thursday, January 15, 2026");
     expect(initBody.dynamic_variables.current_local_time).toBe("2:00 AM CST");
     expect(await store.getCallByProviderId("v3:signed-call")).not.toBeNull();
+    expect((await store.getCallByProviderId("v3:signed-call"))?.consentState).toBe("disclosed");
 
     const intake = JSON.stringify({
       provider_call_id: "v3:signed-call", from_number: "+15555550110", caller_name: "Signed Caller",

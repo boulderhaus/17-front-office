@@ -52,6 +52,8 @@ export class CallService {
     fromNumber: string;
     fromNumberVerified?: boolean;
     startedAt: string;
+    /** "disclosed" only when the server itself supplied the greeting that contains the recording notice. */
+    consentState?: CallRecord["consentState"];
   }): Promise<CallRecord> {
     const claimed = await this.store.claimWebhook(input.eventId);
     if (!claimed) {
@@ -63,7 +65,7 @@ export class CallService {
       if (await this.store.isProviderCallDeleted(input.providerCallId)) throw new Error("Provider call was deleted and cannot be recreated");
       const existing = await this.store.getCallByProviderId(input.providerCallId);
       if (existing && existing.tenantId !== input.tenantId) throw new Error("Provider call belongs to a different tenant");
-      return existing ?? this.createCall(input.tenantId, input.providerCallId, input.fromNumber, input.startedAt, input.fromNumberVerified === true);
+      return existing ?? this.createCall(input.tenantId, input.providerCallId, input.fromNumber, input.startedAt, input.fromNumberVerified === true, input.consentState ?? "unknown");
     });
   }
 
@@ -72,7 +74,6 @@ export class CallService {
     providerCallId: string;
     fromNumber: string;
     fields: Partial<CollectedCallFields>;
-    recordingDisclosureGiven?: boolean;
     recordingDisclosureDeclined?: boolean;
   }): Promise<{ status: "saved"; missing: string[] }> {
     await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
@@ -92,7 +93,8 @@ export class CallService {
       fromNumber: existing.fromNumber === "unknown" && isAllowedCustomerNumber(input.fromNumber) ? input.fromNumber : existing.fromNumber,
       fields,
       emergency,
-      consentState: input.recordingDisclosureDeclined ? "declined" : input.recordingDisclosureGiven ? "disclosed" : existing.consentState,
+      // The model may report an objection; it cannot assert that consent was given.
+      consentState: input.recordingDisclosureDeclined ? "declined" : existing.consentState,
       updatedAt: this.clock.now().toISOString(),
     };
     await this.store.saveCall(call);
@@ -699,7 +701,7 @@ export class CallService {
     });
   }
 
-  private async createCall(tenantId: string, providerCallId: string, fromNumber: string, startedAt: string, fromNumberVerified: boolean): Promise<CallRecord> {
+  private async createCall(tenantId: string, providerCallId: string, fromNumber: string, startedAt: string, fromNumberVerified: boolean, consentState: CallRecord["consentState"] = "unknown"): Promise<CallRecord> {
     const now = this.clock.now().toISOString();
     const call: CallRecord = {
       id: randomUUID(),
@@ -715,7 +717,7 @@ export class CallService {
       outcome: "in_progress",
       transcript: null,
       recordingUrl: null,
-      consentState: "unknown",
+      consentState,
       billingDisposition: "not_billable",
       qualityFlags: [],
       createdAt: now,

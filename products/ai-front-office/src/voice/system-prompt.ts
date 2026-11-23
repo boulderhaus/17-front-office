@@ -168,7 +168,7 @@ export function buildTelnyxTools(config: BusinessConfig, publicBaseUrl: string):
         recording_disclosure_declined: { type: "boolean", description: "True only when the caller explicitly objects to recording." },
       },
       ["problem_description"],
-      { ...preset, from_number: "{{telnyx_end_user_target}}", recording_disclosure_given: true },
+      { ...preset, from_number: "{{telnyx_end_user_target}}" },
     ),
     webhook(
       "triage_call",

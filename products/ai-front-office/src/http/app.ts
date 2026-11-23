@@ -1006,6 +1006,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         fromNumber: callerPhone,
         fromNumberVerified: initialization.data.payload.telnyx_end_user_target_verified === true,
         startedAt: initialization.data.occurred_at ?? dependencies.clock.now().toISOString(),
+        consentState: config.recordingDisclosure.trim() ? "disclosed" : "unknown",
       });
       const localContext = formatLocalCallContext(dependencies.clock.now(), config.timezone);
       return sendJson(response, 200, {
@@ -1081,7 +1082,6 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         ...(input.human_requested === undefined ? {} : { humanRequested: input.human_requested }),
         ...(input.confidence === undefined ? {} : { confidence: input.confidence }),
       },
-      ...(input.recording_disclosure_given === undefined ? {} : { recordingDisclosureGiven: input.recording_disclosure_given }),
       ...(input.recording_disclosure_declined === undefined ? {} : { recordingDisclosureDeclined: input.recording_disclosure_declined }),
     });
     sendJson(response, 200, result);
