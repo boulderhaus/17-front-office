@@ -93,6 +93,10 @@ export class InMemoryStore implements Store {
     this.integrationSecrets.set(`${tenantId}:${provider}:${key}`, value);
   }
 
+  async deleteIntegrationSecret(tenantId: string, provider: string, key: string): Promise<void> {
+    this.integrationSecrets.delete(`${tenantId}:${provider}:${key}`);
+  }
+
   async getCallByProviderId(providerCallId: string): Promise<CallRecord | null> {
     return structuredClone([...this.calls.values()].find((call) => call.providerCallId === providerCallId) ?? null);
   }

@@ -15,7 +15,7 @@ import { isExplicitHumanRequest } from "../domain/human-request.js";
 import { saveAssistantConfig } from "../adapters/assistant-config.js";
 import { DataDeletionService } from "../application/data-deletion.js";
 import { formatEmailBody } from "../adapters/resend.js";
-import { anyGoogleClient, clientForNewConnections, saveGoogleConnection, type GoogleOAuthClient } from "../adapters/google-oauth-clients.js";
+import { anyGoogleClient, clientForAttempt, clientForNewConnections, encodeGoogleConnection, oauthAttemptKey, type GoogleOAuthClient } from "../adapters/google-oauth-clients.js";
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
@@ -814,7 +814,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const googleOAuth = clientForNewConnections(dependencies.env);
       if (!googleOAuth) throw new HttpError(503, "Google OAuth is not configured on the server");
       const cookiePath = "/app/integrations/google";
-      const attempt = createGoogleOAuthAttempt(`${dependencies.env.SESSION_SIGNING_KEY!}:${account.id}`, dependencies.env.NODE_ENV === "production", dependencies.clock.now().getTime(), cookiePath);
+      const attempt = createGoogleOAuthAttempt(oauthAttemptKey(`${dependencies.env.SESSION_SIGNING_KEY!}:${account.id}`, googleOAuth.name), dependencies.env.NODE_ENV === "production", dependencies.clock.now().getTime(), cookiePath);
       const callback = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app/integrations/google/callback`;
       const authorization = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       authorization.search = new URLSearchParams({
@@ -833,14 +833,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (method === "GET" && url.pathname === "/app/integrations/google/callback") {
       const cookiePath = "/app/integrations/google";
-      const verifier = verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, "afo_google_pkce"), `${dependencies.env.SESSION_SIGNING_KEY!}:${account.id}`, dependencies.clock.now().getTime());
-      if (!verifier) throw new HttpError(400, "Google authorization state is invalid or expired");
+      const attempt = clientForAttempt(dependencies.env, `${dependencies.env.SESSION_SIGNING_KEY!}:${account.id}`, (key) => verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, "afo_google_pkce"), key, dependencies.clock.now().getTime()));
+      if (!attempt) throw new HttpError(400, "Google authorization state is invalid or expired");
       const code = url.searchParams.get("code");
       if (!code) throw new HttpError(400, "Google did not return an authorization code");
-      const googleOAuth = clientForNewConnections(dependencies.env);
-      if (!googleOAuth) throw new HttpError(503, "Google OAuth is not configured on the server");
-      const refreshToken = await exchangeGoogleCode(dependencies.env, googleOAuth, code, verifier, "/app/integrations/google/callback");
-      await saveGoogleConnection(dependencies.store, account.tenantId, member ? `refresh_token:${account.id}` : "refresh_token", refreshToken, googleOAuth);
+      const refreshToken = await exchangeGoogleCode(dependencies.env, attempt.client, code, attempt.result, "/app/integrations/google/callback");
+      await dependencies.store.saveIntegrationSecret(account.tenantId, "google", member ? `refresh_token:${account.id}` : "refresh_token", encodeGoogleConnection(refreshToken, attempt.client));
       response.setHeader("set-cookie", clearGoogleOAuthCookie(dependencies.env.NODE_ENV === "production", cookiePath));
       return redirect(response, "/app/settings");
     }
@@ -1310,15 +1308,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return redirect(response, "/admin");
     }
     if (method === "GET" && url.pathname === "/admin/integrations/google/callback") {
-      const googleOAuth = clientForNewConnections(dependencies.env);
-      if (!googleOAuth) throw new HttpError(503, "Google OAuth is not configured on the server");
-      const verifier = verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, "afo_google_pkce"), dependencies.env.SESSION_SIGNING_KEY!);
-      if (!verifier) throw new HttpError(400, "Google OAuth state is invalid or expired");
+      const attempt = clientForAttempt(dependencies.env, dependencies.env.SESSION_SIGNING_KEY!, (key) => verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, "afo_google_pkce"), key));
+      if (!attempt) throw new HttpError(400, "Google OAuth state is invalid or expired");
       if (url.searchParams.has("error")) throw new HttpError(400, "Google authorization was declined");
       const code = url.searchParams.get("code");
       if (!code) throw new HttpError(400, "Google did not return an authorization code");
-      const refreshToken = await exchangeGoogleCode(dependencies.env, googleOAuth, code, verifier);
-      await saveGoogleConnection(dependencies.store, dependencies.env.DEFAULT_TENANT_ID, "refresh_token", refreshToken, googleOAuth);
+      const refreshToken = await exchangeGoogleCode(dependencies.env, attempt.client, code, attempt.result);
+      await dependencies.store.saveIntegrationSecret(dependencies.env.DEFAULT_TENANT_ID, "google", "refresh_token", encodeGoogleConnection(refreshToken, attempt.client));
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
       await dependencies.store.saveConfig({ ...config, calendarConnectionRef: "google-oauth" });
       response.setHeader("set-cookie", clearGoogleOAuthCookie(dependencies.env.NODE_ENV === "production"));
@@ -1354,7 +1350,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (method === "GET" && url.pathname === "/admin/integrations/google/start") {
       const googleOAuth = clientForNewConnections(dependencies.env);
       if (!googleOAuth) throw new HttpError(503, "Google OAuth is not configured on the server");
-      const attempt = createGoogleOAuthAttempt(dependencies.env.SESSION_SIGNING_KEY!, dependencies.env.NODE_ENV === "production");
+      const attempt = createGoogleOAuthAttempt(oauthAttemptKey(dependencies.env.SESSION_SIGNING_KEY!, googleOAuth.name), dependencies.env.NODE_ENV === "production");
       const callback = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/admin/integrations/google/callback`;
       const authorization = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       authorization.search = new URLSearchParams({

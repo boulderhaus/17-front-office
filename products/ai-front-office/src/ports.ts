@@ -25,6 +25,7 @@ export interface Store {
   saveConfig(config: BusinessConfig): Promise<void>;
   getIntegrationSecret(tenantId: string, provider: string, key: string): Promise<string | null>;
   saveIntegrationSecret(tenantId: string, provider: string, key: string, value: string): Promise<void>;
+  deleteIntegrationSecret(tenantId: string, provider: string, key: string): Promise<void>;
   getCallByProviderId(providerCallId: string): Promise<CallRecord | null>;
   isProviderCallDeleted(providerCallId: string): Promise<boolean>;
   getCall(callId: string): Promise<CallRecord | null>;

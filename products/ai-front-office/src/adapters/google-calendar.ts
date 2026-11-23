@@ -6,6 +6,8 @@ import { withTimeout } from "../application/retry.js";
 interface GoogleCalendarOptions {
   /** Refresh token and the OAuth client that issued it (tokens only work with their own client). */
   getCredentials: (tenantId: string) => Promise<{ refreshToken: string; client: { id: string; secret: string } } | null>;
+  /** Google said the refresh token is revoked or expired: forget it so the owner is asked to reconnect. */
+  onRevoked?: (tenantId: string) => Promise<void>;
   calendarId: string;
 }
 
@@ -125,7 +127,14 @@ export class GoogleCalendarAdapter implements CalendarPort {
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body,
     }), 4_000);
-    if (!response.ok) throw new Error(`Google OAuth refresh failed with HTTP ${response.status}`);
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({})) as { error?: string };
+      if (failure.error === "invalid_grant") {
+        await this.options.onRevoked?.(tenantId).catch(() => undefined);
+        throw new Error("Google Calendar access was revoked or expired; reconnect the calendar");
+      }
+      throw new Error(`Google OAuth refresh failed with HTTP ${response.status}`);
+    }
     const payload = await response.json() as { access_token?: string; expires_in?: number };
     if (!payload.access_token) throw new Error("Google OAuth response did not include an access token");
     const token = payload.access_token;

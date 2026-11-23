@@ -68,12 +68,14 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
   const soloCalendar = googleConfigured
     ? new GoogleCalendarAdapter({
         getCredentials: (tenantId) => googleCredentials(store, env, tenantId, "refresh_token"),
+        onRevoked: (tenantId) => store.deleteIntegrationSecret(tenantId, "google", "refresh_token"),
         calendarId: env.GOOGLE_CALENDAR_ID,
       })
     : new UnavailableCalendar();
   const calendar = new TeamCalendar(store, soloCalendar, (accountId, owner) => googleConfigured ? new GoogleCalendarAdapter({
     calendarId: owner ? env.GOOGLE_CALENDAR_ID : "primary",
     getCredentials: (tenantId) => googleCredentials(store, env, tenantId, owner ? "refresh_token" : `refresh_token:${accountId}`),
+    onRevoked: (tenantId) => store.deleteIntegrationSecret(tenantId, "google", owner ? "refresh_token" : `refresh_token:${accountId}`),
   }) : new UnavailableCalendar());
   const smsSender = telnyxSmsConfigured
     ? new TelnyxSmsAdapter({

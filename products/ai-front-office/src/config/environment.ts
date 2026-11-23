@@ -84,6 +84,9 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
   if (Boolean(parsed.RESEND_API_KEY) !== Boolean(parsed.RESEND_FROM_EMAIL)) {
     throw new Error("RESEND_API_KEY and RESEND_FROM_EMAIL must be configured together");
   }
+  if (parsed.GOOGLE_OAUTH_NEW_CONNECTIONS === "next" && !(parsed.GOOGLE_CLIENT_ID_NEXT && parsed.GOOGLE_CLIENT_SECRET_NEXT)) {
+    throw new Error("GOOGLE_OAUTH_NEW_CONNECTIONS=next requires GOOGLE_CLIENT_ID_NEXT and GOOGLE_CLIENT_SECRET_NEXT");
+  }
   if (!parsed.DEMO_MODE) {
     for (const key of ["DATABASE_URL", "DATA_ENCRYPTION_KEY", "SESSION_SIGNING_KEY"] as const) {
       if (!parsed[key]) throw new Error(`${key} is required outside demo mode`);

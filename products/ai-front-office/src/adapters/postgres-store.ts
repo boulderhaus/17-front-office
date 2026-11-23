@@ -103,6 +103,10 @@ export class PostgresStore implements Store {
     return this.cryptoBox.decrypt(String(result.rows[0].value_ciphertext));
   }
 
+  async deleteIntegrationSecret(tenantId: string, provider: string, key: string): Promise<void> {
+    await this.#pool.query("DELETE FROM integration_secrets WHERE tenant_id=$1 AND provider=$2 AND secret_key=$3", [tenantId, provider, key]);
+  }
+
   async saveIntegrationSecret(tenantId: string, provider: string, key: string, value: string): Promise<void> {
     await this.#pool.query(
       `INSERT INTO integration_secrets(tenant_id,provider,secret_key,value_ciphertext,updated_at)
