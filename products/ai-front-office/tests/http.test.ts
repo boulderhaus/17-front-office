@@ -430,6 +430,26 @@ describe("HTTP boundary", () => {
     });
     expect(limitedResponse.status).toBe(200);
     expect((await limitedResponse.json() as { dynamic_variables: { call_access: string } }).dynamic_variables.call_access).toBe("blocked_daily_limit");
+
+    // Another shop can never open this shop's recording, even with the exact provider call id.
+    expect((await store.getCallByProviderId("v3:signed-call"))?.tenantId).toBe("demo");
+    const otherShop = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Other Shop", email: "other@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
+    expect(otherShop.status).toBe(303);
+    const otherCookie = otherShop.headers.get("set-cookie")!.split(";")[0]!;
+    const realFetch = globalThis.fetch;
+    let providerCalls = 0;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      if (String(input).includes("telnyx.com")) providerCalls += 1;
+      return realFetch(input, init);
+    }) as typeof fetch;
+    try {
+      const crossShop = await realFetch(`${baseUrl}/app/provider/telnyx/recordings/${encodeURIComponent("v3:signed-call")}`, { redirect: "manual", headers: { cookie: otherCookie } });
+      expect(crossShop.status).toBe(404);
+      expect(crossShop.headers.get("location")).toBeNull();
+      expect(providerCalls).toBe(0);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 
   it("uses an HttpOnly admin session and rejects a forged CSRF token", async () => {
