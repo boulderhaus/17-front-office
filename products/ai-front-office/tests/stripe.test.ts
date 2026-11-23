@@ -119,7 +119,7 @@ describe("Stripe webhook state is read from the Stripe API", () => {
 
   async function harness(options: { activeAccount?: boolean; telnyxFails?: boolean } = {}) {
     const api: { status: string; price: string; tenant: string | null; subscriptions: Record<string, { status: string; price: string }> } = { status: "active", price: "price_synthetic", tenant: null, subscriptions: {} };
-    const calls: Array<{ url: string; method: string; body?: unknown; key?: string }> = [];
+    const calls: Array<{ url: string; method: string; body?: unknown; key?: string | undefined }> = [];
     const fetcher = (async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? "GET";
