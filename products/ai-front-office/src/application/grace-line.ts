@@ -1,4 +1,5 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { isPaidStatus } from "../domain/billing.js";
 import { formatEmailBody } from "../adapters/resend.js";
 import { TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import { TelnyxVoiceRoutingClient } from "../adapters/telnyx.js";
@@ -219,7 +220,7 @@ export class GraceLineService {
     const startedAt = await graceStartedAt(store, tenantId);
     if (startedAt !== seen) return null; // finished by another replica, ended by payment, or restarted
     const [subscription, account] = await Promise.all([store.getSubscription(tenantId), store.getOwnerAccountByTenant(tenantId)]);
-    if (subscription?.status === "active" || !account) {
+    if (isPaidStatus(subscription?.status) || !account) {
       await clearGrace(store, tenantId);
       return null;
     }
@@ -231,7 +232,7 @@ export class GraceLineService {
     if (elapsed >= GRACE_DAYS * DAY_MS) {
       // Last look before anything irreversible: payment may have landed while this sweep waited for the lock.
       const [stillStarted, latest] = await Promise.all([graceStartedAt(store, tenantId), store.getSubscription(tenantId)]);
-      if (stillStarted !== startedAt || latest?.status === "active") return null;
+      if (stillStarted !== startedAt || isPaidStatus(latest?.status)) return null;
       if (!await this.disconnectUnownedNumber(tenantId)) return null; // retried next sweep
       if (!await releaseProvisionedLine(this.context, tenantId)) return null; // retried next sweep
       await Promise.all(["inbound_number", "pending_number", "provisioned_assistant_id"].map((key) => store.deleteIntegrationSecret(tenantId, "telnyx", key)));

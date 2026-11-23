@@ -7,6 +7,7 @@ import { createDemoConfig } from "../src/domain/config.js";
 import { chargeSentence } from "../src/domain/billing.js";
 import { describeHours, hoursFromChoice } from "../src/domain/hours.js";
 import { createRequestHandler } from "../src/http/app.js";
+import { graceStartedAt } from "../src/application/grace-line.js";
 
 type Call = { url: string; method: string; body: string | null };
 
@@ -221,6 +222,8 @@ describe("three taps to a live line", () => {
     expect(webhook.status).toBe(200);
     expect((await store.getConfig(account.tenantId)).paused).toBe(false);
     expect((await store.getSubscription(account.tenantId))!.status).toBe("trialing");
+    // A trial is paid: no voicemail grace period starts.
+    expect(await graceStartedAt(store, account.tenantId)).toBeNull();
   });
 
   it("serves the setup screens from the React app", async () => {
