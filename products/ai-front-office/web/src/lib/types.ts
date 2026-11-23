@@ -32,7 +32,14 @@ export interface ApiTask {
   updatedAt: string
 }
 
+export interface ForwardingCode {
+  carrier: string
+  on: string
+  off: string
+}
+
 export interface ApiDashboard {
+  line: { number: string | null; mode: "overflow" | "after_hours" | "always"; forwarding: ForwardingCode[] }
   csrf: string
   now: string
   preview: boolean

@@ -1,3 +1,4 @@
+import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, OutboxNotification, OwnerAccount, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import { escapeHtml as e } from "./render.js";
 
@@ -58,6 +59,8 @@ export function renderOwnerApp(input: {
   recentlyCompletedCallId?: string | null;
   view?: "today" | "pipeline" | "calendar";
   preview?: boolean;
+  lineNumber?: string | null;
+  lineError?: string | null;
 }): string {
   const preview = input.preview === true;
   const view = input.view ?? "today";
@@ -108,12 +111,16 @@ export function renderOwnerApp(input: {
     { done: rulesSaved, label: "Set your call rules", href: "/app/setup", cta: "Set rules" },
     { done: input.googleConnected, label: "Connect Google Calendar", href: "/app/integrations/google/start", cta: "Connect" },
     { done: paid, label: "Start your plan", href: "", cta: `Start $${(input.config.flatMonthlyPriceCents / 100).toFixed(0)}/mo plan` },
+    { done: input.account.status === "active", label: "Get your Front Office number", href: "#go-live", cta: "Turn on my line" },
   ];
   const doneSteps = steps.filter((step) => step.done).length;
   const nextStep = steps.find((step) => !step.done);
-  const setup = owner && doneSteps < steps.length ? `<section class="fo-card fo-setup"><div class="fo-setup-head"><div><h2>Finish setup</h2><p>${doneSteps} of ${steps.length} done. Calls stay off until setup is checked.</p></div><span class="fo-ring" style="--p:${Math.round((doneSteps / steps.length) * 100)}">${doneSteps}/${steps.length}</span></div><ol class="fo-steps">${steps.map((step) => `<li class="${step.done ? "done" : ""}"><i>${step.done ? "✓" : ""}</i>${e(step.label)}</li>`).join("")}</ol>${preview || !nextStep ? "" : nextStep.href
+  const setup = owner && doneSteps < steps.length ? `<section class="fo-card fo-setup"><div class="fo-setup-head"><div><h2>Finish setup</h2><p>${doneSteps} of ${steps.length} done. Calls stay off until setup is checked.</p></div><span class="fo-ring" style="--p:${Math.round((doneSteps / steps.length) * 100)}">${doneSteps}/${steps.length}</span></div><ol class="fo-steps">${steps.map((step) => `<li class="${step.done ? "done" : ""}"><i>${step.done ? "✓" : ""}</i>${e(step.label)}</li>`).join("")}</ol>${input.lineError ? `<p class="fo-warn" role="alert">${e(input.lineError)}</p>` : ""}${preview || !nextStep ? "" : nextStep.href === "#go-live"
+      ? `<form method="post" action="/app/line/go-live">${csrfField}<button class="fo-btn wide">${e(nextStep.cta)}</button></form><p class="fo-fine">We pick a local number in your area code. You keep your business number and forward calls to it.</p>`
+      : nextStep.href
       ? `<a class="fo-btn wide" href="${nextStep.href}">${e(nextStep.cta)}</a>`
-      : input.checkoutConfigured ? `<form method="post" action="/app/billing/checkout">${csrfField}<button class="fo-btn wide">${e(nextStep.cta)}</button></form>` : ""}${input.account.status === "active" || preview ? "" : `<p class="fo-fine">After payment we check your line and turn it on. Your dashboard shows when calls are being answered. A test call is optional.</p>`}</section>` : "";
+      : input.checkoutConfigured ? `<form method="post" action="/app/billing/checkout">${csrfField}<button class="fo-btn wide">${e(nextStep.cta)}</button></form>` : ""}</section>` : "";
+  const forwarding = owner && !preview && input.account.status === "active" && input.lineNumber ? forwardingCard(input.lineNumber, input.config.operationMode, input.calls.length === 0) : "";
 
   // ---- pieces ----------------------------------------------------------------
   const urgency = (task: CallbackTask | undefined, call: CallRecord | undefined): { cls: string; label: string } => {
@@ -167,7 +174,7 @@ export function renderOwnerApp(input: {
     : `<div class="fo-empty"><img src="/assets/front-office-mascot-flat.png" alt="" width="96" height="101"><strong>You’re all caught up.</strong><span>New emergencies, callbacks and times to confirm show up here automatically.</span></div>`;
   const recent = input.calls.slice(0, 8).map(callRow).join("") || `<p class="fo-muted">No calls yet. Your first answered call shows up here.</p>`;
   const coming = upcoming.slice(0, 4).map(appointmentRow).join("") || `<p class="fo-muted">Nothing scheduled in the next 7 days.</p>`;
-  const todayMain = `${setup}${stats}<section id="inbox" class="fo-section"><header><h2>Needs your attention</h2><span class="fo-count">${actionable.length}</span></header>${queue}</section><section class="fo-section"><header><h2>Coming up</h2><a href="${link("calendar")}">Calendar</a></header><div class="fo-card fo-list">${coming}</div></section><section id="recent-calls" class="fo-section"><header><h2>Recent calls</h2><a href="${link("pipeline")}">All jobs</a></header><div class="fo-card fo-list">${recent}</div></section><section class="fo-section"><header><h2>Recent activity</h2></header><div class="fo-card fo-list">${activity(input.calls, completed, callsById, tz)}</div></section>${usage}`;
+  const todayMain = `${setup}${forwarding}${stats}<section id="inbox" class="fo-section"><header><h2>Needs your attention</h2><span class="fo-count">${actionable.length}</span></header>${queue}</section><section class="fo-section"><header><h2>Coming up</h2><a href="${link("calendar")}">Calendar</a></header><div class="fo-card fo-list">${coming}</div></section><section id="recent-calls" class="fo-section"><header><h2>Recent calls</h2><a href="${link("pipeline")}">All jobs</a></header><div class="fo-card fo-list">${recent}</div></section><section class="fo-section"><header><h2>Recent activity</h2></header><div class="fo-card fo-list">${activity(input.calls, completed, callsById, tz)}</div></section>${usage}`;
 
   const column = (title: string, items: string, empty: string, count: number): string => `<section class="fo-col"><header><h2>${e(title)}</h2><span class="fo-count">${count}</span></header>${items || `<p class="fo-muted">${e(empty)}</p>`}</section>`;
   const jobCard = (call: CallRecord | undefined, label: string, cls: string, meta: string): string => call ? `<a class="fo-mini ${cls}" href="${link("pipeline", call.id)}#detail"><span><strong>${e(call.fields.callerName ?? "Unknown caller")}</strong><span class="fo-pill ${cls}">${e(label)}</span></span><small>${e(call.fields.problemDescription || "No summary")}</small><time>${e(meta)}</time></a>` : "";
@@ -311,6 +318,11 @@ ${addOn("ownerWeeklyEmailEnabled", c.ownerWeeklyEmailEnabled, i.weeklyEmailAvail
 <div class="fo-savebar"><button class="fo-btn wide">Save changes</button></div></form>`;
   const body = `${input.saved ? `<div class="fo-note ok" role="status"><strong>Saved.</strong></div>` : ""}<div class="fo-settings">${form}<aside class="fo-settings-side"><section class="fo-card fo-group"><h2>Calendar</h2>${calendar}</section><section class="fo-card fo-group"><h2>Plan</h2><p>$${Math.round(c.flatMonthlyPriceCents / 100)}/month · ${c.includedMinutes} minutes · $${(c.overageCentsPerMinute / 100).toFixed(2)}/min after</p>${paid ? `<form method="post" action="/app/billing/portal">${csrfField}<button class="fo-ghost wide">Manage billing or cancel</button></form>` : `<form method="post" action="/app/billing/checkout">${csrfField}<button class="fo-btn wide">Start your plan</button></form>`}</section><section class="fo-card fo-group"><h2>Team</h2><a class="fo-ghost wide" href="/app/team">Teammates &amp; calendars</a></section><section class="fo-card fo-group"><h2>Your data</h2><a class="fo-ghost wide" href="/app/account/export">Download everything</a><form method="post" action="/app/account/sign-out-everywhere">${csrfField}<button class="fo-ghost wide">Sign out on every device</button></form><a class="fo-link" href="/logout">Sign out</a><details class="fo-danger-zone"><summary>Delete your account</summary><form method="post" action="/app/account/delete">${csrfField}<p>Cancel your plan first. This disconnects your line and permanently deletes every call record, transcript, recording, task and setting. Appointments on your calendar stay there.</p><label>Type DELETE to confirm<input name="confirm" autocomplete="off" required></label><label>Your password<input name="password" type="password" autocomplete="current-password" required></label><button class="fo-btn danger">Delete my account</button></form></details></section></aside></div>`;
   return ownerShell({ title: "Settings", view: "settings", businessName: c.businessName, status: coverageStatus(input.account, c), body, base: "/app", needsAttention: 0 });
+}
+
+function forwardingCard(lineNumber: string, mode: "overflow" | "after_hours" | "always", open: boolean): string {
+  const rows = forwardingInstructions(lineNumber, mode).map((row) => `<div><dt>${e(row.carrier)}</dt><dd><code>${e(row.on)}</code> <small>off: <code>${e(row.off)}</code></small></dd></div>`).join("");
+  return `<details class="fo-card fo-forward"${open ? " open" : ""}><summary><span><small>Your Front Office number</small><strong>${e(formatPhone(lineNumber))}</strong></span><span class="fo-badge">Forward your calls</span></summary><p>Keep your business number. On your business phone, dial your carrier’s code and press call. ${mode === "always" ? "Every call" : "Calls you don’t pick up"} will ring through to Front Office.</p><dl class="fo-facts">${rows}</dl><p class="fo-fine">To test: call your business number from another phone and let it ring. Office phone systems (RingCentral, Google Voice, Ooma) set this under call forwarding or “when unanswered”.</p></details>`;
 }
 
 function activity(calls: CallRecord[], completed: CallbackTask[], callsById: Map<string, CallRecord>, tz: string): string {
@@ -558,5 +570,9 @@ a{color:var(--ink)}
   .fo-side nav a.active{background:#ececec;box-shadow:none;font-weight:600}
   .fo-content{gap:16px}
 }
+.fo-forward summary{display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;list-style:none}.fo-forward summary::-webkit-details-marker{display:none}
+.fo-forward summary>span:first-child{display:grid}.fo-forward small{color:var(--muted);font-size:13px}.fo-forward strong{font-size:22px;font-weight:650;font-variant-numeric:tabular-nums}
+.fo-forward[open]{display:grid;gap:12px;border-color:var(--yellow);box-shadow:inset 4px 0 0 var(--yellow),var(--shadow)}.fo-forward p{font-size:14px}
+.fo-forward code{font:600 15px ui-monospace,SFMono-Regular,Menlo,monospace;background:#fbfde0;padding:2px 6px;border-radius:6px;user-select:all}
 @media(prefers-reduced-motion:no-preference){.fo-btn{transition:transform .12s,box-shadow .12s}}
 `;
