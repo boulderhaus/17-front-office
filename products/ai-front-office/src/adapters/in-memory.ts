@@ -144,6 +144,17 @@ export class InMemoryStore implements Store {
     return true;
   }
 
+  async deleteWorkspace(tenantId: string): Promise<void> {
+    for (const call of [...this.calls.values()].filter((item) => item.tenantId === tenantId)) await this.deleteCall(tenantId, call.id);
+    for (const [id, notification] of this.notifications) if (notification.tenantId === tenantId) this.notifications.delete(id);
+    for (const key of [...this.integrationSecrets.keys()]) if (key.startsWith(`${tenantId}:`)) this.integrationSecrets.delete(key);
+    for (const key of [...this.smsOptOuts.keys()]) if (key.startsWith(`${tenantId}:`)) this.smsOptOuts.delete(key);
+    for (const [key, route] of this.providerRoutes) if (route.tenantId === tenantId) this.providerRoutes.delete(key);
+    for (const [id, account] of this.ownerAccounts) if (account.tenantId === tenantId) this.ownerAccounts.delete(id);
+    this.subscriptions.delete(tenantId);
+    this.configs.delete(tenantId);
+  }
+
   async markRetentionFailed(callId: string, at: string): Promise<void> {
     if (this.calls.has(callId)) this.retentionFailures.set(callId, at);
   }

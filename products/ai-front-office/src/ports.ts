@@ -34,6 +34,8 @@ export interface Store {
   /** Expired calls, skipping any whose deletion failed within the last 24 hours before `now`. */
   listExpiredCalls(tenantId: string, endedBefore: string, limit: number, now: string): Promise<CallRecord[]>;
   markRetentionFailed(callId: string, at: string): Promise<void>;
+  /** Remove every record for a shop. Provider call IDs are kept as tombstones so late webhooks cannot recreate calls. */
+  deleteWorkspace(tenantId: string): Promise<void>;
   deleteCall(tenantId: string, callId: string): Promise<boolean>;
   upsertCustomer(customer: CustomerRecord): Promise<void>;
   getBookingForCall(callId: string): Promise<BookingRecord | null>;

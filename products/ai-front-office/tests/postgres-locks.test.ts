@@ -52,5 +52,20 @@ describe.skipIf(!databaseUrl)("PostgreSQL advisory locks under overlapping calls
     expect(await store.listExpiredCalls(tenantId, "2026-02-01T00:00:00Z", 10, "2026-02-01T12:00:00Z")).toEqual([]);
     expect((await store.listExpiredCalls(tenantId, "2026-02-01T00:00:00Z", 10, "2026-02-02T01:00:00Z")).map((call) => call.id)).toEqual([id]);
   });
+
+  it("deletes a whole workspace and keeps tombstones so late webhooks cannot recreate calls", async () => {
+    const tenantId = `workspace_${randomUUID()}`;
+    await store.saveConfig(createDemoConfig(tenantId));
+    await store.saveIntegrationSecret(tenantId, "notifications", "owner-primary", "+12175550199");
+    const id = randomUUID();
+    await store.saveCall({ id, tenantId, providerCallId: `ws-${id}`, fromNumber: "+12175550100", fromNumberVerified: false, startedAt: "2026-01-01T00:00:00.000Z", endedAt: null, durationSeconds: null,
+      fields: { callerName: null, companyName: null, callbackNumber: null, address: null, serviceCategory: null, serviceCategoryConfidence: 0, problemDescription: "", equipmentDetails: null, accessNotes: null, requestedStart: null, explicitSlotConfirmation: false, diagnosticFeeAccepted: false, humanRequested: false, confidence: 0 },
+      emergency: null, outcome: "in_progress", transcript: null, recordingUrl: null, consentState: "unknown", billingDisposition: "billable", qualityFlags: [], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" });
+    await store.deleteWorkspace(tenantId);
+    expect(await store.getCall(id)).toBeNull();
+    expect(await store.getIntegrationSecret(tenantId, "notifications", "owner-primary")).toBeNull();
+    await expect(store.getConfig(tenantId)).rejects.toThrow();
+    expect(await store.isProviderCallDeleted(`ws-${id}`)).toBe(true);
+  });
 });
 

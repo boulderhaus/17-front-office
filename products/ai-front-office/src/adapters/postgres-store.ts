@@ -221,6 +221,27 @@ export class PostgresStore implements Store {
     }
   }
 
+  async deleteWorkspace(tenantId: string): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "INSERT INTO deleted_provider_calls(provider_call_id,tenant_id) SELECT provider_call_id,tenant_id FROM calls WHERE tenant_id=$1 ON CONFLICT DO NOTHING",
+        [tenantId],
+      );
+      // Outbox rows without a call (welcome, billing notices) are not covered by the call cascade.
+      await client.query("DELETE FROM notification_outbox WHERE tenant_id=$1", [tenantId]);
+      await client.query("DELETE FROM tool_events WHERE tenant_id=$1", [tenantId]);
+      await client.query("DELETE FROM business_configs WHERE tenant_id=$1", [tenantId]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async markRetentionFailed(callId: string, at: string): Promise<void> {
     await this.#pool.query("UPDATE calls SET retention_failed_at=$2 WHERE id=$1", [callId, at]);
   }

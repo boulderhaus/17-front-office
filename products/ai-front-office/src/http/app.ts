@@ -718,6 +718,50 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       });
       return redirect(response, "/app/settings");
     }
+    if (method === "GET" && url.pathname === "/app/account/export") {
+      if (member) throw new HttpError(403, "Only the owner can export the shop's data");
+      const [config, calls, tasks, subscription] = await Promise.all([
+        dependencies.store.getConfig(account.tenantId),
+        dependencies.store.listCalls(account.tenantId, 100_000),
+        dependencies.store.listCallbackTasks(account.tenantId, 100_000),
+        dependencies.store.getSubscription(account.tenantId),
+      ]);
+      const bookings = (await Promise.all(calls.map((call) => dependencies.store.getBookingForCall(call.id)))).filter(Boolean);
+      const body = JSON.stringify({
+        exportedAt: dependencies.clock.now().toISOString(),
+        account: { email: account.email, displayName: account.displayName, createdAt: account.createdAt },
+        settings: config,
+        subscription: subscription ? { status: subscription.status, currentPeriodEnd: subscription.currentPeriodEnd } : null,
+        calls: calls.map((call) => ({ id: call.id, startedAt: call.startedAt, endedAt: call.endedAt, durationSeconds: call.durationSeconds, callerNumber: call.fromNumber, details: call.fields, emergency: call.emergency, outcome: call.outcome, transcript: call.transcript, consent: call.consentState })),
+        callbackTasks: tasks,
+        bookings,
+      }, null, 2);
+      response.writeHead(200, {
+        "content-type": "application/json; charset=utf-8",
+        "content-disposition": `attachment; filename="front-office-export-${dependencies.clock.now().toISOString().slice(0, 10)}.json"`,
+        "content-length": Buffer.byteLength(body),
+      });
+      response.end(body);
+      return;
+    }
+    if (method === "POST" && url.pathname === "/app/account/delete") {
+      if (member) throw new HttpError(403, "Only the owner can delete the shop");
+      const form = parseForm(await readBody(request, 8_000));
+      if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      if (form.get("confirm")?.trim().toLowerCase() !== "delete") throw new HttpError(400, "Type DELETE to confirm");
+      if (!await verifyOwnerPassword(form.get("password") ?? "", account.passwordHash)) throw new HttpError(403, "Password is incorrect");
+      const subscription = await dependencies.store.getSubscription(account.tenantId);
+      if (subscription && ["active", "trialing", "past_due", "unpaid"].includes(subscription.status)) {
+        throw new HttpError(409, "Cancel your subscription in Billing first. You can delete your account once it has ended.");
+      }
+      await pauseLiveRoute(account.tenantId)
+        .catch(() => { throw new HttpError(502, "We couldn't disconnect your Front Office line. Nothing was deleted; please retry."); });
+      await deletionService.deleteWorkspace(account.tenantId)
+        .catch(() => { throw new HttpError(502, "A call recording couldn't be deleted. Nothing else was removed; please retry."); });
+      log({ level: "warn", event: "owner_workspace_deleted", tenantId: account.tenantId });
+      response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
+      return redirect(response, "/?deleted=1");
+    }
     if (method === "GET" && url.pathname === "/app/integrations/google/start") {
       if (!dependencies.env.GOOGLE_CLIENT_ID || !dependencies.env.GOOGLE_CLIENT_SECRET) throw new HttpError(503, "Google OAuth is not configured on the server");
       const cookiePath = "/app/integrations/google";

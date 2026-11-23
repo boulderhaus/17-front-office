@@ -706,6 +706,29 @@ describe("HTTP boundary", () => {
     expect(settings).not.toContain("direct booking</option>");
   });
 
+  it("lets an owner export their data and delete the whole workspace after billing ends", async () => {
+    const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Exit", email: "exit@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
+    const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
+    const account = (await store.getOwnerAccountByEmail("exit@synthetic.example"))!;
+    const exported = await fetch(`${baseUrl}/app/account/export`, { headers: { cookie } });
+    expect(exported.headers.get("content-disposition")).toContain("attachment");
+    expect((await exported.json() as { account: { email: string } }).account.email).toBe("exit@synthetic.example");
+    const settings = await (await fetch(`${baseUrl}/app/settings`, { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(settings)![1]!;
+    const remove = (password: string) => fetch(`${baseUrl}/app/account/delete`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, confirm: "DELETE", password }) });
+    expect((await remove("wrong-password-entirely")).status).toBe(403);
+    const now = new Date().toISOString();
+    await store.saveSubscription({ tenantId: account.tenantId, providerCustomerId: "cus_x", providerSubscriptionId: "sub_x", status: "active", currentPeriodEnd: null, providerEventCreatedAt: now, createdAt: now, updatedAt: now });
+    expect((await remove("long-password-for-tests")).status).toBe(409);
+    await store.saveSubscription({ tenantId: account.tenantId, providerCustomerId: "cus_x", providerSubscriptionId: "sub_x", status: "canceled", currentPeriodEnd: null, providerEventCreatedAt: now, createdAt: now, updatedAt: now });
+    const deleted = await remove("long-password-for-tests");
+    expect(deleted.status).toBe(303);
+    expect(deleted.headers.get("set-cookie")).toContain("Max-Age=0");
+    expect(await store.getOwnerAccountByEmail("exit@synthetic.example")).toBeNull();
+    await expect(store.getConfig(account.tenantId)).rejects.toThrow();
+    expect((await fetch(`${baseUrl}/app`, { redirect: "manual", headers: { cookie } })).headers.get("location")).toBe("/login");
+  });
+
   it("persists owner-approved scripts and coverage rules from the admin form", async () => {
     const login = await fetch(`${baseUrl}/admin/login`, {
       method: "POST",
