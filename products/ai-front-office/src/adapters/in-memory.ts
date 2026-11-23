@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type { CalendarPort, NotificationPort, Store } from "../ports.js";
 import type {
@@ -20,10 +21,14 @@ import type {
 import { normalizeBusinessConfig } from "../domain/config.js";
 import { billedMinutesFor, usageClass } from "../domain/usage.js";
 
+/** Re-entrant per async call chain, like the Postgres store's session-level advisory locks. */
 class KeyedMutex {
   readonly #tails = new Map<string, Promise<void>>();
+  readonly #held = new AsyncLocalStorage<ReadonlySet<string>>();
 
   async run<T>(key: string, task: () => Promise<T>): Promise<T> {
+    const held = this.#held.getStore() ?? new Set<string>();
+    if (held.has(key)) return task();
     const previous = this.#tails.get(key) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
@@ -33,7 +38,7 @@ class KeyedMutex {
     this.#tails.set(key, tail);
     await previous;
     try {
-      return await task();
+      return await this.#held.run(new Set([...held, key]), task);
     } finally {
       release();
       if (this.#tails.get(key) === tail) this.#tails.delete(key);
@@ -96,6 +101,17 @@ export class InMemoryStore implements Store {
 
   async deleteIntegrationSecret(tenantId: string, provider: string, key: string): Promise<void> {
     this.integrationSecrets.delete(`${tenantId}:${provider}:${key}`);
+  }
+
+  async backfillInboundNumberLookups(): Promise<{ updated: number; conflicts: number }> {
+    return { updated: 0, conflicts: 0 }; // lookups read the values directly
+  }
+
+  async getTenantIdByInboundNumber(phoneNumber: string): Promise<string | null> {
+    for (const [key, value] of this.integrationSecrets) {
+      if (key.endsWith(":telnyx:inbound_number") && value === phoneNumber) return key.slice(0, -":telnyx:inbound_number".length);
+    }
+    return null;
   }
 
   async getCallByProviderId(providerCallId: string): Promise<CallRecord | null> {
@@ -217,6 +233,13 @@ export class InMemoryStore implements Store {
   async enqueueNotification(notification: OutboxNotification): Promise<boolean> {
     if ([...this.notifications.values()].some((item) => item.idempotencyKey === notification.idempotencyKey)) return false;
     this.notifications.set(notification.id, structuredClone(notification));
+    return true;
+  }
+
+  async cancelPendingNotification(idempotencyKey: string): Promise<boolean> {
+    const item = [...this.notifications.values()].find((candidate) => candidate.idempotencyKey === idempotencyKey);
+    if (!item || (item.state !== "pending" && item.state !== "retry")) return false;
+    item.state = "cancelled";
     return true;
   }
 

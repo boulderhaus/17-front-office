@@ -344,6 +344,8 @@ interface TelnyxVoiceRoutingOptions {
   apiKey: string;
   phoneNumber: string;
   assistantId: string;
+  /** Shared grace-period voicemail TeXML app. A number pointed at it is still ours to reconnect or pause. */
+  voicemailConnectionId?: string | undefined;
   fetcher?: typeof fetch;
 }
 
@@ -351,12 +353,27 @@ export class TelnyxVoiceRoutingClient {
   constructor(private readonly options: TelnyxVoiceRoutingOptions) {}
 
   async setPaused(paused: boolean): Promise<{ changed: boolean; numberId: string }> {
+    const assistantConnectionId = await this.assistantConnectionId();
+    return this.assignConnection(paused ? null : assistantConnectionId, assistantConnectionId);
+  }
+
+  /** Point the number at the shared voicemail TeXML app (billing grace line) instead of disconnecting it. */
+  async setVoicemail(): Promise<{ changed: boolean; numberId: string }> {
+    if (!this.options.voicemailConnectionId) throw new Error("No voicemail TeXML application is configured");
+    const assistantConnectionId = await this.assistantConnectionId();
+    return this.assignConnection(this.options.voicemailConnectionId, assistantConnectionId);
+  }
+
+  private async assistantConnectionId(): Promise<string> {
     const assistant = await this.request<Record<string, unknown>>(`/ai/assistants/${encodeURIComponent(this.options.assistantId)}`);
     const assistantData = objectData(assistant);
     const telephony = objectData(assistantData.telephony_settings);
     const assistantConnectionId = typeof telephony.default_texml_app_id === "string" ? telephony.default_texml_app_id : null;
     if (!assistantConnectionId) throw new Error("Telnyx assistant has no default TeXML application");
+    return assistantConnectionId;
+  }
 
+  private async assignConnection(desiredConnectionId: string | null, assistantConnectionId: string): Promise<{ changed: boolean; numberId: string }> {
     const url = new URL("https://api.telnyx.com/v2/phone_numbers");
     url.searchParams.set("filter[phone_number]", this.options.phoneNumber);
     const response = await this.request<{ data?: Array<Record<string, unknown>> }>(url.toString(), undefined, true);
@@ -364,9 +381,9 @@ export class TelnyxVoiceRoutingClient {
     const numberId = typeof number?.id === "string" ? number.id : null;
     if (!numberId) throw new Error("Telnyx phone number was not found");
     const currentConnectionId = typeof number?.connection_id === "string" ? number.connection_id : null;
-    const desiredConnectionId = paused ? null : assistantConnectionId;
     if (currentConnectionId === desiredConnectionId) return { changed: false, numberId };
-    if (currentConnectionId && currentConnectionId !== assistantConnectionId) {
+    const ours = new Set([assistantConnectionId, this.options.voicemailConnectionId].filter(Boolean));
+    if (currentConnectionId && !ours.has(currentConnectionId)) {
       throw new Error("Telnyx phone number is assigned to an unexpected voice connection");
     }
 

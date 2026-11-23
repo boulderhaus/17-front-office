@@ -109,12 +109,51 @@ export class PostgresStore implements Store {
   }
 
   async saveIntegrationSecret(tenantId: string, provider: string, key: string, value: string): Promise<void> {
+    // Only values we must find by content get a keyed lookup hash; every other secret stays opaque.
+    const lookupHash = provider === "telnyx" && key === "inbound_number" ? this.cryptoBox.hashLookup(value) : null;
     await this.#pool.query(
-      `INSERT INTO integration_secrets(tenant_id,provider,secret_key,value_ciphertext,updated_at)
-       VALUES($1,$2,$3,$4,now())
-       ON CONFLICT (tenant_id,provider,secret_key) DO UPDATE SET value_ciphertext=EXCLUDED.value_ciphertext,updated_at=now()`,
-      [tenantId, provider, key, this.cryptoBox.encrypt(value)],
+      `INSERT INTO integration_secrets(tenant_id,provider,secret_key,value_ciphertext,lookup_hash,updated_at)
+       VALUES($1,$2,$3,$4,$5,now())
+       ON CONFLICT (tenant_id,provider,secret_key) DO UPDATE SET value_ciphertext=EXCLUDED.value_ciphertext,lookup_hash=EXCLUDED.lookup_hash,updated_at=now()`,
+      [tenantId, provider, key, this.cryptoBox.encrypt(value), lookupHash],
     );
+  }
+
+  async backfillInboundNumberLookups(): Promise<{ updated: number; conflicts: number }> {
+    const result = await this.#pool.query(
+      "SELECT tenant_id, value_ciphertext FROM integration_secrets WHERE provider='telnyx' AND secret_key='inbound_number' AND lookup_hash IS NULL",
+    );
+    let updated = 0;
+    let conflicts = 0;
+    for (const row of result.rows) {
+      const value = this.cryptoBox.decrypt(String(row.value_ciphertext));
+      if (!value) continue;
+      try {
+        const write = await this.#pool.query(
+          "UPDATE integration_secrets SET lookup_hash=$2 WHERE tenant_id=$1 AND provider='telnyx' AND secret_key='inbound_number' AND lookup_hash IS NULL",
+          [row.tenant_id, this.cryptoBox.hashLookup(value)],
+        );
+        updated += write.rowCount ?? 0;
+      } catch (error) {
+        // Another shop already owns this number: leave this row unreachable rather than misroute its calls.
+        if ((error as { code?: string }).code !== "23505") throw error;
+        conflicts += 1;
+      }
+    }
+    return { updated, conflicts };
+  }
+
+  async getTenantIdByInboundNumber(phoneNumber: string): Promise<string | null> {
+    const result = await this.#pool.query(
+      `SELECT tenant_id, value_ciphertext FROM integration_secrets
+       WHERE provider='telnyx' AND secret_key='inbound_number' AND lookup_hash=$1
+       ORDER BY updated_at DESC`,
+      [this.cryptoBox.hashLookup(phoneNumber)],
+    );
+    for (const row of result.rows) {
+      if (this.cryptoBox.decrypt(String(row.value_ciphertext)) === phoneNumber) return String(row.tenant_id);
+    }
+    return null;
   }
 
   async getCallByProviderId(providerCallId: string): Promise<CallRecord | null> {
@@ -384,6 +423,15 @@ export class PostgresStore implements Store {
       `UPDATE notification_outbox SET state=$2,attempts=$3,next_attempt_at=$4,provider_receipt=$5,last_error=$6,sent_at=$7,sending_at=NULL WHERE id=$1`,
       [notification.id, notification.state, notification.attempts, notification.nextAttemptAt, notification.providerReceipt, notification.lastError, notification.sentAt],
     );
+  }
+
+  async cancelPendingNotification(idempotencyKey: string): Promise<boolean> {
+    // Claiming holds the row lock and moves it to 'sending'; this re-checks the state after any wait.
+    const result = await this.#pool.query(
+      "UPDATE notification_outbox SET state='cancelled' WHERE idempotency_key=$1 AND state IN ('pending','retry') RETURNING id",
+      [idempotencyKey],
+    );
+    return result.rowCount === 1;
   }
 
   async getNotificationByProviderReceipt(providerReceipt: string): Promise<OutboxNotification | null> {

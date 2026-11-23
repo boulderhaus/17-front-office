@@ -15,7 +15,9 @@ export type NotificationState =
   | "delivery_failed"
   | "delivery_unconfirmed"
   | "retry"
-  | "dead";
+  | "dead"
+  /** Superseded before sending (e.g. a voicemail fallback once the transcript arrived). */
+  | "cancelled";
 
 export interface CollectedCallFields {
   callerName: string | null;

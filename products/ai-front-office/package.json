@@ -16,7 +16,8 @@
     "test:watch": "vitest",
     "demo": "node --import tsx scripts/run-simulated-call.ts",
     "simulate:launch": "node --import tsx scripts/run-launch-simulations.ts",
-    "configure:telnyx": "node --import tsx scripts/configure-telnyx.ts"
+    "configure:telnyx": "node --import tsx scripts/configure-telnyx.ts",
+    "configure:voicemail": "node --import tsx scripts/configure-voicemail-app.ts"
   },
   "dependencies": {
     "pg": "8.23.1",

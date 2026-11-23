@@ -34,6 +34,24 @@ import { NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-pr
 import { TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
 import { carrierFamily, forwardingOffInstruction, type CarrierFamily, type CarrierInfo } from "../domain/forwarding.js";
 import { FORWARDING_CHECK_WINDOW_MS, type ForwardingState } from "./owner-api-model.js";
+import {
+  clearGrace,
+  describeCaller,
+  GRACE_DAYS,
+  GRACE_PROVIDER,
+  GRACE_STARTED_KEY,
+  graceStartedAt,
+  lowerFirst,
+  queueOwnerMessage,
+  releaseProvisionedLine as releaseLine,
+  renderHangupTexml,
+  renderVoicemailTexml,
+  transcriptSnippet,
+  VOICEMAIL_FALLBACK_DELAY_MS,
+  voicemailToken,
+  voicemailTokenMatches,
+  type GraceContext,
+} from "../application/grace-line.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import {
   asTelnyxConversationEnded,
@@ -342,6 +360,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   const limiter = new RateLimiter();
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));
   const telemetry = dependencies.telemetry ?? noopTelemetry;
+  const graceContext: GraceContext = { store: dependencies.store, env: dependencies.env, clock: dependencies.clock, fetcher: dependencies.fetcher, log };
   const analyticsPage = (html: string, loader = true): string => injectAnalytics(html, { key: dependencies.env.POSTHOG_KEY, ingestionHost: dependencies.env.POSTHOG_HOST, loader });
   let ownerWebIndex: Promise<string | null> | null = null;
   const WEB_TYPES: Record<string, string> = { js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", woff2: "font/woff2", woff: "font/woff", svg: "image/svg+xml", png: "image/png" };
@@ -600,6 +619,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return sendHtml(response, 200, renderTerms(await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID)));
     }
     if (method === "POST" && url.pathname === "/webhooks/telnyx") return handleTelnyx(request, response);
+    if (url.pathname.startsWith("/texml/voicemail")) return handleVoicemail(request, response, url);
     if (method === "POST" && url.pathname === "/webhooks/stripe") return handleStripe(request, response);
     if (method === "POST" && url.pathname === "/tools/save-intake") return handleIntake(request, response);
     if (method === "POST" && url.pathname === "/tools/approved-answer") {
@@ -916,7 +936,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   }
 
   /** One path for the settings form and the JSON API, so validation and side effects stay identical. */
+  /** Billing lock first (same order as Stripe events and the grace sweep): an unpause can reconnect a grace-period line. */
   async function saveOwnerSettings(account: OwnerAccount, form: URLSearchParams): Promise<void> {
+    await dependencies.store.withLock(`billing:${account.tenantId}`, () => saveOwnerSettingsLocked(account, form));
+  }
+
+  async function saveOwnerSettingsLocked(account: OwnerAccount, form: URLSearchParams): Promise<void> {
     await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
     const current = await dependencies.store.getConfig(account.tenantId);
     const updated = configFromForm(current, form, "owner");
@@ -957,7 +982,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
       ]);
       if (!dependencies.env.TELNYX_API_KEY || !route || !inboundNumber) throw new HttpError(409, "The live phone route is not configured for this shop");
-      liveRouteChange = new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: inboundNumber, assistantId: route.externalId });
+      liveRouteChange = voiceRouting(inboundNumber, route.externalId);
       await liveRouteChange.setPaused(updated.paused)
         .catch(() => { throw new HttpError(502, "Telnyx could not change the live phone route; your setting was not changed"); });
     }
@@ -1355,7 +1380,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
    */
   async function goLive(account: OwnerAccount, existing: { assistantId: string; inboundNumber: string } | null): Promise<string> {
     telemetry.capture("go_live_attempted", account.tenantId, account.tenantId);
-    return trackGoLive(account.tenantId, dependencies.store.withLock(`go-live:${account.tenantId}`, async () => {
+    // The billing lock keeps go-live from racing a payment change or the day-30 grace release.
+    return trackGoLive(account.tenantId, dependencies.store.withLock(`go-live:${account.tenantId}`, () => dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
       const providerBlockers = liveProviderBlockers();
       if (providerBlockers.length > 0) throw new HttpError(409, `Live provider prerequisites are missing: ${providerBlockers.join(", ")}`);
       const config = await dependencies.store.getConfig(account.tenantId);
@@ -1411,7 +1437,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
 
       const existingRoute = await dependencies.store.getProviderRoute("telnyx", assistantId);
       if (existingRoute && existingRoute.tenantId !== account.tenantId) throw new HttpError(409, "That Telnyx assistant is already assigned to another tenant");
-      const liveRoute = new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY!, phoneNumber: inboundNumber, assistantId, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) });
+      const liveRoute = voiceRouting(inboundNumber, assistantId);
       const now = dependencies.clock.now().toISOString();
       // Map first: a call that arrives the instant the number connects must already resolve to this shop.
       await dependencies.store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", inboundNumber);
@@ -1426,7 +1452,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         throw error;
       }
       return inboundNumber;
-    }));
+    })));
   }
 
   /** Records how a go-live ended: live, blocked (4xx: a prerequisite is missing) or failed (5xx: provider or server). */
@@ -1446,20 +1472,16 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
 
   /** Numbers and assistants we bought for a shop go back to Telnyx when the shop is deleted. Best effort: logged, never blocks deletion. */
   async function releaseProvisionedLine(tenantId: string): Promise<void> {
-    const [assistantId, inbound, pending] = await Promise.all([
-      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "provisioned_assistant_id"),
-      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
-      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "pending_number"),
-    ]);
-    if (!assistantId || !dependencies.env.TELNYX_API_KEY) return; // not a line we provisioned
-    const phoneNumber = inbound ?? pending;
-    await new TelnyxProvisioner({
-      apiKey: dependencies.env.TELNYX_API_KEY,
-      templateAssistantId: dependencies.env.TELNYX_TEMPLATE_ASSISTANT_ID ?? dependencies.env.TELNYX_ASSISTANT_ID ?? "",
-      messagingProfileId: dependencies.env.TELNYX_MESSAGING_PROFILE_ID ?? "",
+    await releaseLine(graceContext, tenantId);
+  }
+
+  /** Every voice-routing change knows the shared voicemail app, so a number in its billing grace period is still ours to move. */
+  function voiceRouting(phoneNumber: string, assistantId: string): TelnyxVoiceRoutingClient {
+    return new TelnyxVoiceRoutingClient({
+      apiKey: dependencies.env.TELNYX_API_KEY!, phoneNumber, assistantId,
+      voicemailConnectionId: dependencies.env.TELNYX_VOICEMAIL_APP_ID,
       ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}),
-      campaignId: dependencies.env.TELNYX_CAMPAIGN_ID,
-    }).release({ phoneNumber, assistantId }).catch((error) => log({ level: "error", event: "line_release_failed", tenantId, phoneNumber, assistantId, error: safeError(error) }));
+    });
   }
 
   /** Detach the shop's number from the assistant so callers do not reach an AI that can save nothing. */
@@ -1469,10 +1491,27 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
     ]);
     if (!route || !inboundNumber || !dependencies.env.TELNYX_API_KEY) return;
-    await new TelnyxVoiceRoutingClient({
-      apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: inboundNumber, assistantId: route.externalId,
-      ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}),
-    }).setPaused(true);
+    await voiceRouting(inboundNumber, route.externalId).setPaused(true);
+  }
+
+  /**
+   * Billing grace line: point the shop's number at the shared voicemail app instead of
+   * disconnecting it. Returns false (and changes nothing) when there is no voicemail app or no line.
+   */
+  async function startGraceLine(tenantId: string): Promise<boolean> {
+    if (!dependencies.env.TELNYX_VOICEMAIL_APP_ID || !dependencies.env.TELNYX_API_KEY) return false;
+    const [route, inboundNumber] = await Promise.all([
+      dependencies.store.getProviderRouteForTenant("telnyx", tenantId),
+      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
+    ]);
+    if (!route || !inboundNumber) return false;
+    // Re-save so shops provisioned before the number lookup existed can be found by the number callers dial.
+    await dependencies.store.saveIntegrationSecret(tenantId, "telnyx", "inbound_number", inboundNumber);
+    await voiceRouting(inboundNumber, route.externalId).setVoicemail();
+    if (!await graceStartedAt(dependencies.store, tenantId)) {
+      await dependencies.store.saveIntegrationSecret(tenantId, GRACE_PROVIDER, GRACE_STARTED_KEY, dependencies.clock.now().toISOString());
+    }
+    return true;
   }
 
   async function readForwarding(tenantId: string): Promise<ForwardingState> {
@@ -1515,11 +1554,25 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     return "check";
   }
 
+  /** Lapse and restore run under `billing:<tenant>`, the lock the grace sweep holds while it releases a line. */
   async function handleBillingLapse(tenantId: string, status: SubscriptionRecord["status"], eventId: string): Promise<void> {
+    await dependencies.store.withLock(`billing:${tenantId}`, () => handleBillingLapseLocked(tenantId, status, eventId));
+  }
+
+  async function handleBillingRestored(tenantId: string, eventId: string): Promise<void> {
+    await dependencies.store.withLock(`billing:${tenantId}`, () => handleBillingRestoredLocked(tenantId, eventId));
+  }
+
+  async function handleBillingLapseLocked(tenantId: string, status: SubscriptionRecord["status"], eventId: string): Promise<void> {
     const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
     if (account?.status !== "active") return;
     if ((await dependencies.store.getConfig(tenantId)).paused) return; // already off (billing or owner)
-    await pauseLiveRoute(tenantId).catch((error) => {
+    // Billing lapse keeps the number answering with voicemail for the grace period; account deletion still disconnects.
+    const grace = await startGraceLine(tenantId).catch((error) => {
+      log({ level: "error", event: "billing_lapse_voicemail_failed", tenantId, error: safeError(error) });
+      throw new HttpError(502, "Could not move the phone line to voicemail; Stripe will retry");
+    });
+    if (!grace) await pauseLiveRoute(tenantId).catch((error) => {
       log({ level: "error", event: "billing_lapse_pause_failed", tenantId, error: safeError(error) });
       throw new HttpError(502, "Could not pause the live phone route; Stripe will retry");
     });
@@ -1535,30 +1588,33 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     for (const destinationRef of config.ownerNotificationRefs) {
       await dependencies.store.enqueueNotification({
         id: randomUUID(), tenantId, callId: null, channel: "sms", destinationRef,
-        body: `Front Office is paused: your subscription is ${statusWords}. Calls forwarded to your Front Office line will not be answered. Update billing in your dashboard, or ${offCode.charAt(0).toLowerCase()}${offCode.slice(1)}`,
+        body: grace
+          ? `Front Office is paused: your subscription is ${statusWords}. For the next ${GRACE_DAYS} days calls forwarded to your Front Office line go to voicemail and we text you each message; after that the number stops working. Update billing in your dashboard, or ${lowerFirst(offCode)}`
+          : `Front Office is paused: your subscription is ${statusWords}. Calls forwarded to your Front Office line will not be answered. Update billing in your dashboard, or ${lowerFirst(offCode)}`,
         priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
         idempotencyKey: `billing-lapse:${tenantId}:${eventId}:${destinationRef}`,
         providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
       });
     }
-    log({ level: "warn", event: "billing_lapse_paused", tenantId, status });
+    log({ level: "warn", event: grace ? "billing_lapse_voicemail" : "billing_lapse_paused", tenantId, status });
   }
 
   /** Billing paused this shop and it has now paid: reconnect the line and tell the owner. */
-  async function handleBillingRestored(tenantId: string, eventId: string): Promise<void> {
+  async function handleBillingRestoredLocked(tenantId: string, eventId: string): Promise<void> {
     const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
     if (account?.status !== "active") return;
     const config = await dependencies.store.getConfig(tenantId);
-    if (!config.pausedForBilling) return;
+    if (!config.pausedForBilling) {
+      await clearGrace(dependencies.store, tenantId);
+      return;
+    }
     const [route, inboundNumber] = await Promise.all([
       dependencies.store.getProviderRouteForTenant("telnyx", tenantId),
       dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
     ]);
     if (route && inboundNumber && dependencies.env.TELNYX_API_KEY) {
-      await new TelnyxVoiceRoutingClient({
-        apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: inboundNumber, assistantId: route.externalId,
-        ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}),
-      }).setPaused(false).catch((error) => {
+      // Reconnects from either state: disconnected, or on the grace-period voicemail.
+      await voiceRouting(inboundNumber, route.externalId).setPaused(false).catch((error) => {
         log({ level: "error", event: "billing_restore_resume_failed", tenantId, error: safeError(error) });
         throw new HttpError(502, "Could not reconnect the live phone route; Stripe will retry");
       });
@@ -1567,6 +1623,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const current = await dependencies.store.getConfig(tenantId);
       await dependencies.store.saveConfig({ ...current, paused: false, pausedForBilling: false });
     });
+    await clearGrace(dependencies.store, tenantId);
     const now = dependencies.clock.now().toISOString();
     for (const destinationRef of config.ownerNotificationRefs) {
       await dependencies.store.enqueueNotification({
@@ -2147,6 +2204,94 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     throw new HttpError(404, "Not found");
   }
 
+  /**
+   * Billing grace-period voicemail, served by the shared TeXML app (TELNYX_VOICEMAIL_APP_ID).
+   * The greeting only names the shop the caller already dialed, so an unsigned instruction fetch is
+   * still answered (a signed one must verify). Recording and transcription callbacks are always
+   * Telnyx-signed and bound to this tenant and call by an HMAC token in their URL.
+   */
+  async function handleVoicemail(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    const method = request.method ?? "GET";
+    if (method !== "POST" && method !== "GET") throw new HttpError(405, "Method not allowed");
+    const rawBody = method === "POST" ? await readBody(request, 64_000) : "";
+    const form = method === "POST" ? new URLSearchParams(rawBody) : url.searchParams;
+    const tokenSecret = dependencies.env.SESSION_SIGNING_KEY ?? dependencies.env.TOOL_TOKEN;
+    const sendTexml = (xml: string): void => {
+      response.writeHead(200, { "content-type": "application/xml; charset=utf-8", "cache-control": "no-store" });
+      response.end(xml);
+    };
+
+    if (url.pathname === "/texml/voicemail" || url.pathname === "/texml/voicemail/done") {
+      if (method === "POST" && request.headers["telnyx-signature-ed25519"]) requireProviderAuth(request, rawBody);
+      enforceProviderRate(request, "texml:voicemail");
+      if (url.pathname === "/texml/voicemail/done") return sendTexml(renderHangupTexml(null));
+      const callSid = form.get("CallSid")?.trim() || null;
+      const dialed = form.get("To")?.trim() ?? "";
+      const to = normalizeUsPhone(dialed) ?? (/^\+[1-9]\d{7,14}$/.test(dialed) ? dialed : null);
+      const tenantId = to ? await dependencies.store.getTenantIdByInboundNumber(to) : null;
+      const config = tenantId ? await dependencies.store.getConfig(tenantId).catch(() => null) : null;
+      if (!tenantId || !config || !callSid) {
+        log({ level: "warn", event: "voicemail_unknown_number" });
+        return sendTexml(renderHangupTexml("Sorry, this number is not in service. Goodbye."));
+      }
+      log({ level: "info", event: "voicemail_answered", tenantId });
+      return sendTexml(renderVoicemailTexml({
+        businessName: config.businessName, publicBaseUrl: dependencies.env.PUBLIC_BASE_URL,
+        tenantId, callSid, token: voicemailToken(tokenSecret, tenantId, callSid),
+      }));
+    }
+
+    const recordingCallback = url.pathname === "/texml/voicemail/recording";
+    if (method !== "POST" || (!recordingCallback && url.pathname !== "/texml/voicemail/transcription")) throw new HttpError(404, "Not found");
+    requireProviderAuth(request, rawBody);
+    enforceProviderRate(request, "texml:voicemail-callback");
+    const tenantId = url.searchParams.get("t");
+    const callSid = form.get("CallSid");
+    if (!tenantId || !callSid || !voicemailTokenMatches(tokenSecret, tenantId, callSid, url.searchParams.get("s"))) {
+      throw new HttpError(403, "Voicemail callback is not bound to this call");
+    }
+    const config = await dependencies.store.getConfig(tenantId).catch(() => null);
+    if (!config) return sendJson(response, 200, { received: true, ignored: "unknown_tenant" });
+    const caller = describeCaller(form.get("From")?.trim() || null);
+    const off = await offInstructionFor(tenantId);
+    const suffix = await graceStartedAt(dependencies.store, tenantId) ? ` Your Front Office plan is paused; ${lowerFirst(off)}` : "";
+    const fallbackBase = `voicemail-fallback:${tenantId}:${callSid}`;
+    // One gate per call: whichever callback arrives first decides whether a no-transcript fallback may exist.
+    const firstForCall = await dependencies.store.claimWebhook(fallbackBase);
+
+    if (recordingCallback) {
+      const status = form.get("RecordingStatus");
+      if (!firstForCall || (status && status !== "completed")) return sendJson(response, 200, { received: true });
+      // Goes out only if the transcript has not arrived (and cancelled it) within a few minutes.
+      await queueOwnerMessage(graceContext, {
+        tenantId,
+        sms: `Front Office voicemail for ${config.businessName}: ${caller} left you a message we couldn't transcribe. Call them back.${suffix}`,
+        emailSubject: `New voicemail for ${config.businessName}`,
+        idempotencyBase: fallbackBase,
+        sendAfter: new Date(dependencies.clock.now().getTime() + VOICEMAIL_FALLBACK_DELAY_MS),
+      });
+      return sendJson(response, 200, { received: true });
+    }
+
+    for (const key of [...config.ownerNotificationRefs.map((reference) => `${fallbackBase}:${reference}`), `${fallbackBase}:email`]) {
+      await dependencies.store.cancelPendingNotification(key);
+    }
+    const transcript = transcriptSnippet(form.get("TranscriptionText") ?? "");
+    const said = transcript ? `${caller} said: \u201c${transcript}\u201d.` : `${caller} left a message with no words we could make out.`;
+    const result = await queueOwnerMessage(graceContext, {
+      tenantId,
+      sms: `Front Office voicemail for ${config.businessName}: ${said}${suffix}`,
+      emailSubject: `New voicemail for ${config.businessName}`,
+      idempotencyBase: `voicemail:${tenantId}:${callSid}`,
+    });
+    log({ level: "info", event: "voicemail_transcribed", tenantId, channel: result.channel, queued: result.queued });
+    return sendJson(response, 200, { received: true });
+  }
+
+  async function offInstructionFor(tenantId: string): Promise<string> {
+    return forwardingOffInstruction((await readForwarding(tenantId)).carrier?.family ?? null);
+  }
+
   function requireProviderAuth(request: IncomingMessage, rawBody: string): void {
     if (dependencies.env.DEMO_MODE && bearerMatches(request, dependencies.env.TOOL_TOKEN)) return;
     if (!dependencies.env.TELNYX_PUBLIC_KEY) {
@@ -2240,6 +2385,7 @@ function formatLocalCallContext(now: Date, timeZone: string): { date: string; ti
 
 function routeKey(pathname: string): string {
   if (pathname === "/webhooks/telnyx") return "webhook:telnyx";
+  if (pathname.startsWith("/texml/")) return `texml:${pathname.slice(7)}`;
   if (pathname.startsWith("/tools/")) return `tool:${pathname.slice(7)}`;
   if (pathname.startsWith("/admin/calls/")) return "admin:call";
   if (pathname.startsWith("/app/calls/")) return "owner:call";

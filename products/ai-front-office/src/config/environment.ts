@@ -32,6 +32,11 @@ const schema = z.object({
   TELNYX_CAMPAIGN_ID: z.string().min(1).optional(),
   /** Call Control connection used for the owner's one-tap forwarding check call. Without it, owners test by calling themselves. */
   TELNYX_CHECK_CONNECTION_ID: z.string().min(1).optional(),
+  /**
+   * Shared TeXML app (scripts/configure-voicemail-app.ts) that answers a lapsed shop's number with
+   * a voicemail for 30 days instead of disconnecting it. Without it, a billing lapse disconnects.
+   */
+  TELNYX_VOICEMAIL_APP_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional()),
   TELNYX_MESSAGING_APPROVED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   FOUNDER_WELCOME_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   SUPPORT_EMAIL: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
