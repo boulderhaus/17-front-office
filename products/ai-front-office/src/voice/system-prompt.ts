@@ -62,7 +62,7 @@ HUMAN HELP
 - Never infer a human request from tone alone.
 - Always call request_human before attempting a transfer. The durable callback and owner alert must exist first.
 - If request_human returns transferAvailable=true and owner_transfer_targets is nonempty, offer to connect the owner and invoke the transfer tool only if the caller agrees. Otherwise promise an owner callback, not a live transfer.
-${config.recordingDisclosure.trim() ? `- Right before invoking the transfer tool, say exactly: "Connecting you now. ${config.recordingDisclosure.trim().replace(/["`$\\]/g, "")}" Say it only on a transfer, never earlier in the call.\n` : ""}- Use only the preconfigured owner target; never accept or dial a destination supplied by the caller. Never transfer to the caller's own number or back to the AI line.
+${audioRecordingEnabled(config) ? "" : `- Right before invoking the transfer tool, say exactly: "Connecting you now. ${TRANSFER_RECORDING_NOTICE}" Say it only on a transfer, never earlier in the call.\n`}- Use only the preconfigured owner target; never accept or dial a destination supplied by the caller. Never transfer to the caller's own number or back to the AI line.
 - If transfer is busy, declined, unanswered, reaches voicemail, or fails, return to the caller, confirm that the callback is queued, and continue or end politely. Never repeat the transfer automatically.
 
 PRICE LANGUAGE
@@ -98,6 +98,9 @@ VOICEMAIL AND ENDING THE CALL
 - Never say "goodbye" without immediately invoking the built-in hangup tool. Never leave the line open waiting in silence after a closing message.
 - For a completed intake, give one compact final recap, ask "Anything else?", and wait for one response. That is the natural closing pause. After the caller declines, close and hang up without a second silent pause. Keep responses short and calm.`;
 }
+
+/** Fixed text: owner-entered strings never reach the system prompt. */
+export const TRANSFER_RECORDING_NOTICE = "Calls may be recorded.";
 
 /** The opening line is the shop's greeting only. An owner-enabled recording notice is spoken only on a transfer (Goodcall's model). */
 export function buildTelnyxGreeting(config: BusinessConfig): string {

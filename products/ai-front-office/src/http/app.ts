@@ -22,7 +22,7 @@ import type { Environment } from "../config/environment.js";
 import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
-import { buildTelnyxGreeting } from "../voice/system-prompt.js";
+import { buildTelnyxGreeting, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import {
   asTelnyxConversationEnded,
@@ -720,7 +720,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
       await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
       const current = await dependencies.store.getConfig(account.tenantId);
-      const updated = configFromForm(current, form);
+      const updated = configFromForm(current, form, "owner");
       if (!dependencies.env.DIRECT_BOOKING_BETA) updated.bookingMode = "confirm";
       if (!dependencies.env.WARM_TRANSFER_BETA) updated.warmTransferEnabled = false;
       updated.flatMonthlyPriceCents = current.flatMonthlyPriceCents;
@@ -1551,7 +1551,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (!bearer && (!session || !verifyCsrf(session, form.get("csrf"), dependencies.env.SESSION_SIGNING_KEY!))) throw new HttpError(403, "Invalid CSRF token");
       await dependencies.store.withLock(`config:${dependencies.env.DEFAULT_TENANT_ID}`, async () => {
       const current = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
-      const updated = configFromForm(current, form);
+      const updated = configFromForm(current, form, "platform");
       const ownerPhone = form.get("ownerPhone")?.trim();
       if (ownerPhone) {
         if (!/^\+[1-9]\d{7,14}$/.test(ownerPhone)) throw new HttpError(400, "Owner phone must use E.164 format");
@@ -1774,7 +1774,7 @@ function timingSafeEqualBuffers(left: Buffer, right: Buffer): boolean {
 }
 
 /** The short optional notice an owner can switch on in setup. */
-const RECORDING_NOTICE = "Calls may be recorded.";
+const RECORDING_NOTICE = TRANSFER_RECORDING_NOTICE;
 
 function serviceAreaMessage(errors: string[]): string {
   return errors.length > 0
@@ -1782,7 +1782,7 @@ function serviceAreaMessage(errors: string[]): string {
     : "Add at least one city and state or 5-digit ZIP.";
 }
 
-function configFromForm(current: BusinessConfig, form: URLSearchParams): BusinessConfig {
+function configFromForm(current: BusinessConfig, form: URLSearchParams, surface: "owner" | "platform"): BusinessConfig {
   const required = (name: string): string => {
     const value = form.get(name)?.trim();
     if (!value) throw new HttpError(400, `${name} is required`);
@@ -1862,8 +1862,8 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
     ownerDailySmsHour,
     ownerRealtimeSmsEnabled: form.has("ownerRealtimeSmsEnabled"),
     requireDiagnosticFeeAcceptance: form.has("requireDiagnosticFeeAcceptance"),
-    // Owner settings send a simple on/off; the platform admin form sends the text itself.
-    recordingDisclosure: form.has("recordingDisclosure") ? (form.get("recordingDisclosure") ?? "").trim().slice(0, 1_000) : form.get("recordingNotice") === "on" ? RECORDING_NOTICE : "",
+    // Owners toggle a fixed notice; only the platform admin form may send its own text (single line).
+    recordingDisclosure: surface === "platform" ? (form.get("recordingDisclosure") ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 200) : form.get("recordingNotice") === "on" ? RECORDING_NOTICE : "",
     dataRetentionDays,
     supportEmail,
     flatMonthlyPriceCents: Math.round(monthlyDollars * 100),
