@@ -1,5 +1,6 @@
 import type { Environment } from "../config/environment.js";
 import type { BusinessConfig } from "../domain/models.js";
+import { money } from "../domain/plans.js";
 
 export type ReadinessStatus = "pass" | "warn" | "block";
 
@@ -44,8 +45,8 @@ export function buildActivationReport(input: {
     label: "Billing boundary",
     status: env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET && env.STRIPE_PRICE_ID ? "pass" : "warn",
     detail: env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET && env.STRIPE_PRICE_ID
-      ? `Signed Stripe subscription checkout is configured for the $${(config.flatMonthlyPriceCents / 100).toFixed(0)}/month base plan; usage remains visible and overages are invoiced separately.`
-      : `Checkout is not configured; keep billing assisted for the $${(config.flatMonthlyPriceCents / 100).toFixed(0)}/month base plan.`,
+      ? `Signed Stripe subscription checkout is configured for the ${money(config.flatMonthlyPriceCents)}/month Solo plan; answered calls are metered and extra calls are invoiced after each billing period.`
+      : `Checkout is not configured; keep billing assisted for the ${money(config.flatMonthlyPriceCents)}/month Solo plan.`,
   });
   checks.push({
     id: "routing",

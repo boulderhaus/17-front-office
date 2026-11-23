@@ -2,7 +2,7 @@ import type { CallRecord } from "./models.js";
 
 /**
  * Calls shorter than this (connected seconds) never count against the owner's
- * minutes: hang-ups, wrong numbers and robocalls that drop at the greeting.
+ * calls: hang-ups, wrong numbers and robocalls that drop at the greeting.
  * The Postgres usage query takes this value as a parameter, so both stores agree.
  */
 export const MIN_BILLABLE_CALL_SECONDS = 15;
@@ -24,7 +24,7 @@ export function usageAlertOptions(current: number): number[] {
 
 export type UsageClass = "billable" | "spam" | "short" | "not_billable";
 
-/** How one call is treated for the owner's minutes. Mirrors PostgresStore.getUsageSummary exactly. */
+/** How one call is treated for the owner's plan ("billable" = one counted call). Mirrors PostgresStore.getUsageSummary exactly. */
 export function usageClass(call: Pick<CallRecord, "billingDisposition" | "outcome" | "durationSeconds">): UsageClass {
   if (call.billingDisposition === "spam_excluded" || call.outcome === "ignored_spam") return "spam";
   if (call.billingDisposition !== "billable") return "not_billable";
@@ -32,9 +32,23 @@ export function usageClass(call: Pick<CallRecord, "billingDisposition" | "outcom
   return "billable";
 }
 
-/** Minutes a billable call adds: every started minute counts, as on the plan page. */
+/** Minutes a counted call used (every started minute). Internal: our provider cost, never what the owner pays. */
 export function billedMinutesFor(call: Pick<CallRecord, "durationSeconds">): number {
   return Math.ceil((call.durationSeconds ?? 0) / 60);
+}
+
+/** Counted calls past the plan's included calls: each one is billed at the overage rate. */
+export function extraCalls(countedCalls: number, includedCalls: number): number {
+  return Math.max(0, countedCalls - includedCalls);
+}
+
+/**
+ * A real customer lead for the guarantee: a counted call (answered, not spam, 15 s or longer) where the
+ * AI captured the caller's name and what the problem is, or that produced a booking or a callback task.
+ */
+export function isQualifyingLead(call: Pick<CallRecord, "billingDisposition" | "outcome" | "durationSeconds" | "fields">, hasBookingOrTask: boolean): boolean {
+  if (usageClass(call) !== "billable") return false;
+  return hasBookingOrTask || Boolean(call.fields.callerName?.trim() && call.fields.problemDescription.trim());
 }
 
 export function isValidUsageAlertPercent(value: number): boolean {
@@ -45,15 +59,35 @@ export function isValidUsageAlertPercent(value: number): boolean {
  * Which alert (if any) the shop's usage has reached. Once the plan is used up only the
  * 100% alert applies, so a single long call that jumps past both sends one message.
  */
-export function dueUsageAlerts(billedMinutes: number, includedMinutes: number, firstPercent: number): number[] {
-  if (includedMinutes <= 0) return [];
-  if (billedMinutes >= includedMinutes) return [100];
-  if (billedMinutes * 100 >= includedMinutes * firstPercent) return [firstPercent];
+export function dueUsageAlerts(countedCalls: number, includedCalls: number, firstPercent: number): number[] {
+  if (includedCalls <= 0) return [];
+  if (countedCalls >= includedCalls) return [100];
+  if (countedCalls * 100 >= includedCalls * firstPercent) return [firstPercent];
   return [];
 }
 
 /**
- * The usage meter follows the shop's Stripe billing cycle so included minutes
+ * The billing period that most recently ended, for period-end overage billing. Uses the same month
+ * arithmetic as currentBillingPeriod, so the period that just closed is exactly the one the meter showed.
+ * Null without a known Stripe period end.
+ */
+export function lastClosedBillingPeriod(now: Date, currentPeriodEnd?: string | null): [string, string] | null {
+  const end = currentPeriodEnd ? new Date(currentPeriodEnd) : null;
+  if (!end || Number.isNaN(end.getTime())) return null;
+  // Stripe hasn't told us about the renewal yet (or the plan ended): the stored period is the one that closed.
+  const closedEnd = end.getTime() <= now.getTime() ? end : monthsBefore(end, 1);
+  if (closedEnd.getTime() > now.getTime()) return null;
+  return [monthsBefore(closedEnd, 1).toISOString(), closedEnd.toISOString()];
+}
+
+function monthsBefore(value: Date, months: number): Date {
+  const result = new Date(value.getTime());
+  result.setUTCMonth(result.getUTCMonth() - months);
+  return result;
+}
+
+/**
+ * The usage meter follows the shop's Stripe billing cycle so included calls
  * reset when the subscription renews. Without a current period (unpaid, or a
  * stale record) it falls back to the UTC calendar month.
  */

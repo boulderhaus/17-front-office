@@ -10,9 +10,9 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { api, useApi } from "@/lib/api"
-import { money } from "@/lib/format"
+import { money, perCall } from "@/lib/format"
 import { useMode } from "@/lib/mode"
-import type { ApiSettings, SettingsValues } from "@/lib/types"
+import type { ApiSettings, PlanId, SettingsValues } from "@/lib/types"
 import { cn, tapWidth } from "@/lib/utils"
 
 const ZONES: Array<[string, string]> = [["America/New_York", "Eastern"], ["America/Chicago", "Central"], ["America/Denver", "Mountain"], ["America/Phoenix", "Arizona"], ["America/Los_Angeles", "Pacific"], ["America/Anchorage", "Alaska"], ["Pacific/Honolulu", "Hawaii"]]
@@ -54,6 +54,56 @@ function Toggle({ id, label, hint, checked, disabled, onChange, extra }: { id: s
       </Label>
       <Switch id={id} checked={checked} disabled={disabled} onCheckedChange={onChange} className="mt-0.5" />
     </div>
+  )
+}
+
+/** The shop's plan, priced by answered calls, and a one-tap switch to another (owner only; Stripe prorates). */
+function PlanCard({ plan, csrf, onChanged }: { plan: ApiSettings["plan"]; csrf: string; onChanged: () => Promise<void> }) {
+  const [picked, setPicked] = useState<PlanId>(plan.id)
+  const [busy, setBusy] = useState(false)
+  const choice = plan.plans.find((item) => item.id === picked)
+  const change = async () => {
+    if (!choice) return
+    setBusy(true)
+    try {
+      await api("/api/app/billing/plan", { method: "POST", body: { plan: choice.id } })
+      await onChanged()
+      toast.success(`You’re on ${choice.label}.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Your plan didn’t change. Please try again.")
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Card className="relative overflow-hidden">
+      <span aria-hidden className="absolute inset-x-0 top-0 h-1 bg-brand-yellow" />
+      <CardHeader><CardTitle className="text-base">Plan</CardTitle></CardHeader>
+      <CardContent className="grid gap-3">
+        <p className="text-sm"><span className="block text-[13px] font-semibold text-muted-foreground">{plan.label}</span><strong className="text-2xl font-semibold tracking-tight">{money(plan.flatMonthlyPriceCents)}</strong>/month · {plan.includedCalls} answered calls · {perCall(plan.overageCentsPerCall)} per extra call</p>
+        {plan.plans.length > 1 && (
+          <div className="grid gap-2" role="radiogroup" aria-label="Change plan">
+            {plan.plans.map((item) => (
+              <button key={item.id} type="button" role="radio" aria-checked={picked === item.id} onClick={() => setPicked(item.id)}
+                className={cn("flex min-h-12 items-center justify-between gap-3 rounded-lg border-2 bg-card px-3 py-2 text-left text-sm transition focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none", picked === item.id ? "border-brand-ink" : "border-brand-ink/15")}>
+                <span className="grid"><strong className="font-semibold">{item.label}{item.id === plan.id ? <span className="ml-1.5 text-[12px] font-medium text-muted-foreground">Current</span> : null}</strong><small className="text-[12.5px] text-muted-foreground">{item.includedCalls} calls · {item.who}</small></span>
+                <span className="tabular font-semibold">{money(item.priceCents)}<small className="text-[12px] font-medium text-muted-foreground">/mo</small></span>
+              </button>
+            ))}
+          </div>
+        )}
+        {choice && choice.id !== plan.id && (
+          <div className="grid gap-1.5">
+            <Button size="tap" variant="brand" className={tapWidth} disabled={busy} onClick={() => void change()}>{busy ? "Switching…" : `Switch to ${choice.label}`}</Button>
+            <p className="text-[13px] text-muted-foreground">{plan.paid ? "You pay or get credit for the difference right away. Team members stay free." : "We’ll use this plan when you add your card."}</p>
+          </div>
+        )}
+        <form method="post" action={plan.paid ? "/app/billing/portal" : "/app/billing/checkout"}>
+          <input type="hidden" name="csrf" value={csrf} />
+          <Button size="tap" variant={plan.paid ? "outline" : "brand"} className={tapWidth}>{plan.paid ? "Manage billing or cancel" : "Start your plan"}</Button>
+        </form>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -162,7 +212,7 @@ export function SettingsPage() {
           </Field>
           <Toggle id="ownerRealtimeSmsEnabled" label={<>Instant lead texts <em className="ml-1 not-italic text-brand-ink/70">+$10/mo</em></>} hint="Every routine new lead the moment the call ends." checked={flag("ownerRealtimeSmsEnabled")} disabled={!i.realtimeSmsAvailable} onChange={(value) => set("ownerRealtimeSmsEnabled", value)} extra={i.realtimeSmsAvailable ? undefined : <span className="text-[13px] text-amber-700">Not available yet.</span>} />
           <Toggle id="ownerWeeklyEmailEnabled" label={<>Sunday week-ahead email <em className="ml-1 not-italic text-brand-ink/70">Included</em></>} hint="Open callbacks and the next seven days." checked={flag("ownerWeeklyEmailEnabled")} disabled={!i.weeklyEmailAvailable} onChange={(value) => set("ownerWeeklyEmailEnabled", value)} extra={i.weeklyEmailAvailable ? undefined : <span className="text-[13px] text-amber-700">Not available yet.</span>} />
-          <Field label="Minutes alert" hint={`We’ll tell you once when you reach this share of your ${plan.includedMinutes} minutes, and again if you use them all.`}>
+          <Field label="Calls alert" hint={`We’ll tell you once when you’ve answered this share of your ${plan.includedCalls} calls, and again if you use them all.`}>
             <select className={selectClass} {...bind("usageAlertPercent")}>
               {EASY_ALERT_PERCENTS.map((percent) => <option key={percent} value={percent}>When I’ve used {percent}%</option>)}
               <optgroup label="Other">
@@ -222,17 +272,7 @@ export function SettingsPage() {
             ) : <p className="text-sm text-muted-foreground">Calendar connection isn’t available yet.</p>}
           </CardContent>
         </Card>
-        <Card className="relative overflow-hidden">
-          <span aria-hidden className="absolute inset-x-0 top-0 h-1 bg-brand-yellow" />
-          <CardHeader><CardTitle className="text-base">Plan</CardTitle></CardHeader>
-          <CardContent className="grid gap-3">
-            <p className="text-sm"><span className="block text-[13px] font-semibold text-muted-foreground">{plan.label}</span><strong className="text-2xl font-semibold tracking-tight">{money(plan.flatMonthlyPriceCents)}</strong>/month · {plan.includedMinutes} minutes · ${(plan.overageCentsPerMinute / 100).toFixed(2)}/min after</p>
-            <form method="post" action={plan.paid ? "/app/billing/portal" : "/app/billing/checkout"}>
-              <input type="hidden" name="csrf" value={csrf} />
-              <Button size="tap" variant={plan.paid ? "outline" : "brand"} className={tapWidth}>{plan.paid ? "Manage billing or cancel" : "Start your plan"}</Button>
-            </form>
-          </CardContent>
-        </Card>
+        <PlanCard plan={plan} csrf={csrf} onChanged={async () => { await settings.reload(); await reloadDashboard() }} />
         <Card>
           <CardHeader><CardTitle className="text-base">Team</CardTitle></CardHeader>
           <CardContent><Button size="tap" variant="outline" className={tapWidth} asChild><a href="/app/team"><Users />Teammates &amp; calendars</a></Button></CardContent>

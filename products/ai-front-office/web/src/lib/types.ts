@@ -82,27 +82,38 @@ export interface ApiDashboard {
     greeting: string
     hours: string
     flatMonthlyPriceCents: number
-    includedMinutes: number
-    overageCentsPerMinute: number
+    includedCalls: number
+    overageCentsPerCall: number
   }
   googleConnected: boolean
   googleAvailable: boolean
   paid: boolean
   checkoutConfigured: boolean
   billing: { status: string; trialEndsAt: string | null; chargeNote: string | null; planId: PlanId; plans: ApiPlan[] }
+  /** The lead guarantee, decided by the server: the refund button shows only when state is "eligible". */
+  guarantee: Guarantee
   onboarding: { hoursSet: boolean; completed: boolean }
-  /** Spam and calls under 15 seconds are left out of billedMinutes; the counts say how many. */
-  usage: { billedMinutes: number; billableCalls: number; excludedSpamCalls: number; excludedShortCalls: number }
+  /** This billing period in answered calls (spam and calls under 15 seconds never count). Extra calls are billed after the period ends. */
+  usage: { countedCalls: number; includedCalls: number; extraCalls: number; extraCents: number; overageCentsPerCall: number; excludedSpamCalls: number; excludedShortCalls: number; periodEnd: string }
   /** Present only when analytics is on: opaque account and shop ids for PostHog. */
   analytics?: { distinctId: string; tenantId: string }
   calls: ApiCall[]
   tasks: ApiTask[]
 }
 
-export type PlanId = "standard" | "plus"
+export type PlanId = "solo" | "pro" | "team" | "fleet"
 
-/** A plan on the card step: cheapest first and picked by default. chargeNote is the line under the button. */
-export interface ApiPlan { id: PlanId; label: string; priceCents: number; firstMonthCents: number; blurb: string; chargeNote: string }
+/** A plan: Solo first and picked by default. chargeNote is the line under the card button. */
+export interface ApiPlan { id: PlanId; label: string; priceCents: number; firstMonthCents: number; includedCalls: number; overageCentsPerCall: number; blurb: string; who: string; chargeNote: string }
+
+export interface Guarantee {
+  state: "none" | "watching" | "eligible" | "refunded" | "closed"
+  /** Real customer leads in the first 30 days so far. */
+  leads: number
+  windowEndsAt: string | null
+  claimUntil: string | null
+  refund: { amountCents: number; at: string } | null
+}
 
 export interface Activation {
   status: "live" | "waiting" | "blocked" | "failed"
@@ -127,7 +138,7 @@ export interface ApiSettings {
   businessName: string
   /** This shop's id, for its own calls export. */
   shopId: string
-  plan: { label: string; flatMonthlyPriceCents: number; includedMinutes: number; overageCentsPerMinute: number; paid: boolean }
+  plan: { id: PlanId; label: string; flatMonthlyPriceCents: number; includedCalls: number; overageCentsPerCall: number; paid: boolean; plans: ApiPlan[] }
   integrations: {
     googleAvailable: boolean
     googleConnected: boolean

@@ -7,7 +7,8 @@ import { GraceLineService } from "./application/grace-line.js";
 import { OwnerSummaryService } from "./application/owner-summary-service.js";
 import { TelnyxRecordingClient } from "./adapters/telnyx.js";
 import { loadEnvironment } from "./config/environment.js";
-import { createRequestHandler } from "./http/app.js";
+import { createRequestHandler, createStripeClient } from "./http/app.js";
+import { OverageBillingService } from "./application/billing-jobs.js";
 import { createTelemetry } from "./adapters/posthog.js";
 import { systemClock } from "./ports.js";
 import { createRuntime } from "./runtime.js";
@@ -31,6 +32,8 @@ const deletion = new DataDeletionService(
 );
 const summaries = new OwnerSummaryService(runtime.store, systemClock, env.PUBLIC_BASE_URL);
 const graceLine = new GraceLineService({ store: runtime.store, env, clock: systemClock, log: logger });
+// Period-end overage: extra answered calls in a closed billing period, billed once as a Stripe invoice.
+const overage = new OverageBillingService(runtime.store, createStripeClient(env, fetch), systemClock, logger);
 // Numbers saved before the lookup column existed: hash them so their grace-period voicemail can find the shop.
 try {
   const backfill = await runtime.store.backfillInboundNumberLookups();
@@ -43,6 +46,7 @@ let nextRecoveryAt = 0;
 let nextRetentionAt = 0;
 let nextSummaryAt = 0;
 let nextGraceAt = 0;
+let nextOverageAt = 0;
 const runWorker = async (): Promise<void> => {
   if (workerActive) return;
   workerActive = true;
@@ -87,6 +91,12 @@ const runWorker = async (): Promise<void> => {
       nextGraceAt = Date.now() + 10 * 60_000;
       const grace = await graceLine.runOnce();
       if (grace.reminded + grace.released > 0) logger({ level: "info", event: "grace_line_cycle", ...grace });
+    }
+    if (Date.now() >= nextOverageAt) {
+      // Hourly: a period closes at most once a month per shop; locked and idempotent across replicas.
+      nextOverageAt = Date.now() + 60 * 60_000;
+      const billed = await overage.runOnce();
+      if (billed.billed + billed.failed > 0) logger({ level: billed.failed > 0 ? "error" : "info", event: "overage_cycle", ...billed });
     }
   } catch (error) {
     logger({ level: "error", event: "outbox_failed", error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });

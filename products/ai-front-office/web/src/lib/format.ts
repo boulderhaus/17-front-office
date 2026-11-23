@@ -38,3 +38,11 @@ export function mapsUrl(address: string): string {
 export function money(cents: number): string {
   return cents % 100 === 0 ? `$${cents / 100}` : `$${(cents / 100).toFixed(2)}`
 }
+
+/** "75¢" under a dollar: how the per-call price reads. */
+export function perCall(cents: number): string {
+  return cents < 100 ? `${cents}¢` : money(cents)
+}
+
+/** The lead guarantee, word for word (mirrors LEAD_GUARANTEE on the server). */
+export const LEAD_GUARANTEE = "If Front Office doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month."

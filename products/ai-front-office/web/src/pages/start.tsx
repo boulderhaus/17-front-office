@@ -7,15 +7,15 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
-import { formatPhone, money } from "@/lib/format"
+import { formatPhone, LEAD_GUARANTEE, money, perCall } from "@/lib/format"
 import { useMode } from "@/lib/mode"
 import type { Activation, ApiDashboard, PlanId } from "@/lib/types"
 import { cn, tapWidth } from "@/lib/utils"
 
 type Step = "card" | "forward" | "hours" | "done"
 const STEPS: Array<{ id: Step; n: number; label: string }> = [
-  { id: "card", n: 2, label: "Card" },
-  { id: "forward", n: 3, label: "Forward calls" },
+  { id: "card", n: 2, label: "Your card" },
+  { id: "forward", n: 3, label: "Forward your calls" },
   { id: "hours", n: 4, label: "Hours" },
   { id: "done", n: 4, label: "All set" },
 ]
@@ -125,12 +125,14 @@ function Heading({ title, children, oneLine = false }: { title: ReactNode; child
 
 function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDashboard; confirming: boolean; cancelled: boolean; note: string | null }) {
   const plans = dashboard.billing.plans
-  // The plan picked at signup, or the cheaper one: picking costs no extra tap.
-  const [picked, setPicked] = useState<PlanId>(plans.some((plan) => plan.id === dashboard.billing.planId) ? dashboard.billing.planId : plans[0]?.id ?? "standard")
+  // The plan picked at signup, or Solo: picking costs no extra tap.
+  const [picked, setPicked] = useState<PlanId>(plans.some((plan) => plan.id === dashboard.billing.planId) ? dashboard.billing.planId : plans[0]?.id ?? "solo")
+  const [showAll, setShowAll] = useState(false)
   if (confirming) {
     return <Card><CardContent className="flex items-center gap-3 text-[15px] font-medium"><Loader2 className="size-5 animate-spin" />Confirming your card…</CardContent></Card>
   }
   const plan = plans.find((item) => item.id === picked) ?? null
+  const others = plans.filter((item) => item.id !== picked)
   return (
     <>
       <Heading title={<span className="marker">Add a card to turn on your line</span>}>Your Front Office line turns on the moment you’re back here. No extra button.</Heading>
@@ -139,24 +141,32 @@ function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDa
       <Card className="relative overflow-hidden border-brand-ink/15">
         <span aria-hidden className="absolute inset-x-0 top-0 h-1.5 bg-brand-yellow" />
         <CardContent className="grid gap-5 pt-2">
-          {plans.length > 1 ? (
-            <div className="grid grid-cols-2 gap-2.5" role="radiogroup" aria-label="Your plan">
-              {plans.map((item) => (
-                <button key={item.id} type="button" role="radio" aria-checked={picked === item.id} onClick={() => setPicked(item.id)}
-                  className={cn("grid content-start gap-1 rounded-xl border-2 bg-card p-3.5 text-left transition focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none", picked === item.id ? "border-brand-ink shadow-[3px_3px_0_var(--color-brand-ink)]" : "border-brand-ink/20")}>
-                  <span className="flex items-start justify-between gap-2"><strong className="text-base font-semibold">{item.label}</strong><span aria-hidden className={cn("mt-0.5 grid size-5 shrink-0 place-items-center rounded-full border-2", picked === item.id ? "border-brand-ink bg-brand-ink text-white" : "border-brand-ink/30")}>{picked === item.id && <Check className="size-3" strokeWidth={3.5} />}</span></span>
-                  <span className="tabular text-2xl font-semibold tracking-tight">{money(item.priceCents)}<small className="text-sm font-medium text-muted-foreground">/mo</small></span>
-                  {item.firstMonthCents < item.priceCents && <span className="text-[13px] font-semibold text-red-700">First month {money(item.firstMonthCents)}</span>}
-                  <span className="text-[13px] text-muted-foreground">{item.blurb}</span>
+          {plan ? (
+            <div className="grid gap-1">
+              <div className="flex items-baseline justify-between gap-3">
+                <strong className="text-lg font-semibold">{plan.label}</strong>
+                <span><strong className="tabular text-3xl font-semibold tracking-tight">{money(plan.priceCents)}</strong><span className="text-sm text-muted-foreground">/month</span></span>
+              </div>
+              <span className="text-[14px] text-muted-foreground">{plan.blurb}. Extra calls {perCall(plan.overageCentsPerCall)} each.</span>
+              {plan.firstMonthCents < plan.priceCents && <span className="text-[14px] font-semibold text-red-700">Limited time: first month half off</span>}
+            </div>
+          ) : null}
+          {/* The picked plan is already chosen; bigger (or smaller) shops open one compact line. No extra tap for Solo. */}
+          {others.length > 0 && (showAll ? (
+            <div className="grid gap-2" role="radiogroup" aria-label="Other plans">
+              {others.map((item) => (
+                <button key={item.id} type="button" role="radio" aria-checked={false} onClick={() => { setPicked(item.id); setShowAll(false) }}
+                  className="flex min-h-12 items-center justify-between gap-3 rounded-lg border-2 border-brand-ink/15 bg-card px-3 py-2 text-left text-sm transition hover:border-brand-ink focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none">
+                  <span className="grid"><strong className="font-semibold">{item.label} <span className="font-medium text-muted-foreground">· {item.who}</span></strong><small className="text-[12.5px] text-muted-foreground">{item.includedCalls} answered calls a month</small></span>
+                  <span className="tabular font-semibold">{money(item.priceCents)}<small className="text-[12px] font-medium text-muted-foreground">/mo</small></span>
                 </button>
               ))}
             </div>
-          ) : plan ? (
-            <div className="flex items-baseline justify-between gap-3">
-              <strong className="text-lg font-semibold">{plan.label}</strong>
-              <span><strong className="tabular text-3xl font-semibold tracking-tight">{money(plan.priceCents)}</strong><span className="text-sm text-muted-foreground">/month</span></span>
-            </div>
-          ) : null}
+          ) : (
+            <button type="button" onClick={() => setShowAll(true)} className="inline-flex min-h-11 w-fit items-center text-[15px] font-semibold text-brand-ink underline underline-offset-4">
+              {picked === plans[0]?.id ? `Bigger shop? ${others.map((item) => item.label).join(", ")}` : "See other plans"}
+            </button>
+          ))}
           <ul className="grid gap-1.5 text-[15px]">
             <li className="flex gap-2"><CheckCircle2 className="mt-0.5 size-4.5 shrink-0 text-emerald-700" />Keep your number</li>
             <li className="flex gap-2"><CheckCircle2 className="mt-0.5 size-4.5 shrink-0 text-emerald-700" />Cancel anytime from your dashboard</li>
@@ -172,7 +182,8 @@ function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDa
           ) : (
             <p className="text-sm text-muted-foreground">Checkout isn’t switched on yet. We’ll reach out to finish this with you.</p>
           )}
-          <p className="text-[13px] text-muted-foreground">Secure checkout by Stripe. We never see your card number.</p>
+          <p className="border-l-4 border-brand-yellow pl-3 text-[13px] text-brand-ink"><strong className="font-semibold">Lead guarantee.</strong> {LEAD_GUARANTEE}</p>
+          <p className="text-[13px] text-muted-foreground">Secure checkout by Stripe. We never see your card number. Team members are free.</p>
         </CardContent>
       </Card>
     </>

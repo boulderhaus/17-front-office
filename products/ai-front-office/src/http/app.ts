@@ -14,7 +14,8 @@ import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
 import { renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
 import { chargeSentence, isPaidStatus } from "../domain/billing.js";
-import { introCouponId, pickPlan, planCatalog, planForPriceIds, type Plan, type PlanId } from "../domain/plans.js";
+import { introCouponId, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, type Plan, type PlanId } from "../domain/plans.js";
+import { GuaranteeError, LeadGuaranteeService, recordFirstPaid } from "../application/billing-jobs.js";
 import { callsCsv } from "./calls-csv.js";
 import { hoursFromChoice } from "../domain/hours.js";
 import { SMS_CONSENT_VERSION } from "../admin/footer.js";
@@ -22,7 +23,7 @@ import { stateForPhone, timezoneForState } from "../domain/area-codes.js";
 import { MAX_USAGE_ALERT_PERCENT, MIN_USAGE_ALERT_PERCENT, currentBillingPeriod, isValidUsageAlertPercent } from "../domain/usage.js";
 
 export { currentBillingPeriod };
-import { apiCall, apiDashboard, apiSettings, apiTask, settingsForm, type ApiCallDetail } from "./owner-api-model.js";
+import { apiCall, apiDashboard, apiSettings, apiTask, settingsForm, type ApiCallDetail, type ApiPlan } from "./owner-api-model.js";
 import { approvedAnswer } from "../domain/approved-answer.js";
 import { isExplicitHumanRequest } from "../domain/human-request.js";
 import { saveAssistantConfig } from "../adapters/assistant-config.js";
@@ -366,14 +367,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   const routingClient = dependencies.env.TELNYX_API_KEY && dependencies.env.TELNYX_FROM_NUMBER && dependencies.env.TELNYX_ASSISTANT_ID
     ? new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: dependencies.env.TELNYX_FROM_NUMBER, assistantId: dependencies.env.TELNYX_ASSISTANT_ID })
     : null;
-  const stripeClient = dependencies.env.STRIPE_SECRET_KEY && dependencies.env.STRIPE_PRICE_ID
-    ? new StripeBillingClient(dependencies.env.STRIPE_SECRET_KEY, {
-        base: dependencies.env.STRIPE_PRICE_ID,
-        ...(dependencies.env.STRIPE_PRICE_ID_PLUS ? { plus: dependencies.env.STRIPE_PRICE_ID_PLUS } : {}),
-        ...(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID ? { dailySms: dependencies.env.STRIPE_DAILY_SMS_PRICE_ID } : {}),
-        ...(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID ? { realtimeSms: dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID } : {}),
-      }, dependencies.fetcher ?? fetch)
-    : null;
+  const stripeClient = createStripeClient(dependencies.env, dependencies.fetcher ?? fetch);
+  const guarantee = new LeadGuaranteeService(dependencies.store, stripeClient, dependencies.clock, (entry) => (dependencies.logger ?? ((value) => console.log(JSON.stringify(value))))(entry));
   const deletionService = new DataDeletionService(dependencies.store, recordingClient);
   const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
   const limiter = new RateLimiter();
@@ -386,10 +381,15 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   const WEB_TYPES: Record<string, string> = { js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", woff2: "font/woff2", woff: "font/woff", svg: "image/svg+xml", png: "image/png" };
   const recordingUrls = new Map<string, { url: string; expiresAt: number }>();
   const trialDays = dependencies.env.STRIPE_TRIAL_DAYS;
-  /** The plans for sale, cheapest first; prices and labels come from config so they can change without a deploy. */
+  /** The plans for sale, Solo first; prices, labels and included calls come from config so they can change without a deploy. */
   const plans = planCatalog(dependencies.env);
   const couponId = introCouponId(dependencies.env);
   const planCharge = (plan: Plan, timezone?: string): string => chargeSentence({ now: dependencies.clock.now(), trialDays, priceCents: plan.priceCents, firstMonthCents: plan.firstMonthCents, ...(timezone ? { timezone } : {}) });
+  /** The plans as the owner app shows them; empty without Stripe (nothing to buy). */
+  const apiPlans = (timezone?: string): ApiPlan[] => stripeClient ? plans.map((plan) => ({
+    id: plan.id, label: plan.label, priceCents: plan.priceCents, firstMonthCents: plan.firstMonthCents, includedCalls: plan.includedCalls,
+    overageCentsPerCall: plan.overageCentsPerCall, blurb: plan.blurb, who: plan.who, chargeNote: planCharge(plan, timezone),
+  })) : [];
   const signupPage = (error = "", values: Record<string, string> = {}): string => renderOwnerSignup(error, values, {
     supportEmail: dependencies.env.SUPPORT_EMAIL ?? null,
     chargeNote: stripeClient ? planCharge(plans[0]!) : null,
@@ -556,12 +556,14 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const splitList = (value: string): string[] => value.split(",").map((item) => item.trim()).filter(Boolean).slice(0, 100);
       const serviceArea = normalizeServiceAreaInput(parsed.data.serviceAreaTerms || homeState || "");
       if (serviceArea.errors.length > 0) return sendHtml(response, 400, signupPage(serviceAreaMessage(serviceArea.errors), values));
-      // The plan picked above the button; the cheaper one when nothing was sent.
+      // The plan picked above the button; Solo when nothing was sent.
       const plan = pickPlan(plans, form.get("plan"));
       const config: BusinessConfig = {
         ...createDemoConfig(tenantId),
         paused: true,
         planId: plan.id,
+        includedCalls: plan.includedCalls,
+        overageCentsPerCall: plan.overageCentsPerCall,
         flatMonthlyPriceCents: plan.priceCents,
         businessName: parsed.data.businessName,
         greeting: form.has("greeting") ? parsed.data.greeting : `Thanks for calling ${parsed.data.businessName}. How can I help?`,
@@ -700,7 +702,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return sendHtml(response, 200, renderPrivacy(await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID)));
     }
     if (method === "GET" && url.pathname === "/terms") {
-      return sendHtml(response, 200, renderTerms(await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID)));
+      return sendHtml(response, 200, renderTerms(await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID), plans));
     }
     if (method === "POST" && url.pathname === "/webhooks/telnyx") return handleTelnyx(request, response);
     if (url.pathname.startsWith("/texml/voicemail")) return handleVoicemail(request, response, url);
@@ -846,7 +848,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       account, config, calls, tasks, usage, googleConnected, subscription, csrf, lineNumber, ownerMobile,
       googleAvailable: anyGoogleClient(dependencies.env),
       chargeNote: stripeClient ? planCharge(pickPlan(plans, config.planId), config.timezone) : null,
-      plans: stripeClient ? plans.map((plan) => ({ id: plan.id, label: plan.label, priceCents: plan.priceCents, firstMonthCents: plan.firstMonthCents, blurb: plan.blurb, chargeNote: planCharge(plan, config.timezone) })) : [],
+      plans: apiPlans(config.timezone),
+      guarantee: await guarantee.status(account.tenantId),
       onboarding: { hoursSet: Boolean(hoursSetAt), completed: Boolean(completedAt) },
       forwarding: await readForwarding(account.tenantId),
       checkoutConfigured: Boolean(stripeClient || dependencies.env.FOUNDING_CHECKOUT_URL),
@@ -993,6 +996,30 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       telemetry.capture("onboarding_completed", account.id, account.tenantId);
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
     }
+    if (method === "POST" && url.pathname === "/api/app/billing/plan") {
+      if (!owner) throw new HttpError(403, "Only the owner can change the plan");
+      const body = await readApiJson(request, session, 1_000) as { plan?: unknown };
+      const id = normalizePlanId(body.plan);
+      const plan = plans.find((item) => item.id === id);
+      if (!plan) throw new HttpError(400, "Pick a plan");
+      if (!limiter.allow(`plan-change:${account.tenantId}`, 10, 60 * 60_000)) throw new HttpError(429, "That’s a lot of plan changes. Please try again in a bit.");
+      await changePlan(account, plan);
+      return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    }
+    if (method === "POST" && url.pathname === "/api/app/billing/lead-refund") {
+      if (!owner) throw new HttpError(403, "Only the owner can request the refund");
+      await readApiJson(request, session, 1_000);
+      if (!limiter.allow(`lead-refund:${account.tenantId}`, 5, 60 * 60_000)) throw new HttpError(429, "Please try again in a bit.");
+      try {
+        await guarantee.refund(account.tenantId, "owner");
+      } catch (error) {
+        if (error instanceof GuaranteeError) throw new HttpError(error.status, error.message);
+        log({ level: "error", event: "lead_guarantee_refund_failed", tenantId: account.tenantId, error: safeError(error) });
+        throw new HttpError(502, "We couldn’t reach our payment processor. Reply to your receipt and we’ll refund you.");
+      }
+      telemetry.capture("lead_guarantee_refunded", account.id, account.tenantId, { by: "owner" });
+      return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    }
     if (url.pathname === "/api/app/settings") {
       if (!owner) throw new HttpError(403, "Only the owner can change shop settings");
       if (method === "PUT") {
@@ -1013,7 +1040,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         status: account.status,
         businessName: config.businessName,
         shopId: account.tenantId,
-        plan: { label: pickPlan(plans, config.planId).label, flatMonthlyPriceCents: config.flatMonthlyPriceCents, includedMinutes: config.includedMinutes, overageCentsPerMinute: config.overageCentsPerMinute, paid: isPaidStatus(subscription?.status) },
+        plan: { id: pickPlan(plans, config.planId).id, label: pickPlan(plans, config.planId).label, flatMonthlyPriceCents: config.flatMonthlyPriceCents, includedCalls: config.includedCalls, overageCentsPerCall: config.overageCentsPerCall, paid: isPaidStatus(subscription?.status), plans: apiPlans(config.timezone) },
         integrations: {
           googleAvailable: anyGoogleClient(dependencies.env),
           googleConnected,
@@ -1109,8 +1136,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (!dependencies.env.DIRECT_BOOKING_BETA) updated.bookingMode = "confirm";
     if (!dependencies.env.WARM_TRANSFER_BETA) updated.warmTransferEnabled = false;
     updated.flatMonthlyPriceCents = current.flatMonthlyPriceCents;
-    updated.includedMinutes = current.includedMinutes;
-    updated.overageCentsPerMinute = current.overageCentsPerMinute;
+    updated.planId = current.planId ?? "solo";
+    updated.includedCalls = current.includedCalls;
+    updated.overageCentsPerCall = current.overageCentsPerCall;
     updated.customerSmsEnabled = current.customerSmsEnabled;
     if (updated.ownerWeeklyEmailEnabled && !(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL)) {
       throw new HttpError(503, "Weekly email delivery is not configured yet");
@@ -1303,8 +1331,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         throw new HttpError(503, "Checkout is not configured yet");
       }
       const returnTo = form.get("from") === "start" ? "start" : "app";
-      const requested = form.get("plan");
-      const target = await startCheckout(account, returnTo, requested && plans.some((plan) => plan.id === requested) ? requested as PlanId : undefined);
+      const requested = normalizePlanId(form.get("plan"));
+      const target = await startCheckout(account, returnTo, requested && plans.some((plan) => plan.id === requested) ? requested : undefined);
       const appUrl = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`;
       telemetry.capture("checkout_started", account.id, account.tenantId, {
         result: target === appUrl || target.endsWith("/app/start") ? "already_active" : target.endsWith("checkout=processing") ? "processing" : target.startsWith("https://checkout.stripe.com") ? "stripe_session" : "billing_portal",
@@ -1508,10 +1536,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (subscription?.providerSubscriptionId && subscription.status !== "canceled") return `${app}?checkout=processing`;
       let config = await dependencies.store.getConfig(account.tenantId);
       const plan = pickPlan(plans, planChoice ?? config.planId);
-      if (config.planId !== plan.id || config.flatMonthlyPriceCents !== plan.priceCents) {
+      if (!isOnPlan(config, plan)) {
         // Remember the pick, so the card screen shows it again and the dashboard shows the right price.
         config = await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
-          const next = { ...(await dependencies.store.getConfig(account.tenantId)), planId: plan.id, flatMonthlyPriceCents: plan.priceCents };
+          const next = onPlan(await dependencies.store.getConfig(account.tenantId), plan);
           await dependencies.store.saveConfig(next);
           return next;
         });
@@ -1587,8 +1615,35 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       });
       if (isPaidStatus(live.status)) {
         await dependencies.store.deleteIntegrationSecret(account.tenantId, "stripe", "open_checkout");
+        await recordFirstPaid(dependencies.store, account.tenantId, now);
         telemetry.capture("checkout_completed", account.tenantId, account.tenantId, { source: "return" });
       }
+    });
+  }
+
+  /**
+   * The owner picks another plan in Settings. A paying shop's Stripe subscription moves first (prorated,
+   * the difference invoiced now); only then is the shop saved on the new plan. Before paying it is just remembered.
+   */
+  async function changePlan(account: OwnerAccount, plan: Plan): Promise<void> {
+    await dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
+      const [subscription, config] = await Promise.all([
+        dependencies.store.getSubscription(account.tenantId),
+        dependencies.store.getConfig(account.tenantId),
+      ]);
+      if (isOnPlan(config, plan)) return;
+      if (subscription?.providerSubscriptionId && subscription.status !== "canceled") {
+        if (!stripeClient) throw new HttpError(503, "Plan changes aren’t available yet");
+        await stripeClient.changePlan(subscription.providerSubscriptionId, plan.id).catch((error) => {
+          log({ level: "error", event: "plan_change_failed", tenantId: account.tenantId, plan: plan.id, error: safeError(error) });
+          throw new HttpError(502, "Your plan couldn’t be changed just now. Nothing was changed; please try again.");
+        });
+      }
+      await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
+        await dependencies.store.saveConfig(onPlan(await dependencies.store.getConfig(account.tenantId), plan));
+      });
+      log({ level: "info", event: "plan_changed", tenantId: account.tenantId, from: config.planId ?? "solo", to: plan.id });
+      telemetry.capture("plan_changed", account.id, account.tenantId, { from: config.planId ?? "solo", to: plan.id });
     });
   }
 
@@ -1598,8 +1653,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (!plan) return;
     await dependencies.store.withLock(`config:${tenantId}`, async () => {
       const current = await dependencies.store.getConfig(tenantId);
-      if (current.planId === plan.id && current.flatMonthlyPriceCents === plan.priceCents) return;
-      await dependencies.store.saveConfig({ ...current, planId: plan.id, flatMonthlyPriceCents: plan.priceCents });
+      if (isOnPlan(current, plan)) return;
+      await dependencies.store.saveConfig(onPlan(current, plan));
     });
   }
 
@@ -1964,7 +2019,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           if (!isPaidStatus(record.status)) await handleBillingLapse(tenantId, record.status, event.id);
           else await handleBillingRestored(tenantId, event.id);
           await dependencies.store.saveSubscription(record);
-          if (isPaidStatus(record.status)) await dependencies.store.deleteIntegrationSecret(tenantId, "stripe", "open_checkout");
+          if (isPaidStatus(record.status)) {
+            await dependencies.store.deleteIntegrationSecret(tenantId, "stripe", "open_checkout");
+            await recordFirstPaid(dependencies.store, tenantId, now);
+          }
         }
       });
     }
@@ -2396,6 +2454,24 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       }
       return redirect(response, "/admin/owners");
     }
+    // Lead guarantee, support side ("reply to your receipt"): GET shows eligibility, POST refunds the first month.
+    // Same zero-lead check as the owner button (a late claim past day 37 is allowed here). Once per shop, ever.
+    const leadRefundMatch = /^\/admin\/owners\/([0-9a-f-]+)\/lead-refund$/i.exec(url.pathname);
+    if (leadRefundMatch?.[1] && (method === "GET" || method === "POST")) {
+      const owner = await dependencies.store.getOwnerAccountById(leadRefundMatch[1]);
+      if (!owner) throw new HttpError(404, "Owner account not found");
+      if (method === "GET") return sendJson(response, 200, { tenantId: owner.tenantId, guarantee: await guarantee.status(owner.tenantId) });
+      const form = parseForm(await readBody(request, 4_000));
+      if (!bearer && (!session || !verifyCsrf(session, form.get("csrf"), dependencies.env.SESSION_SIGNING_KEY!))) throw new HttpError(403, "Invalid CSRF token");
+      try {
+        const refund = await guarantee.refund(owner.tenantId, "admin");
+        return sendJson(response, 200, { refunded: true, refund });
+      } catch (error) {
+        if (error instanceof GuaranteeError) throw new HttpError(error.status, error.message);
+        log({ level: "error", event: "lead_guarantee_refund_failed", tenantId: owner.tenantId, by: "admin", error: safeError(error) });
+        throw new HttpError(502, "Stripe refund failed; nothing was recorded. Retry or refund in the Stripe dashboard.");
+      }
+    }
     if (method === "GET" && url.pathname === "/admin/config") {
       const [config, googleConnected, ownerPhone] = await Promise.all([
         dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID),
@@ -2665,6 +2741,28 @@ function formatLocalCallContext(now: Date, timeZone: string): { date: string; ti
   };
 }
 
+/** The Stripe client for this server's plans, or null when checkout isn't configured. Shared with the period-end job. */
+export function createStripeClient(env: Environment, fetcher: typeof fetch): StripeBillingClient | null {
+  const prices = planPriceIds(env);
+  if (!env.STRIPE_SECRET_KEY || !prices.solo) return null;
+  return new StripeBillingClient(env.STRIPE_SECRET_KEY, {
+    base: prices.solo,
+    ...(prices.pro ? { pro: prices.pro } : {}),
+    ...(prices.team ? { team: prices.team } : {}),
+    ...(prices.fleet ? { fleet: prices.fleet } : {}),
+    ...(env.STRIPE_DAILY_SMS_PRICE_ID ? { dailySms: env.STRIPE_DAILY_SMS_PRICE_ID } : {}),
+    ...(env.STRIPE_REALTIME_SMS_PRICE_ID ? { realtimeSms: env.STRIPE_REALTIME_SMS_PRICE_ID } : {}),
+  }, fetcher);
+}
+
+/** The shop's config on a plan: label lives in the catalog; price, included calls and overage are saved with the shop. */
+function onPlan(config: BusinessConfig, plan: Plan): BusinessConfig {
+  return { ...config, planId: plan.id, flatMonthlyPriceCents: plan.priceCents, includedCalls: plan.includedCalls, overageCentsPerCall: plan.overageCentsPerCall };
+}
+function isOnPlan(config: BusinessConfig, plan: Plan): boolean {
+  return config.planId === plan.id && config.flatMonthlyPriceCents === plan.priceCents && config.includedCalls === plan.includedCalls && config.overageCentsPerCall === plan.overageCentsPerCall;
+}
+
 function routeKey(pathname: string): string {
   if (pathname === "/webhooks/telnyx") return "webhook:telnyx";
   if (pathname.startsWith("/texml/")) return `texml:${pathname.slice(7)}`;
@@ -2744,8 +2842,9 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams, surface:
   if (!(["always", "after_hours", "overflow"] as const).includes(operationMode as BusinessConfig["operationMode"])) throw new HttpError(400, "Invalid operation mode");
   const bookingMode = required("bookingMode");
   if (bookingMode !== "confirm" && bookingMode !== "direct") throw new HttpError(400, "Invalid booking mode");
-  const monthlyDollars = Number(form.get("flatMonthlyPrice") ?? "0");
-  if (!Number.isFinite(monthlyDollars) || monthlyDollars < 49 || monthlyDollars > 99) throw new HttpError(400, "Flat monthly price must be between $49 and $99");
+  // The price follows the plan (set by checkout, plan changes and Stripe); only the platform form may set it by hand.
+  const monthlyDollars = surface === "platform" ? Number(form.get("flatMonthlyPrice") ?? "0") : current.flatMonthlyPriceCents / 100;
+  if (surface === "platform" && (!Number.isFinite(monthlyDollars) || monthlyDollars < 49 || monthlyDollars > 400)) throw new HttpError(400, "Flat monthly price must be between $49 and $400");
   const serviceState = required("serviceState");
   if (serviceState !== "paused" && serviceState !== "active") throw new HttpError(400, "Invalid service state");
   const answerAfterRings = Number(form.get("answerAfterRings") ?? "0");
