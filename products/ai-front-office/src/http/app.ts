@@ -14,6 +14,8 @@ import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
 import { renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
 import { chargeSentence, isPaidStatus } from "../domain/billing.js";
+import { introCouponId, pickPlan, planCatalog, planForPriceIds, type Plan, type PlanId } from "../domain/plans.js";
+import { callsCsv } from "./calls-csv.js";
 import { hoursFromChoice } from "../domain/hours.js";
 import { SMS_CONSENT_VERSION } from "../admin/footer.js";
 import { stateForPhone, timezoneForState } from "../domain/area-codes.js";
@@ -336,8 +338,8 @@ function publicOwnerDemo(now: Date): {
   };
 }
 
-const OWNER_APP_PATH = /^\/app(?:\/(?:start|jobs|calendar|settings|calls\/[0-9a-f-]{36}))?\/?$/i;
-const DEMO_APP_PATH = /^\/demo(?:\/(?:jobs|calendar|calls\/[A-Za-z0-9-]{1,64}))?\/?$/;
+const OWNER_APP_PATH = /^\/app(?:\/(?:start|jobs|calendar|settings|calls|calls\/[0-9a-f-]{36}))?\/?$/i;
+const DEMO_APP_PATH = /^\/demo(?:\/(?:jobs|calendar|calls|calls\/[A-Za-z0-9-]{1,64}))?\/?$/;
 function isOwnerAppPath(pathname: string): boolean { return OWNER_APP_PATH.test(pathname); }
 function isDemoAppPath(pathname: string): boolean { return DEMO_APP_PATH.test(pathname); }
 
@@ -356,6 +358,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   const stripeClient = dependencies.env.STRIPE_SECRET_KEY && dependencies.env.STRIPE_PRICE_ID
     ? new StripeBillingClient(dependencies.env.STRIPE_SECRET_KEY, {
         base: dependencies.env.STRIPE_PRICE_ID,
+        ...(dependencies.env.STRIPE_PRICE_ID_PLUS ? { plus: dependencies.env.STRIPE_PRICE_ID_PLUS } : {}),
         ...(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID ? { dailySms: dependencies.env.STRIPE_DAILY_SMS_PRICE_ID } : {}),
         ...(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID ? { realtimeSms: dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID } : {}),
       }, dependencies.fetcher ?? fetch)
@@ -371,9 +374,14 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   const WEB_TYPES: Record<string, string> = { js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", woff2: "font/woff2", woff: "font/woff", svg: "image/svg+xml", png: "image/png" };
   const recordingUrls = new Map<string, { url: string; expiresAt: number }>();
   const trialDays = dependencies.env.STRIPE_TRIAL_DAYS;
+  /** The plans for sale, cheapest first; prices and labels come from config so they can change without a deploy. */
+  const plans = planCatalog(dependencies.env);
+  const couponId = introCouponId(dependencies.env);
+  const planCharge = (plan: Plan, timezone?: string): string => chargeSentence({ now: dependencies.clock.now(), trialDays, priceCents: plan.priceCents, firstMonthCents: plan.firstMonthCents, ...(timezone ? { timezone } : {}) });
   const signupPage = (error = "", values: Record<string, string> = {}): string => renderOwnerSignup(error, values, {
     supportEmail: dependencies.env.SUPPORT_EMAIL ?? null,
-    chargeNote: stripeClient ? chargeSentence({ now: dependencies.clock.now(), trialDays, priceCents: createDemoConfig().flatMonthlyPriceCents }) : null,
+    chargeNote: stripeClient ? planCharge(plans[0]!) : null,
+    plans: stripeClient ? plans.map((plan) => ({ ...plan, chargeNote: planCharge(plan) })) : [],
   });
 
   return (request, response) => {
@@ -440,7 +448,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (method === "GET" && url.pathname === "/") {
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
-      return sendHtml(response, 200, analyticsPage(renderLanding(config, undefined, { supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, trialDays: stripeClient ? trialDays : 0 })));
+      return sendHtml(response, 200, analyticsPage(renderLanding(config, undefined, { supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, trialDays: stripeClient ? trialDays : 0, plans })));
     }
     if (method === "GET" && url.pathname.startsWith("/web/assets/")) return serveWebAsset(response, url.pathname.slice("/web/assets/".length));
     if (url.pathname.startsWith("/api/demo/")) return handleDemoApi(request, response, url);
@@ -505,9 +513,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const splitList = (value: string): string[] => value.split(",").map((item) => item.trim()).filter(Boolean).slice(0, 100);
       const serviceArea = normalizeServiceAreaInput(parsed.data.serviceAreaTerms || homeState || "");
       if (serviceArea.errors.length > 0) return sendHtml(response, 400, signupPage(serviceAreaMessage(serviceArea.errors), values));
+      // The plan picked above the button; the cheaper one when nothing was sent.
+      const plan = pickPlan(plans, form.get("plan"));
       const config: BusinessConfig = {
         ...createDemoConfig(tenantId),
         paused: true,
+        planId: plan.id,
+        flatMonthlyPriceCents: plan.priceCents,
         businessName: parsed.data.businessName,
         greeting: form.has("greeting") ? parsed.data.greeting : `Thanks for calling ${parsed.data.businessName}. How can I help?`,
         timezone,
@@ -565,7 +577,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       telemetry.capture("owner_signed_up", account.id, tenantId, { operation_mode: config.operationMode });
       // Straight to the card: one tap from "Continue" to Stripe. If Stripe is slow, the next screen has the button.
       if (stripeClient) {
-        const target = await startCheckout(account, "start").catch((error) => {
+        const target = await startCheckout(account, "start", plan.id).catch((error) => {
           log({ level: "warn", event: "signup_checkout_failed", tenantId, error: safeError(error) });
           return null;
         });
@@ -772,7 +784,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const model = apiDashboard({
       account, config, calls, tasks, usage, googleConnected, subscription, csrf, lineNumber, ownerMobile,
       googleAvailable: anyGoogleClient(dependencies.env),
-      chargeNote: stripeClient ? chargeSentence({ now: dependencies.clock.now(), trialDays, priceCents: config.flatMonthlyPriceCents, timezone: config.timezone }) : null,
+      chargeNote: stripeClient ? planCharge(pickPlan(plans, config.planId), config.timezone) : null,
+      plans: stripeClient ? plans.map((plan) => ({ id: plan.id, label: plan.label, priceCents: plan.priceCents, firstMonthCents: plan.firstMonthCents, blurb: plan.blurb, chargeNote: planCharge(plan, config.timezone) })) : [],
       onboarding: { hoursSet: Boolean(hoursSetAt), completed: Boolean(completedAt) },
       forwarding: await readForwarding(account.tenantId),
       checkoutConfigured: Boolean(stripeClient || dependencies.env.FOUNDING_CHECKOUT_URL),
@@ -938,7 +951,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         values: apiSettings(config),
         status: account.status,
         businessName: config.businessName,
-        plan: { flatMonthlyPriceCents: config.flatMonthlyPriceCents, includedMinutes: config.includedMinutes, overageCentsPerMinute: config.overageCentsPerMinute, paid: isPaidStatus(subscription?.status) },
+        shopId: account.tenantId,
+        plan: { label: pickPlan(plans, config.planId).label, flatMonthlyPriceCents: config.flatMonthlyPriceCents, includedMinutes: config.includedMinutes, overageCentsPerMinute: config.overageCentsPerMinute, paid: isPaidStatus(subscription?.status) },
         integrations: {
           googleAvailable: anyGoogleClient(dependencies.env),
           googleConnected,
@@ -949,6 +963,25 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           directBookingAvailable: dependencies.env.DIRECT_BOOKING_BETA,
         },
       });
+    }
+    const exportMatch = /^\/api\/app\/shops\/([A-Za-z0-9_-]{1,80})\/calls\.csv$/.exec(url.pathname);
+    if (method === "GET" && exportMatch?.[1]) {
+      // Another shop's id is simply not found: never confirm that it exists.
+      if (exportMatch[1] !== account.tenantId) throw new HttpError(404, "Not found");
+      if (!owner) throw new HttpError(403, "Only the owner can export the shop's calls");
+      const [config, calls] = await Promise.all([
+        dependencies.store.getConfig(account.tenantId),
+        dependencies.store.listCalls(account.tenantId, 100_000),
+      ]);
+      const body = callsCsv(calls, config.timezone);
+      response.writeHead(200, {
+        "content-type": "text/csv; charset=utf-8",
+        "content-disposition": `attachment; filename="front-office-calls-${dependencies.clock.now().toISOString().slice(0, 10)}.csv"`,
+        "cache-control": "no-store",
+        "content-length": Buffer.byteLength(body),
+      });
+      response.end(body);
+      return;
     }
     const taskMatch = /^\/api\/app\/calls\/([0-9a-f-]{36})\/task$/i.exec(url.pathname);
     if (method === "POST" && taskMatch?.[1]) {
@@ -1209,7 +1242,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         throw new HttpError(503, "Checkout is not configured yet");
       }
       const returnTo = form.get("from") === "start" ? "start" : "app";
-      const target = await startCheckout(account, returnTo);
+      const requested = form.get("plan");
+      const target = await startCheckout(account, returnTo, requested && plans.some((plan) => plan.id === requested) ? requested as PlanId : undefined);
       const appUrl = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`;
       telemetry.capture("checkout_started", account.id, account.tenantId, {
         result: target === appUrl || target.endsWith("/app/start") ? "already_active" : target.endsWith("checkout=processing") ? "processing" : target.startsWith("https://checkout.stripe.com") ? "stripe_session" : "billing_portal",
@@ -1397,7 +1431,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   }
 
   /** Stripe Checkout for this shop, or where to go instead (already paid, payment processing, fix billing). */
-  async function startCheckout(account: OwnerAccount, returnTo: "start" | "app"): Promise<string> {
+  async function startCheckout(account: OwnerAccount, returnTo: "start" | "app", planChoice?: PlanId): Promise<string> {
     if (!stripeClient) throw new HttpError(503, "Checkout is not configured yet");
     // Same lock as the billing webhook, so a payment cannot land between this read and a new session.
     return dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
@@ -1411,8 +1445,18 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       }
       // Any other live subscription (e.g. a first payment still processing) blocks a second one.
       if (subscription?.providerSubscriptionId && subscription.status !== "canceled") return `${app}?checkout=processing`;
-      const config = await dependencies.store.getConfig(account.tenantId);
-      const addOns = `${config.ownerDailySmsEnabled ? 1 : 0}${config.ownerRealtimeSmsEnabled ? 1 : 0}`;
+      let config = await dependencies.store.getConfig(account.tenantId);
+      const plan = pickPlan(plans, planChoice ?? config.planId);
+      if (config.planId !== plan.id || config.flatMonthlyPriceCents !== plan.priceCents) {
+        // Remember the pick, so the card screen shows it again and the dashboard shows the right price.
+        config = await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
+          const next = { ...(await dependencies.store.getConfig(account.tenantId)), planId: plan.id, flatMonthlyPriceCents: plan.priceCents };
+          await dependencies.store.saveConfig(next);
+          return next;
+        });
+      }
+      // The open session is reused only for the same plan and add-ons.
+      const addOns = `${plan.id}:${config.ownerDailySmsEnabled ? 1 : 0}${config.ownerRealtimeSmsEnabled ? 1 : 0}`;
       const now = dependencies.clock.now();
       const savedOpen = await dependencies.store.getIntegrationSecret(account.tenantId, "stripe", "open_checkout");
       const open = savedOpen ? JSON.parse(savedOpen) as { id: string; url: string; expiresAt: string; addOns: string } : null;
@@ -1436,7 +1480,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         realtimeSms: config.ownerRealtimeSmsEnabled,
         now,
         trialDays,
-        submitMessage: chargeSentence({ now, trialDays, priceCents: config.flatMonthlyPriceCents, timezone: config.timezone }),
+        plan: plan.id,
+        couponId,
+        submitMessage: planCharge(plan, config.timezone),
       });
       await dependencies.store.saveIntegrationSecret(account.tenantId, "stripe", "open_checkout", JSON.stringify({ ...created, addOns }));
       return created.url;
@@ -1465,7 +1511,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const live = await stripeClient.retrieveSubscription(subscriptionId)
         .catch(() => { throw new HttpError(502, "We couldn’t confirm your card with Stripe just now. Try again in a moment."); });
       if (live.tenantId && live.tenantId !== account.tenantId) throw new HttpError(400, "That subscription belongs to a different account");
-      if (!live.priceIds.includes(stripeClient.basePriceId)) return;
+      if (!stripeClient.hasPlanPrice(live.priceIds)) return;
+      await syncPlan(account.tenantId, live.priceIds);
       const now = dependencies.clock.now().toISOString();
       await dependencies.store.saveSubscription({
         tenantId: account.tenantId,
@@ -1481,6 +1528,17 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         await dependencies.store.deleteIntegrationSecret(account.tenantId, "stripe", "open_checkout");
         telemetry.capture("checkout_completed", account.tenantId, account.tenantId, { source: "return" });
       }
+    });
+  }
+
+  /** Keep the shop's plan and price in step with what Stripe says it is paying for (e.g. a switch in the billing portal). */
+  async function syncPlan(tenantId: string, priceIds: string[]): Promise<void> {
+    const plan = planForPriceIds(plans, priceIds);
+    if (!plan) return;
+    await dependencies.store.withLock(`config:${tenantId}`, async () => {
+      const current = await dependencies.store.getConfig(tenantId);
+      if (current.planId === plan.id && current.flatMonthlyPriceCents === plan.priceCents) return;
+      await dependencies.store.saveConfig({ ...current, planId: plan.id, flatMonthlyPriceCents: plan.priceCents });
     });
   }
 
@@ -1811,12 +1869,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
             .catch(() => { throw new HttpError(502, "Stripe subscription lookup failed; Stripe will retry"); });
           if (live.tenantId && live.tenantId !== tenantId) throw new HttpError(400, "Stripe subscription belongs to a different workspace");
           const otherSubscription = existing?.providerSubscriptionId && existing.providerSubscriptionId !== live.id;
-          if (!live.priceIds.includes(stripeClient.basePriceId)) {
+          if (!stripeClient.hasPlanPrice(live.priceIds)) {
             log({ level: "warn", event: "stripe_subscription_ignored_wrong_price", tenantId });
           } else if (otherSubscription && isPaidStatus(existing?.status)) {
             // Never let a second subscription cancel or replace the one that is paying.
             if (live.status !== "canceled") log({ level: "error", event: "stripe_duplicate_subscription_requires_refund", tenantId });
           } else {
+            await syncPlan(tenantId, live.priceIds);
             record = {
               tenantId,
               providerCustomerId: live.customer ?? existing?.providerCustomerId ?? null,

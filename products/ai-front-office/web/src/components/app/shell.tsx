@@ -1,6 +1,6 @@
 import { useEffect, type ReactNode } from "react"
 import { Link, NavLink, useLocation } from "react-router-dom"
-import { CalendarDays, CheckSquare, Columns3, LogOut, Settings2, Users } from "lucide-react"
+import { CalendarDays, Columns3, LogOut, PhoneCall, Settings2, Users } from "lucide-react"
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarHeader, SidebarInset, SidebarMenu,
   SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger,
@@ -15,13 +15,13 @@ function useNav() {
   const { base, preview, dashboard } = useMode()
   const attention = dashboard ? derive(dashboard).actionable.length : 0
   return [
-    { to: base, label: "Today", icon: CheckSquare, end: true, badge: attention },
+    { to: base, label: "Calls", icon: PhoneCall, end: true, badge: attention },
     { to: `${base}/jobs`, label: "Jobs", icon: Columns3, end: false, badge: 0 },
     { to: `${base}/calendar`, label: "Calendar", icon: CalendarDays, end: false, badge: 0 },
     preview
       ? { to: "/signup", label: "Start", icon: Settings2, end: false, badge: 0, external: true }
       : { to: `${base}/settings`, label: "Settings", icon: Settings2, end: false, badge: 0 },
-  ] as Array<{ to: string; label: string; icon: typeof CheckSquare; end: boolean; badge: number; external?: boolean }>
+  ] as Array<{ to: string; label: string; icon: typeof PhoneCall; end: boolean; badge: number; external?: boolean }>
 }
 
 function StatusChip() {

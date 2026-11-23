@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom"
-import { ArrowRight, CalendarClock, CheckCircle2, Clock3, Loader2, MessageSquareText, Phone, PhoneCall } from "lucide-react"
+import { ArrowLeft, ArrowRight, CalendarClock, Check, CheckCircle2, Clock3, Loader2, MessageSquareText, Phone, PhoneCall } from "lucide-react"
 import { BrandMark } from "@/components/app/bits"
 import { ForwardingCard } from "@/components/app/forwarding-card"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
-import { formatPhone } from "@/lib/format"
+import { formatPhone, money } from "@/lib/format"
 import { useMode } from "@/lib/mode"
-import type { Activation, ApiDashboard } from "@/lib/types"
+import type { Activation, ApiDashboard, PlanId } from "@/lib/types"
 import { cn, tapWidth } from "@/lib/utils"
 
 type Step = "card" | "forward" | "hours" | "done"
@@ -77,46 +77,60 @@ export function StartPage() {
   const confirming = Boolean(sessionId) && (activation === null || activation === "running")
   const go = (next: Step) => setParams({ step: next })
   const current = STEPS.find((item) => item.id === step)!
+  // A standard back arrow, top-left, on every step that has a step before it in this flow.
+  const back: Step | null = step === "hours" ? "forward" : step === "done" ? "hours" : null
+  const done = step === "done"
 
   return (
     <div className="min-h-svh bg-brand-paper">
       <header className="pt-safe sticky top-0 z-20 border-b bg-brand-paper/95 backdrop-blur-md">
         <div className="mx-auto flex h-14 max-w-xl items-center justify-between gap-3 px-4">
-          <span className="flex items-center gap-2.5"><BrandMark /><span className="text-lg font-semibold tracking-tight">Front <em className="font-serif italic">Office</em></span></span>
+          <span className="flex min-w-0 items-center gap-1.5">
+            {back ? (
+              <button type="button" aria-label="Back" onClick={() => go(back)} className="-ml-2 grid size-11 shrink-0 place-items-center rounded-full text-brand-ink hover:bg-brand-ink/5 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"><ArrowLeft className="size-6" /></button>
+            ) : null}
+            <span className="flex items-center gap-2.5"><BrandMark /><span className="text-lg font-semibold tracking-tight">Front <em className="font-serif italic">Office</em></span></span>
+          </span>
           <span className="truncate text-[13px] font-medium text-muted-foreground">{dashboard.shop.businessName}</span>
         </div>
-        <div className="mx-auto grid max-w-xl gap-1.5 px-4 pb-3" aria-label={step === "done" ? "Setup complete" : `Step ${current.n} of 4: ${current.label}`}>
-          <span className="text-[13px] font-semibold">{step === "done" ? "All set" : `Step ${current.n} of 4 · ${current.label}`}</span>
+        <div className="mx-auto grid max-w-xl gap-1.5 px-4 pb-3" aria-label={done ? "Setup complete" : `Step ${current.n} of 4: ${current.label}`}>
+          <span className={cn("flex items-center gap-1.5 text-[13px] font-semibold", done && "text-emerald-800")}>
+            {done ? <><span className="grid size-[18px] place-items-center rounded-full bg-emerald-600 text-white"><Check className="size-3" strokeWidth={3.5} /></span>All set</> : `Step ${current.n} of 4 · ${current.label}`}
+          </span>
           <ol className="grid grid-cols-4 gap-1.5" aria-hidden>
-            {[1, 2, 3, 4].map((n) => <li key={n} className={cn("h-1.5 rounded-full", n <= (step === "done" ? 4 : current.n) ? "bg-brand-ink" : "bg-brand-ink/15")} />)}
+            {[1, 2, 3, 4].map((n) => <li key={n} className={cn("h-1.5 rounded-full", done ? "bg-emerald-600" : n <= current.n ? "bg-brand-ink" : "bg-brand-ink/15")} />)}
           </ol>
         </div>
       </header>
-      <main className="mx-auto grid max-w-xl gap-4 px-4 pt-5 pb-16">
+      <main className="mx-auto grid max-w-xl content-start gap-5 px-4 pt-7 pb-16">
         {step === "card" && <CardStep dashboard={dashboard} confirming={confirming} cancelled={params.get("checkout") === "cancelled"} note={activation && activation !== "running" && activation.status !== "live" ? activation.message : null} />}
         {step === "forward" && activation && <ActivationNote activation={activation} dashboard={dashboard} retry={() => void activate()} />}
         {step === "forward" && <ForwardStep dashboard={dashboard} next={() => go("hours")} />}
-        {step === "hours" && <HoursStep next={() => go("done")} back={() => go("forward")} />}
+        {step === "hours" && <HoursStep next={() => go("done")} />}
         {step === "done" && <DoneStep dashboard={dashboard} activation={activation} />}
       </main>
     </div>
   )
 }
 
-function Heading({ title, children }: { title: ReactNode; children?: ReactNode }) {
+function Heading({ title, children, oneLine = false }: { title: ReactNode; children?: ReactNode; oneLine?: boolean }) {
   return (
-    <div className="grid gap-1.5">
-      <h1 className="text-[28px] leading-tight font-semibold tracking-tight">{title}</h1>
-      {children && <p className="text-[15px] text-muted-foreground">{children}</p>}
+    <div className="grid gap-2">
+      {/* oneLine: the title and subtitle shrink to fit a 390px phone instead of wrapping. */}
+      <h1 className={cn("leading-tight font-semibold tracking-tight", oneLine ? "text-[min(30px,6vw)] whitespace-nowrap" : "text-[30px] text-balance")}>{title}</h1>
+      {children && <p className={cn("text-muted-foreground", oneLine ? "text-[min(16px,3.45vw)] whitespace-nowrap" : "text-base")}>{children}</p>}
     </div>
   )
 }
 
 function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDashboard; confirming: boolean; cancelled: boolean; note: string | null }) {
+  const plans = dashboard.billing.plans
+  // The plan picked at signup, or the cheaper one: picking costs no extra tap.
+  const [picked, setPicked] = useState<PlanId>(plans.some((plan) => plan.id === dashboard.billing.planId) ? dashboard.billing.planId : plans[0]?.id ?? "standard")
   if (confirming) {
     return <Card><CardContent className="flex items-center gap-3 text-[15px] font-medium"><Loader2 className="size-5 animate-spin" />Confirming your card…</CardContent></Card>
   }
-  const dollars = Math.round(dashboard.shop.flatMonthlyPriceCents / 100)
+  const plan = plans.find((item) => item.id === picked) ?? null
   return (
     <>
       <Heading title={<span className="marker">Add a card to turn on your line</span>}>Your Front Office line turns on the moment you’re back here. No extra button.</Heading>
@@ -124,22 +138,36 @@ function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDa
       {cancelled && <p role="status" className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-950">No charge was made. Add a card whenever you’re ready.</p>}
       <Card className="relative overflow-hidden border-brand-ink/15">
         <span aria-hidden className="absolute inset-x-0 top-0 h-1.5 bg-brand-yellow" />
-        <CardContent className="grid gap-4">
-          <div className="flex items-baseline justify-between gap-3">
-            <strong className="text-lg font-semibold">Solo plan</strong>
-            <span><strong className="tabular text-3xl font-semibold tracking-tight">${dollars}</strong><span className="text-sm text-muted-foreground">/month</span></span>
-          </div>
+        <CardContent className="grid gap-5 pt-2">
+          {plans.length > 1 ? (
+            <div className="grid grid-cols-2 gap-2.5" role="radiogroup" aria-label="Your plan">
+              {plans.map((item) => (
+                <button key={item.id} type="button" role="radio" aria-checked={picked === item.id} onClick={() => setPicked(item.id)}
+                  className={cn("grid content-start gap-1 rounded-xl border-2 bg-card p-3.5 text-left transition focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none", picked === item.id ? "border-brand-ink shadow-[3px_3px_0_var(--color-brand-ink)]" : "border-brand-ink/20")}>
+                  <span className="flex items-start justify-between gap-2"><strong className="text-base font-semibold">{item.label}</strong><span aria-hidden className={cn("mt-0.5 grid size-5 shrink-0 place-items-center rounded-full border-2", picked === item.id ? "border-brand-ink bg-brand-ink text-white" : "border-brand-ink/30")}>{picked === item.id && <Check className="size-3" strokeWidth={3.5} />}</span></span>
+                  <span className="tabular text-2xl font-semibold tracking-tight">{money(item.priceCents)}<small className="text-sm font-medium text-muted-foreground">/mo</small></span>
+                  {item.firstMonthCents < item.priceCents && <span className="text-[13px] font-semibold text-red-700">First month {money(item.firstMonthCents)}</span>}
+                  <span className="text-[13px] text-muted-foreground">{item.blurb}</span>
+                </button>
+              ))}
+            </div>
+          ) : plan ? (
+            <div className="flex items-baseline justify-between gap-3">
+              <strong className="text-lg font-semibold">{plan.label}</strong>
+              <span><strong className="tabular text-3xl font-semibold tracking-tight">{money(plan.priceCents)}</strong><span className="text-sm text-muted-foreground">/month</span></span>
+            </div>
+          ) : null}
           <ul className="grid gap-1.5 text-[15px]">
-            <li className="flex gap-2"><CheckCircle2 className="mt-0.5 size-4.5 shrink-0 text-emerald-700" />{dashboard.shop.includedMinutes} AI minutes a month</li>
             <li className="flex gap-2"><CheckCircle2 className="mt-0.5 size-4.5 shrink-0 text-emerald-700" />Keep your number</li>
             <li className="flex gap-2"><CheckCircle2 className="mt-0.5 size-4.5 shrink-0 text-emerald-700" />Cancel anytime from your dashboard</li>
           </ul>
-          {dashboard.billing.chargeNote && <p className="rounded-md bg-brand-paper px-3 py-2.5 text-[15px] font-medium">{dashboard.billing.chargeNote}</p>}
           {dashboard.checkoutConfigured ? (
-            <form method="post" action="/app/billing/checkout">
+            <form method="post" action="/app/billing/checkout" className="grid gap-2.5">
               <input type="hidden" name="csrf" value={dashboard.csrf} />
               <input type="hidden" name="from" value="start" />
-              <Button size="tap" variant="brand" className={tapWidth}>Add card<ArrowRight /></Button>
+              {plan && <input type="hidden" name="plan" value={plan.id} />}
+              <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")}>Add card<ArrowRight /></Button>
+              {(plan?.chargeNote ?? dashboard.billing.chargeNote) && <p className="text-center text-[15px] font-semibold text-balance md:text-left">{plan?.chargeNote ?? dashboard.billing.chargeNote}</p>}
             </form>
           ) : (
             <p className="text-sm text-muted-foreground">Checkout isn’t switched on yet. We’ll reach out to finish this with you.</p>
@@ -159,7 +187,7 @@ function ActivationNote({ activation, dashboard, retry }: { activation: Activati
     return (
       <div role="status" className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-emerald-950">
         <PhoneCall className="mt-0.5 size-5 shrink-0" />
-        <p className="text-[15px]"><strong>Your line is on.</strong> {formatPhone(dashboard.line.number)} answers for {dashboard.shop.businessName}.</p>
+        <p className="grid text-[15px]"><strong className="text-base">Your line is on.</strong><span>{formatPhone(dashboard.line.number)} answers for {dashboard.shop.businessName}.</span></p>
       </div>
     )
   }
@@ -183,30 +211,35 @@ function ActivationNote({ activation, dashboard, retry }: { activation: Activati
 function ForwardStep({ dashboard, next }: { dashboard: ApiDashboard; next: () => void }) {
   return (
     <>
-      <Heading title="Send missed calls to Front Office">Your phone still rings first. Only calls you miss come here.</Heading>
+      <Heading oneLine title="Send missed calls to Front Office">Your phone still rings first. Only calls you miss come here.</Heading>
       <ForwardingCard
         dashboard={dashboard}
-        footer={({ confirmed }) => (
-          <div className="grid gap-2 border-t pt-3 md:flex md:items-center">
-            {confirmed || (!dashboard.line.number && dashboard.line.business.number) ? (
-              <Button size="tap" variant="brand" className={tapWidth} onClick={next}>Next: your hours<ArrowRight /></Button>
-            ) : (
-              <Button size="tap" variant="ghost" className={tapWidth} onClick={next}>Skip for now</Button>
-            )}
+        footer={({ confirmed }) => (confirmed || (!dashboard.line.number && dashboard.line.business.number) ? (
+          <div className="grid gap-2 border-t pt-4 md:flex md:items-center">
+            <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} onClick={next}>Next: your hours<ArrowRight /></Button>
           </div>
-        )}
+        ) : null)}
       />
+      {/* Skipping is allowed but costs something; say what, in one line. */}
+      {!(dashboard.line.confirmedAt || (!dashboard.line.number && dashboard.line.business.number)) && (
+        <p className="px-1 text-sm text-muted-foreground">
+          <button type="button" className="inline-flex min-h-11 items-center font-semibold text-brand-ink underline underline-offset-4" onClick={next}>Skip for now</button>
+          <span className="block">Front Office won’t get your missed calls until forwarding is on.</span>
+        </p>
+      )}
     </>
   )
 }
 
+// What Florida residential HVAC offices keep. Emergencies are answered 24/7 regardless; these are the hours callers can book.
 const PRESETS = [
-  { id: "weekdays", label: "Weekdays 8–5", detail: "Monday to Friday, 8 AM to 5 PM" },
-  { id: "mon_sat", label: "Mon–Sat 8–6", detail: "Monday to Saturday, 8 AM to 6 PM" },
+  { id: "weekdays", label: "Mon–Fri 7:30–5", detail: "Monday to Friday, 7:30 AM to 5 PM" },
+  { id: "weekdays_sat", label: "Mon–Fri 8–5 + Sat 8–noon", detail: "Weekdays 8 AM to 5 PM, Saturday mornings" },
   { id: "every_day", label: "Every day 7–7", detail: "Seven days, 7 AM to 7 PM" },
 ] as const
+const optionCard = "flex min-h-[88px] w-full items-center justify-between gap-3 rounded-xl border-2 border-brand-ink/15 bg-card px-4 py-3.5 text-left shadow-xs transition hover:border-brand-ink focus-visible:border-brand-ink focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none disabled:opacity-60 md:max-w-[480px]"
 
-function HoursStep({ next, back }: { next: () => void; back: () => void }) {
+function HoursStep({ next }: { next: () => void }) {
   const { reload } = useMode()
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -229,11 +262,11 @@ function HoursStep({ next, back }: { next: () => void; back: () => void }) {
   }
   return (
     <>
-      <Heading title="When can you take jobs?">Front Office offers callers times inside these hours. You confirm every job before it’s booked.</Heading>
-      <div className="grid gap-2.5">
+      <Heading title="When can you take jobs?">Callers get offered times inside these hours. Emergencies are answered anytime. You confirm every job.</Heading>
+      <div className="grid gap-3">
         {PRESETS.map((preset) => (
           <button key={preset.id} type="button" disabled={Boolean(busy)} onClick={() => void save({ preset: preset.id })}
-            className="flex min-h-[72px] items-center justify-between gap-3 rounded-xl border-2 border-brand-ink/15 bg-card px-4 py-3 text-left shadow-xs transition hover:border-brand-ink focus-visible:border-brand-ink focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none disabled:opacity-60 md:max-w-[480px]">
+            className={optionCard}>
             <span className="grid gap-0.5">
               <strong className="text-xl font-semibold tracking-tight">{preset.label}</strong>
               <small className="text-[13px] text-muted-foreground">{preset.detail}</small>
@@ -242,7 +275,13 @@ function HoursStep({ next, back }: { next: () => void; back: () => void }) {
           </button>
         ))}
         {!custom ? (
-          <Button size="tap" variant="ghost" className={cn(tapWidth, "justify-start md:justify-center")} onClick={() => setCustom(true)}><CalendarClock />Custom hours</Button>
+          <button type="button" disabled={Boolean(busy)} onClick={() => setCustom(true)} className={optionCard}>
+            <span className="grid gap-0.5">
+              <strong className="flex items-center gap-2 text-xl font-semibold tracking-tight"><CalendarClock className="size-5" />Custom hours</strong>
+              <small className="text-[13px] text-muted-foreground">Pick your own start, end and days</small>
+            </span>
+            <ArrowRight className="size-5 text-muted-foreground" />
+          </button>
         ) : (
           <Card className="md:max-w-[480px]">
             <CardContent className="grid gap-3">
@@ -262,7 +301,6 @@ function HoursStep({ next, back }: { next: () => void; back: () => void }) {
         )}
         {error && <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">{error}</p>}
       </div>
-      <button type="button" className="w-fit text-sm font-semibold underline underline-offset-4" onClick={back}>Back to forwarding</button>
     </>
   )
 }
@@ -285,15 +323,18 @@ function DoneStep({ dashboard, activation }: { dashboard: ApiDashboard; activati
     { icon: Phone, label: "Your line", value: waiting ? (activation !== "running" && activation?.status === "waiting" ? "On its way: carriers usually approve it in 1 to 3 business days" : "Turning on") : formatPhone(dashboard.line.number!) },
     { icon: MessageSquareText, label: "It answers", value: `“${dashboard.shop.greeting}”` },
     { icon: CalendarClock, label: "Jobs", value: `${dashboard.shop.hours}. Callers pick a time; you confirm it.` },
-    ...(trialEnds ? [{ icon: CheckCircle2, label: "Free trial", value: `Free until ${trialEnds}, then $${Math.round(dashboard.shop.flatMonthlyPriceCents / 100)}/month` }] : []),
+    ...(trialEnds ? [{ icon: CheckCircle2, label: "Free trial", value: `Free until ${trialEnds}, then ${money(dashboard.shop.flatMonthlyPriceCents)}/month` }] : []),
   ]
   return (
     <>
-      <Heading title={<span className="marker">You’re set.</span>}>{waiting ? "Your setup is saved. Your line turns on by itself once it’s approved." : "Missed calls now get answered. New jobs show up on Today."}</Heading>
+      <div className="grid justify-items-start gap-4">
+        <span className="grid size-14 place-items-center rounded-full bg-emerald-600 text-white shadow-[0_0_0_6px_rgba(5,150,105,.15)]"><Check className="size-8" strokeWidth={3} /></span>
+        <Heading title={<span className="marker">You’re set!</span>}>{waiting ? "Your setup is saved. Your line turns on by itself once it’s approved." : "Missed calls now get answered. New jobs show up in Calls."}</Heading>
+      </div>
       <Card>
         <CardContent className="grid gap-0 divide-y">
           {rows.map((row) => (
-            <div key={row.label} className="flex gap-3 py-3 first:pt-0 last:pb-0">
+            <div key={row.label} className="flex gap-3 py-3.5 first:pt-0 last:pb-0">
               <row.icon className="mt-0.5 size-5 shrink-0 text-brand-ink/70" />
               <div className="grid gap-0.5">
                 <small className="text-[13px] font-medium text-muted-foreground">{row.label}</small>
@@ -303,7 +344,7 @@ function DoneStep({ dashboard, activation }: { dashboard: ApiDashboard; activati
           ))}
         </CardContent>
       </Card>
-      <Button size="tap" variant="brand" className={tapWidth} disabled={busy} onClick={() => void finish()}>{busy ? <Loader2 className="animate-spin" /> : null}Go to Today<ArrowRight /></Button>
+      <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} disabled={busy} onClick={() => void finish()}>{busy ? <Loader2 className="animate-spin" /> : null}See my calls<ArrowRight /></Button>
       <p className="text-sm text-muted-foreground">Change your greeting, service area or hours anytime in <Link className="font-semibold underline underline-offset-4" to="/app/settings">Settings</Link>.</p>
     </>
   )

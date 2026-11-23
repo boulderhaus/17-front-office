@@ -143,7 +143,9 @@ export function isCoverageActive(config: BusinessConfig, at: Date, ownerBusy: bo
     const [hours = "0", minutes = "0"] = time.split(":");
     return Number(hours) * 60 + Number(minutes);
   };
-  const start = parseTime(config.afterHours.weekdayStart);
+  // A Saturday-morning shop: Saturday's after hours starts when the morning ends.
+  const saturdayClose = weekday === "Sat" && config.afterHours.workSaturday ? config.afterHours.saturdayEnd : undefined;
+  const start = parseTime(saturdayClose ?? config.afterHours.weekdayStart);
   const end = parseTime(config.afterHours.weekdayEnd);
   return start <= end ? minuteOfDay >= start && minuteOfDay < end : minuteOfDay >= start || minuteOfDay < end;
 }

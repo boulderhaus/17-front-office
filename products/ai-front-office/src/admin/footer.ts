@@ -6,4 +6,4 @@ export function siteFooter(supportEmail: string | null | undefined): string {
 }
 
 /** Version of the text-consent wording on the signup form, saved with each opt-in. */
-export const SMS_CONSENT_VERSION = "2026-11-23";
+export const SMS_CONSENT_VERSION = "2026-11-23.2";

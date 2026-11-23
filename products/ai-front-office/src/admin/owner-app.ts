@@ -25,7 +25,7 @@ export function ownerShell(input: {
   const tab = (view: OwnerView, href: string, icon: string, label: string, badge = 0): string =>
     `<a class="${input.view === view ? "active" : ""}" href="${href}"${input.view === view ? ' aria-current="page"' : ""}>${ownerIcon(icon)}<span>${label}</span>${badge ? `<b>${badge}</b>` : ""}</a>`;
   const tabs = [
-    tab("today", link("today"), "today", "Today", input.needsAttention),
+    tab("today", link("today"), "today", "Calls", input.needsAttention),
     tab("pipeline", link("pipeline"), "jobs", "Jobs"),
     tab("calendar", link("calendar"), "calendar", "Calendar"),
     tab("settings", settingsHref, "settings", input.preview ? "Start" : "Settings"),
@@ -200,7 +200,7 @@ export function renderOwnerApp(input: {
       ? `${banners.join("")}<div class="fo-split"><div class="fo-primary">${main}</div><aside class="fo-aside">${detail(detailCall, false)}</aside></div>`
       : `${banners.join("")}${main}`;
   return ownerShell({
-    title: view === "today" ? "Today" : view === "pipeline" ? "Jobs" : "Calendar",
+    title: view === "today" ? "Calls" : view === "pipeline" ? "Jobs" : "Calendar",
     view,
     businessName: input.config.businessName,
     status: preview ? { tone: "on", label: "Answering calls" } : coverageStatus(input.account, input.config),

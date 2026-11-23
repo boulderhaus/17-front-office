@@ -115,6 +115,34 @@ describe("Owner JSON API and React app serving", () => {
     expect(await detail.json()).toMatchObject({ call: { id: CALL_ID, fields: { callerName: "Synthetic Caller" } }, task: { status: "open" }, canDelete: true });
   });
 
+  it("exports the shop's calls as a spreadsheet, and gives another shop a 404", async () => {
+    const owner = await signUp("a@synthetic.example");
+    const other = await signUp("b@synthetic.example");
+    await seedCall(owner.tenantId);
+    // A caller can't plant a spreadsheet formula in the owner's export.
+    const sneaky = (await store.getCall(CALL_ID))!;
+    await store.saveCall({ ...sneaky, id: "55555555-5555-4555-8555-555555555555", providerCallId: "v3:sneaky", startedAt: "2026-01-14T15:00:00.000Z", fields: { ...sneaky.fields, callerName: "=HYPERLINK(\"x\")", problemDescription: "Says \"no air\"" }, outcome: "booked" });
+    const path = `/api/app/shops/${owner.tenantId}/calls.csv`;
+    const response = await fetch(`${baseUrl}${path}`, { headers: { cookie: owner.cookie } });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/csv; charset=utf-8");
+    expect(response.headers.get("content-disposition")).toMatch(/^attachment; filename="front-office-calls-2026-01-15\.csv"$/);
+    const lines = (await response.text()).replace(/^﻿/, "").trimEnd().split("\r\n");
+    expect(lines[0]).toBe('"Date","Caller name","Callback number","Address","Problem","Outcome"');
+    expect(lines[1]).toBe('"01/15/2026, 2:30 AM","Synthetic Caller","(212) 555-0177","100 Main St, Albany, NY 12207","No heat overnight","Call back"');
+    expect(lines[2]).toContain('"\'=HYPERLINK(""x"")"');
+    expect(lines[2]).toContain('"Says ""no air"""');
+    expect(lines[2]).toMatch(/"Booked"$/);
+    // Another shop asking for this shop's calls: not found, and nothing leaks.
+    const stranger = await fetch(`${baseUrl}${path}`, { headers: { cookie: other.cookie } });
+    expect(stranger.status).toBe(404);
+    expect(await stranger.text()).not.toContain("Synthetic Caller");
+    // Its own export is empty but for the header.
+    const own = await (await fetch(`${baseUrl}/api/app/shops/${other.tenantId}/calls.csv`, { headers: { cookie: other.cookie } })).text();
+    expect(own.replace(/^﻿/, "").trimEnd().split("\r\n")).toHaveLength(1);
+    expect((await fetch(`${baseUrl}${path}`)).status).toBe(401);
+  });
+
   it("requires JSON and the CSRF header for every change", async () => {
     const owner = await signUp("a@synthetic.example");
     await seedCall(owner.tenantId);

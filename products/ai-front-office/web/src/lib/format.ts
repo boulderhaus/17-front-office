@@ -33,3 +33,8 @@ export function notificationWords(state: string): string {
 export function mapsUrl(address: string): string {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`
 }
+
+/** "$49.99", or "$49" for whole dollars. */
+export function money(cents: number): string {
+  return cents % 100 === 0 ? `$${cents / 100}` : `$${(cents / 100).toFixed(2)}`
+}

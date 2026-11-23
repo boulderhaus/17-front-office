@@ -11,26 +11,62 @@ type OwnerDashboardView = "today" | "pipeline" | "calendar";
 
 export const renderLanding = renderMarketing;
 
-export function renderOwnerSignup(error = "", values: Record<string, string> = {}, options: { supportEmail?: string | null; chargeNote?: string | null } = {}): string {
+/** A plan offered on the signup form, with the exact line shown under the button when it's picked. */
+export interface SignupPlan { id: string; label: string; priceCents: number; firstMonthCents: number; blurb: string; chargeNote: string }
+
+export function renderOwnerSignup(error = "", values: Record<string, string> = {}, options: { supportEmail?: string | null; chargeNote?: string | null; plans?: SignupPlan[] } = {}): string {
   const value = (name: string): string => escapeHtml(values[name] ?? "");
+  const plans = options.plans ?? [];
+  const picked = plans.find((plan) => plan.id === values.plan)?.id ?? plans[0]?.id;
+  const dollars = (cents: number): string => cents % 100 === 0 ? `$${cents / 100}` : `$${(cents / 100).toFixed(2)}`;
+  // Which charge line shows follows the checked plan, in CSS only (strict CSP, no inline script).
+  const planCss = plans.map((plan) => `.publicform:has(#plan-${plan.id}:checked) .charge[data-plan="${plan.id}"]{display:block}`).join("");
   const style = `<style>
-.formpage{max-width:560px}.formintro{padding:28px 0 18px}.formintro h1{font-size:clamp(40px,9vw,58px)}.formintro>p:last-child{font-size:18px;margin:12px 0 0}
-.onboard-steps{display:grid;gap:8px;margin:22px 0 0;font:800 13px/1.2 ui-sans-serif,system-ui,-apple-system,sans-serif}
+.formpage{max-width:560px}.formintro{padding:26px 0 20px}
+.formintro h1{font-size:clamp(28px,8.4vw,58px);white-space:nowrap;line-height:1;letter-spacing:-.035em}
+.formintro>p:last-child{font-size:17px;margin:12px 0 0}
+.onboard-steps{display:grid;gap:8px;margin:0 0 20px;font:800 13px/1.2 ui-sans-serif,system-ui,-apple-system,sans-serif}
 .onboard-steps ol{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;list-style:none;margin:0;padding:0}
 .onboard-steps li{height:6px;background:rgba(7,89,168,.18);font-size:0}.onboard-steps li.on{background:var(--blue)}
-.publicform{padding:24px;margin-bottom:28px}.publicform label{margin-bottom:16px}.publicform .hint{display:block;margin-top:6px;font-weight:600;font-size:13px}
-.publicform button{width:100%;min-height:54px;font-size:16px}
-.publicform .consent{margin:4px 0 20px;padding:12px;background:var(--white);border:2px solid rgba(7,89,168,.35);font-size:13px;line-height:1.45}
-.publicform .consent input{width:22px;height:22px;flex:none}
-.charge{margin:14px 0 0;font:700 14px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif}
-.agree{margin:10px 0 0;font:600 13px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif}
-.signin{font:700 15px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif;margin:0 0 28px}
+.publicform{padding:24px;margin-bottom:28px}.publicform label{margin-bottom:18px;font-size:15px}
+.publicform input{min-height:52px;font-size:17px}
+.publicform .hint{display:block;margin-top:6px;font-weight:600;font-size:13px}
+.publicform button{width:100%;min-height:56px;font-size:16px}
+.optin{margin:2px 0 22px}
+.publicform .optin label.check{margin:0;font:700 14px/1.35 ui-sans-serif,system-ui,-apple-system,sans-serif;align-items:flex-start}
+.publicform .optin input{width:22px;height:22px;min-height:0;flex:none;margin:0}
+.optin small{display:block;margin:6px 0 0 32px;font:500 11.5px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif}
+.optin a{color:var(--blue)}
+.publicform .plans{margin:0 0 20px;padding:0;border:0}
+.plans legend{margin:0 0 8px;padding:0;font:800 15px/1.3 ui-sans-serif,system-ui,-apple-system,sans-serif}
+.plangrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.publicform label.plan{position:relative;display:grid;align-content:start;gap:3px;margin:0;padding:12px 12px 12px;background:var(--white);border:2px solid rgba(7,89,168,.45);cursor:pointer;font:600 13px/1.3 ui-sans-serif,system-ui,-apple-system,sans-serif}
+.publicform label.plan:has(input:checked){border:3px solid var(--blue);padding:11px;box-shadow:4px 4px 0 var(--blue)}
+.publicform label.plan input{position:absolute;top:12px;right:12px;width:20px;height:20px;min-height:0;margin:0;accent-color:var(--blue)}
+.plan strong{font:800 16px/1.2 ui-sans-serif,system-ui,-apple-system,sans-serif;padding-right:24px}
+.plan .price{font:900 22px/1.1 ui-sans-serif,system-ui,-apple-system,sans-serif;letter-spacing:-.02em}.plan .price small{font-size:13px;font-weight:700;letter-spacing:0}
+.plan .intro{color:var(--red);font-weight:800;white-space:nowrap;font-size:min(13px,3.2vw)}
+.charge{display:none;margin:14px 0 0;text-align:center;text-wrap:balance;font:800 15px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif}
+.charge.always{display:block}
+.agree{margin:8px 0 0;text-align:center;text-wrap:balance;font:600 13px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif}
+.signin{font:700 15px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif;margin:0 0 28px;text-align:center}
 .maker{font:600 14px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif;border-top:2px solid var(--blue);padding:18px 0 40px;margin:0}.maker a{color:var(--blue)}
-@media(min-width:768px){.publicform button{width:auto;min-width:280px;max-width:360px}}
+@media(max-width:480px){.publicform{padding:20px 16px;box-shadow:8px 8px 0 var(--blue)}.publicform .hint{font-size:min(13px,3.2vw)}}
+@media(min-width:768px){.publicform button{width:auto;min-width:280px;max-width:360px;display:block;margin:0 auto}}
+${planCss}
 </style>`;
   const steps = `<div class="onboard-steps" aria-label="Step 1 of 4: your shop"><span>Step 1 of 4 · Your shop</span><ol aria-hidden="true"><li class="on">Shop</li><li>Card</li><li>Calls</li><li>Hours</li></ol></div>`;
   const button = options.chargeNote ? "Continue to card" : "Create my account";
-  return publicLayout("Get started", `${style}<header class="publicnav"><a class="brand smallbrand" href="/"><span>Front</span> Office</a><nav><a href="/login">Sign in</a></nav></header><main class="publicmain formpage"><section class="formintro">${steps}<h1>Get your calls covered.</h1><p>Four quick answers. Your line turns on right after you add a card.</p></section>${error ? `<p class="formerror" role="alert">${escapeHtml(error)}</p>` : ""}<form class="publicform" method="post" action="/signup"><input type="hidden" name="timezone" value="${value("timezone")}"><label>Shop name<input name="businessName" autocomplete="organization" maxlength="120" value="${value("businessName")}" required></label><label>Your mobile number<input name="phone" type="tel" autocomplete="tel" inputmode="tel" maxlength="30" placeholder="(941) 555-0123" value="${value("phone")}" required><span class="hint">We use it to set up your line. Callers never see it.</span></label><label>Email<input name="email" type="email" autocomplete="email" inputmode="email" maxlength="254" value="${value("email")}" required></label><label>Password<input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="200" required><span class="hint">At least 12 characters.</span></label><label class="check consent"><input name="ownerSmsConsent" type="checkbox" value="yes" ${values.ownerSmsConsent === "yes" ? "checked" : ""}><span>Optional: text me account notifications from <strong>Front Office by Dutchworks LLC</strong> at this number, like new-call and urgent-call notifications. Message frequency varies. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. Consent is not a condition of purchase. We will not share mobile information with third parties for promotional or marketing purposes. <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></span></label><label class="trap" aria-hidden="true">Fax number<input name="faxNumber" tabindex="-1" autocomplete="off"></label><button>${button}</button>${options.chargeNote ? `<p class="charge">${escapeHtml(options.chargeNote)}</p>` : ""}<p class="agree">By continuing you agree to the <a href="/terms">Terms</a> and <a href="/privacy">Privacy notice</a>.</p></form><p class="signin">Already have an account? <a class="textlink" href="/login">Sign in</a></p>${siteFooter(options.supportEmail)}</main>`);
+  // Optional, unchecked, separate from the terms and from paying (10DLC / Telnyx opt-in checklist).
+  const optIn = `<div class="optin"><label class="check"><input name="ownerSmsConsent" type="checkbox" value="yes" ${values.ownerSmsConsent === "yes" ? "checked" : ""}><span>Send me Front Office account notifications by text (new calls, appointments)—optional</span></label><small>By checking this, you agree to receive SMS account notifications from Front Office by Dutchworks LLC. Msg frequency varies. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. We won’t share mobile info with third parties for marketing. Not required to sign up. <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></small></div>`;
+  // Two plans, the cheaper one already picked: choosing costs no extra tap.
+  const planPicker = plans.length > 1
+    ? `<fieldset class="plans"><legend>Your plan</legend><div class="plangrid">${plans.map((plan) => `<label class="plan" for="plan-${escapeHtml(plan.id)}"><input type="radio" name="plan" id="plan-${escapeHtml(plan.id)}" value="${escapeHtml(plan.id)}" ${plan.id === picked ? "checked" : ""}><strong>${escapeHtml(plan.label)}</strong><span class="price">${dollars(plan.priceCents)}<small>/mo</small></span>${plan.firstMonthCents < plan.priceCents ? `<span class="intro">First month ${dollars(plan.firstMonthCents)}</span>` : ""}<span>${escapeHtml(plan.blurb)}</span></label>`).join("")}</div></fieldset>`
+    : plans.length === 1 ? `<input type="hidden" name="plan" value="${escapeHtml(plans[0]!.id)}">` : "";
+  const charges = plans.length > 1
+    ? plans.map((plan) => `<p class="charge" data-plan="${escapeHtml(plan.id)}">${escapeHtml(plan.chargeNote)}</p>`).join("")
+    : options.chargeNote ? `<p class="charge always">${escapeHtml(plans[0]?.chargeNote ?? options.chargeNote)}</p>` : "";
+  return publicLayout("Get started", `${style}<header class="publicnav"><a class="brand smallbrand" href="/"><span>Front</span> Office</a><nav><a href="/login">Sign in</a></nav></header><main class="publicmain formpage"><section class="formintro">${steps}<h1>Get your calls covered.</h1><p>Four quick answers. Your line turns on right after you add a card.</p></section>${error ? `<p class="formerror" role="alert">${escapeHtml(error)}</p>` : ""}<form class="publicform" method="post" action="/signup"><input type="hidden" name="timezone" value="${value("timezone")}"><label>Shop name<input name="businessName" autocomplete="organization" maxlength="120" value="${value("businessName")}" required></label><label>Your mobile number<input name="phone" type="tel" autocomplete="tel" inputmode="tel" maxlength="30" placeholder="(941) 555-0123" value="${value("phone")}" required><span class="hint">We use it to set up your line. Callers never see it.</span></label><label>Email<input name="email" type="email" autocomplete="email" inputmode="email" maxlength="254" value="${value("email")}" required></label><label>Password<input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="200" required><span class="hint">At least 12 characters.</span></label>${optIn}<label class="trap" aria-hidden="true">Fax number<input name="faxNumber" tabindex="-1" autocomplete="off"></label>${planPicker}<button>${button}</button>${charges}<p class="agree">By continuing you agree to the <a href="/terms">Terms</a> and <a href="/privacy">Privacy notice</a>.</p></form><p class="signin">Already have an account? <a class="textlink" href="/login">Sign in</a></p>${siteFooter(options.supportEmail)}</main>`);
 }
 
 export function renderOwnerLogin(error = ""): string {

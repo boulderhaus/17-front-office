@@ -73,7 +73,7 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
       <div className="grid gap-4 px-5 py-5">
         <header className="flex items-start justify-between gap-3">
           <div className="grid gap-0.5">
-            <small className="text-[13px] font-medium text-muted-foreground">Your Front Office number</small>
+            <small className="text-[13px] font-medium text-muted-foreground">Your new Front Office number</small>
             {line.number ? (
               <strong className="tabular text-xl font-semibold tracking-tight"><Phone className="mr-1.5 inline size-4 align-[-2px]" />{formatPhone(line.number)}</strong>
             ) : (
@@ -84,21 +84,24 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
         </header>
 
         {asking ? (
-          <div className="grid gap-3">
-            <p className="text-[15px] font-semibold">Is this the number customers call?</p>
-            <p className="tabular rounded-xl border-2 border-brand-ink/20 bg-brand-paper px-4 py-3 text-center text-2xl font-semibold tracking-tight">{formatPhone(business.suggested!)}</p>
-            <div className="grid gap-2 md:flex">
-              <Button size="tap" variant="brand" className={tapWidth} disabled={busy === "save"} onClick={() => void post("save", "/api/app/line/business-number", { number: business.suggested })}>
+          <div className="grid gap-4 border-t pt-4">
+            <p className="text-[17px] leading-snug font-semibold">Is this your current business number—the one customers call?</p>
+            {/* A plain read-out, not a box: only the two buttons below are tappable. */}
+            <div className="grid gap-0.5">
+              <small className="text-[13px] font-medium text-muted-foreground">Your current business number</small>
+              <strong className="tabular text-[28px] leading-tight font-semibold tracking-tight">{formatPhone(business.suggested!)}</strong>
+            </div>
+            <div className="grid gap-2.5 md:flex">
+              <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} disabled={busy === "save"} onClick={() => void post("save", "/api/app/line/business-number", { number: business.suggested })}>
                 {busy === "save" ? <><Loader2 className="animate-spin" />Looking up your phone company…</> : "Yes"}
               </Button>
-              <Button size="tap" variant="outline" className={tapWidth} disabled={busy === "save"} onClick={() => setEditing(true)}>No, it’s another number</Button>
+              <Button size="tap" variant="outline" className={cn(tapWidth, "h-14 border-2 border-brand-ink bg-card text-base text-brand-ink lg:h-12")} disabled={busy === "save"} onClick={() => setEditing(true)}>No, it’s another number</Button>
             </div>
-            <p className="text-sm text-muted-foreground">You keep it. Only the calls you miss come to Front Office.</p>
           </div>
         ) : editing ? (
           <form onSubmit={(event) => void saveNumber(event)} className="grid gap-2.5">
-            <label htmlFor="business-number" className="text-[15px] font-semibold">What number do your customers call today?</label>
-            <p className="-mt-1 text-sm text-muted-foreground">You keep it. We’ll show you how to send the calls you miss to Front Office.</p>
+            <label htmlFor="business-number" className="text-[15px] font-semibold">Your current business number</label>
+            <p className="-mt-1 text-sm text-muted-foreground">The one customers call today. You keep it.</p>
             <Input id="business-number" name="number" type="tel" inputMode="tel" autoComplete="tel" placeholder="Your business number" defaultValue={business.number ? formatPhone(business.number) : ""} className="h-12 text-lg md:max-w-[360px]" required autoFocus={Boolean(business.suggested)} />
             <Button size="tap" variant="brand" className={tapWidth} disabled={busy === "save"}>{busy === "save" ? <><Loader2 className="animate-spin" />Looking up your phone company…</> : "Next"}</Button>
           </form>
@@ -193,7 +196,10 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
             {helpAsked ? (
               <p className="flex items-center gap-2 text-sm"><Check className="size-4 text-emerald-700" />Got it. We’ll call you within one business hour to set this up together.</p>
             ) : (
-              <Button variant="ghost" size="tap" className={tapWidth} disabled={busy === "help"} onClick={() => void post("help", "/api/app/line/help")}><LifeBuoy />Set it up with me</Button>
+              <p className="text-sm text-muted-foreground">
+                <button type="button" className="inline-flex min-h-11 items-center gap-1.5 font-semibold text-brand-ink underline underline-offset-4 disabled:opacity-60" disabled={busy === "help"} onClick={() => void post("help", "/api/app/line/help")}><LifeBuoy className="size-4" />Set it up with me</button>
+                <span className="block">We’ll call you and set it up together.</span>
+              </p>
             )}
           </div>
         )}

@@ -72,7 +72,7 @@ export interface ApiDashboard {
   paid: boolean;
   checkoutConfigured: boolean;
   /** Card status in plain terms: a trial counts as paid; trialEndsAt is when the first charge happens. */
-  billing: { status: SubscriptionRecord["status"] | "none"; trialEndsAt: string | null; chargeNote: string | null };
+  billing: { status: SubscriptionRecord["status"] | "none"; trialEndsAt: string | null; chargeNote: string | null; planId: "standard" | "plus"; plans: ApiPlan[] };
   /** The new-owner flow: sign up → card → forward calls → hours → done. */
   onboarding: { hoursSet: boolean; completed: boolean };
   /** Spam and calls under 15 seconds are left out of billedMinutes; the counts say how many. */
@@ -80,6 +80,9 @@ export interface ApiDashboard {
   calls: ApiCall[];
   tasks: ApiTask[];
 }
+
+/** A plan on the card step: cheapest first, picked by default. chargeNote is the line under the button. */
+export interface ApiPlan { id: "standard" | "plus"; label: string; priceCents: number; firstMonthCents: number; blurb: string; chargeNote: string }
 
 export interface ApiCallDetail {
   call: ApiCall;
@@ -144,6 +147,7 @@ export function apiDashboard(input: {
   ownerMobile?: string | null | undefined;
   googleAvailable?: boolean | undefined;
   chargeNote?: string | null | undefined;
+  plans?: ApiPlan[] | undefined;
   onboarding?: { hoursSet: boolean; completed: boolean } | undefined;
 }): ApiDashboard {
   const c = input.config;
@@ -175,6 +179,8 @@ export function apiDashboard(input: {
       status: input.subscription?.status ?? "none",
       trialEndsAt: input.subscription?.status === "trialing" ? input.subscription.currentPeriodEnd : null,
       chargeNote: input.chargeNote ?? null,
+      planId: c.planId ?? "standard",
+      plans: input.plans ?? [],
     },
     onboarding: input.onboarding ?? { hoursSet: false, completed: false },
     usage: {

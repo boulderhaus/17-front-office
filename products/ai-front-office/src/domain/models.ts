@@ -165,6 +165,8 @@ export interface BusinessConfig {
     weekends: boolean;
     /** With weekends on: Saturday keeps weekday hours instead of being covered all day. */
     workSaturday?: boolean;
+    /** When workSaturday: after-hours starts at this time on Saturday instead of weekdayStart. */
+    saturdayEnd?: string | undefined;
     holidayDates: string[];
   };
   bookableHours: {
@@ -173,6 +175,8 @@ export interface BusinessConfig {
     weekends: boolean;
     /** Saturday is bookable even when weekends are off (a Mon–Sat shop). */
     saturday?: boolean;
+    /** Saturday closes earlier than weekdays (e.g. "12:00" for Saturday mornings). */
+    saturdayEnd?: string | undefined;
   };
   minimumLeadTimeMinutes: number;
   priceSnippets: Array<{ label: string; text: string }>;
@@ -184,6 +188,8 @@ export interface BusinessConfig {
   dataRetentionDays: number;
   supportEmail: string | null;
   flatMonthlyPriceCents: number;
+  /** The plan the owner picked on the card step ("standard" when unset). */
+  planId?: "standard" | "plus";
   includedMinutes: number;
   overageCentsPerMinute: number;
   /** Percent of included minutes (50–95) that triggers the first usage alert each billing period; 100% always alerts. */
