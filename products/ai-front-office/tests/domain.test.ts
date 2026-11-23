@@ -1,5 +1,10 @@
+import { shopActivationBlockers } from "../src/application/readiness.js";
+import { isExplicitHumanRequest } from "../src/domain/human-request.js";
+import { RateLimiter } from "../src/http/security.js";
+import { renderQuickSetup } from "../src/admin/setup.js";
+import { currentBillingPeriod } from "../src/http/app.js";
 import { describe, expect, it } from "vitest";
-import { createDemoConfig, evaluateServiceArea, isCoverageActive } from "../src/domain/config.js";
+import { createDemoConfig, evaluateServiceArea, isCoverageActive, normalizeServiceAreaInput } from "../src/domain/config.js";
 import { triageEmergency } from "../src/domain/triage.js";
 import { buildTelnyxAssistantUpdate, buildTelnyxOutboundTestCall, buildTelnyxTools, buildVoiceSystemPrompt } from "../src/voice/system-prompt.js";
 import { redactError } from "../src/application/retry.js";
@@ -159,5 +164,114 @@ describe("operational safety", () => {
     const results = await runAllSimulations();
     expect(results).toHaveLength(15);
     expect(results.filter((item) => !item.passed)).toEqual([]);
+  });
+});
+
+describe("shop activation prerequisites", () => {
+  it("refuses activation when the owner has not opted into urgent alerts", () => {
+    expect(shopActivationBlockers({ ownerPhoneConfigured: true, urgentAlertsEnabled: false, googleConnected: true, serviceAreaConfigured: true }))
+      .toEqual(["urgent text alerts (the owner has not opted in)"]);
+    expect(shopActivationBlockers({ ownerPhoneConfigured: true, urgentAlertsEnabled: true, googleConnected: true, serviceAreaConfigured: true })).toEqual([]);
+  });
+});
+
+describe("life-safety phrasing", () => {
+  const config = { emergencyKeywords: [] as string[], emergencyThreshold: 0.7 };
+  it.each([
+    "I smelled gas near the water heater", "there's an odor of gas in the kitchen", "it smells kind of like gas",
+    "I'm getting fumes from the furnace and a headache", "smoke is coming out of the vent", "There is smoke in the house",
+    "the outlet is on fire", "I see flames", "CO detector is going off", "carbon-monoxide alarm", "I cannot breathe",
+    "smells like rotten eggs", "gas smell in the hallway",
+    "There's a fire in the furnace closet", "the room is full of smoke", "gas is leaking from the meter", "I noticed a smell of gas",
+    "both CO alarms are going off", "flames coming out of the furnace", "No, it's not a joke, I smell gas",
+    "I don't think it's a gas leak but I smell gas now",
+  ])("escalates: %s", (text) => {
+    expect(triageEmergency(text, config).severity).toBe("life_safety");
+  });
+  it.each([
+    "my furnace won't fire", "the pilot won't fire up", "smoke detector is chirping, low battery", "I want to schedule a fireplace inspection",
+    "the flame sensor failed and the furnace won't stay lit", "weak pilot flame", "No, I don't smell gas", "there's no gas leak, just no heat",
+    "I haven't noticed any gas smell", "nope, I don't see smoke",
+  ])("does not escalate: %s", (text) => {
+    expect(triageEmergency(text, config).severity).not.toBe("life_safety");
+  });
+});
+
+describe("explicit human request gate", () => {
+  it.each(["I want to talk to a person", "Can I speak to the owner?", "Transfer me to someone please", "Have the owner call me back", "I need a human", "Representative please", "Could you connect me with the owner"])("accepts: %s", (quote) => {
+    expect(isExplicitHumanRequest(quote)).toBe(true);
+  });
+  it.each(["I need a technician to look at my furnace", "I need someone to fix my AC", "Why is this so loud?", "I don't want to talk to a person", "Can someone come out tomorrow?"])("rejects: %s", (quote) => {
+    expect(isExplicitHumanRequest(quote)).toBe(false);
+  });
+});
+
+describe("rate limiter capacity", () => {
+  it("evicts the oldest bucket instead of refusing new clients when full", () => {
+    const limiter = new RateLimiter(3);
+    for (const key of ["a", "b", "c"]) expect(limiter.allow(key, 5, 60_000, 0)).toBe(true);
+    expect(limiter.allow("d", 5, 60_000, 1)).toBe(true);
+  });
+});
+
+describe("service area input", () => {
+  it("merges a separate state into the city an owner typed", () => {
+    expect(normalizeServiceAreaInput("Sarasota, FL, Venice, fl, 34236")).toEqual({ terms: ["Sarasota FL", "Venice FL", "34236"], errors: [] });
+    expect(normalizeServiceAreaInput("North Port FL\nEnglewood FL; 34236").terms).toEqual(["North Port FL", "Englewood FL", "34236"]);
+  });
+  it("rejects a city with no state instead of silently ignoring it", () => {
+    expect(normalizeServiceAreaInput("Sarasota, Venice").errors).toEqual(["Sarasota", "Venice"]);
+    expect(normalizeServiceAreaInput("3423").errors).toEqual(["3423"]);
+  });
+  it("still covers a normal address for a city-and-state term", () => {
+    const config = { ...createDemoConfig(), serviceAreaTerms: normalizeServiceAreaInput("Sarasota, FL").terms };
+    expect(evaluateServiceArea("100 Bay St, Sarasota, FL 34236", config).status).toBe("covered");
+  });
+});
+
+describe("owner setup beta controls", () => {
+  it("shows direct booking and warm transfer only when their flags are on", () => {
+    const hidden = renderQuickSetup(createDemoConfig(), "csrf", false);
+    expect(hidden).not.toContain("warmTransferEnabled");
+    const shown = renderQuickSetup(createDemoConfig(), "csrf", false, { directBooking: true, warmTransfer: true });
+    expect(shown).toContain("Book available times on my calendar");
+    expect(shown).toContain("warmTransferEnabled");
+  });
+});
+
+describe("recording consent evidence", () => {
+  it("does not let the model preset consent on every intake save", () => {
+    const tools = buildTelnyxTools(createDemoConfig(), "https://front-office.example") as Array<{ webhook?: { name: string; preset_body_fields: Record<string, unknown> } }>;
+    const intake = tools.find((tool) => tool.webhook?.name === "save_intake")!;
+    expect(intake.webhook!.preset_body_fields).not.toHaveProperty("recording_disclosure_given");
+  });
+});
+
+describe("usage billing period", () => {
+  it("follows the Stripe cycle so included minutes reset at renewal", () => {
+    expect(currentBillingPeriod(new Date("2026-11-23T12:00:00Z"), "2026-12-09T15:00:00.000Z")).toEqual(["2026-11-09T15:00:00.000Z", "2026-12-09T15:00:00.000Z"]);
+  });
+  it("falls back to the calendar month without a current period", () => {
+    expect(currentBillingPeriod(new Date("2026-11-23T12:00:00Z"), null)).toEqual(["2026-11-01T00:00:00.000Z", "2026-12-01T00:00:00.000Z"]);
+    expect(currentBillingPeriod(new Date("2026-11-23T12:00:00Z"), "2026-11-01T00:00:00.000Z")[0]).toBe("2026-11-01T00:00:00.000Z");
+  });
+});
+
+describe("model score guard", () => {
+  it("ignores a non-finite model score instead of erasing an urgent match", () => {
+    expect(triageEmergency("no heat and an elderly resident", { emergencyKeywords: [], emergencyThreshold: 0.7 }, Number.NaN).emergency).toBe(true);
+  });
+});
+
+describe("service area address shapes", () => {
+  const config = { ...createDemoConfig(), serviceAreaTerms: ["Sarasota FL", "34236"] };
+  it.each([
+    "100 Bay St, Sarasota, FL 34236, USA", "100 Bay St, Apt 4, Sarasota, FL", "100 Bay St, Sarasota, FL 34236-1234",
+    "Sarasota, FL", "100 Bay Street, 34236",
+  ])("covers %s", (address) => {
+    expect(evaluateServiceArea(address, config).status).toBe("covered");
+  });
+  it.each(["34236 Lake Shore Dr, Chicago, IL 60601", "1200 Main St, Sarasota Springs, NY 12866", "100 Bay St, Venice, FL 34285"])("does not cover %s", (address) => {
+    expect(evaluateServiceArea(address, config).status).toBe("outside");
   });
 });

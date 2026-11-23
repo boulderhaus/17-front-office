@@ -74,20 +74,25 @@ export function evaluateServiceArea(address: string | null, config: BusinessConf
   if (terms.length === 0) return { status: "unconfigured", matchedTerm: null };
   if (!address?.trim()) return { status: "incomplete", matchedTerm: null };
 
-  const rawComponents = address.split(",").map((component) => component.trim()).filter(Boolean);
+  const rawComponents = address.split(",").map((component) => component.trim()).filter(Boolean)
+    .filter((component, index) => index === 0 || !/^(?:usa|us|u\.s\.a?\.?|united states(?: of america)?)$/i.test(component));
   const addressComponents = rawComponents.map(normalizeCoverageText);
-  const localityComponents = addressComponents.slice(1);
-  const lastComponent = rawComponents.at(-1) ?? "";
-  const postalCodes: string[] = lastComponent.match(/\b\d{5}(?:-\d{4})?\b/g) ?? [];
+  // The first component is the street unless it has no digits ("Austin, TX 78701"). House
+  // numbers are never read as ZIP codes ("62701 Lake Shore Dr" is not in 627xx).
+  const firstIsStreet = /\d/.test(rawComponents[0] ?? "") && rawComponents.length > 1;
+  const localityStart = firstIsStreet ? 1 : 0;
+  const postalCodes = rawComponents.slice(localityStart).flatMap((component) => [...component.matchAll(/\b(\d{5})(?:-\d{4})?\b/g)].map((match) => match[1]!));
   for (const term of terms) {
     const normalizedTerm = normalizeCoverageText(term);
-    if (/^\d{5}(?:-\d{4})?$/.test(normalizedTerm)) {
+    if (/^\d{5}$/.test(normalizedTerm)) {
       if (postalCodes.includes(normalizedTerm)) return { status: "covered", matchedTerm: term };
       continue;
     }
-    const locality = localityComponents.join(" ");
-    if (normalizedTerm && normalizedTerm.includes(" ") && (locality === normalizedTerm || locality.startsWith(`${normalizedTerm} `))) {
-      return { status: "covered", matchedTerm: term };
+    if (!normalizedTerm || !normalizedTerm.includes(" ")) continue;
+    // "Sarasota FL" matches the locality wherever it starts, e.g. after "Apt 4".
+    for (let index = localityStart; index < addressComponents.length; index += 1) {
+      const locality = addressComponents.slice(index).join(" ");
+      if (locality === normalizedTerm || locality.startsWith(`${normalizedTerm} `)) return { status: "covered", matchedTerm: term };
     }
   }
   return { status: "outside", matchedTerm: null };
@@ -125,4 +130,26 @@ export function isCoverageActive(config: BusinessConfig, at: Date, ownerBusy: bo
   const start = parseTime(config.afterHours.weekdayStart);
   const end = parseTime(config.afterHours.weekdayEnd);
   return start <= end ? minuteOfDay >= start && minuteOfDay < end : minuteOfDay >= start || minuteOfDay < end;
+}
+
+/**
+ * Parse what an owner types ("Sarasota, FL, Venice FL, 34236") into exact
+ * coverage terms. A city without a state never matches anything, so it is an
+ * error rather than a silently ignored term.
+ */
+export function normalizeServiceAreaInput(raw: string): { terms: string[]; errors: string[] } {
+  const tokens = raw.split(/[,;\n]+/).map((token) => token.trim().replace(/\s+/g, " ")).filter(Boolean);
+  const merged: string[] = [];
+  for (const token of tokens) {
+    if (/^[A-Za-z]{2}$/.test(token) && merged.length > 0 && !/^\d{5}$/.test(merged.at(-1)!)) merged[merged.length - 1] = `${merged.at(-1)} ${token}`;
+    else merged.push(token);
+  }
+  const terms: string[] = [];
+  const errors: string[] = [];
+  for (const term of merged) {
+    if (/^\d{5}$/.test(term)) terms.push(term);
+    else if (/^[A-Za-z][A-Za-z .'-]* [A-Za-z]{2}$/.test(term)) terms.push(`${term.slice(0, -2).trimEnd()} ${term.slice(-2).toUpperCase()}`);
+    else errors.push(term);
+  }
+  return { terms: [...new Set(terms)].slice(0, 100), errors };
 }

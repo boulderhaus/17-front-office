@@ -4,9 +4,10 @@ import type { CalendarPort } from "../ports.js";
 import { withTimeout } from "../application/retry.js";
 
 interface GoogleCalendarOptions {
-  clientId: string;
-  clientSecret: string;
-  getRefreshToken: (tenantId: string) => Promise<string | null>;
+  /** Refresh token and the OAuth client that issued it (tokens only work with their own client). */
+  getCredentials: (tenantId: string) => Promise<{ refreshToken: string; client: { id: string; secret: string } } | null>;
+  /** Google said the refresh token is revoked or expired: forget it so the owner is asked to reconnect. */
+  onRevoked?: (tenantId: string) => Promise<void>;
   calendarId: string;
 }
 
@@ -113,12 +114,12 @@ export class GoogleCalendarAdapter implements CalendarPort {
   private async accessToken(tenantId: string): Promise<string> {
     const cached = this.#cachedAccessTokens.get(tenantId);
     if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
-    const refreshToken = await this.options.getRefreshToken(tenantId);
-    if (!refreshToken) throw new Error("Google Calendar is not connected");
+    const credentials = await this.options.getCredentials(tenantId);
+    if (!credentials) throw new Error("Google Calendar is not connected");
     const body = new URLSearchParams({
-      client_id: this.options.clientId,
-      client_secret: this.options.clientSecret,
-      refresh_token: refreshToken,
+      client_id: credentials.client.id,
+      client_secret: credentials.client.secret,
+      refresh_token: credentials.refreshToken,
       grant_type: "refresh_token",
     });
     const response = await withTimeout(fetch("https://oauth2.googleapis.com/token", {
@@ -126,7 +127,14 @@ export class GoogleCalendarAdapter implements CalendarPort {
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body,
     }), 4_000);
-    if (!response.ok) throw new Error(`Google OAuth refresh failed with HTTP ${response.status}`);
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({})) as { error?: string };
+      if (failure.error === "invalid_grant") {
+        await this.options.onRevoked?.(tenantId).catch(() => undefined);
+        throw new Error("Google Calendar access was revoked or expired; reconnect the calendar");
+      }
+      throw new Error(`Google OAuth refresh failed with HTTP ${response.status}`);
+    }
     const payload = await response.json() as { access_token?: string; expires_in?: number };
     if (!payload.access_token) throw new Error("Google OAuth response did not include an access token");
     const token = payload.access_token;

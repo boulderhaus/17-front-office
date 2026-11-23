@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 import type { OwnerAccount } from "../domain/models.js";
 
@@ -11,6 +11,8 @@ export interface OwnerSession {
   tenantId: string;
   csrf: string;
   expiresAt: number;
+  /** Must equal the account's sessionVersion; older sessions are revoked. */
+  sv?: number;
 }
 
 export async function hashOwnerPassword(password: string): Promise<string> {
@@ -31,10 +33,11 @@ export async function verifyOwnerPassword(password: string, encoded: string): Pr
   }
 }
 
-export function mintOwnerSession(account: Pick<OwnerAccount, "id" | "tenantId">, secret: string, now = Date.now()): string {
+export function mintOwnerSession(account: Pick<OwnerAccount, "id" | "tenantId" | "sessionVersion">, secret: string, now = Date.now()): string {
   const payload = Buffer.from(JSON.stringify({
     accountId: account.id,
     tenantId: account.tenantId,
+    sv: account.sessionVersion ?? 0,
     csrf: randomBytes(18).toString("base64url"),
     expiresAt: now + SESSION_TTL_SECONDS * 1_000,
   })).toString("base64url");
@@ -75,4 +78,18 @@ function constantTimeEqual(left: string, right: string): boolean {
   const leftBuffer = Buffer.from(left);
   const rightBuffer = Buffer.from(right);
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+export function sessionMatchesAccount(session: OwnerSession, account: Pick<OwnerAccount, "sessionVersion">): boolean {
+  return (session.sv ?? 0) === (account.sessionVersion ?? 0);
+}
+
+/** A reset token for the link, and the hash that is stored. Only the hash is persisted. */
+export function createPasswordResetToken(): { token: string; tokenHash: string } {
+  const token = randomBytes(32).toString("base64url");
+  return { token, tokenHash: hashPasswordResetToken(token) };
+}
+
+export function hashPasswordResetToken(token: string): string {
+  return createHash("sha256").update(`password-reset:${token}`).digest("hex");
 }

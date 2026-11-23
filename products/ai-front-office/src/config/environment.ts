@@ -30,6 +30,10 @@ const schema = z.object({
   TELNYX_ASSISTANT_ID: z.string().min(1).optional(),
   TELNYX_MESSAGING_APPROVED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   FOUNDER_WELCOME_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  SUPPORT_EMAIL: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
+  // Owner-facing controls stay hidden until each capability passes live acceptance.
+  DIRECT_BOOKING_BETA: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  WARM_TRANSFER_BETA: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   FOUNDER_WELCOME_FROM_NUMBER: z.preprocess(
     (value) => value === "" ? undefined : value,
     z.string().regex(/^\+[1-9]\d{7,14}$/, "FOUNDER_WELCOME_FROM_NUMBER must use E.164 format").optional(),
@@ -39,6 +43,10 @@ const schema = z.object({
   RECORDING_CONSENT_APPROVED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
+  // A second OAuth client for migrating projects; existing tokens keep their own client.
+  GOOGLE_CLIENT_ID_NEXT: z.preprocess((value) => value === "" ? undefined : value, z.string().optional()),
+  GOOGLE_CLIENT_SECRET_NEXT: z.preprocess((value) => value === "" ? undefined : value, z.string().optional()),
+  GOOGLE_OAUTH_NEW_CONNECTIONS: z.enum(["legacy", "next"]).default("legacy"),
   GOOGLE_REFRESH_TOKEN: z.string().optional(),
   GOOGLE_CALENDAR_ID: z.string().default("primary"),
   OWNER_DESTINATIONS_JSON: z.string().default("{}"),
@@ -75,6 +83,9 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
   }
   if (Boolean(parsed.RESEND_API_KEY) !== Boolean(parsed.RESEND_FROM_EMAIL)) {
     throw new Error("RESEND_API_KEY and RESEND_FROM_EMAIL must be configured together");
+  }
+  if (parsed.GOOGLE_OAUTH_NEW_CONNECTIONS === "next" && !(parsed.GOOGLE_CLIENT_ID_NEXT && parsed.GOOGLE_CLIENT_SECRET_NEXT)) {
+    throw new Error("GOOGLE_OAUTH_NEW_CONNECTIONS=next requires GOOGLE_CLIENT_ID_NEXT and GOOGLE_CLIENT_SECRET_NEXT");
   }
   if (!parsed.DEMO_MODE) {
     for (const key of ["DATABASE_URL", "DATA_ENCRYPTION_KEY", "SESSION_SIGNING_KEY"] as const) {

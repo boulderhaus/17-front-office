@@ -3,21 +3,24 @@ import { readFile } from "node:fs/promises";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms } from "../admin/render.js";
-import { buildActivationReport, type ActivationReport } from "../application/readiness.js";
+import { renderAdminResetLink, renderForgotPassword, renderResetPassword, renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms } from "../admin/render.js";
+import { buildActivationReport, shopActivationBlockers, type ActivationReport } from "../application/readiness.js";
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService } from "../application/call-service.js";
 import { approvedTransferTargets } from "../application/transfer-policy.js";
 import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
 import { approvedAnswer } from "../domain/approved-answer.js";
+import { isExplicitHumanRequest } from "../domain/human-request.js";
 import { saveAssistantConfig } from "../adapters/assistant-config.js";
 import { DataDeletionService } from "../application/data-deletion.js";
+import { formatEmailBody } from "../adapters/resend.js";
+import { anyGoogleClient, clientForAttempt, clientForNewConnections, encodeGoogleConnection, oauthAttemptKey, type GoogleOAuthClient } from "../adapters/google-oauth-clients.js";
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
-import { createDemoConfig } from "../domain/config.js";
+import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
-import { clearOwnerSessionCookie, hashOwnerPassword, mintOwnerSession, ownerSessionCookie, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
+import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
 import { buildTelnyxGreeting } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import {
@@ -157,6 +160,8 @@ export interface AppDependencies {
   clock: Clock;
   integrations: Record<string, boolean>;
   logger?: (entry: Record<string, unknown>) => void;
+  /** Outbound HTTP for Stripe and Telnyx routing; tests inject a fake. */
+  fetcher?: typeof fetch;
 }
 
 function publicOwnerDemo(now: Date): {
@@ -305,9 +310,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         base: dependencies.env.STRIPE_PRICE_ID,
         ...(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID ? { dailySms: dependencies.env.STRIPE_DAILY_SMS_PRICE_ID } : {}),
         ...(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID ? { realtimeSms: dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID } : {}),
-      })
+      }, dependencies.fetcher ?? fetch)
     : null;
-  const deletionService = new DataDeletionService(dependencies.store, dependencies.calendar, recordingClient);
+  const deletionService = new DataDeletionService(dependencies.store, recordingClient);
   const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
   const limiter = new RateLimiter();
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));
@@ -409,13 +414,15 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         updatedAt: now,
       };
       const splitList = (value: string): string[] => value.split(",").map((item) => item.trim()).filter(Boolean).slice(0, 100);
+      const serviceArea = normalizeServiceAreaInput(parsed.data.serviceAreaTerms);
+      if (serviceArea.errors.length > 0) return sendHtml(response, 400, renderOwnerSignup(serviceAreaMessage(serviceArea.errors), values));
       const config: BusinessConfig = {
         ...createDemoConfig(tenantId),
         paused: true,
         businessName: parsed.data.businessName,
         greeting: form.has("greeting") ? parsed.data.greeting : `Thanks for calling ${parsed.data.businessName}. I’m the owner’s AI assistant. How can I help?`,
         timezone: parsed.data.timezone,
-        serviceAreaTerms: splitList(parsed.data.serviceAreaTerms),
+        serviceAreaTerms: serviceArea.terms,
         emergencyKeywords: splitList(parsed.data.emergencyKeywords),
         serviceCategories: splitList(parsed.data.serviceCategories),
         requireDiagnosticFeeAcceptance: false,
@@ -469,12 +476,52 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (!limiter.allow(`${ip}:owner-login`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
       const parsed = ownerLoginSchema.safeParse(Object.fromEntries(parseForm(await readBody(request, 16_000)).entries()));
       if (!parsed.success) return sendHtml(response, 400, renderOwnerLogin("Enter a valid email and password."));
+      // Per-account limit so guesses spread across many addresses still stop.
+      if (!limiter.allow(`owner-login-email:${parsed.data.email}`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
       const account = await dependencies.store.getOwnerAccountByEmail(parsed.data.email);
       const valid = await verifyOwnerPassword(parsed.data.password, account?.passwordHash ?? await dummyOwnerPasswordHash);
       if (!account || !valid || account.status === "suspended") return sendHtml(response, 401, renderOwnerLogin("Email or password is incorrect."));
       const session = mintOwnerSession(account, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
       response.setHeader("set-cookie", ownerSessionCookie(session, dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/app");
+    }
+    if (url.pathname === "/forgot" && (method === "GET" || method === "POST")) {
+      const emailEnabled = Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL);
+      if (method === "GET") return sendHtml(response, 200, renderForgotPassword({ emailEnabled, supportEmail: dependencies.env.SUPPORT_EMAIL ?? null }));
+      if (!emailEnabled) return sendHtml(response, 200, renderForgotPassword({ emailEnabled, supportEmail: dependencies.env.SUPPORT_EMAIL ?? null }));
+      if (!limiter.allow(`${ip}:forgot`, 5, 60 * 60_000)) throw new HttpError(429, "Too many reset requests");
+      const parsed = z.object({ email: z.string().trim().toLowerCase().email().max(254) }).safeParse(Object.fromEntries(parseForm(await readBody(request, 4_000)).entries()));
+      if (!parsed.success) return sendHtml(response, 400, renderForgotPassword({ emailEnabled, error: "Enter the email on your account." }));
+      const resetAccount = limiter.allow(`forgot-email:${parsed.data.email}`, 3, 60 * 60_000) ? await dependencies.store.getOwnerAccountByEmail(parsed.data.email) : null;
+      if (resetAccount && resetAccount.status !== "suspended") {
+        const { token, tokenHash } = createPasswordResetToken();
+        const now = dependencies.clock.now();
+        await dependencies.store.createPasswordReset(resetAccount.id, tokenHash, new Date(now.getTime() + 30 * 60_000).toISOString());
+        const link = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/reset?token=${encodeURIComponent(token)}`;
+        await dependencies.store.enqueueNotification({
+          id: randomUUID(), tenantId: resetAccount.tenantId, callId: null, channel: "email", destinationRef: `email:${resetAccount.email}`,
+          body: formatEmailBody("Reset your Front Office password", `Use this link within 30 minutes to choose a new password:\n\n${link}\n\nIf you didn't ask for this, ignore this email. Your password has not changed.`),
+          priority: "high", state: "pending", attempts: 0, nextAttemptAt: now.toISOString(),
+          idempotencyKey: `password-reset:${tokenHash}`, providerReceipt: null, lastError: null, createdAt: now.toISOString(), sentAt: null,
+        });
+      }
+      // Same answer whether or not the account exists.
+      return sendHtml(response, 200, renderForgotPassword({ emailEnabled, sent: true }));
+    }
+    if (url.pathname === "/reset" && method === "GET") return sendHtml(response, 200, renderResetPassword(url.searchParams.get("token") ?? ""));
+    if (url.pathname === "/reset" && method === "POST") {
+      if (!limiter.allow(`${ip}:reset`, 10, 60 * 60_000)) throw new HttpError(429, "Too many attempts");
+      const form = parseForm(await readBody(request, 4_000));
+      const token = form.get("token") ?? "";
+      const password = form.get("password") ?? "";
+      if (password.length < 12 || password.length > 200) return sendHtml(response, 400, renderResetPassword(token, "Use at least 12 characters."));
+      if (password !== form.get("confirm")) return sendHtml(response, 400, renderResetPassword(token, "The two passwords don't match."));
+      const accountId = token ? await dependencies.store.consumePasswordReset(hashPasswordResetToken(token), dependencies.clock.now().toISOString()) : null;
+      if (!accountId) return sendHtml(response, 400, renderForgotPassword({ emailEnabled: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL), error: "That reset link is expired or already used. Ask for a new one." }));
+      await dependencies.store.updateOwnerPassword(accountId, await hashOwnerPassword(password), dependencies.clock.now().toISOString());
+      log({ level: "info", event: "owner_password_reset", accountId });
+      response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
+      return redirect(response, "/login");
     }
     if (method === "GET" && url.pathname === "/logout") {
       response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
@@ -525,7 +572,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const session = verifyOwnerSession(sessionValue, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
     if (!session) return redirect(response, "/login");
     const account = await dependencies.store.getOwnerAccountById(session.accountId);
-    if (!account || account.tenantId !== session.tenantId || account.status === "suspended") {
+    if (!account || account.tenantId !== session.tenantId || account.status === "suspended" || !sessionMatchesAccount(session, account)) {
       response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/login");
     }
@@ -533,7 +580,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const member = account.role === "member";
     if (url.pathname === "/app/setup") {
       if (member) throw new HttpError(403, "Only the owner can change the shop’s call setup");
-      if (method === "GET") return sendHtml(response, 200, renderQuickSetup(await dependencies.store.getConfig(account.tenantId), session.csrf, await isGoogleConnected(dependencies.env, dependencies.store, account.tenantId)));
+      if (method === "GET") return sendHtml(response, 200, renderQuickSetup(await dependencies.store.getConfig(account.tenantId), session.csrf, await isGoogleConnected(dependencies.env, dependencies.store, account.tenantId), { directBooking: dependencies.env.DIRECT_BOOKING_BETA, warmTransfer: dependencies.env.WARM_TRANSFER_BETA }));
       if (method !== "POST") throw new HttpError(405, "Method not allowed");
       const form = parseForm(await readBody(request, 20_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
@@ -542,6 +589,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (!parsed.success || parsed.data.bookStart >= parsed.data.bookEnd) throw new HttpError(400, "Check the required answers and appointment hours");
       const data = parsed.data;
       if (!/\bAI\b/i.test(data.greeting)) throw new HttpError(400, "Your greeting must identify the AI assistant");
+      const serviceArea = normalizeServiceAreaInput(data.serviceAreaTerms);
+      if (serviceArea.errors.length > 0 || serviceArea.terms.length === 0) throw new HttpError(400, serviceAreaMessage(serviceArea.errors));
       try { new Intl.DateTimeFormat("en-US", { timeZone: data.timezone }).format(); } catch { throw new HttpError(400, "Choose a valid timezone"); }
       const phoneInput = form.get("ownerPhone")?.trim();
       const phone = phoneInput ? normalizeUsPhone(phoneInput) : null;
@@ -550,7 +599,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         const current = await dependencies.store.getConfig(account.tenantId);
         if (phone) await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner-primary", phone);
         if (form.get("ownerSmsConsent") === "yes" && !phone && !await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")) throw new HttpError(400, "Add a mobile number for text alerts");
-        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, businessName: data.businessName, timezone: data.timezone, serviceAreaTerms: data.serviceAreaTerms.split(",").map((v) => v.trim()).filter(Boolean), operationMode: data.operationMode, afterHours: { ...current.afterHours, weekdayStart: data.start, weekdayEnd: data.end }, bookableHours: { weekdayStart: data.bookStart, weekdayEnd: data.bookEnd, weekends: form.get("weekends") === "on" }, bookingMode: data.bookingMode, greeting: data.greeting, priceSnippets: parseLines(data.prices, 30).map((text, index) => ({ label: `Approved price ${index + 1}`, text })), approvedKnowledge: parseLines(data.answers, 30).map((text, index) => ({ topic: `Approved answer ${index + 1}`, text })), ownerNotificationRefs: form.get("ownerSmsConsent") === "yes" ? ["owner-primary"] : [], ownerTransferNumberRef: "owner-primary", warmTransferEnabled: form.get("warmTransferEnabled") === "on" });
+        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, businessName: data.businessName, timezone: data.timezone, serviceAreaTerms: serviceArea.terms, operationMode: data.operationMode, afterHours: { ...current.afterHours, weekdayStart: data.start, weekdayEnd: data.end }, bookableHours: { weekdayStart: data.bookStart, weekdayEnd: data.bookEnd, weekends: form.get("weekends") === "on" }, bookingMode: dependencies.env.DIRECT_BOOKING_BETA ? data.bookingMode : "confirm", greeting: data.greeting, priceSnippets: parseLines(data.prices, 30).map((text, index) => ({ label: `Approved price ${index + 1}`, text })), approvedKnowledge: parseLines(data.answers, 30).map((text, index) => ({ topic: `Approved answer ${index + 1}`, text })), ownerNotificationRefs: form.get("ownerSmsConsent") === "yes" ? ["owner-primary"] : [], ownerTransferNumberRef: "owner-primary", warmTransferEnabled: dependencies.env.WARM_TRANSFER_BETA && form.get("warmTransferEnabled") === "on" });
       });
       return redirect(response, "/app?setup=saved");
     }
@@ -561,13 +610,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return teamRoutes(request, response, url, dependencies, account, session);
     }
     if (method === "GET" && url.pathname === "/app") {
-      const [config, calls, tasks, usage, googleConnected, subscription] = await Promise.all([
+      const subscription = await dependencies.store.getSubscription(account.tenantId);
+      const [config, calls, tasks, usage, googleConnected] = await Promise.all([
         dependencies.store.getConfig(account.tenantId),
         dependencies.store.listCalls(account.tenantId, 50),
         dependencies.store.listCallbackTasks(account.tenantId, 100),
-        dependencies.store.getUsageSummary(account.tenantId, ...currentBillingPeriod(dependencies.clock.now())),
+        dependencies.store.getUsageSummary(account.tenantId, ...currentBillingPeriod(dependencies.clock.now(), subscription?.currentPeriodEnd)),
         isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
-        dependencies.store.getSubscription(account.tenantId),
       ]);
       return sendHtml(response, 200, renderOwnerDashboard({
         account,
@@ -598,24 +647,50 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (method === "POST" && url.pathname === "/app/billing/checkout") {
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
-      const subscription = await dependencies.store.getSubscription(account.tenantId);
-      if (subscription?.status === "active") return redirect(response, "/app");
-      if (stripeClient) {
+      if (!stripeClient) {
+        if (dependencies.env.FOUNDING_CHECKOUT_URL) return redirect(response, dependencies.env.FOUNDING_CHECKOUT_URL);
+        throw new HttpError(503, "Checkout is not configured yet");
+      }
+      // Same lock as the billing webhook, so a payment cannot land between this read and a new session.
+      const target = await dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
+        const subscription = await dependencies.store.getSubscription(account.tenantId);
+        const app = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`;
+        if (subscription?.status === "active" || subscription?.status === "trialing") return app;
+        if (subscription?.providerCustomerId && (subscription.status === "past_due" || subscription.status === "unpaid")) {
+          // Fix payment on the existing subscription instead of starting a second one.
+          return stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`)
+            .catch(() => { throw new HttpError(502, "Billing could not be opened. Please retry; your subscription has not changed."); });
+        }
+        // Any other live subscription (e.g. a first payment still processing) blocks a second one.
+        if (subscription?.providerSubscriptionId && subscription.status !== "canceled") return `${app}?checkout=processing`;
         const config = await dependencies.store.getConfig(account.tenantId);
+        const addOns = `${config.ownerDailySmsEnabled ? 1 : 0}${config.ownerRealtimeSmsEnabled ? 1 : 0}`;
+        const now = dependencies.clock.now();
+        const savedOpen = await dependencies.store.getIntegrationSecret(account.tenantId, "stripe", "open_checkout");
+        const open = savedOpen ? JSON.parse(savedOpen) as { id: string; url: string; expiresAt: string; addOns: string } : null;
+        if (open && Date.parse(open.expiresAt) > now.getTime() + 60_000) {
+          // One payable Checkout Session per shop: reuse it, or expire it if the add-ons changed.
+          if (open.addOns === addOns) return open.url;
+          const expired = await stripeClient.expireCheckout(open.id).catch(() => { throw new HttpError(502, "Checkout could not be updated. Please retry."); });
+          if (expired === "complete") return `${app}?checkout=processing`;
+        }
         const base = dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "");
-        const checkoutUrl = await stripeClient.createCheckout({
+        const created = await stripeClient.createCheckout({
           tenantId: account.tenantId,
           email: account.email,
+          customerId: subscription?.providerCustomerId ?? null,
           successUrl: `${base}/app?checkout=success`,
           cancelUrl: `${base}/app?checkout=cancelled`,
-          idempotencyKey: `checkout:${account.tenantId}:${randomUUID()}`,
+          // A retry after a timeout in the same half hour gets the same session back from Stripe.
+          idempotencyKey: `checkout:${account.tenantId}:${addOns}:${Math.floor(now.getTime() / 1_800_000)}`,
           dailySms: config.ownerDailySmsEnabled,
           realtimeSms: config.ownerRealtimeSmsEnabled,
+          now,
         });
-        return redirect(response, checkoutUrl);
-      }
-      if (dependencies.env.FOUNDING_CHECKOUT_URL) return redirect(response, dependencies.env.FOUNDING_CHECKOUT_URL);
-      throw new HttpError(503, "Checkout is not configured yet");
+        await dependencies.store.saveIntegrationSecret(account.tenantId, "stripe", "open_checkout", JSON.stringify({ ...created, addOns }));
+        return created.url;
+      });
+      return redirect(response, target);
     }
     if (method === "GET" && (url.pathname === "/app/settings" || url.pathname === "/app/config")) {
       const [config, googleConnected, ownerPhone] = await Promise.all([
@@ -624,12 +699,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary"),
       ]);
       return sendHtml(response, 200, renderConfig(config, session.csrf, {
-        googleAvailable: Boolean(dependencies.env.GOOGLE_CLIENT_ID && dependencies.env.GOOGLE_CLIENT_SECRET),
+        googleAvailable: anyGoogleClient(dependencies.env),
         googleConnected,
         ownerPhoneConfigured: Boolean(ownerPhone),
         weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
         dailySmsAvailable: Boolean(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID),
         realtimeSmsAvailable: Boolean(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID),
+        directBookingAvailable: dependencies.env.DIRECT_BOOKING_BETA,
       }, "owner"));
     }
     if (method === "POST" && url.pathname === "/app/config") {
@@ -638,6 +714,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
       const current = await dependencies.store.getConfig(account.tenantId);
       const updated = configFromForm(current, form);
+      if (!dependencies.env.DIRECT_BOOKING_BETA) updated.bookingMode = "confirm";
+      if (!dependencies.env.WARM_TRANSFER_BETA) updated.warmTransferEnabled = false;
       updated.flatMonthlyPriceCents = current.flatMonthlyPriceCents;
       updated.includedMinutes = current.includedMinutes;
       updated.overageCentsPerMinute = current.overageCentsPerMinute;
@@ -658,6 +736,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         }
       }
       if (account.status !== "active") updated.paused = true;
+      if (updated.paused !== current.paused) updated.pausedForBilling = false;
       const ownerPhone = form.get("ownerPhone")?.trim();
       if (ownerPhone) {
         if (!/^\+[1-9]\d{7,14}$/.test(ownerPhone)) throw new HttpError(400, "Owner phone must use E.164 format");
@@ -699,14 +778,67 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       });
       return redirect(response, "/app/settings");
     }
+    if (method === "GET" && url.pathname === "/app/account/export") {
+      if (member) throw new HttpError(403, "Only the owner can export the shop's data");
+      const [config, calls, tasks, subscription] = await Promise.all([
+        dependencies.store.getConfig(account.tenantId),
+        dependencies.store.listCalls(account.tenantId, 100_000),
+        dependencies.store.listCallbackTasks(account.tenantId, 100_000),
+        dependencies.store.getSubscription(account.tenantId),
+      ]);
+      const bookings = await dependencies.store.listBookingsForTenant(account.tenantId);
+      const body = JSON.stringify({
+        exportedAt: dependencies.clock.now().toISOString(),
+        account: { email: account.email, displayName: account.displayName, createdAt: account.createdAt },
+        settings: config,
+        subscription: subscription ? { status: subscription.status, currentPeriodEnd: subscription.currentPeriodEnd } : null,
+        calls: calls.map((call) => ({ id: call.id, startedAt: call.startedAt, endedAt: call.endedAt, durationSeconds: call.durationSeconds, callerNumber: call.fromNumber, details: call.fields, emergency: call.emergency, outcome: call.outcome, transcript: call.transcript, consent: call.consentState })),
+        callbackTasks: tasks,
+        bookings,
+      }, null, 2);
+      response.writeHead(200, {
+        "content-type": "application/json; charset=utf-8",
+        "content-disposition": `attachment; filename="front-office-export-${dependencies.clock.now().toISOString().slice(0, 10)}.json"`,
+        "content-length": Buffer.byteLength(body),
+      });
+      response.end(body);
+      return;
+    }
+    if (method === "POST" && url.pathname === "/app/account/sign-out-everywhere") {
+      const form = parseForm(await readBody(request, 4_000));
+      if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      await dependencies.store.revokeOwnerSessions(account.id, dependencies.clock.now().toISOString());
+      response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
+      return redirect(response, "/login");
+    }
+    if (method === "POST" && url.pathname === "/app/account/delete") {
+      if (member) throw new HttpError(403, "Only the owner can delete the shop");
+      const form = parseForm(await readBody(request, 8_000));
+      if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      if (form.get("confirm")?.trim().toLowerCase() !== "delete") throw new HttpError(400, "Type DELETE to confirm");
+      if (!await verifyOwnerPassword(form.get("password") ?? "", account.passwordHash)) throw new HttpError(403, "Password is incorrect");
+      const subscription = await dependencies.store.getSubscription(account.tenantId);
+      // Only once billing has fully ended: anything but a cancelled subscription may still charge.
+      if (subscription?.providerSubscriptionId && subscription.status !== "canceled") {
+        throw new HttpError(409, "Cancel your subscription in Billing first. You can delete your account once it has ended.");
+      }
+      await pauseLiveRoute(account.tenantId)
+        .catch(() => { throw new HttpError(502, "We couldn't disconnect your Front Office line. Nothing was deleted; please retry."); });
+      await deletionService.deleteWorkspace(account.tenantId)
+        .catch(() => { throw new HttpError(502, "A call recording couldn't be deleted. Nothing else was removed; please retry."); });
+      log({ level: "warn", event: "owner_workspace_deleted", tenantId: account.tenantId });
+      response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
+      return redirect(response, "/?deleted=1");
+    }
     if (method === "GET" && url.pathname === "/app/integrations/google/start") {
-      if (!dependencies.env.GOOGLE_CLIENT_ID || !dependencies.env.GOOGLE_CLIENT_SECRET) throw new HttpError(503, "Google OAuth is not configured on the server");
+      const googleOAuth = clientForNewConnections(dependencies.env);
+      if (!googleOAuth) throw new HttpError(503, "Google OAuth is not configured on the server");
       const cookiePath = "/app/integrations/google";
-      const attempt = createGoogleOAuthAttempt(`${dependencies.env.SESSION_SIGNING_KEY!}:${account.id}`, dependencies.env.NODE_ENV === "production", dependencies.clock.now().getTime(), cookiePath);
+      const attempt = createGoogleOAuthAttempt(oauthAttemptKey(`${dependencies.env.SESSION_SIGNING_KEY!}:${account.id}`, googleOAuth.name), dependencies.env.NODE_ENV === "production", dependencies.clock.now().getTime(), cookiePath);
       const callback = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app/integrations/google/callback`;
       const authorization = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       authorization.search = new URLSearchParams({
-        client_id: dependencies.env.GOOGLE_CLIENT_ID,
+        client_id: googleOAuth.id,
         redirect_uri: callback,
         response_type: "code",
         access_type: "offline",
@@ -721,12 +853,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (method === "GET" && url.pathname === "/app/integrations/google/callback") {
       const cookiePath = "/app/integrations/google";
-      const verifier = verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, "afo_google_pkce"), `${dependencies.env.SESSION_SIGNING_KEY!}:${account.id}`, dependencies.clock.now().getTime());
-      if (!verifier) throw new HttpError(400, "Google authorization state is invalid or expired");
+      const attempt = clientForAttempt(dependencies.env, `${dependencies.env.SESSION_SIGNING_KEY!}:${account.id}`, (key) => verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, "afo_google_pkce"), key, dependencies.clock.now().getTime()));
+      if (!attempt) throw new HttpError(400, "Google authorization state is invalid or expired");
       const code = url.searchParams.get("code");
       if (!code) throw new HttpError(400, "Google did not return an authorization code");
-      const refreshToken = await exchangeGoogleCode(dependencies.env, code, verifier, "/app/integrations/google/callback");
-      await dependencies.store.saveIntegrationSecret(account.tenantId, "google", member ? `refresh_token:${account.id}` : "refresh_token", refreshToken);
+      const refreshToken = await exchangeGoogleCode(dependencies.env, attempt.client, code, attempt.result, "/app/integrations/google/callback");
+      await dependencies.store.saveIntegrationSecret(account.tenantId, "google", member ? `refresh_token:${account.id}` : "refresh_token", encodeGoogleConnection(refreshToken, attempt.client));
       response.setHeader("set-cookie", clearGoogleOAuthCookie(dependencies.env.NODE_ENV === "production", cookiePath));
       return redirect(response, "/app/settings");
     }
@@ -824,6 +956,83 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     throw new HttpError(404, "Not found");
   }
 
+  /** Detach the shop's number from the assistant so callers do not reach an AI that can save nothing. */
+  async function pauseLiveRoute(tenantId: string): Promise<void> {
+    const [route, inboundNumber] = await Promise.all([
+      dependencies.store.getProviderRouteForTenant("telnyx", tenantId),
+      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
+    ]);
+    if (!route || !inboundNumber || !dependencies.env.TELNYX_API_KEY) return;
+    await new TelnyxVoiceRoutingClient({
+      apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: inboundNumber, assistantId: route.externalId,
+      ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}),
+    }).setPaused(true);
+  }
+
+  async function handleBillingLapse(tenantId: string, status: SubscriptionRecord["status"], eventId: string): Promise<void> {
+    const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
+    if (account?.status !== "active") return;
+    if ((await dependencies.store.getConfig(tenantId)).paused) return; // already off (billing or owner)
+    await pauseLiveRoute(tenantId).catch((error) => {
+      log({ level: "error", event: "billing_lapse_pause_failed", tenantId, error: safeError(error) });
+      throw new HttpError(502, "Could not pause the live phone route; Stripe will retry");
+    });
+    const config = await dependencies.store.withLock(`config:${tenantId}`, async () => {
+      const current = await dependencies.store.getConfig(tenantId);
+      // Remember that billing (not the owner) paused it, so payment can turn it back on.
+      await dependencies.store.saveConfig({ ...current, paused: true, pausedForBilling: !current.paused || current.pausedForBilling === true });
+      return current;
+    });
+    const now = dependencies.clock.now().toISOString();
+    const statusWords = status === "past_due" ? "past due" : status === "canceled" ? "cancelled" : status.replace("_", " ");
+    for (const destinationRef of config.ownerNotificationRefs) {
+      await dependencies.store.enqueueNotification({
+        id: randomUUID(), tenantId, callId: null, channel: "sms", destinationRef,
+        body: `Front Office is paused: your subscription is ${statusWords}. Calls forwarded to your Front Office line will not be answered. Update billing in your dashboard or turn off call forwarding.`,
+        priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
+        idempotencyKey: `billing-lapse:${tenantId}:${eventId}:${destinationRef}`,
+        providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
+      });
+    }
+    log({ level: "warn", event: "billing_lapse_paused", tenantId, status });
+  }
+
+  /** Billing paused this shop and it has now paid: reconnect the line and tell the owner. */
+  async function handleBillingRestored(tenantId: string, eventId: string): Promise<void> {
+    const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
+    if (account?.status !== "active") return;
+    const config = await dependencies.store.getConfig(tenantId);
+    if (!config.pausedForBilling) return;
+    const [route, inboundNumber] = await Promise.all([
+      dependencies.store.getProviderRouteForTenant("telnyx", tenantId),
+      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
+    ]);
+    if (route && inboundNumber && dependencies.env.TELNYX_API_KEY) {
+      await new TelnyxVoiceRoutingClient({
+        apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: inboundNumber, assistantId: route.externalId,
+        ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}),
+      }).setPaused(false).catch((error) => {
+        log({ level: "error", event: "billing_restore_resume_failed", tenantId, error: safeError(error) });
+        throw new HttpError(502, "Could not reconnect the live phone route; Stripe will retry");
+      });
+    }
+    await dependencies.store.withLock(`config:${tenantId}`, async () => {
+      const current = await dependencies.store.getConfig(tenantId);
+      await dependencies.store.saveConfig({ ...current, paused: false, pausedForBilling: false });
+    });
+    const now = dependencies.clock.now().toISOString();
+    for (const destinationRef of config.ownerNotificationRefs) {
+      await dependencies.store.enqueueNotification({
+        id: randomUUID(), tenantId, callId: null, channel: "sms", destinationRef,
+        body: "Front Office is back on: your payment went through and calls forwarded to your Front Office line are being answered again.",
+        priority: "normal", state: "pending", attempts: 0, nextAttemptAt: now,
+        idempotencyKey: `billing-restored:${tenantId}:${eventId}:${destinationRef}`,
+        providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
+      });
+    }
+    log({ level: "info", event: "billing_restored_resumed", tenantId });
+  }
+
   async function handleStripe(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (!dependencies.env.STRIPE_WEBHOOK_SECRET) throw new HttpError(503, "Stripe webhooks are not configured");
     const rawBody = await readBody(request, 256_000);
@@ -838,8 +1047,50 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const metadata = object.metadata && typeof object.metadata === "object" ? object.metadata as Record<string, unknown> : {};
       const tenantId = typeof metadata.tenant_id === "string" ? metadata.tenant_id : typeof object.client_reference_id === "string" ? object.client_reference_id : null;
       if (!tenantId || !await dependencies.store.getOwnerAccountByTenant(tenantId)) throw new HttpError(400, "Stripe event tenant is not recognized");
-      const record = subscriptionFromStripeEvent(event, await dependencies.store.getSubscription(tenantId), dependencies.clock.now().toISOString());
-      if (record) await dependencies.store.saveSubscription(record);
+      // One shop's billing events are applied one at a time, each against a fresh API read,
+      // so a slow stale read can never overwrite a newer state.
+      await dependencies.store.withLock(`billing:${tenantId}`, async () => {
+        const existing = await dependencies.store.getSubscription(tenantId);
+        const now = dependencies.clock.now().toISOString();
+        const subscriptionId = event.type.startsWith("customer.subscription.")
+          ? (typeof object.id === "string" ? object.id : null)
+          : (typeof object.subscription === "string" ? object.subscription : null);
+        let record: SubscriptionRecord | null = null;
+        if (stripeClient && subscriptionId) {
+          const live = await stripeClient.retrieveSubscription(subscriptionId)
+            .catch(() => { throw new HttpError(502, "Stripe subscription lookup failed; Stripe will retry"); });
+          if (live.tenantId && live.tenantId !== tenantId) throw new HttpError(400, "Stripe subscription belongs to a different workspace");
+          const otherSubscription = existing?.providerSubscriptionId && existing.providerSubscriptionId !== live.id;
+          if (!live.priceIds.includes(stripeClient.basePriceId)) {
+            log({ level: "warn", event: "stripe_subscription_ignored_wrong_price", tenantId });
+          } else if (otherSubscription && existing?.status === "active") {
+            // Never let a second subscription cancel or replace the one that is paying.
+            if (live.status !== "canceled") log({ level: "error", event: "stripe_duplicate_subscription_requires_refund", tenantId });
+          } else {
+            record = {
+              tenantId,
+              providerCustomerId: live.customer ?? existing?.providerCustomerId ?? null,
+              providerSubscriptionId: live.id,
+              status: live.status,
+              currentPeriodEnd: live.currentPeriodEnd ?? existing?.currentPeriodEnd ?? null,
+              providerEventCreatedAt: typeof event.created === "number" ? new Date(event.created * 1_000).toISOString() : now,
+              createdAt: existing?.createdAt ?? now,
+              updatedAt: now,
+            };
+          }
+        } else {
+          record = subscriptionFromStripeEvent(event, existing, now);
+        }
+        if (record) {
+          // Pause or resume first: if Telnyx fails, nothing is saved and Stripe's retry sees the same transition.
+          // Reconcile the line with the current status on every event, not only on a status edge,
+          // so a crash between steps cannot leave a paid shop paused or an unpaid shop live.
+          if (record.status !== "active") await handleBillingLapse(tenantId, record.status, event.id);
+          else await handleBillingRestored(tenantId, event.id);
+          await dependencies.store.saveSubscription(record);
+          if (record.status === "active") await dependencies.store.deleteIntegrationSecret(tenantId, "stripe", "open_checkout");
+        }
+      });
     }
     const firstReceipt = await dependencies.store.claimWebhook(`stripe:${event.id}`);
     if (!firstReceipt) return sendJson(response, 200, { received: true, duplicate: true });
@@ -917,6 +1168,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         fromNumber: callerPhone,
         fromNumberVerified: initialization.data.payload.telnyx_end_user_target_verified === true,
         startedAt: initialization.data.occurred_at ?? dependencies.clock.now().toISOString(),
+        consentState: config.recordingDisclosure.trim() ? "disclosed" : "unknown",
       });
       const localContext = formatLocalCallContext(dependencies.clock.now(), config.timezone);
       return sendJson(response, 200, {
@@ -992,7 +1244,6 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         ...(input.human_requested === undefined ? {} : { humanRequested: input.human_requested }),
         ...(input.confidence === undefined ? {} : { confidence: input.confidence }),
       },
-      ...(input.recording_disclosure_given === undefined ? {} : { recordingDisclosureGiven: input.recording_disclosure_given }),
       ...(input.recording_disclosure_declined === undefined ? {} : { recordingDisclosureDeclined: input.recording_disclosure_declined }),
     });
     sendJson(response, 200, result);
@@ -1126,14 +1377,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return redirect(response, "/admin");
     }
     if (method === "GET" && url.pathname === "/admin/integrations/google/callback") {
-      if (!dependencies.env.GOOGLE_CLIENT_ID || !dependencies.env.GOOGLE_CLIENT_SECRET) throw new HttpError(503, "Google OAuth is not configured on the server");
-      const verifier = verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, "afo_google_pkce"), dependencies.env.SESSION_SIGNING_KEY!);
-      if (!verifier) throw new HttpError(400, "Google OAuth state is invalid or expired");
+      const attempt = clientForAttempt(dependencies.env, dependencies.env.SESSION_SIGNING_KEY!, (key) => verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, "afo_google_pkce"), key));
+      if (!attempt) throw new HttpError(400, "Google OAuth state is invalid or expired");
       if (url.searchParams.has("error")) throw new HttpError(400, "Google authorization was declined");
       const code = url.searchParams.get("code");
       if (!code) throw new HttpError(400, "Google did not return an authorization code");
-      const refreshToken = await exchangeGoogleCode(dependencies.env, code, verifier);
-      await dependencies.store.saveIntegrationSecret(dependencies.env.DEFAULT_TENANT_ID, "google", "refresh_token", refreshToken);
+      const refreshToken = await exchangeGoogleCode(dependencies.env, attempt.client, code, attempt.result);
+      await dependencies.store.saveIntegrationSecret(dependencies.env.DEFAULT_TENANT_ID, "google", "refresh_token", encodeGoogleConnection(refreshToken, attempt.client));
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
       await dependencies.store.saveConfig({ ...config, calendarConnectionRef: "google-oauth" });
       response.setHeader("set-cookie", clearGoogleOAuthCookie(dependencies.env.NODE_ENV === "production"));
@@ -1167,12 +1417,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
 
     if (method === "GET" && url.pathname === "/admin/integrations/google/start") {
-      if (!dependencies.env.GOOGLE_CLIENT_ID || !dependencies.env.GOOGLE_CLIENT_SECRET) throw new HttpError(503, "Google OAuth is not configured on the server");
-      const attempt = createGoogleOAuthAttempt(dependencies.env.SESSION_SIGNING_KEY!, dependencies.env.NODE_ENV === "production");
+      const googleOAuth = clientForNewConnections(dependencies.env);
+      if (!googleOAuth) throw new HttpError(503, "Google OAuth is not configured on the server");
+      const attempt = createGoogleOAuthAttempt(oauthAttemptKey(dependencies.env.SESSION_SIGNING_KEY!, googleOAuth.name), dependencies.env.NODE_ENV === "production");
       const callback = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/admin/integrations/google/callback`;
       const authorization = new URL("https://accounts.google.com/o/oauth2/v2/auth");
       authorization.search = new URLSearchParams({
-        client_id: dependencies.env.GOOGLE_CLIENT_ID,
+        client_id: googleOAuth.id,
         redirect_uri: callback,
         response_type: "code",
         access_type: "offline",
@@ -1200,6 +1451,17 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (method === "GET" && url.pathname === "/admin/owners") {
       return sendHtml(response, 200, renderOwnerAccounts(await dependencies.store.listOwnerAccounts(200), csrf));
+    }
+    const resetLinkMatch = /^\/admin\/owners\/([0-9a-f-]+)\/reset-link$/i.exec(url.pathname);
+    if (method === "POST" && resetLinkMatch?.[1]) {
+      const form = parseForm(await readBody(request, 4_000));
+      if (!bearer && (!session || !verifyCsrf(session, form.get("csrf"), dependencies.env.SESSION_SIGNING_KEY!))) throw new HttpError(403, "Invalid CSRF token");
+      const owner = await dependencies.store.getOwnerAccountById(resetLinkMatch[1]);
+      if (!owner) throw new HttpError(404, "Owner account not found");
+      const { token, tokenHash } = createPasswordResetToken();
+      await dependencies.store.createPasswordReset(owner.id, tokenHash, new Date(dependencies.clock.now().getTime() + 30 * 60_000).toISOString());
+      log({ level: "info", event: "admin_reset_link_created", accountId: owner.id });
+      return sendHtml(response, 200, renderAdminResetLink(owner.email, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/reset?token=${encodeURIComponent(token)}`));
     }
     const ownerStatusMatch = /^\/admin\/owners\/([0-9a-f-]+)\/status$/i.exec(url.pathname);
     if (method === "POST" && ownerStatusMatch?.[1]) {
@@ -1231,7 +1493,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
           dependencies.store.getSubscription(account.tenantId),
         ]);
-        if (!ownerPhone || !googleConnected || config.serviceAreaTerms.length === 0) throw new HttpError(409, "Owner phone, Google Calendar, and service area must be configured before activation");
+        const shopBlockers = shopActivationBlockers({
+          ownerPhoneConfigured: Boolean(ownerPhone),
+          urgentAlertsEnabled: config.ownerNotificationRefs.length > 0,
+          googleConnected,
+          serviceAreaConfigured: config.serviceAreaTerms.length > 0,
+        });
+        if (shopBlockers.length > 0) throw new HttpError(409, `This shop is missing: ${shopBlockers.join(", ")}`);
         if (!stripeClient || subscription?.status !== "active") throw new HttpError(409, "An active paid subscription is required before activation");
         const existingRoute = await dependencies.store.getProviderRoute("telnyx", assistantId);
         if (existingRoute && existingRoute.tenantId !== account.tenantId) throw new HttpError(409, "That Telnyx assistant is already assigned to another tenant");
@@ -1249,15 +1517,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           throw error;
         }
       } else {
-        const [route, inboundNumber] = await Promise.all([
-          dependencies.store.getProviderRouteForTenant("telnyx", account.tenantId),
-          dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
-        ]);
-        if (route && inboundNumber && dependencies.env.TELNYX_API_KEY) {
-          await new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: inboundNumber, assistantId: route.externalId })
-            .setPaused(true)
-            .catch(() => { throw new HttpError(502, "Telnyx could not disconnect the live phone route; account status was not changed"); });
-        }
+        await pauseLiveRoute(account.tenantId)
+          .catch(() => { throw new HttpError(502, "Telnyx could not disconnect the live phone route; account status was not changed"); });
         await dependencies.store.saveConfig({ ...config, paused: true });
         await dependencies.store.updateOwnerAccountStatus(account.id, status, dependencies.clock.now().toISOString());
       }
@@ -1270,7 +1531,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         dependencies.store.getIntegrationSecret(dependencies.env.DEFAULT_TENANT_ID, "notifications", "owner-primary"),
       ]);
       return sendHtml(response, 200, renderConfig(config, csrf, {
-        googleAvailable: Boolean(dependencies.env.GOOGLE_CLIENT_ID && dependencies.env.GOOGLE_CLIENT_SECRET),
+        googleAvailable: anyGoogleClient(dependencies.env),
         googleConnected,
         ownerPhoneConfigured: Boolean(ownerPhone),
         weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
@@ -1432,19 +1693,6 @@ function unwrapToolPayload(value: unknown): unknown {
   return { ...(nested as Record<string, unknown>), ...outer };
 }
 
-function isExplicitHumanRequest(callerQuote: string): boolean {
-  const quote = callerQuote.toLowerCase().replace(/\s+/g, " ").trim();
-  const person = "(?:human|person|owner|representative|operator|technician|someone|somebody)";
-  if (new RegExp(`\\b(?:do not|don't|dont|never|no need to|not trying to|not asking to|do not want to|don't want to)\\b.{0,40}\\b${person}\\b`).test(quote)) return false;
-  return [
-    new RegExp(`\\b(?:i|we)\\s+(?:want|need|would like|have to)\\s+(?:to\\s+)?(?:speak|talk|connect|transfer|reach|get|call|be connected)?\\s*(?:with|to)?\\s*(?:a|the|your)?\\s*${person}\\b`),
-    new RegExp(`\\b(?:can|could|would|will)\\s+(?:i|you)\\s+(?:please\\s+)?(?:speak|talk|connect|transfer|put|get|reach)\\b.{0,30}\\b${person}\\b`),
-    new RegExp(`\\b(?:connect|transfer|put|get)\\s+me\\b.{0,30}\\b${person}\\b`),
-    new RegExp(`\\b(?:let me|please)\\s+(?:speak|talk)\\b.{0,30}\\b${person}\\b`),
-    /\b(?:have|ask)\s+(?:the\s+)?(?:owner|technician|someone|somebody)\s+(?:to\s+)?call\s+me(?:\s+back)?\b/,
-    /\b(?:human|person|representative|operator)\s*(?:please|now)?[.!?]*$/,
-  ].some((pattern) => pattern.test(quote));
-}
 
 function formatLocalCallContext(now: Date, timeZone: string): { date: string; time: string } {
   return {
@@ -1462,10 +1710,21 @@ function routeKey(pathname: string): string {
   return pathname;
 }
 
-function currentBillingPeriod(now: Date): [string, string] {
+/**
+ * The usage meter follows the shop's Stripe billing cycle so included minutes
+ * reset when the subscription renews. Without a current period (unpaid, or a
+ * stale record) it falls back to the UTC calendar month.
+ */
+export function currentBillingPeriod(now: Date, currentPeriodEnd?: string | null): [string, string] {
+  const end = currentPeriodEnd ? new Date(currentPeriodEnd) : null;
+  if (end && !Number.isNaN(end.getTime()) && end.getTime() > now.getTime()) {
+    const start = new Date(end.getTime());
+    start.setUTCMonth(start.getUTCMonth() - 1);
+    if (start.getTime() <= now.getTime()) return [start.toISOString(), end.toISOString()];
+  }
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
-  return [start.toISOString(), end.toISOString()];
+  const fallbackEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  return [start.toISOString(), fallbackEnd.toISOString()];
 }
 
 function normalizeUsPhone(value: string): string | null {
@@ -1505,6 +1764,12 @@ function timingSafeEqualBuffers(left: Buffer, right: Buffer): boolean {
   let mismatch = 0;
   for (let index = 0; index < left.length; index += 1) mismatch |= left[index]! ^ right[index]!;
   return mismatch === 0;
+}
+
+function serviceAreaMessage(errors: string[]): string {
+  return errors.length > 0
+    ? `Add a state to: ${errors.slice(0, 5).join(", ")}. Use a city and state ("Sarasota FL") or a 5-digit ZIP.`
+    : "Add at least one city and state or 5-digit ZIP.";
 }
 
 function configFromForm(current: BusinessConfig, form: URLSearchParams): BusinessConfig {
@@ -1562,7 +1827,7 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams): Busines
     answerAfterRings,
     bookingMode,
     warmTransferEnabled: form.get("warmTransferEnabled") === "on",
-    serviceAreaTerms: list("serviceAreaTerms"),
+    serviceAreaTerms: (() => { const area = normalizeServiceAreaInput(form.get("serviceAreaTerms") ?? ""); if (area.errors.length > 0) throw new HttpError(400, serviceAreaMessage(area.errors)); return area.terms; })(),
     emergencyKeywords: list("emergencyKeywords"),
     emergencyThreshold,
     minimumLeadTimeMinutes,
@@ -1636,14 +1901,14 @@ async function isGoogleConnected(env: Environment, store: Store, tenantId = env.
   return Boolean(await store.getIntegrationSecret(tenantId, "google", "refresh_token") || (tenantId === env.DEFAULT_TENANT_ID && env.GOOGLE_REFRESH_TOKEN));
 }
 
-async function exchangeGoogleCode(env: Environment, code: string, verifier: string, callbackPath = "/admin/integrations/google/callback"): Promise<string> {
+async function exchangeGoogleCode(env: Environment, client: GoogleOAuthClient, code: string, verifier: string, callbackPath = "/admin/integrations/google/callback"): Promise<string> {
   const callback = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}${callbackPath}`;
   const response = await withTimeout(fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      client_id: env.GOOGLE_CLIENT_ID!,
-      client_secret: env.GOOGLE_CLIENT_SECRET!,
+      client_id: client.id,
+      client_secret: client.secret,
       code,
       code_verifier: verifier,
       grant_type: "authorization_code",

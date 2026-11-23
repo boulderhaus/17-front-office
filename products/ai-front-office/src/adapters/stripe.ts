@@ -15,13 +15,39 @@ export interface StripePrices {
   realtimeSms?: string;
 }
 
+export interface StripeSubscriptionSnapshot {
+  id: string;
+  status: SubscriptionRecord["status"];
+  customer: string | null;
+  tenantId: string | null;
+  priceIds: string[];
+  currentPeriodEnd: string | null;
+}
+
+const PORTAL_CONFIGURATION_TAG = "v1";
+
 export class StripeBillingClient {
   private portalConfiguration: string | null = null;
   constructor(private readonly secretKey: string, private readonly prices: StripePrices, private readonly fetcher: typeof fetch = fetch) {}
 
+  get basePriceId(): string { return this.prices.base; }
+
+  private async findPortalConfiguration(): Promise<string | null> {
+    const response = await withTimeout(this.fetcher("https://api.stripe.com/v1/billing_portal/configurations?active=true&limit=100", {
+      headers: { authorization: `Bearer ${this.secretKey}` },
+    }), 6_000);
+    if (!response.ok) return null;
+    const payload = await response.json().catch(() => ({})) as { data?: Array<{ id?: string; metadata?: Record<string, string> }> };
+    return payload.data?.find((item) => item.metadata?.front_office === PORTAL_CONFIGURATION_TAG)?.id ?? null;
+  }
+
   async createPortal(customerId: string, returnUrl: string): Promise<string> {
+    if (!this.portalConfiguration) this.portalConfiguration = await this.findPortalConfiguration();
     if (!this.portalConfiguration) {
+      // No permanent idempotency key: Stripe replays a stored failure for 24 hours and
+      // rejects the same key with a changed body. A tagged configuration is found next time.
       const body = new URLSearchParams({
+        "metadata[front_office]": PORTAL_CONFIGURATION_TAG,
         "business_profile[headline]": "Manage your Front Office subscription",
         "features[subscription_cancel][enabled]": "true",
         "features[subscription_cancel][mode]": "at_period_end",
@@ -29,7 +55,7 @@ export class StripeBillingClient {
         "features[invoice_history][enabled]": "true",
       });
       const response = await withTimeout(this.fetcher("https://api.stripe.com/v1/billing_portal/configurations", {
-        method: "POST", headers: { authorization: `Bearer ${this.secretKey}`, "content-type": "application/x-www-form-urlencoded", "idempotency-key": "front-office-portal-v1" }, body,
+        method: "POST", headers: { authorization: `Bearer ${this.secretKey}`, "content-type": "application/x-www-form-urlencoded" }, body,
       }), 6_000);
       const data = await response.json() as { id?: string };
       if (!response.ok || !data.id) throw new Error(`Stripe billing portal configuration failed with HTTP ${response.status}`);
@@ -44,12 +70,16 @@ export class StripeBillingClient {
     return data.url;
   }
 
-  async createCheckout(input: { tenantId: string; email: string; successUrl: string; cancelUrl: string; idempotencyKey: string; dailySms: boolean; realtimeSms: boolean }): Promise<string> {
+  async createCheckout(input: { tenantId: string; email: string; customerId?: string | null; successUrl: string; cancelUrl: string; idempotencyKey: string; dailySms: boolean; realtimeSms: boolean; now?: Date }): Promise<{ id: string; url: string; expiresAt: string }> {
+    // Sessions expire in ~31 minutes (Stripe's minimum is 30) so a stale one cannot be paid later.
+    const expiresAt = Math.floor((input.now ?? new Date()).getTime() / 1_000) + 31 * 60;
     const body = new URLSearchParams({
       mode: "subscription",
       "line_items[0][price]": this.prices.base,
       "line_items[0][quantity]": "1",
-      customer_email: input.email,
+      // A returning shop keeps its Stripe customer instead of getting a second one.
+      ...(input.customerId ? { customer: input.customerId } : { customer_email: input.email }),
+      expires_at: String(expiresAt),
       client_reference_id: input.tenantId,
       "metadata[tenant_id]": input.tenantId,
       "subscription_data[metadata][tenant_id]": input.tenantId,
@@ -57,8 +87,12 @@ export class StripeBillingClient {
       cancel_url: input.cancelUrl,
     });
     let lineItem = 1;
-    if (input.dailySms) body.set(`line_items[${lineItem++}][price]`, requiredPrice(this.prices.dailySms, "daily SMS"));
-    if (input.realtimeSms) body.set(`line_items[${lineItem}][price]`, requiredPrice(this.prices.realtimeSms, "instant lead SMS"));
+    for (const [enabled, price, label] of [[input.dailySms, this.prices.dailySms, "daily SMS"], [input.realtimeSms, this.prices.realtimeSms, "instant lead SMS"]] as const) {
+      if (!enabled) continue;
+      body.set(`line_items[${lineItem}][price]`, requiredPrice(price, label));
+      body.set(`line_items[${lineItem}][quantity]`, "1");
+      lineItem += 1;
+    }
     const response = await withTimeout(this.fetcher("https://api.stripe.com/v1/checkout/sessions", {
       method: "POST",
       headers: {
@@ -68,9 +102,55 @@ export class StripeBillingClient {
       },
       body,
     }), 6_000);
-    const payload = await response.json().catch(() => ({})) as { url?: string; error?: { message?: string } };
-    if (!response.ok || !payload.url?.startsWith("https://")) throw new Error(`Stripe checkout failed with HTTP ${response.status}${payload.error?.message ? `: ${payload.error.message}` : ""}`);
-    return payload.url;
+    const payload = await response.json().catch(() => ({})) as { id?: string; url?: string; error?: { message?: string } };
+    if (!response.ok || !payload.url?.startsWith("https://") || !payload.id) throw new Error(`Stripe checkout failed with HTTP ${response.status}${payload.error?.message ? `: ${payload.error.message}` : ""}`);
+    return { id: payload.id, url: payload.url, expiresAt: new Date(expiresAt * 1_000).toISOString() };
+  }
+
+  /** Expire an unpaid Checkout Session so it can no longer start a subscription. */
+  /** Returns "complete" if the session was already paid; a new checkout must not be created then. */
+  async expireCheckout(sessionId: string): Promise<"expired" | "complete"> {
+    const response = await withTimeout(this.fetcher(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}/expire`, {
+      method: "POST", headers: { authorization: `Bearer ${this.secretKey}`, "content-type": "application/x-www-form-urlencoded" },
+    }), 6_000);
+    if (response.ok) return "expired";
+    if (response.status !== 400) throw new Error(`Stripe checkout expire failed with HTTP ${response.status}`);
+    // 400: already expired or already completed. Find out which.
+    const current = await withTimeout(this.fetcher(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}`, {
+      headers: { authorization: `Bearer ${this.secretKey}` },
+    }), 6_000);
+    const session = await current.json().catch(() => ({})) as { status?: string };
+    if (!current.ok) throw new Error(`Stripe checkout lookup failed with HTTP ${current.status}`);
+    return session.status === "complete" ? "complete" : "expired";
+  }
+
+  /**
+   * Current subscription state from Stripe. Webhook order is not guaranteed and
+   * Stripe advises against ordering by event timestamps, so the API is the source of truth.
+   */
+  async retrieveSubscription(subscriptionId: string): Promise<StripeSubscriptionSnapshot> {
+    const response = await withTimeout(this.fetcher(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+      headers: { authorization: `Bearer ${this.secretKey}` },
+    }), 6_000);
+    const payload = await response.json().catch(() => ({})) as {
+      id?: string; status?: string; customer?: string | { id?: string }; current_period_end?: number;
+      metadata?: Record<string, unknown>;
+      items?: { data?: Array<{ price?: { id?: string }; current_period_end?: number }> };
+      error?: { message?: string };
+    };
+    if (!response.ok || payload.id !== subscriptionId) throw new Error(`Stripe subscription lookup failed with HTTP ${response.status}`);
+    const items = payload.items?.data ?? [];
+    // Newer API versions report the period on each item instead of the subscription.
+    const periodEnds = [payload.current_period_end, ...items.map((item) => item.current_period_end)].filter((value): value is number => typeof value === "number");
+    const customer = typeof payload.customer === "string" ? payload.customer : payload.customer?.id ?? null;
+    return {
+      id: payload.id,
+      status: normalizeSubscriptionStatus(payload.status ?? "incomplete"),
+      customer,
+      tenantId: typeof payload.metadata?.tenant_id === "string" ? payload.metadata.tenant_id : null,
+      priceIds: items.map((item) => item.price?.id).filter((value): value is string => typeof value === "string"),
+      currentPeriodEnd: periodEnds.length ? new Date(Math.max(...periodEnds) * 1_000).toISOString() : null,
+    };
   }
 
   async syncAddOns(subscriptionId: string, input: { dailySms: boolean; realtimeSms: boolean }): Promise<void> {
@@ -97,7 +177,10 @@ export class StripeBillingClient {
     const body = new URLSearchParams({ proration_behavior: "always_invoice", payment_behavior: "error_if_incomplete" });
     changes.forEach((change, index) => {
       if (change.id) body.set(`items[${index}][id]`, change.id);
-      if (change.price) body.set(`items[${index}][price]`, change.price);
+      if (change.price) {
+        body.set(`items[${index}][price]`, change.price);
+        body.set(`items[${index}][quantity]`, "1");
+      }
       if (change.deleted) body.set(`items[${index}][deleted]`, "true");
     });
     const update = await withTimeout(this.fetcher(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(subscriptionId)}`, {
@@ -156,7 +239,9 @@ export function subscriptionFromStripeEvent(event: StripeEvent, existing: Subscr
   };
 }
 
-function normalizeSubscriptionStatus(value: string): SubscriptionRecord["status"] {
+export function normalizeSubscriptionStatus(value: string): SubscriptionRecord["status"] {
+  // An expired first payment can never be paid; treat it as ended so the shop can buy again.
+  if (value === "incomplete_expired") return "canceled";
   if (value === "trialing" || value === "active" || value === "past_due" || value === "canceled" || value === "unpaid" || value === "incomplete") return value;
   return "incomplete";
 }

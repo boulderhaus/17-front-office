@@ -23,6 +23,19 @@ export class BookingCoordinator {
   ) {}
 
   async book(input: BookSlotInput): Promise<BookingRecord> {
+    try {
+      return await this.bookUnderLock(input);
+    } catch (error) {
+      // Another booking for this shop held the calendar past the wait limit: never fail the
+      // caller's tool call; fall back to owner confirmation.
+      if (error instanceof Error && error.message.startsWith("Lock wait timed out")) {
+        return this.pending(input, "Calendar was busy with another booking; owner confirmation required", this.clock.now());
+      }
+      throw error;
+    }
+  }
+
+  private async bookUnderLock(input: BookSlotInput): Promise<BookingRecord> {
     return this.store.withLock(`calendar:${input.tenantId}`, async () => {
       const existing = await this.store.getBookingForCall(input.callId);
       if (existing?.status === "confirmed" || existing?.status === "unknown") return existing;
@@ -49,6 +62,8 @@ export class BookingCoordinator {
       };
       await this.store.saveBooking(booking);
 
+      let created: { status: "confirmed" | "unknown"; providerEventId: string | null } | null = null;
+      let createAttempted = false;
       try {
         const free = await withRetry(() => this.calendar.isFree({ tenantId: input.tenantId, slot }), {
           attempts: 1,
@@ -59,7 +74,7 @@ export class BookingCoordinator {
         if (!free) {
           const conflict = { ...booking, status: "conflict" as const, failureReason: "Requested slot is no longer free", updatedAt: this.clock.now().toISOString() };
           await this.store.saveBooking(conflict);
-          await this.audit(input.tenantId, input.callId, started, "failed", { status: "conflict", slot }, conflict.failureReason);
+          await this.safeAudit(input.tenantId, input.callId, started, "failed", { status: "conflict", slot }, conflict.failureReason);
           return conflict;
         }
 
@@ -74,36 +89,55 @@ export class BookingCoordinator {
           problemDescription: input.problemDescription,
           idempotencyKey: `calendar:${input.tenantId}:${input.callId}:${slot.start}`,
         };
-        const created = await withRetry(() => this.calendar.createEvent(attempt), {
+        createAttempted = true;
+        created = await withRetry(() => this.calendar.createEvent(attempt), {
           attempts: 1,
           baseDelayMs: 0,
           maxDelayMs: 0,
           timeoutMs: 1_500,
         });
-        const writeVerified = created.status === "confirmed" && created.providerEventId
-          ? await withRetry(() => this.calendar.verifyEvent({ tenantId: input.tenantId, providerEventId: created.providerEventId!, slot }), {
+        const createdEvent = created;
+        const writeVerified = createdEvent.status === "confirmed" && createdEvent.providerEventId
+          ? await withRetry(() => this.calendar.verifyEvent({ tenantId: input.tenantId, providerEventId: createdEvent.providerEventId!, slot }), {
               attempts: 1,
               baseDelayMs: 0,
               maxDelayMs: 0,
               timeoutMs: 1_200,
             })
           : false;
-        const verifiedStatus = created.status === "confirmed" && writeVerified ? "confirmed" as const : "unknown" as const;
+        const verifiedStatus = createdEvent.status === "confirmed" && writeVerified ? "confirmed" as const : "unknown" as const;
         const result: BookingRecord = {
           ...booking,
           status: verifiedStatus,
-          providerEventId: created.providerEventId,
+          providerEventId: createdEvent.providerEventId,
           writeVerifiedAt: writeVerified ? this.clock.now().toISOString() : null,
           verificationFailures: writeVerified ? [] : ["system_write_not_verified"],
           failureReason: writeVerified ? null : "Calendar write could not be read back; owner confirmation required",
           updatedAt: this.clock.now().toISOString(),
         };
         await this.store.saveBooking(result);
-        await this.audit(input.tenantId, input.callId, started, writeVerified ? "success" : "unknown", { status: verifiedStatus, slot, writeVerified }, result.failureReason);
+        await this.safeAudit(input.tenantId, input.callId, started, writeVerified ? "success" : "unknown", { status: verifiedStatus, slot, writeVerified }, result.failureReason);
         return result;
       } catch (error) {
+        if (createAttempted) {
+          // The event may exist even though we saw an error (timeout, failed read-back).
+          // Keep its id and mark it unknown so a retry neither double-books nor reports a
+          // conflict against the shop's own event; the owner confirms.
+          const uncertain: BookingRecord = {
+            ...booking,
+            status: "unknown",
+            providerEventId: created?.providerEventId ?? null,
+            writeVerifiedAt: null,
+            verificationFailures: ["system_write_not_verified"],
+            failureReason: `Calendar write may have happened (${redactError(error)}); owner confirmation required`,
+            updatedAt: this.clock.now().toISOString(),
+          };
+          await this.store.saveBooking(uncertain);
+          await this.safeAudit(input.tenantId, input.callId, started, "unknown", { status: "unknown", slot }, uncertain.failureReason);
+          return uncertain;
+        }
         const pending = await this.pending(input, redactError(error), started, slot, booking);
-        await this.audit(input.tenantId, input.callId, started, "failed", { status: "pending", slot }, pending.failureReason);
+        await this.safeAudit(input.tenantId, input.callId, started, "failed", { status: "pending", slot }, pending.failureReason);
         return pending;
       }
     });
@@ -134,6 +168,11 @@ export class BookingCoordinator {
     };
     await this.store.saveBooking(pending);
     return pending;
+  }
+
+  /** Audit is evidence, not control flow: a failed audit write must never change the booking outcome. */
+  private async safeAudit(...args: Parameters<BookingCoordinator["audit"]>): Promise<void> {
+    await this.audit(...args).catch(() => undefined);
   }
 
   private async audit(

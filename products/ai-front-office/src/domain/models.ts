@@ -150,6 +150,8 @@ export interface BusinessConfig {
   ownerNotificationRefs: string[];
   ownerTransferNumberRef: string | null;
   warmTransferEnabled?: boolean;
+  /** True only when billing (not the owner) paused coverage, so payment can restore it. */
+  pausedForBilling?: boolean;
   schedulingCalendars?: Array<{ accountId: string; enabled: boolean; hours: BusinessConfig["bookableHours"] }>;
   calendarConnectionRef: string | null;
   bookingMode: "confirm" | "direct";
@@ -194,6 +196,8 @@ export interface OwnerAccount {
   passwordHash: string;
   role?: "owner" | "member";
   status: "pending_activation" | "active" | "suspended";
+  /** Incremented to revoke every existing session (password reset, sign out everywhere). */
+  sessionVersion?: number;
   createdAt: string;
   updatedAt: string;
 }

@@ -1,5 +1,6 @@
 import { CapturingNotificationSender, InMemoryCalendar, InMemoryStore } from "./adapters/in-memory.js";
 import { GoogleCalendarAdapter } from "./adapters/google-calendar.js";
+import { anyGoogleClient, googleCredentials } from "./adapters/google-oauth-clients.js";
 import { TeamCalendar } from "./adapters/team-calendar.js";
 import { PostgresStore } from "./adapters/postgres-store.js";
 import { TelnyxSmsAdapter } from "./adapters/telnyx.js";
@@ -61,22 +62,20 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
     const existing = await store.getProviderRoute("telnyx", env.TELNYX_ASSISTANT_ID);
     if (!existing) await store.saveProviderRoute({ provider: "telnyx", externalId: env.TELNYX_ASSISTANT_ID, tenantId: env.DEFAULT_TENANT_ID, createdAt: now, updatedAt: now });
   }
-  const googleConfigured = Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET);
+  const googleConfigured = anyGoogleClient(env);
   const telnyxVoiceConfigured = Boolean(env.TELNYX_API_KEY && env.TELNYX_PUBLIC_KEY && env.TELNYX_ASSISTANT_ID);
   const telnyxSmsConfigured = Boolean(env.TELNYX_API_KEY && env.TELNYX_FROM_NUMBER && env.TELNYX_MESSAGING_PROFILE_ID);
   const soloCalendar = googleConfigured
     ? new GoogleCalendarAdapter({
-        clientId: env.GOOGLE_CLIENT_ID!,
-        clientSecret: env.GOOGLE_CLIENT_SECRET!,
-        getRefreshToken: async (tenantId) =>
-          (await store.getIntegrationSecret(tenantId, "google", "refresh_token"))
-          ?? (tenantId === env.DEFAULT_TENANT_ID ? env.GOOGLE_REFRESH_TOKEN ?? null : null),
+        getCredentials: (tenantId) => googleCredentials(store, env, tenantId, "refresh_token"),
+        onRevoked: (tenantId) => store.deleteIntegrationSecret(tenantId, "google", "refresh_token"),
         calendarId: env.GOOGLE_CALENDAR_ID,
       })
     : new UnavailableCalendar();
   const calendar = new TeamCalendar(store, soloCalendar, (accountId, owner) => googleConfigured ? new GoogleCalendarAdapter({
-    clientId: env.GOOGLE_CLIENT_ID!, clientSecret: env.GOOGLE_CLIENT_SECRET!, calendarId: owner ? env.GOOGLE_CALENDAR_ID : "primary",
-    getRefreshToken: (tenantId) => store.getIntegrationSecret(tenantId, "google", owner ? "refresh_token" : `refresh_token:${accountId}`),
+    calendarId: owner ? env.GOOGLE_CALENDAR_ID : "primary",
+    getCredentials: (tenantId) => googleCredentials(store, env, tenantId, owner ? "refresh_token" : `refresh_token:${accountId}`),
+    onRevoked: (tenantId) => store.deleteIntegrationSecret(tenantId, "google", owner ? "refresh_token" : `refresh_token:${accountId}`),
   }) : new UnavailableCalendar());
   const smsSender = telnyxSmsConfigured
     ? new TelnyxSmsAdapter({

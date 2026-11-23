@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import pg from "pg";
 import type { Store } from "../ports.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, CustomerRecord, OutboxNotification, OwnerAccount, OwnerWorkspaceInput, PilotSignup, ProviderRoute, SubscriptionRecord, ToolEvent, UsageSummary } from "../domain/models.js";
@@ -11,6 +12,7 @@ type Row = Record<string, unknown>;
 export class PostgresStore implements Store {
   readonly #pool: pg.Pool;
   readonly #lockPool: pg.Pool;
+  readonly #lockSession = new AsyncLocalStorage<{ client: pg.PoolClient; held: Set<string>; broken: boolean }>();
 
   constructor(databaseUrl: string, private readonly cryptoBox: CryptoBox) {
     this.#pool = new Pool({ connectionString: databaseUrl, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 3_000 });
@@ -28,21 +30,40 @@ export class PostgresStore implements Store {
     await this.#pool.query("SELECT 1");
   }
 
+  /**
+   * Session-level advisory locks. Nested locks (call -> calendar, config ->
+   * assistant-config) reuse the outer session, so one operation never needs two
+   * lock connections: before this, five overlapping bookings exhausted the pool
+   * and all of them failed. Waits are bounded with try-lock polling because
+   * lock_timeout does not bound pg_advisory_lock in practice.
+   */
   async withLock<T>(key: string, task: () => Promise<T>): Promise<T> {
-    const client = await this.#lockPool.connect();
-    let destroy = false;
-    try {
-      await client.query("SET lock_timeout = '3000ms'");
-      await client.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [key]);
-      return await task();
-    } finally {
+    const current = this.#lockSession.getStore();
+    if (current) {
+      if (current.held.has(key)) return task();
+      await acquireAdvisoryLock(current.client, key);
+      current.held.add(key);
       try {
-        const unlocked = await client.query("SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS unlocked", [key]);
-        destroy = unlocked.rows[0]?.unlocked !== true;
-      } catch {
-        destroy = true;
+        return await task();
+      } finally {
+        current.held.delete(key);
+        await releaseAdvisoryLock(current.client, key).catch(() => { current.broken = true; });
       }
-      client.release(destroy);
+    }
+    const client = await this.#lockPool.connect();
+    const session = { client, held: new Set([key]), broken: false };
+    try {
+      await acquireAdvisoryLock(client, key);
+    } catch (error) {
+      client.release();
+      throw error;
+    }
+    try {
+      return await this.#lockSession.run(session, task);
+    } finally {
+      await releaseAdvisoryLock(client, key).catch(() => { session.broken = true; });
+      // A session that may still hold a lock must never return to the pool.
+      client.release(session.broken);
     }
   }
 
@@ -80,6 +101,10 @@ export class PostgresStore implements Store {
     );
     if (!result.rows[0]) return null;
     return this.cryptoBox.decrypt(String(result.rows[0].value_ciphertext));
+  }
+
+  async deleteIntegrationSecret(tenantId: string, provider: string, key: string): Promise<void> {
+    await this.#pool.query("DELETE FROM integration_secrets WHERE tenant_id=$1 AND provider=$2 AND secret_key=$3", [tenantId, provider, key]);
   }
 
   async saveIntegrationSecret(tenantId: string, provider: string, key: string, value: string): Promise<void> {
@@ -166,10 +191,12 @@ export class PostgresStore implements Store {
     return Number(result.rows[0]?.count ?? 0);
   }
 
-  async listExpiredCalls(tenantId: string, endedBefore: string, limit: number): Promise<CallRecord[]> {
+  async listExpiredCalls(tenantId: string, endedBefore: string, limit: number, now: string): Promise<CallRecord[]> {
     const result = await this.#pool.query(
-      "SELECT * FROM calls WHERE tenant_id=$1 AND ended_at IS NOT NULL AND ended_at < $2 ORDER BY ended_at LIMIT $3",
-      [tenantId, endedBefore, limit],
+      `SELECT * FROM calls WHERE tenant_id=$1 AND ended_at IS NOT NULL AND ended_at < $2
+         AND (retention_failed_at IS NULL OR retention_failed_at < $4::timestamptz - interval '24 hours')
+       ORDER BY ended_at LIMIT $3`,
+      [tenantId, endedBefore, limit, now],
     );
     return result.rows.map((row) => this.mapCall(row as Row));
   }
@@ -198,11 +225,29 @@ export class PostgresStore implements Store {
     }
   }
 
-  async deleteExpiredCalls(tenantId: string, endedBefore: string): Promise<number> {
-    const calls = await this.listExpiredCalls(tenantId, endedBefore, 1_000);
-    let deleted = 0;
-    for (const call of calls) if (await this.deleteCall(tenantId, call.id)) deleted += 1;
-    return deleted;
+  async deleteWorkspace(tenantId: string): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "INSERT INTO deleted_provider_calls(provider_call_id,tenant_id) SELECT provider_call_id,tenant_id FROM calls WHERE tenant_id=$1 ON CONFLICT DO NOTHING",
+        [tenantId],
+      );
+      // Outbox rows without a call (welcome, billing notices) are not covered by the call cascade.
+      await client.query("DELETE FROM notification_outbox WHERE tenant_id=$1", [tenantId]);
+      await client.query("DELETE FROM tool_events WHERE tenant_id=$1", [tenantId]);
+      await client.query("DELETE FROM business_configs WHERE tenant_id=$1", [tenantId]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async markRetentionFailed(callId: string, at: string): Promise<void> {
+    await this.#pool.query("UPDATE calls SET retention_failed_at=$2 WHERE id=$1", [callId, at]);
   }
 
   async upsertCustomer(customer: CustomerRecord): Promise<void> {
@@ -487,6 +532,42 @@ export class PostgresStore implements Store {
     return result.rows.map((row) => mapOwnerAccount(row as Row, this.cryptoBox));
   }
 
+  async createPasswordReset(accountId: string, tokenHash: string, expiresAt: string): Promise<void> {
+    await this.#pool.query("INSERT INTO password_reset_tokens(token_hash,account_id,expires_at) VALUES($1,$2,$3)", [tokenHash, accountId, expiresAt]);
+  }
+
+  async consumePasswordReset(tokenHash: string, now: string): Promise<string | null> {
+    const result = await this.#pool.query(
+      "UPDATE password_reset_tokens SET used_at=$2 WHERE token_hash=$1 AND used_at IS NULL AND expires_at > $2 RETURNING account_id",
+      [tokenHash, now],
+    );
+    return result.rows[0] ? String(result.rows[0].account_id) : null;
+  }
+
+  async updateOwnerPassword(accountId: string, passwordHash: string, updatedAt: string): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("UPDATE owner_accounts SET password_hash=$2, session_version=session_version+1, updated_at=$3 WHERE id=$1", [accountId, passwordHash, updatedAt]);
+      await client.query("DELETE FROM password_reset_tokens WHERE account_id=$1", [accountId]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listBookingsForTenant(tenantId: string): Promise<BookingRecord[]> {
+    const result = await this.#pool.query("SELECT * FROM booking_requests WHERE tenant_id=$1 ORDER BY created_at", [tenantId]);
+    return result.rows.map((row) => mapBooking(row as Row));
+  }
+
+  async revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void> {
+    await this.#pool.query("UPDATE owner_accounts SET session_version=session_version+1, updated_at=$2 WHERE id=$1", [accountId, updatedAt]);
+  }
+
   async updateOwnerAccountStatus(accountId: string, status: OwnerAccount["status"], updatedAt: string): Promise<boolean> {
     const result = await this.#pool.query("UPDATE owner_accounts SET status=$2,updated_at=$3 WHERE id=$1", [accountId, status, updatedAt]);
     return result.rowCount === 1;
@@ -609,6 +690,7 @@ function mapOwnerAccount(row: Row, cryptoBox: CryptoBox): OwnerAccount {
     passwordHash: String(row.password_hash),
     role: row.role === "owner" ? "owner" : "member",
     status: row.status as OwnerAccount["status"],
+    sessionVersion: row.session_version === undefined || row.session_version === null ? 0 : Number(row.session_version),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };
@@ -686,4 +768,21 @@ function mapPilotSignup(row: Row, cryptoBox: CryptoBox): PilotSignup {
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };
+}
+
+const LOCK_WAIT_MS = 3_000;
+
+async function acquireAdvisoryLock(client: pg.PoolClient, key: string): Promise<void> {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    const result = await client.query("SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked", [key]);
+    if (result.rows[0]?.locked === true) return;
+    if (Date.now() >= deadline) throw new Error(`Lock wait timed out for ${key.split(":")[0]}`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+async function releaseAdvisoryLock(client: pg.PoolClient, key: string): Promise<void> {
+  const result = await client.query("SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS unlocked", [key]);
+  if (result.rows[0]?.unlocked !== true) throw new Error("Advisory lock was not held");
 }

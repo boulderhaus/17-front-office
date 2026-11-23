@@ -56,6 +56,7 @@ export class InMemoryStore implements Store {
   readonly ownerAccounts = new Map<string, OwnerAccount>();
   readonly providerRoutes = new Map<string, ProviderRoute>();
   readonly subscriptions = new Map<string, SubscriptionRecord>();
+  readonly retentionFailures = new Map<string, string>();
   readonly #mutex = new KeyedMutex();
 
   async ping(): Promise<void> {}
@@ -92,6 +93,10 @@ export class InMemoryStore implements Store {
     this.integrationSecrets.set(`${tenantId}:${provider}:${key}`, value);
   }
 
+  async deleteIntegrationSecret(tenantId: string, provider: string, key: string): Promise<void> {
+    this.integrationSecrets.delete(`${tenantId}:${provider}:${key}`);
+  }
+
   async getCallByProviderId(providerCallId: string): Promise<CallRecord | null> {
     return structuredClone([...this.calls.values()].find((call) => call.providerCallId === providerCallId) ?? null);
   }
@@ -120,9 +125,11 @@ export class InMemoryStore implements Store {
     return [...this.calls.values()].filter((call) => call.tenantId === tenantId && call.fromNumber === phone && call.startedAt >= since).length;
   }
 
-  async listExpiredCalls(tenantId: string, endedBefore: string, limit: number): Promise<CallRecord[]> {
+  async listExpiredCalls(tenantId: string, endedBefore: string, limit: number, now: string): Promise<CallRecord[]> {
+    const retryAfter = new Date(Date.parse(now) - 24 * 60 * 60_000).toISOString();
     return [...this.calls.values()]
       .filter((call) => call.tenantId === tenantId && call.endedAt !== null && call.endedAt < endedBefore)
+      .filter((call) => { const failed = this.retentionFailures.get(call.id); return !failed || failed < retryAfter; })
       .sort((a, b) => (a.endedAt ?? "").localeCompare(b.endedAt ?? ""))
       .slice(0, limit)
       .map((call) => structuredClone(call));
@@ -141,12 +148,19 @@ export class InMemoryStore implements Store {
     return true;
   }
 
-  async deleteExpiredCalls(tenantId: string, endedBefore: string): Promise<number> {
-    const ids = [...this.calls.values()]
-      .filter((call) => call.tenantId === tenantId && call.endedAt !== null && call.endedAt < endedBefore)
-      .map((call) => call.id);
-    for (const id of ids) await this.deleteCall(tenantId, id);
-    return ids.length;
+  async deleteWorkspace(tenantId: string): Promise<void> {
+    for (const call of [...this.calls.values()].filter((item) => item.tenantId === tenantId)) await this.deleteCall(tenantId, call.id);
+    for (const [id, notification] of this.notifications) if (notification.tenantId === tenantId) this.notifications.delete(id);
+    for (const key of [...this.integrationSecrets.keys()]) if (key.startsWith(`${tenantId}:`)) this.integrationSecrets.delete(key);
+    for (const key of [...this.smsOptOuts.keys()]) if (key.startsWith(`${tenantId}:`)) this.smsOptOuts.delete(key);
+    for (const [key, route] of this.providerRoutes) if (route.tenantId === tenantId) this.providerRoutes.delete(key);
+    for (const [id, account] of this.ownerAccounts) if (account.tenantId === tenantId) this.ownerAccounts.delete(id);
+    this.subscriptions.delete(tenantId);
+    this.configs.delete(tenantId);
+  }
+
+  async markRetentionFailed(callId: string, at: string): Promise<void> {
+    if (this.calls.has(callId)) this.retentionFailures.set(callId, at);
   }
 
   async upsertCustomer(customer: CustomerRecord): Promise<void> {
@@ -304,6 +318,34 @@ export class InMemoryStore implements Store {
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
       .slice(0, limit)
       .map((account) => structuredClone(account));
+  }
+
+  readonly passwordResets = new Map<string, { accountId: string; expiresAt: string; usedAt: string | null }>();
+
+  async createPasswordReset(accountId: string, tokenHash: string, expiresAt: string): Promise<void> {
+    this.passwordResets.set(tokenHash, { accountId, expiresAt, usedAt: null });
+  }
+
+  async consumePasswordReset(tokenHash: string, now: string): Promise<string | null> {
+    const reset = this.passwordResets.get(tokenHash);
+    if (!reset || reset.usedAt || reset.expiresAt <= now) return null;
+    reset.usedAt = now;
+    return reset.accountId;
+  }
+
+  async updateOwnerPassword(accountId: string, passwordHash: string, updatedAt: string): Promise<void> {
+    const account = this.ownerAccounts.get(accountId);
+    if (account) this.ownerAccounts.set(accountId, { ...account, passwordHash, sessionVersion: (account.sessionVersion ?? 0) + 1, updatedAt });
+    for (const [hash, reset] of this.passwordResets) if (reset.accountId === accountId) this.passwordResets.delete(hash);
+  }
+
+  async listBookingsForTenant(tenantId: string): Promise<BookingRecord[]> {
+    return [...this.bookings.values()].filter((booking) => booking.tenantId === tenantId).map((booking) => structuredClone(booking));
+  }
+
+  async revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void> {
+    const account = this.ownerAccounts.get(accountId);
+    if (account) this.ownerAccounts.set(accountId, { ...account, sessionVersion: (account.sessionVersion ?? 0) + 1, updatedAt });
   }
 
   async updateOwnerAccountStatus(accountId: string, status: OwnerAccount["status"], updatedAt: string): Promise<boolean> {

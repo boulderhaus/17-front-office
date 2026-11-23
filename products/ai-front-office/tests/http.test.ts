@@ -45,6 +45,29 @@ describe("HTTP boundary", () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
+  it("stops password guessing against one account even when it comes from many addresses", async () => {
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      statuses.push((await fetch(`${baseUrl}/login`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": `10.0.${attempt}.1` }, body: new URLSearchParams({ email: "victim@synthetic.example", password: `guess-${attempt}` }) })).status);
+    }
+    expect(statuses.slice(0, 10).every((status) => status === 401)).toBe(true);
+    expect(statuses[10]).toBe(429);
+  });
+
+  it("makes no spam-exclusion promise until a real spam signal exists", async () => {
+    for (const path of ["/", "/signup", "/terms", "/privacy", "/demo"]) {
+      const html = (await (await fetch(`${baseUrl}${path}`)).text()).toLowerCase();
+      expect(html, path).not.toMatch(/spam minutes don|spam doesn|spam is excluded|provider-classified spam/);
+    }
+  });
+
+  it("lets billing forms redirect to Stripe without loosening other CSP directives", async () => {
+    const csp = (await fetch(`${baseUrl}/signup`)).headers.get("content-security-policy") ?? "";
+    expect(csp).toContain("form-action 'self' https://checkout.stripe.com https://billing.stripe.com");
+    expect(csp).toContain("script-src 'self'");
+    expect(csp).toContain("default-src 'none'");
+  });
+
   it("exposes health and rejects unauthenticated tools", async () => {
     const health = await fetch(`${baseUrl}/healthz`);
     expect(health.status).toBe(200);
@@ -322,6 +345,7 @@ describe("HTTP boundary", () => {
     expect(initBody.dynamic_variables.current_local_date).toBe("Thursday, January 15, 2026");
     expect(initBody.dynamic_variables.current_local_time).toBe("2:00 AM CST");
     expect(await store.getCallByProviderId("v3:signed-call")).not.toBeNull();
+    expect((await store.getCallByProviderId("v3:signed-call"))?.consentState).toBe("disclosed");
 
     const intake = JSON.stringify({
       provider_call_id: "v3:signed-call", from_number: "+15555550110", caller_name: "Signed Caller",
@@ -625,6 +649,8 @@ describe("HTTP boundary", () => {
     expect((await store.getConfig(account!.tenantId)).serviceAreaTerms).toEqual([]);
     const dashboard = await (await fetch(`${baseUrl}/app`, { headers: { cookie: ownerCookie } })).text();
     expect(dashboard).toContain("Set your call rules");
+    expect(dashboard).toContain("Urgent alerts are off.");
+    expect(await (await fetch(`${baseUrl}/demo`)).text()).not.toContain("Urgent alerts are off.");
     const teamPage = await (await fetch(`${baseUrl}/app/team`, { headers: { cookie: ownerCookie } })).text();
     const csrf = /name="csrf" value="([^"]+)"/.exec(teamPage)![1]!;
     const invite = await fetch(`${baseUrl}/app/team/invite`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, email: "teammate@synthetic.example" }) });
@@ -643,6 +669,95 @@ describe("HTTP boundary", () => {
     const setup = await (await fetch(`${baseUrl}/app/setup`, { headers: { cookie: ownerCookie } })).text();
     expect(setup).toContain("Where can you take a job?");
     expect(setup).toContain("Connect Google Calendar");
+  });
+
+  it("rejects setup service areas that would never match and saves the parsed terms", async () => {
+    const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Air", email: "area@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
+    const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
+    const page = await (await fetch(`${baseUrl}/app/setup`, { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
+    const save = (serviceAreaTerms: string) => fetch(`${baseUrl}/app/setup`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({
+      csrf, businessName: "Synthetic Air", serviceAreaTerms, timezone: "America/New_York", operationMode: "overflow", start: "17:00", end: "08:00",
+      bookStart: "08:00", bookEnd: "17:00", bookingMode: "confirm", greeting: "Hi, I'm the owner's AI assistant. How can I help?", prices: "", answers: "", disclosureApproved: "yes",
+    }) });
+    const rejected = await save("Sarasota, Venice");
+    expect(rejected.status).toBe(400);
+    expect((await rejected.json() as { error: string }).error).toContain("Add a state to: Sarasota, Venice");
+    expect((await save("Sarasota, FL, 34236")).status).toBe(303);
+    const account = await store.getOwnerAccountByEmail("area@synthetic.example");
+    expect((await store.getConfig(account!.tenantId)).serviceAreaTerms).toEqual(["Sarasota FL", "34236"]);
+  });
+
+  it("keeps direct booking and warm transfer hidden and off for owners until their beta flags are on", async () => {
+    const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Air", email: "beta@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
+    const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
+    const page = await (await fetch(`${baseUrl}/app/setup`, { headers: { cookie } })).text();
+    expect(page).not.toContain("warmTransferEnabled");
+    expect(page).not.toContain("Book available times on my calendar");
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
+    const saved = await fetch(`${baseUrl}/app/setup`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({
+      csrf, businessName: "Synthetic Air", serviceAreaTerms: "Sarasota FL", timezone: "America/New_York", operationMode: "overflow", start: "17:00", end: "08:00",
+      bookStart: "08:00", bookEnd: "17:00", bookingMode: "direct", warmTransferEnabled: "on", greeting: "Hi, I'm the owner's AI assistant. How can I help?", prices: "", answers: "", disclosureApproved: "yes",
+    }) });
+    expect(saved.status).toBe(303);
+    const account = await store.getOwnerAccountByEmail("beta@synthetic.example");
+    expect(await store.getConfig(account!.tenantId)).toMatchObject({ bookingMode: "confirm", warmTransferEnabled: false });
+    const settings = await (await fetch(`${baseUrl}/app/settings`, { headers: { cookie } })).text();
+    expect(settings).not.toContain("direct booking</option>");
+  });
+
+  it("lets an owner export their data and delete the whole workspace after billing ends", async () => {
+    const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Exit", email: "exit@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
+    const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
+    const account = (await store.getOwnerAccountByEmail("exit@synthetic.example"))!;
+    const exported = await fetch(`${baseUrl}/app/account/export`, { headers: { cookie } });
+    expect(exported.headers.get("content-disposition")).toContain("attachment");
+    expect((await exported.json() as { account: { email: string } }).account.email).toBe("exit@synthetic.example");
+    const settings = await (await fetch(`${baseUrl}/app/settings`, { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(settings)![1]!;
+    const remove = (password: string) => fetch(`${baseUrl}/app/account/delete`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, confirm: "DELETE", password }) });
+    expect((await remove("wrong-password-entirely")).status).toBe(403);
+    const now = new Date().toISOString();
+    await store.saveSubscription({ tenantId: account.tenantId, providerCustomerId: "cus_x", providerSubscriptionId: "sub_x", status: "active", currentPeriodEnd: null, providerEventCreatedAt: now, createdAt: now, updatedAt: now });
+    expect((await remove("long-password-for-tests")).status).toBe(409);
+    await store.saveSubscription({ tenantId: account.tenantId, providerCustomerId: "cus_x", providerSubscriptionId: "sub_x", status: "incomplete", currentPeriodEnd: null, providerEventCreatedAt: now, createdAt: now, updatedAt: now });
+    expect((await remove("long-password-for-tests")).status).toBe(409);
+    await store.saveSubscription({ tenantId: account.tenantId, providerCustomerId: "cus_x", providerSubscriptionId: "sub_x", status: "canceled", currentPeriodEnd: null, providerEventCreatedAt: now, createdAt: now, updatedAt: now });
+    const deleted = await remove("long-password-for-tests");
+    expect(deleted.status).toBe(303);
+    expect(deleted.headers.get("set-cookie")).toContain("Max-Age=0");
+    expect(await store.getOwnerAccountByEmail("exit@synthetic.example")).toBeNull();
+    await expect(store.getConfig(account.tenantId)).rejects.toThrow();
+    expect((await fetch(`${baseUrl}/app`, { redirect: "manual", headers: { cookie } })).headers.get("location")).toBe("/login");
+  });
+
+  it("recovers an account with a single-use reset link and revokes every old session", async () => {
+    const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Reset", email: "reset@synthetic.example", password: "original-password-123", consent: "yes" }) });
+    const oldCookie = signup.headers.get("set-cookie")!.split(";")[0]!;
+    const owner = (await store.getOwnerAccountByEmail("reset@synthetic.example"))!;
+    const forgot = await (await fetch(`${baseUrl}/forgot`)).text();
+    expect(forgot).toContain("Email reset isn’t switched on yet");
+    const login = await fetch(`${baseUrl}/admin/login`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token: adminToken }) });
+    const adminCookie = login.headers.get("set-cookie")!.split(";")[0]!;
+    const ownersPage = await (await fetch(`${baseUrl}/admin/owners`, { headers: { cookie: adminCookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(ownersPage)![1]!;
+    const linkPage = await (await fetch(`${baseUrl}/admin/owners/${owner.id}/reset-link`, { method: "POST", headers: { cookie: adminCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }) })).text();
+    const token = /reset\?token=([A-Za-z0-9_-]+)/.exec(linkPage)![1]!;
+    const reset = (password: string, confirm = password) => fetch(`${baseUrl}/reset`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token, password, confirm }) });
+    expect((await reset("short")).status).toBe(400);
+    expect((await reset("brand-new-password-456", "different-password-789")).status).toBe(400);
+    expect((await reset("brand-new-password-456")).status).toBe(303);
+    expect((await reset("another-new-password-789")).status).toBe(400);
+    expect((await fetch(`${baseUrl}/app`, { redirect: "manual", headers: { cookie: oldCookie } })).headers.get("location")).toBe("/login");
+    const signIn = (password: string) => fetch(`${baseUrl}/login`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "reset@synthetic.example", password }) });
+    expect((await signIn("original-password-123")).status).toBe(401);
+    const fresh = await signIn("brand-new-password-456");
+    expect(fresh.status).toBe(303);
+    const freshCookie = fresh.headers.get("set-cookie")!.split(";")[0]!;
+    const settings = await (await fetch(`${baseUrl}/app/settings`, { headers: { cookie: freshCookie } })).text();
+    const ownerCsrf = /name="csrf" value="([^"]+)"/.exec(settings)![1]!;
+    expect((await fetch(`${baseUrl}/app/account/sign-out-everywhere`, { method: "POST", redirect: "manual", headers: { cookie: freshCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf: ownerCsrf }) })).status).toBe(303);
+    expect((await fetch(`${baseUrl}/app`, { redirect: "manual", headers: { cookie: freshCookie } })).headers.get("location")).toBe("/login");
   });
 
   it("persists owner-approved scripts and coverage rules from the admin form", async () => {
@@ -675,7 +790,7 @@ describe("HTTP boundary", () => {
         defaultServiceDurationMinutes: "60",
         emergencyThreshold: "0.8",
         maxCallsPerCallerPerDay: "7",
-        serviceAreaTerms: "Albany NY, 122",
+        serviceAreaTerms: "Albany NY, 12207",
         emergencyKeywords: "no heat, burst pipe",
         serviceCategories: "HVAC repair, maintenance",
         priceSnippets: "Diagnostic: The diagnostic visit is $89.",

@@ -25,17 +25,22 @@ export interface Store {
   saveConfig(config: BusinessConfig): Promise<void>;
   getIntegrationSecret(tenantId: string, provider: string, key: string): Promise<string | null>;
   saveIntegrationSecret(tenantId: string, provider: string, key: string, value: string): Promise<void>;
+  deleteIntegrationSecret(tenantId: string, provider: string, key: string): Promise<void>;
   getCallByProviderId(providerCallId: string): Promise<CallRecord | null>;
   isProviderCallDeleted(providerCallId: string): Promise<boolean>;
   getCall(callId: string): Promise<CallRecord | null>;
   saveCall(call: CallRecord): Promise<void>;
   listCalls(tenantId: string, limit: number): Promise<CallRecord[]>;
   countCallsFromNumberSince(tenantId: string, phone: string, since: string): Promise<number>;
-  listExpiredCalls(tenantId: string, endedBefore: string, limit: number): Promise<CallRecord[]>;
+  /** Expired calls, skipping any whose deletion failed within the last 24 hours before `now`. */
+  listExpiredCalls(tenantId: string, endedBefore: string, limit: number, now: string): Promise<CallRecord[]>;
+  markRetentionFailed(callId: string, at: string): Promise<void>;
+  /** Remove every record for a shop. Provider call IDs are kept as tombstones so late webhooks cannot recreate calls. */
+  deleteWorkspace(tenantId: string): Promise<void>;
   deleteCall(tenantId: string, callId: string): Promise<boolean>;
-  deleteExpiredCalls(tenantId: string, endedBefore: string): Promise<number>;
   upsertCustomer(customer: CustomerRecord): Promise<void>;
   getBookingForCall(callId: string): Promise<BookingRecord | null>;
+  listBookingsForTenant(tenantId: string): Promise<BookingRecord[]>;
   saveBooking(booking: BookingRecord): Promise<void>;
   getCallbackTaskForCall(callId: string): Promise<CallbackTask | null>;
   listOpenCallbackTasks(tenantId: string, limit: number): Promise<CallbackTask[]>;
@@ -61,6 +66,13 @@ export interface Store {
   getOwnerAccountByTenant(tenantId: string): Promise<OwnerAccount | null>;
   listOwnerAccounts(limit: number): Promise<OwnerAccount[]>;
   updateOwnerAccountStatus(accountId: string, status: OwnerAccount["status"], updatedAt: string): Promise<boolean>;
+  /** Store a hashed single-use reset token. */
+  createPasswordReset(accountId: string, tokenHash: string, expiresAt: string): Promise<void>;
+  /** Atomically mark an unexpired, unused token used; returns its account or null. */
+  consumePasswordReset(tokenHash: string, now: string): Promise<string | null>;
+  /** Replace the password, revoke every existing session, and void every outstanding reset link. */
+  updateOwnerPassword(accountId: string, passwordHash: string, updatedAt: string): Promise<void>;
+  revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void>;
   getUsageSummary(tenantId: string, periodStart: string, periodEnd: string): Promise<UsageSummary>;
   saveProviderRoute(route: ProviderRoute): Promise<void>;
   getProviderRoute(provider: ProviderRoute["provider"], externalId: string): Promise<ProviderRoute | null>;

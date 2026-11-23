@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { CapturingNotificationSender, InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
+import { DataDeletionService } from "../src/application/data-deletion.js";
 import { CallService } from "../src/application/call-service.js";
 import { OutboxWorker } from "../src/application/outbox-worker.js";
 import { createDemoConfig } from "../src/domain/config.js";
@@ -295,10 +296,30 @@ describe("call outcomes", () => {
     expect(call.outcome).toBe("handoff_queued");
   });
 
+  it("does not escalate a routine call because the assistant asked a safety screening question", async () => {
+    await start("screening");
+    const call = await service.finalize({ ...summary("screening", { problemDescription: "Annual AC tune-up" }), transcript: "AI assistant: Any smoke, gas smell, or burning odor?\nCaller: No, just a tune-up." });
+    expect(call.emergency?.severity).toBe("routine");
+    expect(call.outcome).not.toBe("handoff_queued");
+  });
+
+  it("escalates at call end when the caller said something dangerous that the summary left out", async () => {
+    await start("caller-gas");
+    const call = await service.finalize({ ...summary("caller-gas", { problemDescription: "Furnace issue" }), transcript: "AI assistant: How can I help?\nCaller: I smelled gas by the furnace" });
+    expect(call.emergency?.severity).toBe("life_safety");
+  });
+
+  it("never drops an emergency as spam", async () => {
+    await start("spam-emergency");
+    const call = await service.finalize({ ...summary("spam-emergency", { problemDescription: "Unknown" }), transcript: "Caller: I smell gas in the basement", isSpam: true });
+    expect(call.outcome).toBe("handoff_queued");
+    expect(call.emergency?.severity).toBe("life_safety");
+  });
+
   it("deletes expired call data and dependent records", async () => {
     await start("retention");
     const call = await service.finalize(summary("retention"));
-    expect(await store.deleteExpiredCalls("demo", "2027-01-01T00:00:00.000Z")).toBe(1);
+    expect(await new DataDeletionService(store, { deleteForCall: async () => undefined }).deleteExpired("demo", "2027-01-01T00:00:00.000Z", 100, "2027-01-01T00:00:00.000Z")).toEqual({ deleted: 1, failed: 0 });
     expect(await store.getCall(call.id)).toBeNull();
     expect(await store.listNotifications(call.id)).toEqual([]);
     expect(await store.getCallbackTaskForCall(call.id)).toBeNull();

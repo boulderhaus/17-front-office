@@ -23,7 +23,6 @@ const worker = new OutboxWorker(runtime.store, runtime.sender, systemClock);
 const recovery = new CallService(runtime.store, runtime.calendar, systemClock, env.PUBLIC_BASE_URL);
 const deletion = new DataDeletionService(
   runtime.store,
-  runtime.calendar,
   env.TELNYX_API_KEY ? new TelnyxRecordingClient(env.TELNYX_API_KEY) : null,
 );
 const summaries = new OwnerSummaryService(runtime.store, systemClock, env.PUBLIC_BASE_URL);
