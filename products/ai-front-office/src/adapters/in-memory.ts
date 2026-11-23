@@ -316,6 +316,29 @@ export class InMemoryStore implements Store {
       .map((account) => structuredClone(account));
   }
 
+  readonly passwordResets = new Map<string, { accountId: string; expiresAt: string; usedAt: string | null }>();
+
+  async createPasswordReset(accountId: string, tokenHash: string, expiresAt: string): Promise<void> {
+    this.passwordResets.set(tokenHash, { accountId, expiresAt, usedAt: null });
+  }
+
+  async consumePasswordReset(tokenHash: string, now: string): Promise<string | null> {
+    const reset = this.passwordResets.get(tokenHash);
+    if (!reset || reset.usedAt || reset.expiresAt <= now) return null;
+    reset.usedAt = now;
+    return reset.accountId;
+  }
+
+  async updateOwnerPassword(accountId: string, passwordHash: string, updatedAt: string): Promise<void> {
+    const account = this.ownerAccounts.get(accountId);
+    if (account) this.ownerAccounts.set(accountId, { ...account, passwordHash, sessionVersion: (account.sessionVersion ?? 0) + 1, updatedAt });
+  }
+
+  async revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void> {
+    const account = this.ownerAccounts.get(accountId);
+    if (account) this.ownerAccounts.set(accountId, { ...account, sessionVersion: (account.sessionVersion ?? 0) + 1, updatedAt });
+  }
+
   async updateOwnerAccountStatus(accountId: string, status: OwnerAccount["status"], updatedAt: string): Promise<boolean> {
     const account = this.ownerAccounts.get(accountId);
     if (!account) return false;

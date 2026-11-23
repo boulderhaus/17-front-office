@@ -67,5 +67,20 @@ describe.skipIf(!databaseUrl)("PostgreSQL advisory locks under overlapping calls
     await expect(store.getConfig(tenantId)).rejects.toThrow();
     expect(await store.isProviderCallDeleted(`ws-${id}`)).toBe(true);
   });
+
+  it("consumes a reset token once and revokes sessions when the password changes", async () => {
+    const tenantId = `recovery_${randomUUID()}`;
+    const accountId = randomUUID();
+    const now = "2026-01-01T00:00:00.000Z";
+    expect(await store.createOwnerWorkspace({ account: { id: accountId, tenantId, email: `${accountId}@synthetic.example`, displayName: "Synthetic", passwordHash: "scrypt-v1:x:y", status: "pending_activation", createdAt: now, updatedAt: now }, config: createDemoConfig(tenantId), ownerPhone: null })).toBe(true);
+    expect((await store.getOwnerAccountById(accountId))?.sessionVersion).toBe(0);
+    await store.createPasswordReset(accountId, `hash-${accountId}`, "2026-01-01T00:30:00.000Z");
+    expect(await store.consumePasswordReset(`hash-${accountId}`, "2026-01-01T00:40:00.000Z")).toBeNull();
+    await store.createPasswordReset(accountId, `hash2-${accountId}`, "2026-01-01T00:30:00.000Z");
+    expect(await store.consumePasswordReset(`hash2-${accountId}`, "2026-01-01T00:10:00.000Z")).toBe(accountId);
+    expect(await store.consumePasswordReset(`hash2-${accountId}`, "2026-01-01T00:11:00.000Z")).toBeNull();
+    await store.updateOwnerPassword(accountId, "scrypt-v1:new:hash", "2026-01-01T00:12:00.000Z");
+    expect(await store.getOwnerAccountById(accountId)).toMatchObject({ passwordHash: "scrypt-v1:new:hash", sessionVersion: 1 });
+  });
 });
 

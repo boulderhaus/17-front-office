@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms } from "../admin/render.js";
+import { renderAdminResetLink, renderForgotPassword, renderResetPassword, renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms } from "../admin/render.js";
 import { buildActivationReport, shopActivationBlockers, type ActivationReport } from "../application/readiness.js";
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService } from "../application/call-service.js";
@@ -14,11 +14,12 @@ import { approvedAnswer } from "../domain/approved-answer.js";
 import { isExplicitHumanRequest } from "../domain/human-request.js";
 import { saveAssistantConfig } from "../adapters/assistant-config.js";
 import { DataDeletionService } from "../application/data-deletion.js";
+import { formatEmailBody } from "../adapters/resend.js";
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
-import { clearOwnerSessionCookie, hashOwnerPassword, mintOwnerSession, ownerSessionCookie, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
+import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
 import { buildTelnyxGreeting } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import {
@@ -483,6 +484,44 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       response.setHeader("set-cookie", ownerSessionCookie(session, dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/app");
     }
+    if (url.pathname === "/forgot" && (method === "GET" || method === "POST")) {
+      const emailEnabled = Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL);
+      if (method === "GET") return sendHtml(response, 200, renderForgotPassword({ emailEnabled, supportEmail: dependencies.env.SUPPORT_EMAIL ?? null }));
+      if (!emailEnabled) return sendHtml(response, 200, renderForgotPassword({ emailEnabled, supportEmail: dependencies.env.SUPPORT_EMAIL ?? null }));
+      if (!limiter.allow(`${ip}:forgot`, 5, 60 * 60_000)) throw new HttpError(429, "Too many reset requests");
+      const parsed = z.object({ email: z.string().trim().toLowerCase().email().max(254) }).safeParse(Object.fromEntries(parseForm(await readBody(request, 4_000)).entries()));
+      if (!parsed.success) return sendHtml(response, 400, renderForgotPassword({ emailEnabled, error: "Enter the email on your account." }));
+      const resetAccount = limiter.allow(`forgot-email:${parsed.data.email}`, 3, 60 * 60_000) ? await dependencies.store.getOwnerAccountByEmail(parsed.data.email) : null;
+      if (resetAccount && resetAccount.status !== "suspended") {
+        const { token, tokenHash } = createPasswordResetToken();
+        const now = dependencies.clock.now();
+        await dependencies.store.createPasswordReset(resetAccount.id, tokenHash, new Date(now.getTime() + 30 * 60_000).toISOString());
+        const link = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/reset?token=${encodeURIComponent(token)}`;
+        await dependencies.store.enqueueNotification({
+          id: randomUUID(), tenantId: resetAccount.tenantId, callId: null, channel: "email", destinationRef: `email:${resetAccount.email}`,
+          body: formatEmailBody("Reset your Front Office password", `Use this link within 30 minutes to choose a new password:\n\n${link}\n\nIf you didn't ask for this, ignore this email. Your password has not changed.`),
+          priority: "high", state: "pending", attempts: 0, nextAttemptAt: now.toISOString(),
+          idempotencyKey: `password-reset:${tokenHash}`, providerReceipt: null, lastError: null, createdAt: now.toISOString(), sentAt: null,
+        });
+      }
+      // Same answer whether or not the account exists.
+      return sendHtml(response, 200, renderForgotPassword({ emailEnabled, sent: true }));
+    }
+    if (url.pathname === "/reset" && method === "GET") return sendHtml(response, 200, renderResetPassword(url.searchParams.get("token") ?? ""));
+    if (url.pathname === "/reset" && method === "POST") {
+      if (!limiter.allow(`${ip}:reset`, 10, 60 * 60_000)) throw new HttpError(429, "Too many attempts");
+      const form = parseForm(await readBody(request, 4_000));
+      const token = form.get("token") ?? "";
+      const password = form.get("password") ?? "";
+      if (password.length < 12 || password.length > 200) return sendHtml(response, 400, renderResetPassword(token, "Use at least 12 characters."));
+      if (password !== form.get("confirm")) return sendHtml(response, 400, renderResetPassword(token, "The two passwords don't match."));
+      const accountId = token ? await dependencies.store.consumePasswordReset(hashPasswordResetToken(token), dependencies.clock.now().toISOString()) : null;
+      if (!accountId) return sendHtml(response, 400, renderForgotPassword({ emailEnabled: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL), error: "That reset link is expired or already used. Ask for a new one." }));
+      await dependencies.store.updateOwnerPassword(accountId, await hashOwnerPassword(password), dependencies.clock.now().toISOString());
+      log({ level: "info", event: "owner_password_reset", accountId });
+      response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
+      return redirect(response, "/login");
+    }
     if (method === "GET" && url.pathname === "/logout") {
       response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/");
@@ -532,7 +571,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const session = verifyOwnerSession(sessionValue, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
     if (!session) return redirect(response, "/login");
     const account = await dependencies.store.getOwnerAccountById(session.accountId);
-    if (!account || account.tenantId !== session.tenantId || account.status === "suspended") {
+    if (!account || account.tenantId !== session.tenantId || account.status === "suspended" || !sessionMatchesAccount(session, account)) {
       response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/login");
     }
@@ -743,6 +782,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       });
       response.end(body);
       return;
+    }
+    if (method === "POST" && url.pathname === "/app/account/sign-out-everywhere") {
+      const form = parseForm(await readBody(request, 4_000));
+      if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      await dependencies.store.revokeOwnerSessions(account.id, dependencies.clock.now().toISOString());
+      response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
+      return redirect(response, "/login");
     }
     if (method === "POST" && url.pathname === "/app/account/delete") {
       if (member) throw new HttpError(403, "Only the owner can delete the shop");
@@ -1333,6 +1379,17 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (method === "GET" && url.pathname === "/admin/owners") {
       return sendHtml(response, 200, renderOwnerAccounts(await dependencies.store.listOwnerAccounts(200), csrf));
+    }
+    const resetLinkMatch = /^\/admin\/owners\/([0-9a-f-]+)\/reset-link$/i.exec(url.pathname);
+    if (method === "POST" && resetLinkMatch?.[1]) {
+      const form = parseForm(await readBody(request, 4_000));
+      if (!bearer && (!session || !verifyCsrf(session, form.get("csrf"), dependencies.env.SESSION_SIGNING_KEY!))) throw new HttpError(403, "Invalid CSRF token");
+      const owner = await dependencies.store.getOwnerAccountById(resetLinkMatch[1]);
+      if (!owner) throw new HttpError(404, "Owner account not found");
+      const { token, tokenHash } = createPasswordResetToken();
+      await dependencies.store.createPasswordReset(owner.id, tokenHash, new Date(dependencies.clock.now().getTime() + 30 * 60_000).toISOString());
+      log({ level: "info", event: "admin_reset_link_created", accountId: owner.id });
+      return sendHtml(response, 200, renderAdminResetLink(owner.email, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/reset?token=${encodeURIComponent(token)}`));
     }
     const ownerStatusMatch = /^\/admin\/owners\/([0-9a-f-]+)\/status$/i.exec(url.pathname);
     if (method === "POST" && ownerStatusMatch?.[1]) {

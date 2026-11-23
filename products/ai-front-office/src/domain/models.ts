@@ -194,6 +194,8 @@ export interface OwnerAccount {
   passwordHash: string;
   role?: "owner" | "member";
   status: "pending_activation" | "active" | "suspended";
+  /** Incremented to revoke every existing session (password reset, sign out everywhere). */
+  sessionVersion?: number;
   createdAt: string;
   updatedAt: string;
 }

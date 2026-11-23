@@ -729,6 +729,35 @@ describe("HTTP boundary", () => {
     expect((await fetch(`${baseUrl}/app`, { redirect: "manual", headers: { cookie } })).headers.get("location")).toBe("/login");
   });
 
+  it("recovers an account with a single-use reset link and revokes every old session", async () => {
+    const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Reset", email: "reset@synthetic.example", password: "original-password-123", consent: "yes" }) });
+    const oldCookie = signup.headers.get("set-cookie")!.split(";")[0]!;
+    const owner = (await store.getOwnerAccountByEmail("reset@synthetic.example"))!;
+    const forgot = await (await fetch(`${baseUrl}/forgot`)).text();
+    expect(forgot).toContain("Email reset isn’t switched on yet");
+    const login = await fetch(`${baseUrl}/admin/login`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token: adminToken }) });
+    const adminCookie = login.headers.get("set-cookie")!.split(";")[0]!;
+    const ownersPage = await (await fetch(`${baseUrl}/admin/owners`, { headers: { cookie: adminCookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(ownersPage)![1]!;
+    const linkPage = await (await fetch(`${baseUrl}/admin/owners/${owner.id}/reset-link`, { method: "POST", headers: { cookie: adminCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }) })).text();
+    const token = /reset\?token=([A-Za-z0-9_-]+)/.exec(linkPage)![1]!;
+    const reset = (password: string, confirm = password) => fetch(`${baseUrl}/reset`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token, password, confirm }) });
+    expect((await reset("short")).status).toBe(400);
+    expect((await reset("brand-new-password-456", "different-password-789")).status).toBe(400);
+    expect((await reset("brand-new-password-456")).status).toBe(303);
+    expect((await reset("another-new-password-789")).status).toBe(400);
+    expect((await fetch(`${baseUrl}/app`, { redirect: "manual", headers: { cookie: oldCookie } })).headers.get("location")).toBe("/login");
+    const signIn = (password: string) => fetch(`${baseUrl}/login`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "reset@synthetic.example", password }) });
+    expect((await signIn("original-password-123")).status).toBe(401);
+    const fresh = await signIn("brand-new-password-456");
+    expect(fresh.status).toBe(303);
+    const freshCookie = fresh.headers.get("set-cookie")!.split(";")[0]!;
+    const settings = await (await fetch(`${baseUrl}/app/settings`, { headers: { cookie: freshCookie } })).text();
+    const ownerCsrf = /name="csrf" value="([^"]+)"/.exec(settings)![1]!;
+    expect((await fetch(`${baseUrl}/app/account/sign-out-everywhere`, { method: "POST", redirect: "manual", headers: { cookie: freshCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf: ownerCsrf }) })).status).toBe(303);
+    expect((await fetch(`${baseUrl}/app`, { redirect: "manual", headers: { cookie: freshCookie } })).headers.get("location")).toBe("/login");
+  });
+
   it("persists owner-approved scripts and coverage rules from the admin form", async () => {
     const login = await fetch(`${baseUrl}/admin/login`, {
       method: "POST",

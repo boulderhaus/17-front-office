@@ -528,6 +528,26 @@ export class PostgresStore implements Store {
     return result.rows.map((row) => mapOwnerAccount(row as Row, this.cryptoBox));
   }
 
+  async createPasswordReset(accountId: string, tokenHash: string, expiresAt: string): Promise<void> {
+    await this.#pool.query("INSERT INTO password_reset_tokens(token_hash,account_id,expires_at) VALUES($1,$2,$3)", [tokenHash, accountId, expiresAt]);
+  }
+
+  async consumePasswordReset(tokenHash: string, now: string): Promise<string | null> {
+    const result = await this.#pool.query(
+      "UPDATE password_reset_tokens SET used_at=$2 WHERE token_hash=$1 AND used_at IS NULL AND expires_at > $2 RETURNING account_id",
+      [tokenHash, now],
+    );
+    return result.rows[0] ? String(result.rows[0].account_id) : null;
+  }
+
+  async updateOwnerPassword(accountId: string, passwordHash: string, updatedAt: string): Promise<void> {
+    await this.#pool.query("UPDATE owner_accounts SET password_hash=$2, session_version=session_version+1, updated_at=$3 WHERE id=$1", [accountId, passwordHash, updatedAt]);
+  }
+
+  async revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void> {
+    await this.#pool.query("UPDATE owner_accounts SET session_version=session_version+1, updated_at=$2 WHERE id=$1", [accountId, updatedAt]);
+  }
+
   async updateOwnerAccountStatus(accountId: string, status: OwnerAccount["status"], updatedAt: string): Promise<boolean> {
     const result = await this.#pool.query("UPDATE owner_accounts SET status=$2,updated_at=$3 WHERE id=$1", [accountId, status, updatedAt]);
     return result.rowCount === 1;
@@ -650,6 +670,7 @@ function mapOwnerAccount(row: Row, cryptoBox: CryptoBox): OwnerAccount {
     passwordHash: String(row.password_hash),
     role: row.role === "owner" ? "owner" : "member",
     status: row.status as OwnerAccount["status"],
+    sessionVersion: row.session_version === undefined || row.session_version === null ? 0 : Number(row.session_version),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };

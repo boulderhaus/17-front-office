@@ -64,6 +64,13 @@ export interface Store {
   getOwnerAccountByTenant(tenantId: string): Promise<OwnerAccount | null>;
   listOwnerAccounts(limit: number): Promise<OwnerAccount[]>;
   updateOwnerAccountStatus(accountId: string, status: OwnerAccount["status"], updatedAt: string): Promise<boolean>;
+  /** Store a hashed single-use reset token. */
+  createPasswordReset(accountId: string, tokenHash: string, expiresAt: string): Promise<void>;
+  /** Atomically mark an unexpired, unused token used; returns its account or null. */
+  consumePasswordReset(tokenHash: string, now: string): Promise<string | null>;
+  /** Replace the password and revoke every existing session. */
+  updateOwnerPassword(accountId: string, passwordHash: string, updatedAt: string): Promise<void>;
+  revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void>;
   getUsageSummary(tenantId: string, periodStart: string, periodEnd: string): Promise<UsageSummary>;
   saveProviderRoute(route: ProviderRoute): Promise<void>;
   getProviderRoute(provider: ProviderRoute["provider"], externalId: string): Promise<ProviderRoute | null>;
