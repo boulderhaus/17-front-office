@@ -1,6 +1,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { formatEmailBody } from "../adapters/resend.js";
 import { TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
+import { TelnyxVoiceRoutingClient } from "../adapters/telnyx.js";
 import type { Environment } from "../config/environment.js";
 import { forwardingOffInstruction, type CarrierInfo } from "../domain/forwarding.js";
 import type { OutboxNotification } from "../domain/models.js";
@@ -32,7 +33,15 @@ export async function graceStartedAt(store: Store, tenantId: string): Promise<st
   return store.getIntegrationSecret(tenantId, GRACE_PROVIDER, GRACE_STARTED_KEY);
 }
 
+/** End grace and withdraw a day-23 reminder that has not gone out yet. */
 export async function clearGrace(store: Store, tenantId: string): Promise<void> {
+  const startedAt = await graceStartedAt(store, tenantId);
+  if (!startedAt) return;
+  const config = await store.getConfig(tenantId).catch(() => null);
+  const base = `grace-reminder:${tenantId}:${startedAt}`;
+  for (const key of [...(config?.ownerNotificationRefs ?? []).map((reference) => `${base}:${reference}`), `${base}:email`]) {
+    await store.cancelPendingNotification(key);
+  }
   await store.deleteIntegrationSecret(tenantId, GRACE_PROVIDER, GRACE_STARTED_KEY);
 }
 
@@ -48,8 +57,8 @@ export function lowerFirst(text: string): string {
 }
 
 /**
- * Numbers and assistants we bought for a shop go back to Telnyx. Best effort: failures are logged
- * and reported as false so a caller that must retry (the grace sweep) can try again later.
+ * Numbers and assistants we bought for a shop go back to Telnyx. True only when nothing of ours is
+ * left at Telnyx; false (logged) when the release failed or cannot run, so the grace sweep retries.
  */
 export async function releaseProvisionedLine(context: GraceContext, tenantId: string): Promise<boolean> {
   const { store, env } = context;
@@ -58,8 +67,12 @@ export async function releaseProvisionedLine(context: GraceContext, tenantId: st
     store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
     store.getIntegrationSecret(tenantId, "telnyx", "pending_number"),
   ]);
-  if (!assistantId || !env.TELNYX_API_KEY) return true; // not a line we provisioned
+  if (!assistantId) return true; // not a line we provisioned: nothing of ours to give back
   const phoneNumber = inbound ?? pending;
+  if (!env.TELNYX_API_KEY) {
+    context.log({ level: "error", event: "line_release_blocked", tenantId, reason: "TELNYX_API_KEY is not set" });
+    return false;
+  }
   try {
     await new TelnyxProvisioner({
       apiKey: env.TELNYX_API_KEY,
@@ -188,9 +201,10 @@ export class GraceLineService {
     let reminded = 0;
     let released = 0;
     for (const tenantId of await this.context.store.listTenantIds()) {
-      if (!await graceStartedAt(this.context.store, tenantId)) continue;
+      const seen = await graceStartedAt(this.context.store, tenantId);
+      if (!seen) continue;
       try {
-        const outcome = await this.context.store.withLock(`billing:${tenantId}`, () => this.advance(tenantId));
+        const outcome = await this.context.store.withLock(`billing:${tenantId}`, () => this.advance(tenantId, seen));
         if (outcome === "reminded") reminded += 1;
         if (outcome === "released") released += 1;
       } catch (error) {
@@ -200,10 +214,10 @@ export class GraceLineService {
     return { reminded, released };
   }
 
-  private async advance(tenantId: string): Promise<"reminded" | "released" | null> {
+  private async advance(tenantId: string, seen: string): Promise<"reminded" | "released" | null> {
     const { store, clock, log } = this.context;
     const startedAt = await graceStartedAt(store, tenantId);
-    if (!startedAt) return null; // another replica finished it, or payment came back
+    if (startedAt !== seen) return null; // finished by another replica, ended by payment, or restarted
     const [subscription, account] = await Promise.all([store.getSubscription(tenantId), store.getOwnerAccountByTenant(tenantId)]);
     if (subscription?.status === "active" || !account) {
       await clearGrace(store, tenantId);
@@ -215,6 +229,10 @@ export class GraceLineService {
       return null;
     }
     if (elapsed >= GRACE_DAYS * DAY_MS) {
+      // Last look before anything irreversible: payment may have landed while this sweep waited for the lock.
+      const [stillStarted, latest] = await Promise.all([graceStartedAt(store, tenantId), store.getSubscription(tenantId)]);
+      if (stillStarted !== startedAt || latest?.status === "active") return null;
+      if (!await this.disconnectUnownedNumber(tenantId)) return null; // retried next sweep
       if (!await releaseProvisionedLine(this.context, tenantId)) return null; // retried next sweep
       await Promise.all(["inbound_number", "pending_number", "provisioned_assistant_id"].map((key) => store.deleteIntegrationSecret(tenantId, "telnyx", key)));
       await store.withLock(`config:${tenantId}`, async () => {
@@ -243,5 +261,31 @@ export class GraceLineService {
       }
     }
     return null;
+  }
+
+  /** A number we did not buy is never deleted, but it must stop answering with this shop's voicemail. */
+  private async disconnectUnownedNumber(tenantId: string): Promise<boolean> {
+    const { store, env, log } = this.context;
+    const [assistantId, inbound] = await Promise.all([
+      store.getIntegrationSecret(tenantId, "telnyx", "provisioned_assistant_id"),
+      store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
+    ]);
+    if (assistantId || !inbound) return true; // ours (deleted by the release) or nothing to move
+    const route = await store.getProviderRouteForTenant("telnyx", tenantId);
+    if (!env.TELNYX_API_KEY || !route) {
+      log({ level: "error", event: "grace_disconnect_blocked", tenantId, reason: env.TELNYX_API_KEY ? "no assistant route" : "TELNYX_API_KEY is not set" });
+      return false;
+    }
+    try {
+      await new TelnyxVoiceRoutingClient({
+        apiKey: env.TELNYX_API_KEY, phoneNumber: inbound, assistantId: route.externalId,
+        voicemailConnectionId: env.TELNYX_VOICEMAIL_APP_ID,
+        ...(this.context.fetcher ? { fetcher: this.context.fetcher } : {}),
+      }).setPaused(true);
+      return true;
+    } catch (error) {
+      log({ level: "error", event: "grace_disconnect_failed", tenantId, error: redactError(error) });
+      return false;
+    }
   }
 }

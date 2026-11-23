@@ -16,7 +16,7 @@ async function harness(options: { voicemail?: boolean } = { voicemail: true }) {
   let now = new Date("2026-11-21T18:00:00.000Z");
   const clock = { now: () => now };
   const api = { status: "active", tenant: null as string | null };
-  const telnyx = { connectionId: "texml_assistant" as string | null, released: [] as string[] };
+  const telnyx = { connectionId: "texml_assistant" as string | null, released: [] as string[], patchGate: null as Promise<void> | null, onPatch: null as (() => void) | null };
   const calls: Array<{ url: string; method: string }> = [];
   const fetcher = (async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
@@ -29,6 +29,8 @@ async function harness(options: { voicemail?: boolean } = { voicemail: true }) {
     if (url.endsWith("/v2/ai/assistants/assistant_synthetic") && method === "DELETE") { telnyx.released.push("assistant"); return json({}); }
     if (url.includes("api.telnyx.com/v2/phone_numbers?")) return json({ data: telnyx.released.includes("number") ? [] : [{ id: "num_synthetic", phone_number: LINE, connection_id: telnyx.connectionId }] });
     if (url.endsWith("/v2/phone_numbers/num_synthetic") && method === "PATCH") {
+      telnyx.onPatch?.();
+      if (telnyx.patchGate) await telnyx.patchGate;
       telnyx.connectionId = (JSON.parse(String(init?.body)) as { connection_id: string | null }).connection_id;
       return json({ data: { connection_id: telnyx.connectionId } });
     }
@@ -229,6 +231,75 @@ describe("billing grace line", () => {
       h.advance(25 * DAY);
       expect(await h.sweep.runOnce()).toEqual({ reminded: 0, released: 0 });
       expect(h.telnyx.released).toEqual([]);
+    } finally { await h.close(); }
+  });
+
+  it("keeps the line when payment lands while the day-30 sweep is waiting to release it", async () => {
+    const h = await harness();
+    try {
+      await h.setStatus("past_due");
+      h.advance(31 * DAY);
+      let openGate!: () => void;
+      h.telnyx.patchGate = new Promise<void>((resolve) => { openGate = resolve; });
+      const reconnectStarted = new Promise<void>((resolve) => { h.telnyx.onPatch = resolve; });
+      const restoring = h.setStatus("active");
+      await reconnectStarted; // restore holds the billing lock, mid-reconnect
+      const sweeping = h.sweep.runOnce(); // saw grace before restore cleared it
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      openGate();
+      expect((await restoring).status).toBe(200);
+      expect(await sweeping).toEqual({ reminded: 0, released: 0 });
+      expect(h.telnyx.released).toEqual([]);
+      expect(h.telnyx.connectionId).toBe("texml_assistant");
+      expect(await h.store.getIntegrationSecret(h.tenantId, "telnyx", "inbound_number")).toBe(LINE);
+      expect((await h.store.getOwnerAccountByTenant(h.tenantId))?.status).toBe("active");
+    } finally { await h.close(); }
+  });
+
+  it("does not finish grace when the line cannot be released, and retries on the next sweep", async () => {
+    const h = await harness();
+    try {
+      await h.setStatus("past_due");
+      h.advance(31 * DAY);
+      const noKey = new GraceLineService({ store: h.store, env: { ...h.env, TELNYX_API_KEY: undefined }, clock: { now: () => new Date(Date.parse("2026-11-21T18:00:00.000Z") + 31 * DAY) }, log: () => undefined });
+      expect(await noKey.runOnce()).toEqual({ reminded: 0, released: 0 });
+      expect(await h.store.getIntegrationSecret(h.tenantId, "telnyx", "inbound_number")).toBe(LINE);
+      expect(await h.store.getIntegrationSecret(h.tenantId, "billing", "grace_started_at")).not.toBeNull();
+      expect(h.telnyx.connectionId).toBe("texml_voicemail");
+      expect((await h.sweep.runOnce()).released).toBe(1);
+      expect(h.telnyx.released.sort()).toEqual(["assistant", "number"]);
+    } finally { await h.close(); }
+  });
+
+  it("takes a number we did not provision off the voicemail app on day 30 without deleting it", async () => {
+    const h = await harness();
+    try {
+      await h.store.deleteIntegrationSecret(h.tenantId, "telnyx", "provisioned_assistant_id");
+      await h.setStatus("past_due");
+      expect(h.telnyx.connectionId).toBe("texml_voicemail");
+      h.advance(31 * DAY);
+      expect((await h.sweep.runOnce()).released).toBe(1);
+      expect(h.telnyx.connectionId).toBeNull();
+      expect(h.telnyx.released).toEqual([]);
+    } finally { await h.close(); }
+  });
+
+  it("cancels a voicemail fallback that is waiting to retry, and a queued reminder when payment clears grace", async () => {
+    const h = await harness();
+    try {
+      await h.setStatus("past_due");
+      const texml = await (await h.telnyxPost("/texml/voicemail", { CallSid: "call_synthetic_5", From: CALLER, To: LINE })).text();
+      await h.telnyxPost(callbackPath(texml, "recordingStatusCallback"), { CallSid: "call_synthetic_5", RecordingStatus: "completed" });
+      const fallback = h.outbox("voicemail-fallback:")[0]!;
+      await h.store.saveNotification({ ...fallback, state: "retry", attempts: 1 });
+      await h.telnyxPost(callbackPath(texml, "transcriptionCallback"), { CallSid: "call_synthetic_5", From: CALLER, TranscriptionText: "Please call me back." });
+      expect(h.outbox("voicemail-fallback:")[0]!.state).toBe("cancelled");
+
+      h.advance(23 * DAY);
+      await h.sweep.runOnce();
+      expect(h.outbox("grace-reminder:")[0]!.state).toBe("pending");
+      await h.setStatus("active");
+      expect(h.outbox("grace-reminder:")[0]!.state).toBe("cancelled");
     } finally { await h.close(); }
   });
 

@@ -31,6 +31,13 @@ const deletion = new DataDeletionService(
 );
 const summaries = new OwnerSummaryService(runtime.store, systemClock, env.PUBLIC_BASE_URL);
 const graceLine = new GraceLineService({ store: runtime.store, env, clock: systemClock, log: logger });
+// Numbers saved before the lookup column existed: hash them so their grace-period voicemail can find the shop.
+try {
+  const backfill = await runtime.store.backfillInboundNumberLookups();
+  if (backfill.updated > 0 || backfill.conflicts > 0) logger({ level: backfill.conflicts > 0 ? "error" : "info", event: "inbound_number_lookup_backfill", ...backfill });
+} catch (error) {
+  logger({ level: "error", event: "inbound_number_lookup_backfill_failed", error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });
+}
 let workerActive = false;
 let nextRecoveryAt = 0;
 let nextRetentionAt = 0;

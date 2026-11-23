@@ -936,7 +936,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   }
 
   /** One path for the settings form and the JSON API, so validation and side effects stay identical. */
+  /** Billing lock first (same order as Stripe events and the grace sweep): an unpause can reconnect a grace-period line. */
   async function saveOwnerSettings(account: OwnerAccount, form: URLSearchParams): Promise<void> {
+    await dependencies.store.withLock(`billing:${account.tenantId}`, () => saveOwnerSettingsLocked(account, form));
+  }
+
+  async function saveOwnerSettingsLocked(account: OwnerAccount, form: URLSearchParams): Promise<void> {
     await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
     const current = await dependencies.store.getConfig(account.tenantId);
     const updated = configFromForm(current, form, "owner");
@@ -1375,7 +1380,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
    */
   async function goLive(account: OwnerAccount, existing: { assistantId: string; inboundNumber: string } | null): Promise<string> {
     telemetry.capture("go_live_attempted", account.tenantId, account.tenantId);
-    return trackGoLive(account.tenantId, dependencies.store.withLock(`go-live:${account.tenantId}`, async () => {
+    // The billing lock keeps go-live from racing a payment change or the day-30 grace release.
+    return trackGoLive(account.tenantId, dependencies.store.withLock(`go-live:${account.tenantId}`, () => dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
       const providerBlockers = liveProviderBlockers();
       if (providerBlockers.length > 0) throw new HttpError(409, `Live provider prerequisites are missing: ${providerBlockers.join(", ")}`);
       const config = await dependencies.store.getConfig(account.tenantId);
@@ -1446,7 +1452,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         throw error;
       }
       return inboundNumber;
-    }));
+    })));
   }
 
   /** Records how a go-live ended: live, blocked (4xx: a prerequisite is missing) or failed (5xx: provider or server). */
@@ -1548,7 +1554,16 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     return "check";
   }
 
+  /** Lapse and restore run under `billing:<tenant>`, the lock the grace sweep holds while it releases a line. */
   async function handleBillingLapse(tenantId: string, status: SubscriptionRecord["status"], eventId: string): Promise<void> {
+    await dependencies.store.withLock(`billing:${tenantId}`, () => handleBillingLapseLocked(tenantId, status, eventId));
+  }
+
+  async function handleBillingRestored(tenantId: string, eventId: string): Promise<void> {
+    await dependencies.store.withLock(`billing:${tenantId}`, () => handleBillingRestoredLocked(tenantId, eventId));
+  }
+
+  async function handleBillingLapseLocked(tenantId: string, status: SubscriptionRecord["status"], eventId: string): Promise<void> {
     const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
     if (account?.status !== "active") return;
     if ((await dependencies.store.getConfig(tenantId)).paused) return; // already off (billing or owner)
@@ -1585,7 +1600,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   }
 
   /** Billing paused this shop and it has now paid: reconnect the line and tell the owner. */
-  async function handleBillingRestored(tenantId: string, eventId: string): Promise<void> {
+  async function handleBillingRestoredLocked(tenantId: string, eventId: string): Promise<void> {
     const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
     if (account?.status !== "active") return;
     const config = await dependencies.store.getConfig(tenantId);
