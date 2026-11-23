@@ -49,7 +49,8 @@ export function extraCalls(countedCalls: number, includedCalls: number): number 
  * period's total passes fair use (3× included). Never on (callsWithoutUnlimited = countedCalls) is plain extraCalls.
  */
 export function extraCallsWithUnlimited(input: { countedCalls: number; callsWithoutUnlimited: number; includedCalls: number }): number {
-  return Math.max(0, input.callsWithoutUnlimited - input.includedCalls, input.countedCalls - fairUseCalls(input.includedCalls));
+  const withoutUnlimited = Math.min(input.countedCalls, Math.max(0, input.callsWithoutUnlimited));
+  return Math.max(0, withoutUnlimited - input.includedCalls, input.countedCalls - fairUseCalls(input.includedCalls));
 }
 
 /**

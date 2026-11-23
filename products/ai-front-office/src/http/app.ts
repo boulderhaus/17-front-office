@@ -15,7 +15,7 @@ import { renderQuickSetup } from "../admin/setup.js";
 import { renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
 import { chargeSentence, isPaidStatus } from "../domain/billing.js";
 import { currentPlan, hasUnlimitedPrice, introCouponId, knownPlans, legacyPlanPriceIds, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, unlimitedPriceIds, type Plan, type PlanId } from "../domain/plans.js";
-import { GuaranteeError, LeadGuaranteeService, recordFirstPaid, recordUnlimited } from "../application/billing-jobs.js";
+import { GuaranteeError, LeadGuaranteeService, recordFirstPaid, recordUnlimitedObservation, type UnlimitedItem } from "../application/billing-jobs.js";
 import { callbackLinkMatches, readCallbackLinkToken } from "../domain/owner-sms.js";
 import { callsCsv } from "./calls-csv.js";
 import { hoursFromChoice } from "../domain/hours.js";
@@ -1735,7 +1735,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         .catch(() => { throw new HttpError(502, "We couldn’t confirm your card with Stripe just now. Try again in a moment."); });
       if (live.tenantId && live.tenantId !== account.tenantId) throw new HttpError(400, "That subscription belongs to a different account");
       if (!stripeClient.hasPlanPrice(live.priceIds)) return;
-      await syncPlan(account.tenantId, live.priceIds);
+      await syncPlan(account.tenantId, live);
       const now = dependencies.clock.now().toISOString();
       await dependencies.store.saveSubscription({
         tenantId: account.tenantId,
@@ -1770,34 +1770,45 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const unlimited = wantsUnlimited(plan, config.unlimitedCalls === true);
       if (isOnPlan(config, plan, unlimited)) return;
       const live = Boolean(subscription?.providerSubscriptionId && subscription.status !== "canceled");
+      let addOnItems: UnlimitedItem[] | null = null;
       if (live) {
         if (!stripeClient) throw new HttpError(503, "Plan changes aren’t available yet");
-        await stripeClient.changePlan(subscription!.providerSubscriptionId!, plan.id, { unlimited }).catch((error) => {
+        addOnItems = (await stripeClient.changePlan(subscription!.providerSubscriptionId!, plan.id, { unlimited }).catch((error) => {
           log({ level: "error", event: "plan_change_failed", tenantId: account.tenantId, plan: plan.id, error: safeError(error) });
           throw new HttpError(502, "Your plan couldn’t be changed just now. Nothing was changed; please try again.");
-        });
+        })).addOnItems;
       }
       await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
         await dependencies.store.saveConfig(onPlan(await dependencies.store.getConfig(account.tenantId), plan, unlimited));
       });
-      if (live) await recordUnlimited(dependencies.store, account.tenantId, unlimited, dependencies.clock.now().toISOString());
+      if (live) await observeOwnChange(account.tenantId, unlimited, addOnItems);
       log({ level: "info", event: "plan_changed", tenantId: account.tenantId, from: config.planId ?? "solo", to: plan.id });
       telemetry.capture("plan_changed", account.id, account.tenantId, { from: config.planId ?? "solo", to: plan.id });
     });
   }
 
   /** Keep the shop's plan and price in step with what Stripe says it is paying for (e.g. a switch in the billing portal). */
-  async function syncPlan(tenantId: string, priceIds: string[]): Promise<void> {
+  async function syncPlan(tenantId: string, live: { priceIds: string[]; addOnItems: UnlimitedItem[] }): Promise<void> {
+    const { priceIds } = live;
     const plan = planForPriceIds(known, priceIds);
     if (!plan) return;
-    // Stripe is the truth for the add-on too: its item on the subscription means Unlimited is on, from now.
+    // Stripe is the truth for the add-on too: its item on the subscription means Unlimited is on.
     const unlimited = hasUnlimitedPrice(known, priceIds);
     await dependencies.store.withLock(`config:${tenantId}`, async () => {
       const current = await dependencies.store.getConfig(tenantId);
       if (isOnPlan(current, plan, unlimited)) return;
       await dependencies.store.saveConfig(onPlan(current, plan, unlimited));
     });
-    await recordUnlimited(dependencies.store, tenantId, unlimited, dependencies.clock.now().toISOString());
+    await recordUnlimitedObservation(dependencies.store, tenantId, { at: dependencies.clock.now().toISOString(), items: live.addOnItems, live: true });
+  }
+
+  /**
+   * After we changed the add-on in Stripe ourselves: Stripe's reply lists the add-on items (with creation times).
+   * If it didn't, a placeholder item stands in from now until the next read of Stripe shows the real one.
+   */
+  async function observeOwnChange(tenantId: string, on: boolean, items: UnlimitedItem[] | null): Promise<void> {
+    const at = dependencies.clock.now().toISOString();
+    await recordUnlimitedObservation(dependencies.store, tenantId, { at, items: items ?? (on ? [{ id: `owner:${at}`, createdAt: at }] : []), live: true });
   }
 
   /**
@@ -1815,17 +1826,18 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (on && !plan.unlimited) throw new HttpError(409, plan.sold ? "Unlimited calls aren’t available on this plan yet." : `Unlimited calls aren’t available on ${plan.label}. Switch to Solo, Team or Fleet to add it.`);
       if ((config.unlimitedCalls === true) === on) return;
       const live = Boolean(subscription?.providerSubscriptionId && subscription.status !== "canceled");
+      let addOnItems: UnlimitedItem[] | null = null;
       if (live) {
         if (!stripeClient) throw new HttpError(503, "Plan changes aren’t available yet");
-        await stripeClient.changePlan(subscription!.providerSubscriptionId!, plan.id, { unlimited: on }).catch((error) => {
+        addOnItems = (await stripeClient.changePlan(subscription!.providerSubscriptionId!, plan.id, { unlimited: on }).catch((error) => {
           log({ level: "error", event: "unlimited_change_failed", tenantId: account.tenantId, on, error: safeError(error) });
           throw new HttpError(502, "Unlimited calls couldn’t be changed just now. Nothing was changed; please try again.");
-        });
+        })).addOnItems;
       }
       await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
         await dependencies.store.saveConfig({ ...await dependencies.store.getConfig(account.tenantId), unlimitedCalls: on });
       });
-      if (live) await recordUnlimited(dependencies.store, account.tenantId, on, dependencies.clock.now().toISOString());
+      if (live) await observeOwnChange(account.tenantId, on, addOnItems);
       log({ level: "info", event: "unlimited_changed", tenantId: account.tenantId, on });
       telemetry.capture("unlimited_changed", account.id, account.tenantId, { on, plan: plan.id });
     });
@@ -2169,7 +2181,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
             // Never let a second subscription cancel or replace the one that is paying.
             if (live.status !== "canceled") log({ level: "error", event: "stripe_duplicate_subscription_requires_refund", tenantId });
           } else {
-            await syncPlan(tenantId, live.priceIds);
+            // The event's own payload is a fact as of its created time (order-proof); the API read is the truth now.
+            const payloadItems = (object.items as { data?: unknown } | undefined)?.data;
+            if (event.type.startsWith("customer.subscription.") && Array.isArray(payloadItems) && typeof event.created === "number") {
+              await recordUnlimitedObservation(dependencies.store, tenantId, { at: new Date(event.created * 1_000).toISOString(), items: stripeClient.addOnItemsFrom(payloadItems as Array<Record<string, unknown>>) });
+            }
+            await syncPlan(tenantId, live);
             record = {
               tenantId,
               providerCustomerId: live.customer ?? existing?.providerCustomerId ?? null,

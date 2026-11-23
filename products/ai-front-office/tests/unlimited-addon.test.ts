@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
 import { StripeBillingClient } from "../src/adapters/stripe.js";
-import { OverageBillingService, recordFirstPaid, recordUnlimited } from "../src/application/billing-jobs.js";
+import { OverageBillingService, recordFirstPaid, recordUnlimitedObservation, unlimitedWindows } from "../src/application/billing-jobs.js";
 import { usageAlertText } from "../src/application/usage-alerts.js";
 import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
@@ -133,9 +133,17 @@ describe("period-end overage respects Unlimited", () => {
   async function calls(days: string[]) {
     for (const day of days) await store.saveCall(call(tenantId, `${day}T15:00:00.000Z`));
   }
+  /** Stripe shows the add-on item (created at `at`), or no add-on item, as of `at`. */
+  const on = (at: string, id = "si_unl") => recordUnlimitedObservation(store, tenantId, { at, items: [{ id, createdAt: at }] });
+  const off = (at: string) => recordUnlimitedObservation(store, tenantId, { at, items: [] });
+  async function billedQuantity(): Promise<string | null> {
+    const stripe = overageStripe();
+    await new OverageBillingService(store, new StripeBillingClient("sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", { base: "price_solo" }, stripe.fetcher), clock).runOnce();
+    return stripe.requests.find((request) => request.url.endsWith("/v1/invoiceitems"))?.body.get("quantity") ?? null;
+  }
 
   it("bills nothing while the period stayed within fair use", async () => {
-    await recordUnlimited(store, tenantId, true, "2025-12-20T15:00:00.000Z");
+    await on("2025-12-20T15:00:00.000Z");
     await calls(["2025-12-21", "2025-12-22", "2025-12-23", "2025-12-24", "2025-12-25", "2025-12-26"]);
     const stripe = overageStripe();
     await new OverageBillingService(store, new StripeBillingClient("sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", { base: "price_solo" }, stripe.fetcher), clock).runOnce();
@@ -144,7 +152,7 @@ describe("period-end overage respects Unlimited", () => {
   });
 
   it("bills each call past fair use at 75¢", async () => {
-    await recordUnlimited(store, tenantId, true, "2025-12-20T15:00:00.000Z");
+    await on("2025-12-20T15:00:00.000Z");
     await calls(["2025-12-21", "2025-12-22", "2025-12-23", "2025-12-24", "2025-12-25", "2025-12-26", "2025-12-27", "2025-12-28"]);
     const stripe = overageStripe();
     await new OverageBillingService(store, new StripeBillingClient("sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", { base: "price_solo" }, stripe.fetcher), clock).runOnce();
@@ -154,7 +162,7 @@ describe("period-end overage respects Unlimited", () => {
 
   it("still bills the calls made before Unlimited was turned on, so a last-day switch can't erase a month of extras", async () => {
     await calls(["2025-12-21", "2025-12-22", "2025-12-23", "2025-12-24", "2026-01-18"]);
-    await recordUnlimited(store, tenantId, true, "2026-01-19T00:00:00.000Z");
+    await on("2026-01-19T00:00:00.000Z");
     await calls(["2026-01-19"]);
     const stripe = overageStripe();
     await new OverageBillingService(store, new StripeBillingClient("sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", { base: "price_solo" }, stripe.fetcher), clock).runOnce();
@@ -163,15 +171,66 @@ describe("period-end overage respects Unlimited", () => {
   });
 
   it("covers only the time it was on when it was turned off mid-period", async () => {
-    await recordUnlimited(store, tenantId, true, "2025-12-20T15:00:00.000Z");
+    await on("2025-12-20T15:00:00.000Z");
     await calls(["2025-12-21", "2025-12-22", "2025-12-23", "2025-12-24"]);
-    await recordUnlimited(store, tenantId, false, "2026-01-01T00:00:00.000Z");
+    await off("2026-01-01T00:00:00.000Z");
     await store.saveConfig({ ...await store.getConfig(tenantId), unlimitedCalls: false });
     await calls(["2026-01-02", "2026-01-03", "2026-01-04"]);
     const stripe = overageStripe();
     await new OverageBillingService(store, new StripeBillingClient("sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", { base: "price_solo" }, stripe.fetcher), clock).runOnce();
     // 3 calls while off against 2 included: 1 extra. Total 7 is past fair use (6) by 1 too, so 1.
     expect(stripe.requests.find((request) => request.url.endsWith("/v1/invoiceitems"))!.body.get("quantity")).toBe("1");
+  });
+
+  it("builds the same windows whatever order Stripe delivers on and off in", async () => {
+    // Webhook payloads: the add-on item (created Dec 25) seen on Dec 25, gone by Jan 1. Delivered off first.
+    await off("2026-01-01T00:00:00.000Z");
+    await recordUnlimitedObservation(store, tenantId, { at: "2025-12-25T00:00:00.000Z", items: [{ id: "si_unl", createdAt: "2025-12-25T00:00:00.000Z" }] });
+    expect(await unlimitedWindows(store, tenantId)).toEqual([{ from: "2025-12-25T00:00:00.000Z", to: "2026-01-01T00:00:00.000Z" }]);
+    // Calls: 2 before (Dec 21, 22), 4 while on (Dec 26-29), 2 after (Jan 2, 3). Off calls 4 vs 2 included: 2 extra.
+    await calls(["2025-12-21", "2025-12-22", "2025-12-26", "2025-12-27", "2025-12-28", "2025-12-29", "2026-01-02", "2026-01-03"]);
+    expect(await billedQuantity()).toBe("2");
+  });
+
+  it("ignores a retried old 'on' after the add-on was removed, and duplicates", async () => {
+    await on("2025-12-25T00:00:00.000Z");
+    await on("2025-12-25T00:00:00.000Z");
+    await off("2026-01-01T00:00:00.000Z");
+    await off("2026-01-01T00:00:00.000Z");
+    // Stripe retries the Dec 25 event after Jan 1: the window must stay closed, and must not move.
+    await on("2025-12-25T00:00:00.000Z");
+    await recordUnlimitedObservation(store, tenantId, { at: "2025-12-26T00:00:00.000Z", items: [{ id: "si_unl", createdAt: "2025-12-25T00:00:00.000Z" }] });
+    expect(await unlimitedWindows(store, tenantId)).toEqual([{ from: "2025-12-25T00:00:00.000Z", to: "2026-01-01T00:00:00.000Z" }]);
+    // An "off" seen later never pushes the end out; an earlier true "off" pulls it in.
+    await off("2026-01-05T00:00:00.000Z");
+    expect((await unlimitedWindows(store, tenantId))[0]!.to).toBe("2026-01-01T00:00:00.000Z");
+    await off("2025-12-30T00:00:00.000Z");
+    expect((await unlimitedWindows(store, tenantId))[0]!.to).toBe("2025-12-30T00:00:00.000Z");
+  });
+
+  it("closes a window turned on and off within the same second once a later observation sees it gone", async () => {
+    await on("2025-12-25T00:00:00.000Z");
+    await off("2025-12-25T00:00:00.000Z"); // same second: can't tell the order from Stripe's timestamps alone
+    await recordUnlimitedObservation(store, tenantId, { at: "2025-12-25T00:00:00.400Z", items: [], live: true });
+    const windows = await unlimitedWindows(store, tenantId);
+    expect(windows).toEqual([{ from: "2025-12-25T00:00:00.000Z", to: "2025-12-25T00:00:00.400Z" }]);
+    // Live reads taken at the same instant still advance: a toggle and its undo never leave a window open.
+    await recordUnlimitedObservation(store, tenantId, { at: "2025-12-26T00:00:00.000Z", items: [{ id: "owner:x", createdAt: "2025-12-26T00:00:00.000Z" }], live: true });
+    await recordUnlimitedObservation(store, tenantId, { at: "2025-12-26T00:00:00.000Z", items: [], live: true });
+    const second = (await unlimitedWindows(store, tenantId))[1]!;
+    expect(second.to).not.toBeNull();
+    expect(Date.parse(second.to!)).toBeGreaterThan(Date.parse(second.from));
+  });
+
+  it("counts calls once where windows overlap and never goes negative", async () => {
+    // Two add-on items overlapping (a replaced item seen briefly beside the old one): A Dec 20-25, B Dec 24-27.
+    await recordUnlimitedObservation(store, tenantId, { at: "2025-12-24T12:00:00.000Z", items: [{ id: "si_a", createdAt: "2025-12-20T15:00:00.000Z" }, { id: "si_b", createdAt: "2025-12-24T00:00:00.000Z" }] });
+    await recordUnlimitedObservation(store, tenantId, { at: "2025-12-25T00:00:00.000Z", items: [{ id: "si_b", createdAt: "2025-12-24T00:00:00.000Z" }] });
+    await off("2025-12-27T00:00:00.000Z");
+    // Dec 24 sits in both windows, Dec 26 in B; Dec 28-31 were made with it off. 4 off calls vs 2 included: 2 extra.
+    // Summing the windows would count Dec 24 twice and bill only 1.
+    await calls(["2025-12-24", "2025-12-26", "2025-12-28", "2025-12-29", "2025-12-30", "2025-12-31"]);
+    expect(await billedQuantity()).toBe("2");
   });
 
   it("speaks fair use in the usage alert when Unlimited is on", () => {
@@ -311,7 +370,7 @@ describe("Unlimited over HTTP: card step, Settings toggle, webhook sync", () => 
     const update = stripe.requests.find((request) => request.method === "POST" && request.url.endsWith("/v1/subscriptions/sub_synthetic"))!;
     expect(Object.fromEntries(update.body)).toMatchObject({ "items[0][price]": "price_unl_solo", proration_behavior: "always_invoice", payment_behavior: "error_if_incomplete" });
     expect(await store.getConfig(shop.tenantId)).toMatchObject({ unlimitedCalls: true });
-    expect(JSON.parse((await store.getIntegrationSecret(shop.tenantId, "billing", "unlimited_windows"))!)).toEqual([{ from: now.toISOString(), to: null }]);
+    expect(await unlimitedWindows(store, shop.tenantId)).toEqual([{ from: now.toISOString(), to: null }]);
     const dashboard = await on.json() as { billing: { unlimited: boolean }; usage: { unlimited: boolean; fairUseCalls: number | null } };
     expect(dashboard.billing.unlimited).toBe(true);
     expect(dashboard.usage).toMatchObject({ unlimited: true, fairUseCalls: 180 });
@@ -321,7 +380,7 @@ describe("Unlimited over HTTP: card step, Settings toggle, webhook sync", () => 
     expect((await shop.post("/api/app/billing/unlimited", { on: false })).status).toBe(200);
     expect(Object.fromEntries(stripe.requests.at(-1)!.body)).toMatchObject({ "items[0][id]": "si_unl", "items[0][deleted]": "true" });
     expect(await store.getConfig(shop.tenantId)).toMatchObject({ unlimitedCalls: false });
-    expect(JSON.parse((await store.getIntegrationSecret(shop.tenantId, "billing", "unlimited_windows"))!)).toEqual([{ from: "2026-01-15T08:00:00.000Z", to: "2026-01-20T08:00:00.000Z" }]);
+    expect(await unlimitedWindows(store, shop.tenantId)).toEqual([{ from: "2026-01-15T08:00:00.000Z", to: "2026-01-20T08:00:00.000Z" }]);
   });
 
   it("keeps the add-on on a plan change, at the new plan's add-on price", async () => {
@@ -344,7 +403,7 @@ describe("Unlimited over HTTP: card step, Settings toggle, webhook sync", () => 
     expect((await send()).status).toBe(200);
     expect(await store.getConfig(shop.tenantId)).toMatchObject({ planId: "team", unlimitedCalls: true });
     await send();
-    expect(JSON.parse((await store.getIntegrationSecret(shop.tenantId, "billing", "unlimited_windows"))!)).toHaveLength(1);
+    expect(await unlimitedWindows(store, shop.tenantId)).toHaveLength(1);
   });
 
   it("rejects anything but a yes or no for the add-on", async () => {

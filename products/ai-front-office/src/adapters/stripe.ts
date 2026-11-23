@@ -33,6 +33,8 @@ export interface StripeSubscriptionSnapshot {
   customer: string | null;
   tenantId: string | null;
   priceIds: string[];
+  /** The Unlimited add-on items on the subscription right now (empty: the add-on is off). */
+  addOnItems: Array<{ id: string; createdAt: string | null }>;
   currentPeriodEnd: string | null;
 }
 
@@ -89,7 +91,7 @@ export class StripeBillingClient {
    * is swapped, the add-on item is added, re-priced for the new plan, or removed, all in one update, and Stripe
    * invoices the difference now (credit for a downgrade). Other add-on items (SMS) are left alone. No change, no write.
    */
-  async changePlan(subscriptionId: string, plan: PlanId, options: { unlimited?: boolean } = {}): Promise<void> {
+  async changePlan(subscriptionId: string, plan: PlanId, options: { unlimited?: boolean } = {}): Promise<{ addOnItems: Array<{ id: string; createdAt: string | null }> | null }> {
     const price = requiredPrice(this.planPrice(plan), `${plan} plan`);
     const unlimited = options.unlimited === true;
     const addOnPrice = unlimited ? requiredPrice(this.unlimitedPrice(plan), `${plan} Unlimited add-on`) : null;
@@ -105,7 +107,7 @@ export class StripeBillingClient {
     if (addOnPrice && !addOnItem) changes.push({ price: addOnPrice });
     else if (addOnPrice && addOnItem?.id && addOnItem.price?.id !== addOnPrice) changes.push({ id: addOnItem.id, price: addOnPrice });
     else if (!addOnPrice && addOnItem?.id) changes.push({ id: addOnItem.id, deleted: true });
-    if (changes.length === 0) return;
+    if (changes.length === 0) return { addOnItems: this.addOnItemsFrom(items) };
     const body = new URLSearchParams();
     changes.forEach((change, index) => {
       if (change.id) body.set(`items[${index}][id]`, change.id);
@@ -121,6 +123,19 @@ export class StripeBillingClient {
     body.set("metadata[unlimited]", unlimited ? "yes" : "no");
     const update = await this.post(`subscriptions/${encodeURIComponent(subscriptionId)}`, body);
     if (!update.ok || update.payload.id !== subscriptionId) throw new Error(`Stripe plan change failed with HTTP ${update.status}${update.payload.error?.message ? `: ${update.payload.error.message}` : ""}`);
+    // Stripe answers with the updated subscription: its add-on items (and their creation times) are the new truth.
+    const updated = update.payload.items as { data?: unknown } | undefined;
+    return { addOnItems: Array.isArray(updated?.data) ? this.addOnItemsFrom(updated.data as Array<Record<string, unknown>>) : null };
+  }
+
+  /** The Unlimited add-on items among a subscription's items (from the API or a webhook payload). */
+  addOnItemsFrom(items: Array<{ id?: unknown; created?: unknown; price?: unknown }>): Array<{ id: string; createdAt: string | null }> {
+    const addOns = this.unlimitedPrices();
+    return items.flatMap((item) => {
+      const price = typeof item.price === "string" ? item.price : (item.price as { id?: unknown } | undefined)?.id;
+      if (typeof item.id !== "string" || typeof price !== "string" || !addOns.includes(price)) return [];
+      return [{ id: item.id, createdAt: typeof item.created === "number" ? new Date(item.created * 1_000).toISOString() : null }];
+    });
   }
 
   /**
@@ -336,7 +351,7 @@ export class StripeBillingClient {
     const payload = await response.json().catch(() => ({})) as {
       id?: string; status?: string; customer?: string | { id?: string }; current_period_end?: number;
       metadata?: Record<string, unknown>;
-      items?: { data?: Array<{ price?: { id?: string }; current_period_end?: number }> };
+      items?: { data?: Array<{ id?: string; created?: number; price?: { id?: string }; current_period_end?: number }> };
       error?: { message?: string };
     };
     if (!response.ok || payload.id !== subscriptionId) throw new Error(`Stripe subscription lookup failed with HTTP ${response.status}`);
@@ -350,6 +365,7 @@ export class StripeBillingClient {
       customer,
       tenantId: typeof payload.metadata?.tenant_id === "string" ? payload.metadata.tenant_id : null,
       priceIds: items.map((item) => item.price?.id).filter((value): value is string => typeof value === "string"),
+      addOnItems: this.addOnItemsFrom(items),
       currentPeriodEnd: periodEnds.length ? new Date(Math.max(...periodEnds) * 1_000).toISOString() : null,
     };
   }

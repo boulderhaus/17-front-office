@@ -31,27 +31,92 @@ export async function firstPaidAt(store: Store, tenantId: string): Promise<strin
   return store.getIntegrationSecret(tenantId, "billing", "first_paid_at");
 }
 
-/** When the Unlimited add-on was on: [from, to) windows, to = null while it still is. Append-only. */
+/** When the Unlimited add-on was on: [from, to), to = null while it still is. Derived, never stored. */
 export interface UnlimitedWindow { from: string; to: string | null }
 
+/** One add-on subscription item Stripe showed: its id and when Stripe created it. */
+export interface UnlimitedItem { id: string; createdAt: string | null }
+
+/**
+ * Everything we have seen about the add-on, as facts that don't depend on delivery order:
+ *  - items: each add-on item ever seen, from its Stripe creation time (or the earliest time it was seen);
+ *  - observations: "at time T, the subscription's add-on items were exactly these".
+ * An item's window ends at the earliest observation strictly after its start that doesn't list it. So a
+ * webhook delivered late, twice, or out of order can only add a fact, never reopen or stretch a window.
+ */
+interface UnlimitedLedger {
+  items: Record<string, { from: string }>;
+  observations: Array<{ at: string; present: string[] }>;
+  /** Last live observation (our own read of Stripe, in processing order): the next one is always later. */
+  lastLiveAt: string | null;
+}
+const LEDGER_KEY = "unlimited_ledger";
+/** Observations kept: well past the overage lookback (35 days after a period ends). */
+const LEDGER_MAX_OBSERVATIONS = 1_000;
+
+async function readLedger(store: Store, tenantId: string): Promise<UnlimitedLedger> {
+  const raw = await store.getIntegrationSecret(tenantId, "billing", LEDGER_KEY);
+  const parsed = raw ? JSON.parse(raw) as Partial<UnlimitedLedger> : {};
+  return { items: parsed.items ?? {}, observations: parsed.observations ?? [], lastLiveAt: parsed.lastLiveAt ?? null };
+}
+
+function windowsFrom(ledger: UnlimitedLedger): UnlimitedWindow[] {
+  return Object.entries(ledger.items).map(([id, item]) => {
+    const start = Date.parse(item.from);
+    const ends = ledger.observations.filter((obs) => Date.parse(obs.at) > start && !obs.present.includes(id)).map((obs) => Date.parse(obs.at));
+    return { from: item.from, to: ends.length ? new Date(Math.min(...ends)).toISOString() : null };
+  }).sort((left, right) => Date.parse(left.from) - Date.parse(right.from));
+}
+
 export async function unlimitedWindows(store: Store, tenantId: string): Promise<UnlimitedWindow[]> {
-  const raw = await store.getIntegrationSecret(tenantId, "billing", "unlimited_windows");
-  return raw ? JSON.parse(raw) as UnlimitedWindow[] : [];
+  return windowsFrom(await readLedger(store, tenantId));
 }
 
 /**
- * Record that Stripe bills (on) or stopped billing (off) the Unlimited add-on at `at`. Idempotent: on with a
- * window already open, or off with none open, changes nothing. The overage job uses these windows, so calls made
- * before the add-on was turned on still count against the plan's included calls.
+ * Record what Stripe showed about the Unlimited add-on at `at`: the add-on items on the subscription then
+ * (empty: none). Webhook payloads pass the event's created time; our own reads of Stripe (checkout return,
+ * Settings toggle, the webhook's API read) pass live: true and are forced strictly after the previous live
+ * read, so a toggle and its undo in the same instant still close. Call it under the shop's billing lock (every
+ * caller holds it), which serializes the read-modify-write of the stored ledger. Idempotent.
  */
-export async function recordUnlimited(store: Store, tenantId: string, on: boolean, at: string): Promise<void> {
-  const windows = await unlimitedWindows(store, tenantId);
-  const last = windows.at(-1);
-  const open = last && last.to === null ? last : null;
-  if (on === Boolean(open)) return;
-  if (on) windows.push({ from: at, to: null });
-  else if (open) open.to = Date.parse(at) > Date.parse(open.from) ? at : open.from;
-  await store.saveIntegrationSecret(tenantId, "billing", "unlimited_windows", JSON.stringify(windows));
+export async function recordUnlimitedObservation(store: Store, tenantId: string, observation: { at: string; items: UnlimitedItem[]; live?: boolean }): Promise<void> {
+  if (Number.isNaN(Date.parse(observation.at))) return;
+  const ledger = await readLedger(store, tenantId);
+  let at = new Date(observation.at).toISOString();
+  if (observation.live) {
+    if (ledger.lastLiveAt && Date.parse(at) <= Date.parse(ledger.lastLiveAt)) at = new Date(Date.parse(ledger.lastLiveAt) + 1).toISOString();
+    ledger.lastLiveAt = at;
+  }
+  for (const item of observation.items) {
+    const created = item.createdAt && !Number.isNaN(Date.parse(item.createdAt)) ? new Date(item.createdAt).toISOString() : at;
+    const known = ledger.items[item.id];
+    // Stripe's creation time is exact; without it, the earliest time the item was seen.
+    if (!known || Date.parse(created) < Date.parse(known.from)) ledger.items[item.id] = { from: created };
+  }
+  const present = [...new Set(observation.items.map((item) => item.id))].sort();
+  if (!ledger.observations.some((obs) => obs.at === at && obs.present.join() === present.join())) {
+    ledger.observations.push({ at, present });
+    ledger.observations.sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+    if (ledger.observations.length > LEDGER_MAX_OBSERVATIONS) ledger.observations.splice(0, ledger.observations.length - LEDGER_MAX_OBSERVATIONS);
+  }
+  await store.saveIntegrationSecret(tenantId, "billing", LEDGER_KEY, JSON.stringify(ledger));
+}
+
+/** The windows clipped to [from, to) and merged, so a call inside two overlapping windows counts once. */
+export function coveredIntervals(windows: UnlimitedWindow[], from: string, to: string): Array<[number, number]> {
+  const lo = Date.parse(from);
+  const hi = Date.parse(to);
+  const clipped = windows
+    .map((window): [number, number] => [Math.max(Date.parse(window.from), lo), Math.min(window.to === null ? Infinity : Date.parse(window.to), hi)])
+    .filter(([start, end]) => end > start)
+    .sort((left, right) => left[0] - right[0]);
+  const merged: Array<[number, number]> = [];
+  for (const [start, end] of clipped) {
+    const last = merged.at(-1);
+    if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+  return merged;
 }
 
 /** One closed period's overage record. The allowance and rate are snapshotted when the period is first seen closed. */
@@ -130,12 +195,10 @@ export class OverageBillingService {
         const usage = await this.store.getUsageSummary(tenantId, usageFrom, periodEnd);
         // Calls made while the Unlimited add-on was on are covered up to fair use; the rest use the plan's calls.
         let covered = 0;
-        for (const window of await unlimitedWindows(this.store, tenantId)) {
-          const from = Math.max(Date.parse(window.from), Date.parse(usageFrom));
-          const to = Math.min(window.to === null ? Infinity : Date.parse(window.to), Date.parse(periodEnd));
-          if (to > from) covered += (await this.store.getUsageSummary(tenantId, new Date(from).toISOString(), new Date(to).toISOString())).billableCalls;
+        for (const [from, to] of coveredIntervals(await unlimitedWindows(this.store, tenantId), usageFrom, periodEnd)) {
+          covered += (await this.store.getUsageSummary(tenantId, new Date(from).toISOString(), new Date(to).toISOString())).billableCalls;
         }
-        calls = extraCallsWithUnlimited({ countedCalls: usage.billableCalls, callsWithoutUnlimited: usage.billableCalls - covered, includedCalls: snapshot.includedCalls });
+        calls = extraCallsWithUnlimited({ countedCalls: usage.billableCalls, callsWithoutUnlimited: Math.max(0, usage.billableCalls - covered), includedCalls: snapshot.includedCalls });
       }
       if (calls <= 0) {
         // Not final: a late call record can still push the period over, until the lookback ends.

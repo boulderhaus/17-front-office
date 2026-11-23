@@ -14,13 +14,14 @@ import type { CallRecord } from "./models.js";
  *   Call back: https://.../c/...
  *
  * When the AI booked a time, the last bullet is "- Booked tomorrow 10a" and the link reads "Confirmation:".
- * Urgent and emergency calls start "URGENT: {reason}" in place of the first line, then the same bullets.
+ * Urgent and emergency calls start with an "URGENT: {reason}" line, then the same lines.
  */
 export function ownerCallSms(input: { call: Pick<CallRecord, "fields" | "emergency">; urgentReason?: string | null; wants?: string | null; booked?: string | null; link: string }): string {
   const place = streetAndCity(input.call.fields.address);
   const next = input.booked ? `Booked ${gsm7(input.booked)}` : input.wants ? gsm7(input.wants) : null;
   const lines = [
-    input.urgentReason ? `URGENT: ${clip(gsm7(input.urgentReason), 40)}` : `New call: ${callerFirstName(input.call.fields.callerName)}`,
+    ...(input.urgentReason ? [`URGENT: ${clip(gsm7(input.urgentReason), 40)}`] : []),
+    `New call: ${callerFirstName(input.call.fields.callerName)}`,
     `- ${clip(gsm7(input.call.fields.problemDescription) || "Problem not captured", 40)}`,
     ...(place ? [`- ${place}`] : []),
     ...(next ? [`- ${next}`] : []),

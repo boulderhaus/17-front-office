@@ -43,10 +43,10 @@ describe("owner new-call text", () => {
     ].join("\n"));
   });
 
-  it("starts urgent calls with URGENT and the reason, then the same bullets", () => {
+  it("starts urgent calls with URGENT and the reason, then the caller's first name and the same bullets", () => {
     const emergency: EmergencyDecision = { emergency: true, severity: "urgent", score: 0.9, evidence: ["gas smell"], immediateInstruction: null };
     const body = ownerCallSms({ call: { fields, emergency }, urgentReason: urgentReason({ fields, emergency }, false), wants: "Wants someone today", link: "https://x.example/c/t" });
-    expect(body).toBe(["URGENT: gas smell", "- AC not cooling", "- 41 Palm Ave, Sarasota", "- Wants someone today", "", "Call back: https://x.example/c/t"].join("\n"));
+    expect(body).toBe(["URGENT: gas smell", "New call: Maria", "- AC not cooling", "- 41 Palm Ave, Sarasota", "- Wants someone today", "", "Call back: https://x.example/c/t"].join("\n"));
     expect(urgentReason({ fields, emergency: { ...emergency, severity: "life_safety", evidence: ["carbon monoxide"] } }, false)).toBe("safety risk, carbon monoxide");
     expect(urgentReason({ fields, emergency: null }, true)).toBe("caller asked for you");
     expect(urgentReason({ fields, emergency: null }, false)).toBeNull();
