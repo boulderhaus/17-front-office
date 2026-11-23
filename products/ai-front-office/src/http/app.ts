@@ -158,6 +158,8 @@ export interface AppDependencies {
   clock: Clock;
   integrations: Record<string, boolean>;
   logger?: (entry: Record<string, unknown>) => void;
+  /** Outbound HTTP for Stripe and Telnyx routing; tests inject a fake. */
+  fetcher?: typeof fetch;
 }
 
 function publicOwnerDemo(now: Date): {
@@ -306,7 +308,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         base: dependencies.env.STRIPE_PRICE_ID,
         ...(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID ? { dailySms: dependencies.env.STRIPE_DAILY_SMS_PRICE_ID } : {}),
         ...(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID ? { realtimeSms: dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID } : {}),
-      })
+      }, dependencies.fetcher ?? fetch)
     : null;
   const deletionService = new DataDeletionService(dependencies.store, recordingClient);
   const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
@@ -601,6 +603,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
       const subscription = await dependencies.store.getSubscription(account.tenantId);
       if (subscription?.status === "active") return redirect(response, "/app");
+      if (stripeClient && subscription?.providerCustomerId && (subscription.status === "incomplete" || subscription.status === "past_due" || subscription.status === "unpaid")) {
+        // An existing subscription needs payment fixed, not a second subscription.
+        const portalUrl = await stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`)
+          .catch(() => { throw new HttpError(502, "Billing could not be opened. Please retry; your subscription has not changed."); });
+        return redirect(response, portalUrl);
+      }
       if (stripeClient) {
         const config = await dependencies.store.getConfig(account.tenantId);
         const base = dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "");
@@ -609,7 +617,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           email: account.email,
           successUrl: `${base}/app?checkout=success`,
           cancelUrl: `${base}/app?checkout=cancelled`,
-          idempotencyKey: `checkout:${account.tenantId}:${randomUUID()}`,
+          // Same 10-minute window and add-ons reuse one Checkout Session, so repeat taps cannot open two subscriptions.
+          idempotencyKey: `checkout:${account.tenantId}:${Math.floor(dependencies.clock.now().getTime() / 600_000)}:${config.ownerDailySmsEnabled ? 1 : 0}${config.ownerRealtimeSmsEnabled ? 1 : 0}`,
           dailySms: config.ownerDailySmsEnabled,
           realtimeSms: config.ownerRealtimeSmsEnabled,
         });
@@ -825,6 +834,42 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     throw new HttpError(404, "Not found");
   }
 
+  /** Detach the shop's number from the assistant so callers do not reach an AI that can save nothing. */
+  async function pauseLiveRoute(tenantId: string): Promise<void> {
+    const [route, inboundNumber] = await Promise.all([
+      dependencies.store.getProviderRouteForTenant("telnyx", tenantId),
+      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
+    ]);
+    if (!route || !inboundNumber || !dependencies.env.TELNYX_API_KEY) return;
+    await new TelnyxVoiceRoutingClient({
+      apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: inboundNumber, assistantId: route.externalId,
+      ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}),
+    }).setPaused(true);
+  }
+
+  async function handleBillingLapse(tenantId: string, status: SubscriptionRecord["status"], eventId: string): Promise<void> {
+    const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
+    if (account?.status !== "active") return;
+    await pauseLiveRoute(tenantId).catch((error) => {
+      log({ level: "error", event: "billing_lapse_pause_failed", tenantId, error: safeError(error) });
+      throw new HttpError(502, "Could not pause the live phone route; Stripe will retry");
+    });
+    const config = await dependencies.store.getConfig(tenantId);
+    await dependencies.store.saveConfig({ ...config, paused: true });
+    const now = dependencies.clock.now().toISOString();
+    const statusWords = status === "past_due" ? "past due" : status === "canceled" ? "cancelled" : status.replace("_", " ");
+    for (const destinationRef of config.ownerNotificationRefs) {
+      await dependencies.store.enqueueNotification({
+        id: randomUUID(), tenantId, callId: null, channel: "sms", destinationRef,
+        body: `Front Office is paused: your subscription is ${statusWords}. Calls forwarded to your Front Office line will not be answered. Update billing in your dashboard or turn off call forwarding.`,
+        priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
+        idempotencyKey: `billing-lapse:${tenantId}:${eventId}:${destinationRef}`,
+        providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
+      });
+    }
+    log({ level: "warn", event: "billing_lapse_paused", tenantId, status });
+  }
+
   async function handleStripe(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (!dependencies.env.STRIPE_WEBHOOK_SECRET) throw new HttpError(503, "Stripe webhooks are not configured");
     const rawBody = await readBody(request, 256_000);
@@ -839,8 +884,42 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const metadata = object.metadata && typeof object.metadata === "object" ? object.metadata as Record<string, unknown> : {};
       const tenantId = typeof metadata.tenant_id === "string" ? metadata.tenant_id : typeof object.client_reference_id === "string" ? object.client_reference_id : null;
       if (!tenantId || !await dependencies.store.getOwnerAccountByTenant(tenantId)) throw new HttpError(400, "Stripe event tenant is not recognized");
-      const record = subscriptionFromStripeEvent(event, await dependencies.store.getSubscription(tenantId), dependencies.clock.now().toISOString());
-      if (record) await dependencies.store.saveSubscription(record);
+      const existing = await dependencies.store.getSubscription(tenantId);
+      const now = dependencies.clock.now().toISOString();
+      const subscriptionId = event.type.startsWith("customer.subscription.")
+        ? (typeof object.id === "string" ? object.id : null)
+        : (typeof object.subscription === "string" ? object.subscription : null);
+      let record: SubscriptionRecord | null = null;
+      if (stripeClient && subscriptionId) {
+        const live = await stripeClient.retrieveSubscription(subscriptionId)
+          .catch(() => { throw new HttpError(502, "Stripe subscription lookup failed; Stripe will retry"); });
+        if (live.tenantId && live.tenantId !== tenantId) throw new HttpError(400, "Stripe subscription belongs to a different workspace");
+        const otherSubscription = existing?.providerSubscriptionId && existing.providerSubscriptionId !== live.id;
+        if (!live.priceIds.includes(stripeClient.basePriceId)) {
+          log({ level: "warn", event: "stripe_subscription_ignored_wrong_price", tenantId });
+        } else if (otherSubscription && existing?.status === "active") {
+          // Never let a second subscription cancel or replace the one that is paying.
+          if (live.status !== "canceled") log({ level: "error", event: "stripe_duplicate_subscription_requires_refund", tenantId });
+        } else {
+          record = {
+            tenantId,
+            providerCustomerId: live.customer ?? existing?.providerCustomerId ?? null,
+            providerSubscriptionId: live.id,
+            status: live.status,
+            currentPeriodEnd: live.currentPeriodEnd ?? existing?.currentPeriodEnd ?? null,
+            providerEventCreatedAt: typeof event.created === "number" ? new Date(event.created * 1_000).toISOString() : now,
+            createdAt: existing?.createdAt ?? now,
+            updatedAt: now,
+          };
+        }
+      } else {
+        record = subscriptionFromStripeEvent(event, existing, now);
+      }
+      if (record) {
+        // Pause first: if Telnyx fails, nothing is saved and Stripe's retry sees the same transition.
+        if (existing?.status === "active" && record.status !== "active") await handleBillingLapse(tenantId, record.status, event.id);
+        await dependencies.store.saveSubscription(record);
+      }
     }
     const firstReceipt = await dependencies.store.claimWebhook(`stripe:${event.id}`);
     if (!firstReceipt) return sendJson(response, 200, { received: true, duplicate: true });
@@ -1256,15 +1335,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           throw error;
         }
       } else {
-        const [route, inboundNumber] = await Promise.all([
-          dependencies.store.getProviderRouteForTenant("telnyx", account.tenantId),
-          dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
-        ]);
-        if (route && inboundNumber && dependencies.env.TELNYX_API_KEY) {
-          await new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: inboundNumber, assistantId: route.externalId })
-            .setPaused(true)
-            .catch(() => { throw new HttpError(502, "Telnyx could not disconnect the live phone route; account status was not changed"); });
-        }
+        await pauseLiveRoute(account.tenantId)
+          .catch(() => { throw new HttpError(502, "Telnyx could not disconnect the live phone route; account status was not changed"); });
         await dependencies.store.saveConfig({ ...config, paused: true });
         await dependencies.store.updateOwnerAccountStatus(account.id, status, dependencies.clock.now().toISOString());
       }

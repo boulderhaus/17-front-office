@@ -15,9 +15,20 @@ export interface StripePrices {
   realtimeSms?: string;
 }
 
+export interface StripeSubscriptionSnapshot {
+  id: string;
+  status: SubscriptionRecord["status"];
+  customer: string | null;
+  tenantId: string | null;
+  priceIds: string[];
+  currentPeriodEnd: string | null;
+}
+
 export class StripeBillingClient {
   private portalConfiguration: string | null = null;
   constructor(private readonly secretKey: string, private readonly prices: StripePrices, private readonly fetcher: typeof fetch = fetch) {}
+
+  get basePriceId(): string { return this.prices.base; }
 
   async createPortal(customerId: string, returnUrl: string): Promise<string> {
     if (!this.portalConfiguration) {
@@ -71,6 +82,35 @@ export class StripeBillingClient {
     const payload = await response.json().catch(() => ({})) as { url?: string; error?: { message?: string } };
     if (!response.ok || !payload.url?.startsWith("https://")) throw new Error(`Stripe checkout failed with HTTP ${response.status}${payload.error?.message ? `: ${payload.error.message}` : ""}`);
     return payload.url;
+  }
+
+  /**
+   * Current subscription state from Stripe. Webhook order is not guaranteed and
+   * Stripe advises against ordering by event timestamps, so the API is the source of truth.
+   */
+  async retrieveSubscription(subscriptionId: string): Promise<StripeSubscriptionSnapshot> {
+    const response = await withTimeout(this.fetcher(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+      headers: { authorization: `Bearer ${this.secretKey}` },
+    }), 6_000);
+    const payload = await response.json().catch(() => ({})) as {
+      id?: string; status?: string; customer?: string | { id?: string }; current_period_end?: number;
+      metadata?: Record<string, unknown>;
+      items?: { data?: Array<{ price?: { id?: string }; current_period_end?: number }> };
+      error?: { message?: string };
+    };
+    if (!response.ok || payload.id !== subscriptionId) throw new Error(`Stripe subscription lookup failed with HTTP ${response.status}`);
+    const items = payload.items?.data ?? [];
+    // Newer API versions report the period on each item instead of the subscription.
+    const periodEnds = [payload.current_period_end, ...items.map((item) => item.current_period_end)].filter((value): value is number => typeof value === "number");
+    const customer = typeof payload.customer === "string" ? payload.customer : payload.customer?.id ?? null;
+    return {
+      id: payload.id,
+      status: normalizeSubscriptionStatus(payload.status ?? "incomplete"),
+      customer,
+      tenantId: typeof payload.metadata?.tenant_id === "string" ? payload.metadata.tenant_id : null,
+      priceIds: items.map((item) => item.price?.id).filter((value): value is string => typeof value === "string"),
+      currentPeriodEnd: periodEnds.length ? new Date(Math.max(...periodEnds) * 1_000).toISOString() : null,
+    };
   }
 
   async syncAddOns(subscriptionId: string, input: { dailySms: boolean; realtimeSms: boolean }): Promise<void> {
@@ -156,7 +196,7 @@ export function subscriptionFromStripeEvent(event: StripeEvent, existing: Subscr
   };
 }
 
-function normalizeSubscriptionStatus(value: string): SubscriptionRecord["status"] {
+export function normalizeSubscriptionStatus(value: string): SubscriptionRecord["status"] {
   if (value === "trialing" || value === "active" || value === "past_due" || value === "canceled" || value === "unpaid" || value === "incomplete") return value;
   return "incomplete";
 }
