@@ -1,5 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
+import { DEFAULT_TELNYX_VOICE } from "../voice/system-prompt.js";
+
+export { DEFAULT_TELNYX_VOICE };
 
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -32,6 +35,12 @@ const schema = z.object({
   TELNYX_CAMPAIGN_ID: z.string().min(1).optional(),
   /** Call Control connection used for the owner's one-tap forwarding check call. Without it, owners test by calling themselves. */
   TELNYX_CHECK_CONNECTION_ID: z.string().min(1).optional(),
+  /**
+   * Voice for every assistant we create or push (voice_settings.voice). The voice lab (research/voice-lab)
+   * left the timbre to the founder, so the default stays the current Ultra voice. Never turn on
+   * expressive_mode: it leaks <break> tags into transcripts.
+   */
+  TELNYX_VOICE: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).default(DEFAULT_TELNYX_VOICE)),
   /**
    * Shared TeXML app (scripts/configure-voicemail-app.ts) that answers a lapsed shop's number with
    * a voicemail for 30 days instead of disconnecting it. Without it, a billing lapse disconnects.
