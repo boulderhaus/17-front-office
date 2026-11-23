@@ -180,6 +180,8 @@ export interface BusinessConfig {
   flatMonthlyPriceCents: number;
   includedMinutes: number;
   overageCentsPerMinute: number;
+  /** Percent of included minutes (50–95) that triggers the first usage alert each billing period; 100% always alerts. */
+  usageAlertPercent: number;
   customerSmsEnabled: boolean;
   ownerWeeklyEmailEnabled: boolean;
   ownerDailySmsEnabled: boolean;
@@ -211,8 +213,11 @@ export interface OwnerWorkspaceInput {
 export interface UsageSummary {
   periodStart: string;
   periodEnd: string;
+  /** Calls that count against the plan: not spam and connected at least 15 seconds. */
   billableCalls: number;
   excludedSpamCalls: number;
+  /** Calls under 15 seconds, which never count. */
+  excludedShortCalls: number;
   billedMinutes: number;
 }
 

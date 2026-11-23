@@ -16,6 +16,7 @@ import { audioRecordingEnabled } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import { BookingCoordinator } from "./booking-coordinator.js";
 import { redactError, withRetry } from "./retry.js";
+import { UsageAlertService } from "./usage-alerts.js";
 
 const EMPTY_FIELDS: CollectedCallFields = {
   callerName: null,
@@ -36,14 +37,18 @@ const EMPTY_FIELDS: CollectedCallFields = {
 
 export class CallService {
   readonly #booking: BookingCoordinator;
+  readonly #usageAlerts: UsageAlertService;
 
   constructor(
     private readonly store: Store,
     private readonly calendar: CalendarPort,
     private readonly clock: Clock,
     private readonly publicBaseUrl: string,
+    /** ownerEmailAvailable: email delivery is configured, so owners without text alerts can be emailed. */
+    options: { ownerEmailAvailable?: boolean } = {},
   ) {
     this.#booking = new BookingCoordinator(store, calendar, clock);
+    this.#usageAlerts = new UsageAlertService(store, clock, publicBaseUrl, options.ownerEmailAvailable === true);
   }
 
   async recordStarted(input: {
@@ -392,7 +397,11 @@ export class CallService {
       if (!duplicate) throw new Error("Duplicate final webhook refers to a deleted or unknown call");
       return duplicate;
     }
-    return this.store.withLock(`call:${input.providerCallId}`, () => this.finalizeClaimed(input));
+    const call = await this.store.withLock(`call:${input.providerCallId}`, () => this.finalizeClaimed(input));
+    // Usage only changes when a call finalizes, so this is where the minutes alert is checked.
+    // A missed check (crash between the two) is caught by the next finalized call.
+    await this.#usageAlerts.check(call.tenantId);
+    return call;
   }
 
   private async finalizeClaimed(input: CallSummaryInput): Promise<CallRecord> {

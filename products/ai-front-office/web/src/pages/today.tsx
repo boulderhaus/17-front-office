@@ -324,6 +324,7 @@ function CallRow({ call, task, tz, selected }: { call: ApiCall; task: ApiTask | 
 function UsageCard({ dashboard }: { dashboard: ApiDashboard }) {
   const { preview } = useMode()
   const d = derive(dashboard)
+  const skipped = dashboard.usage.excludedSpamCalls + dashboard.usage.excludedShortCalls
   return (
     <Card>
       <CardContent className="grid gap-2.5">
@@ -333,6 +334,7 @@ function UsageCard({ dashboard }: { dashboard: ApiDashboard }) {
         </div>
         <Progress value={Math.min(100, Math.round((d.used / Math.max(1, d.included)) * 100))} aria-label={`${d.used} of ${d.included} included minutes used`} className="h-2 [&>div]:bg-brand-ink" />
         <p className="text-[13px] text-muted-foreground">{d.used} of {d.included} used · {dashboard.usage.billableCalls} calls this period{d.overageCents ? ` · $${(d.overageCents / 100).toFixed(2)} over` : ""}</p>
+        <p className="text-[13px] text-muted-foreground">Spam and calls under 15 seconds aren’t counted.{skipped > 0 ? ` ${skipped} skipped this period.` : ""}</p>
         {!preview && dashboard.viewer.role === "owner" && dashboard.paid && (
           <form method="post" action="/app/billing/portal">
             <input type="hidden" name="csrf" value={dashboard.csrf} />

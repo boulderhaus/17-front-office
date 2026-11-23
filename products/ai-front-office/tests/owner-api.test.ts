@@ -156,6 +156,36 @@ describe("Owner JSON API and React app serving", () => {
     expect((await store.getConfig(owner.tenantId)).afterHours.weekdayStart).toBe(config.afterHours.weekdayStart);
   });
 
+  it("lets the owner move the minutes alert between 50% and 95% and rejects anything else", async () => {
+    const owner = await signUp("a@synthetic.example");
+    const current = await (await fetch(`${baseUrl}/api/app/settings`, { headers: { cookie: owner.cookie } })).json() as { values: Record<string, string | boolean> };
+    expect(current.values.usageAlertPercent).toBe("75");
+    const saved = await fetch(`${baseUrl}/api/app/settings`, json(owner, "PUT", { ...current.values, usageAlertPercent: "90" }));
+    expect(saved.status).toBe(200);
+    expect(((await saved.json()) as { values: Record<string, unknown> }).values.usageAlertPercent).toBe("90");
+    expect((await store.getConfig(owner.tenantId)).usageAlertPercent).toBe(90);
+    for (const bad of ["49", "96", "100", "75.5", "", "lots"]) {
+      const response = await fetch(`${baseUrl}/api/app/settings`, json(owner, "PUT", { ...current.values, usageAlertPercent: bad }));
+      expect(response.status, `usageAlertPercent=${bad}`).toBe(400);
+    }
+    expect((await store.getConfig(owner.tenantId)).usageAlertPercent).toBe(90);
+    // A client that leaves the field out keeps the saved choice.
+    const { usageAlertPercent: _omitted, ...withoutAlert } = current.values;
+    expect((await fetch(`${baseUrl}/api/app/settings`, json(owner, "PUT", withoutAlert))).status).toBe(200);
+    expect((await store.getConfig(owner.tenantId)).usageAlertPercent).toBe(90);
+  });
+
+  it("shows billed minutes without spam or calls under 15 seconds, and says how many were left out", async () => {
+    const owner = await signUp("a@synthetic.example");
+    await seedCall(owner.tenantId); // 240 seconds: 4 minutes
+    const base = (await store.getCall(CALL_ID))!;
+    const extra = (id: string, overrides: Partial<CallRecord>): CallRecord => ({ ...base, id, providerCallId: `v3:${id}`, ...overrides });
+    await store.saveCall(extra("33333333-3333-4333-8333-333333333333", { durationSeconds: 12 }));
+    await store.saveCall(extra("44444444-4444-4444-8444-444444444444", { durationSeconds: 900, outcome: "ignored_spam", billingDisposition: "spam_excluded", emergency: null }));
+    const dashboard = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie: owner.cookie } })).json() as { usage: Record<string, number> };
+    expect(dashboard.usage).toEqual({ billedMinutes: 4, billableCalls: 1, excludedSpamCalls: 1, excludedShortCalls: 1 });
+  });
+
   it("keeps the public demo read-only", async () => {
     const demo = await (await fetch(`${baseUrl}/api/demo/dashboard`)).json() as { preview: boolean; calls: Array<{ id: string }> };
     expect(demo.preview).toBe(true);

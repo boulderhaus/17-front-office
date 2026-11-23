@@ -4,6 +4,7 @@ import type { Store } from "../ports.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, CustomerRecord, OutboxNotification, OwnerAccount, OwnerWorkspaceInput, PilotSignup, ProviderRoute, SubscriptionRecord, ToolEvent, UsageSummary } from "../domain/models.js";
 import { CryptoBox } from "../security/crypto-box.js";
 import { normalizeBusinessConfig } from "../domain/config.js";
+import { MIN_BILLABLE_CALL_SECONDS } from "../domain/usage.js";
 
 const { Pool } = pg;
 
@@ -574,19 +575,33 @@ export class PostgresStore implements Store {
   }
 
   async getUsageSummary(tenantId: string, periodStart: string, periodEnd: string): Promise<UsageSummary> {
+    // Same rules as usageClass(): spam never counts, nor does a call under MIN_BILLABLE_CALL_SECONDS ($4).
     const result = await this.#pool.query(
-      `SELECT
-         count(*) FILTER (WHERE billing_disposition='billable')::int AS billable_calls,
-         count(*) FILTER (WHERE billing_disposition='spam_excluded')::int AS excluded_spam_calls,
-         COALESCE(sum(ceil(COALESCE(duration_seconds,0)::numeric / 60)) FILTER (WHERE billing_disposition='billable'),0)::int AS billed_minutes
-       FROM calls WHERE tenant_id=$1 AND started_at >= $2 AND started_at < $3`,
-      [tenantId, periodStart, periodEnd],
+      `WITH period AS (
+         SELECT
+           CASE
+             WHEN billing_disposition='spam_excluded' OR outcome='ignored_spam' THEN 'spam'
+             WHEN billing_disposition<>'billable' THEN 'not_billable'
+             WHEN COALESCE(duration_seconds,0) < $4 THEN 'short'
+             ELSE 'billable'
+           END AS usage_class,
+           duration_seconds
+         FROM calls WHERE tenant_id=$1 AND started_at >= $2 AND started_at < $3
+       )
+       SELECT
+         count(*) FILTER (WHERE usage_class='billable')::int AS billable_calls,
+         count(*) FILTER (WHERE usage_class='spam')::int AS excluded_spam_calls,
+         count(*) FILTER (WHERE usage_class='short')::int AS excluded_short_calls,
+         COALESCE(sum(ceil(duration_seconds::numeric / 60)) FILTER (WHERE usage_class='billable'),0)::int AS billed_minutes
+       FROM period`,
+      [tenantId, periodStart, periodEnd, MIN_BILLABLE_CALL_SECONDS],
     );
     return {
       periodStart,
       periodEnd,
       billableCalls: Number(result.rows[0]?.billable_calls ?? 0),
       excludedSpamCalls: Number(result.rows[0]?.excluded_spam_calls ?? 0),
+      excludedShortCalls: Number(result.rows[0]?.excluded_short_calls ?? 0),
       billedMinutes: Number(result.rows[0]?.billed_minutes ?? 0),
     };
   }
