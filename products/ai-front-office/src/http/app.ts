@@ -35,8 +35,8 @@ import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import type { OwnerSession } from "../security/owner-auth.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
-import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
-import { NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
+import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
+import { ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import { TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
 import { carrierFamily, forwardingOffInstruction, type CarrierFamily, type CarrierInfo } from "../domain/forwarding.js";
 import { FORWARDING_CHECK_WINDOW_MS, type ForwardingState } from "./owner-api-model.js";
@@ -678,6 +678,16 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (method === "POST" && url.pathname === "/tools/triage") return handleTriage(request, response);
     if (method === "POST" && url.pathname === "/tools/book") return handleBooking(request, response);
     if (method === "POST" && url.pathname === "/tools/request-human") return handleHandoff(request, response);
+    if (method === "POST" && url.pathname === "/tools/mark-spam") {
+      const rawBody = await readBody(request);
+      requireProviderAuth(request, rawBody);
+      enforceProviderRate(request, "tool:mark-spam");
+      const input = baseToolSchema.extend({ from_number: z.string().min(3).max(40), category: z.enum(SPAM_CATEGORIES), caller_quote: z.string().min(1).max(500) }).parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
+      requireMatchingCallHeader(request, input.provider_call_id);
+      const tenantId = await tenantForCall(input.provider_call_id);
+      await requireOperational(tenantId);
+      return sendJson(response, 200, await service.markSpam({ tenantId, providerCallId: input.provider_call_id, fromNumber: input.from_number, category: input.category, callerQuote: input.caller_quote }));
+    }
     if (url.pathname.startsWith("/admin")) return handleAdmin(request, response, url);
     throw new HttpError(404, "Not found");
   }
@@ -1642,6 +1652,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const existingRoute = await dependencies.store.getProviderRoute("telnyx", assistantId);
       if (existingRoute && existingRoute.tenantId !== account.tenantId) throw new HttpError(409, "That Telnyx assistant is already assigned to another tenant");
       const liveRoute = voiceRouting(inboundNumber, assistantId);
+      // Reject spam at the carrier before the AI answers, so robocalls never spend minutes. Idempotent on every
+      // activation; a failure is logged, never blocks the line (scripts/enable-call-screening.ts backfills).
+      await ensureInboundCallScreening({ apiKey: dependencies.env.TELNYX_API_KEY!, phoneNumber: inboundNumber, apply: true, fetcher: dependencies.fetcher })
+        .catch((error) => log({ level: "error", event: "call_screening_enable_failed", tenantId: account.tenantId, error: safeError(error) }));
       const now = dependencies.clock.now().toISOString();
       // Map first: a call that arrives the instant the number connects must already resolve to this shop.
       await dependencies.store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", inboundNumber);

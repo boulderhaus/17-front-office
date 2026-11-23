@@ -13,7 +13,7 @@ type Call = { url: string; method: string; body: Record<string, unknown> | null;
 function fakeTelnyx(options: { available?: Record<string, string[]>; orderStatuses?: string[]; failAssistantCreate?: boolean | undefined; carriers?: Record<string, { name: string; type: string }> | undefined } = {}) {
   const calls: Call[] = [];
   const orders = [...(options.orderStatuses ?? ["pending", "success"])];
-  const owned = new Map<string, { id: string; connection_id: string | null }>();
+  const owned = new Map<string, { id: string; connection_id: string | null; screening?: string }>();
   let assistants = 0;
   const fetcher = (async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
@@ -44,6 +44,12 @@ function fakeTelnyx(options: { available?: Record<string, string[]>; orderStatus
       const number = new URL(url).searchParams.get("filter[phone_number]")!;
       const record = owned.get(number);
       return json({ data: record ? [{ id: record.id, phone_number: number, connection_id: record.connection_id }] : [] });
+    }
+    const voice = /\/phone_numbers\/(num-\d+)\/voice$/.exec(url);
+    if (voice) {
+      const entry = [...owned.values()].find((value) => value.id === voice[1])!;
+      if (method === "PATCH") entry.screening = String(body?.inbound_call_screening);
+      return json({ data: { id: voice[1], inbound_call_screening: entry.screening ?? "disabled" } });
     }
     const patch = /\/phone_numbers\/(num-\d+)$/.exec(url);
     if (patch && method === "PATCH") {
@@ -170,6 +176,9 @@ describe("owner one-tap go-live", () => {
     expect((await store.getProviderRoute("telnyx", "assistant-1"))?.tenantId).toBe(account.tenantId);
     expect(telnyx.owned.get("+19415550123")!.connection_id).toBe("texml-assistant-1");
     expect(telnyx.calls.some((call) => call.url.endsWith("/10dlc/phone_number_campaigns") && call.body?.phoneNumber === "+19415550123")).toBe(true);
+    // Spam is rejected at the carrier before the AI answers.
+    const screening = telnyx.calls.find((call) => call.method === "PATCH" && call.url.endsWith("/phone_numbers/num-1/voice"));
+    expect(screening?.body).toEqual({ inbound_call_screening: "reject_calls" });
     const dashboard = await (await fetch(`${baseUrl}/app`, { headers: { cookie } })).text();
     expect(dashboard).toContain("(941) 555-0123");
     expect(dashboard).toContain("*719415550123");

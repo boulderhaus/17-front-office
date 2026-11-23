@@ -12,7 +12,7 @@ import type {
 } from "../domain/models.js";
 import { evaluateServiceArea, isInServiceArea } from "../domain/config.js";
 import { triageEmergency } from "../domain/triage.js";
-import { audioRecordingEnabled } from "../voice/system-prompt.js";
+import { audioRecordingEnabled, WRAP_UP_AFTER_SECONDS } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import { BookingCoordinator } from "./booking-coordinator.js";
 import { redactError, withRetry } from "./retry.js";
@@ -81,12 +81,51 @@ export class CallService {
     fromNumber: string;
     fields: Partial<CollectedCallFields>;
     recordingDisclosureDeclined?: boolean;
-  }): Promise<{ status: "saved"; missing: string[] }> {
+  }): Promise<{ status: "saved"; missing: string[]; wrap_up: boolean }> {
     await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
     return this.store.withLock(`call:${input.providerCallId}`, () => this.saveIntakeClaimed(input));
   }
 
-  private async saveIntakeClaimed(input: Parameters<CallService["saveIntake"]>[0]): Promise<{ status: "saved"; missing: string[] }> {
+  /**
+   * The assistant decided this is a vendor, solicitor, recruiter, robocall or wrong number.
+   * Marked calls are spam_excluded (never billed or counted, no owner alerts). Refused, so the
+   * assistant keeps helping, whenever the caller could be a customer: an emergency, a human
+   * request, a captured address, a booking, or a number that has called this shop before.
+   */
+  async markSpam(input: {
+    tenantId: string;
+    providerCallId: string;
+    fromNumber: string;
+    category: string;
+    callerQuote: string;
+  }): Promise<{ status: "marked" | "continue"; instruction: string }> {
+    await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
+    return this.store.withLock(`call:${input.providerCallId}`, async () => {
+      const started = this.clock.now();
+      const existing = await this.store.getCallByProviderId(input.providerCallId);
+      if (!existing || existing.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
+      const config = await this.store.getConfig(input.tenantId);
+      const safety = triageEmergency(`${existing.fields.problemDescription}\n${input.callerQuote}`, config);
+      const callerNumber = existing.fromNumber === "unknown" ? input.fromNumber : existing.fromNumber;
+      const reason = existing.emergency?.emergency || safety.emergency ? "emergency"
+        : existing.fields.humanRequested ? "human_requested"
+          : existing.fields.address?.trim() ? "address_captured"
+            : await this.store.getBookingForCall(existing.id) ? "booking_exists"
+              : isAllowedCustomerNumber(callerNumber) && await this.store.isKnownCustomer(input.tenantId, callerNumber) ? "existing_customer"
+                : null;
+      if (reason) {
+        await this.audit(existing, "call.mark_spam", started, "failed", { category: input.category, refused: reason }, null);
+        return { status: "continue", instruction: "This caller may be a customer. Do not hang up; continue the normal intake." };
+      }
+      const now = this.clock.now().toISOString();
+      const call: CallRecord = { ...existing, outcome: "ignored_spam", billingDisposition: "spam_excluded", qualityFlags: ["spam_excluded"], updatedAt: now };
+      await this.store.saveCall(call);
+      await this.audit(call, "call.mark_spam", started, "success", { category: input.category }, null);
+      return { status: "marked", instruction: "Say the fixed service-calls-only goodbye and invoke hangup in the same turn." };
+    });
+  }
+
+  private async saveIntakeClaimed(input: Parameters<CallService["saveIntake"]>[0]): Promise<{ status: "saved"; missing: string[]; wrap_up: boolean }> {
     const existing = await this.store.getCallByProviderId(input.providerCallId);
     if (!existing || existing.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
     const incoming = completePartialFields(input.fields);
@@ -112,7 +151,9 @@ export class CallService {
       !fields.problemDescription.trim() ? "problem_description" : null,
       !fields.serviceCategory?.trim() ? "service_category" : null,
     ].filter((value): value is string => value !== null);
-    return { status: "saved", missing };
+    // The model has no clock; the soft five-minute limit rides on every intake save.
+    const elapsedMs = this.clock.now().getTime() - Date.parse(call.startedAt);
+    return { status: "saved", missing, wrap_up: elapsedMs >= WRAP_UP_AFTER_SECONDS * 1000 };
   }
 
   async checkAvailability(input: {
