@@ -136,7 +136,12 @@ export class RateLimiter {
       for (const [bucketKey, bucket] of this.#buckets) {
         if (bucket.resetAt <= now) this.#buckets.delete(bucketKey);
       }
-      if (this.#buckets.size >= this.maxBuckets && !this.#buckets.has(key)) return false;
+      // Evict the oldest bucket instead of refusing every new client: a flood of
+      // unique keys must not lock legitimate owners out.
+      if (this.#buckets.size >= this.maxBuckets && !this.#buckets.has(key)) {
+        const oldest = this.#buckets.keys().next().value;
+        if (oldest !== undefined) this.#buckets.delete(oldest);
+      }
     }
     const current = this.#buckets.get(key);
     if (!current || current.resetAt <= now) {
@@ -148,6 +153,10 @@ export class RateLimiter {
   }
 }
 
+/**
+ * Railway's edge overwrites X-Forwarded-For/X-Real-IP (verified 2026-11-23: spoofed
+ * values did not bypass the live login limit). Re-verify if a CDN is added in front.
+ */
 export function requestIp(request: IncomingMessage): string {
   const forwarded = request.headers["x-forwarded-for"];
   const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(",")[0]?.trim();

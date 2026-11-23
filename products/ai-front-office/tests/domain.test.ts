@@ -1,5 +1,6 @@
 import { shopActivationBlockers } from "../src/application/readiness.js";
 import { isExplicitHumanRequest } from "../src/domain/human-request.js";
+import { RateLimiter } from "../src/http/security.js";
 import { describe, expect, it } from "vitest";
 import { createDemoConfig, evaluateServiceArea, isCoverageActive } from "../src/domain/config.js";
 import { triageEmergency } from "../src/domain/triage.js";
@@ -195,5 +196,13 @@ describe("explicit human request gate", () => {
   });
   it.each(["I need a technician to look at my furnace", "I need someone to fix my AC", "Why is this so loud?", "I don't want to talk to a person", "Can someone come out tomorrow?"])("rejects: %s", (quote) => {
     expect(isExplicitHumanRequest(quote)).toBe(false);
+  });
+});
+
+describe("rate limiter capacity", () => {
+  it("evicts the oldest bucket instead of refusing new clients when full", () => {
+    const limiter = new RateLimiter(3);
+    for (const key of ["a", "b", "c"]) expect(limiter.allow(key, 5, 60_000, 0)).toBe(true);
+    expect(limiter.allow("d", 5, 60_000, 1)).toBe(true);
   });
 });

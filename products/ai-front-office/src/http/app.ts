@@ -472,6 +472,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (!limiter.allow(`${ip}:owner-login`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
       const parsed = ownerLoginSchema.safeParse(Object.fromEntries(parseForm(await readBody(request, 16_000)).entries()));
       if (!parsed.success) return sendHtml(response, 400, renderOwnerLogin("Enter a valid email and password."));
+      // Per-account limit so guesses spread across many addresses still stop.
+      if (!limiter.allow(`owner-login-email:${parsed.data.email}`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
       const account = await dependencies.store.getOwnerAccountByEmail(parsed.data.email);
       const valid = await verifyOwnerPassword(parsed.data.password, account?.passwordHash ?? await dummyOwnerPasswordHash);
       if (!account || !valid || account.status === "suspended") return sendHtml(response, 401, renderOwnerLogin("Email or password is incorrect."));

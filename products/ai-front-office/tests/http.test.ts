@@ -45,6 +45,15 @@ describe("HTTP boundary", () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
+  it("stops password guessing against one account even when it comes from many addresses", async () => {
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      statuses.push((await fetch(`${baseUrl}/login`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": `10.0.${attempt}.1` }, body: new URLSearchParams({ email: "victim@synthetic.example", password: `guess-${attempt}` }) })).status);
+    }
+    expect(statuses.slice(0, 10).every((status) => status === 401)).toBe(true);
+    expect(statuses[10]).toBe(429);
+  });
+
   it("lets billing forms redirect to Stripe without loosening other CSP directives", async () => {
     const csp = (await fetch(`${baseUrl}/signup`)).headers.get("content-security-policy") ?? "";
     expect(csp).toContain("form-action 'self' https://checkout.stripe.com https://billing.stripe.com");
