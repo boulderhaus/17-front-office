@@ -45,6 +45,21 @@ CONVERSATION STYLE
 - Collect, in this order, only what is still missing: the problem, the caller's name, the callback number, the service address, and how urgent it is.
 - Confirm the details once, in the final recap. Do not confirm each item as you go except for a correction.
 
+HOW YOU SOUND (natural phone rhythm)
+- Talk like a relaxed, competent person at a front desk, not a script. Most turns are one short sentence plus at most one question, under about 20 words.
+- Open most replies with a quick, varied acknowledgement that fits the moment: "Got it." "Okay." "Sure." "Oh no." "Ugh, in this cold?" "Yep." Never use the same one twice in a row, and never say "Great question" or "Absolutely".
+- If the caller is clearly mid-thought (they trail off with "and, uh..." or "so..."), reply with only a short backchannel like "Mm-hm." or "Yeah, go ahead." and let them finish.
+- If the caller cuts you off, drop what you were saying. Answer what they just said first; repeat the dropped part only if it still matters, in a few words.
+- If the caller changes their mind, accept it lightly ("No problem, afternoon then.") without re-reading everything.
+- Match the caller's emotion: sympathetic and a little warmer when they're stressed or uncomfortable, calm and slow for anything urgent, upbeat at the close.
+- Small, natural spoken touches are fine sparingly: "Let's see...", "Okay, so...". Never stack fillers, and never use "um" more than once a call.
+- Never read lists aloud. Ask for one detail at a time.
+
+TOOL RESULTS
+- Never call the same tool more than twice in a call. The only exceptions: save_intake as the GOAL section requires, and get_approved_answer for a different topic.
+- Never invent times: only offer times a tool returned. No returned times means the owner will confirm a time.
+- If a tool result has ok=false, say its say line once, follow its instruction, and do not call that tool again. Take a message and move on.
+
 GOAL
 Collect the caller's name, company if relevant, callback number, service address, service category, concise problem description, equipment details, and access notes. Resolve only one of these outcomes: a verified appointment, a pending owner confirmation, or a human handoff/callback queue.
 - Call save_intake after the caller's name and problem are known, again whenever important details change, and once more before ending. The only exception is a voicemail or automated system reached before any caller intake exists.
@@ -298,10 +313,26 @@ export function buildTelnyxTools(config: BusinessConfig, publicBaseUrl: string):
   ];
 }
 
-export function buildTelnyxAssistantUpdate(config: BusinessConfig, publicBaseUrl: string): Record<string, unknown> {
+/** The current production voice. The voice lab left the timbre choice to the founder; override with TELNYX_VOICE. */
+export const DEFAULT_TELNYX_VOICE = "Telnyx.Ultra.f786b574-daa5-4673-aa0c-cbe3e8534c02";
+
+/**
+ * Turn-taking from the voice lab (research/voice-lab/RESULTS.md, 2026-11-23): cut the median response gap
+ * from 1.73 s to about 1.1-1.3 s versus eot 0.8 / eager 0.8 / timeout 5 s and no interrupt prediction.
+ */
+export const TURN_TAKING = {
+  eot_threshold: 0.75,
+  eager_eot_threshold: 0.5,
+  eot_timeout_ms: 2_000,
+  interrupt_prediction_threshold: 0.5,
+} as const;
+
+export function buildTelnyxAssistantUpdate(config: BusinessConfig, publicBaseUrl: string, options: { voice?: string | undefined } = {}): Record<string, unknown> {
   const baseUrl = publicBaseUrl.replace(/\/$/, "");
   return {
     instructions: buildVoiceSystemPrompt(config),
+    // expressive_mode stays off: on Ultra it writes <break> SSML into transcripts.
+    voice_settings: { voice: options.voice ?? DEFAULT_TELNYX_VOICE, voice_speed: 1 },
     greeting: "{{opening_greeting}}",
     tool_ids: [],
     tools: buildTelnyxTools(config, baseUrl),
@@ -332,10 +363,19 @@ export function buildTelnyxAssistantUpdate(config: BusinessConfig, publicBaseUrl
       settings: {
         smart_format: true,
         numerals: true,
-        eot_threshold: 0.8,
-        eot_timeout_ms: 5_000,
-        eager_eot_threshold: 0.8,
+        eot_threshold: TURN_TAKING.eot_threshold,
+        eot_timeout_ms: TURN_TAKING.eot_timeout_ms,
+        eager_eot_threshold: TURN_TAKING.eager_eot_threshold,
         keyterm: "HVAC,heating,cooling,air conditioning,plumbing,electrical,street,avenue,boulevard,road,drive,lane,court,first,second,third,fourth,fifth,sixth,seventh,eighth,ninth,tenth,twentieth,thirtieth,fortieth,fiftieth,sixtieth,seventieth,eightieth,ninetieth,80th",
+      },
+    },
+    interruption_settings: {
+      enable: true,
+      disable_greeting_interruption: false,
+      interrupt_prediction_threshold: TURN_TAKING.interrupt_prediction_threshold,
+      start_speaking_plan: {
+        wait_seconds: 0.1,
+        transcription_endpointing_plan: { on_punctuation_seconds: 0.1, on_no_punctuation_seconds: 0.1, on_number_seconds: 0.1 },
       },
     },
     promote_to_main: true,

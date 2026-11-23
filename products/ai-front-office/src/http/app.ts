@@ -36,6 +36,7 @@ import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignu
 import type { OwnerSession } from "../security/owner-auth.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
 import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
+import { TOOL_DEADLINE_MS, TOOL_ROUTES, ToolCallBudget, toolFailure, toolLimitReached, type VoiceToolName } from "../voice/tool-results.js";
 import { callScreeningSetting, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import { TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
 import { carrierFamily, forwardingOffInstruction, type CarrierFamily, type CarrierInfo } from "../domain/forwarding.js";
@@ -206,6 +207,15 @@ export interface AppDependencies {
   ownerWeb?: { dir: string };
   /** PostHog product analytics + error tracking; a no-op when POSTHOG_KEY is unset. */
   telemetry?: Telemetry;
+  /** How long a voice tool may run before it answers "unavailable" (tests shorten it). */
+  toolDeadlineMs?: number;
+}
+
+/** A voice tool used up its per-call budget: answer 200 with the fixed take-a-message result. */
+class ToolLimitError extends Error {
+  constructor(readonly tool: VoiceToolName) {
+    super(`${tool} call limit reached`);
+  }
 }
 
 function publicOwnerDemo(now: Date): {
@@ -367,6 +377,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   const deletionService = new DataDeletionService(dependencies.store, recordingClient);
   const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
   const limiter = new RateLimiter();
+  const toolBudget = new ToolCallBudget();
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));
   const telemetry = dependencies.telemetry ?? noopTelemetry;
   const graceContext: GraceContext = { store: dependencies.store, env: dependencies.env, clock: dependencies.clock, fetcher: dependencies.fetcher, log };
@@ -388,6 +399,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   return (request, response) => {
     void handle(request, response).catch((error: unknown) => {
       const requestId = response.getHeader("x-request-id") ?? request.headers["x-request-id"] ?? "unassigned";
+      const tool = toolForPath(new URL(request.url ?? "/", "http://localhost").pathname);
+      if (error instanceof ToolLimitError) {
+        log({ level: "warn", event: "tool_call_limit_reached", requestId, tool: error.tool });
+        if (!response.headersSent) sendJson(response, 200, toolLimitReached(error.tool));
+        else response.end();
+        return;
+      }
       const status = error instanceof HttpError ? error.status : error instanceof z.ZodError ? 400 : 500;
       const message = error instanceof HttpError || error instanceof z.ZodError ? error.message : "Internal server error";
       log({ level: status >= 500 ? "error" : "warn", event: "request_failed", requestId, status, error: safeError(error) });
@@ -395,10 +413,34 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
         telemetry.captureException(error, { route: routeKey(pathname), method: request.method ?? "GET", status, requestId: String(requestId) });
       }
-      if (!response.headersSent) sendJson(response, status, { error: message, request_id: requestId });
-      else response.end();
+      if (response.headersSent) response.end();
+      // A voice tool always answers in plain English so the model never retries an unreadable
+      // result. Deliberate rejections keep their status; an unexpected failure answers 200.
+      else if (tool) sendJson(response, status === 500 ? 200 : status, { ...toolFailure(tool), error: message, request_id: requestId });
+      else sendJson(response, status, { error: message, request_id: requestId });
     });
   };
+
+  /** Run a voice tool, answering "unavailable" before the provider's webhook timeout if it hangs. */
+  async function runTool(tool: VoiceToolName, work: () => Promise<void>, response: ServerResponse): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), dependencies.toolDeadlineMs ?? TOOL_DEADLINE_MS); });
+    const running = work();
+    try {
+      if (await Promise.race([running.then(() => "done" as const), deadline]) === "done") return;
+    } finally {
+      clearTimeout(timer);
+    }
+    // The late handler can no longer answer; drop whatever it ends with.
+    running.catch(() => undefined);
+    log({ level: "warn", event: "tool_deadline_exceeded", tool });
+    if (!response.headersSent) sendJson(response, 200, toolFailure(tool));
+  }
+
+  /** Count one authenticated tool call against its per-call budget. */
+  function spendToolBudget(providerCallId: string, tool: VoiceToolName): void {
+    if (!toolBudget.take(providerCallId, tool)) throw new ToolLimitError(tool);
+  }
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     setSecurityHeaders(response);
@@ -663,33 +705,41 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (method === "POST" && url.pathname === "/webhooks/telnyx") return handleTelnyx(request, response);
     if (url.pathname.startsWith("/texml/voicemail")) return handleVoicemail(request, response, url);
     if (method === "POST" && url.pathname === "/webhooks/stripe") return handleStripe(request, response);
-    if (method === "POST" && url.pathname === "/tools/save-intake") return handleIntake(request, response);
-    if (method === "POST" && url.pathname === "/tools/approved-answer") {
+    const tool = method === "POST" ? toolForPath(url.pathname) : null;
+    if (tool) return runTool(tool, () => handleToolRoute(request, response, url), response);
+    if (url.pathname.startsWith("/admin")) return handleAdmin(request, response, url);
+    throw new HttpError(404, "Not found");
+  }
+
+  async function handleToolRoute(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    if (url.pathname === "/tools/save-intake") return handleIntake(request, response);
+    if (url.pathname === "/tools/approved-answer") {
       const rawBody = await readBody(request);
       requireProviderAuth(request, rawBody);
       enforceProviderRate(request, "tool:approved-answer");
       const input = baseToolSchema.extend({ kind: z.enum(["price", "answer"]), key: z.string().max(120) }).strict().parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
       requireMatchingCallHeader(request, input.provider_call_id);
+      spendToolBudget(input.provider_call_id, "get_approved_answer");
       const tenantId = await tenantForCall(input.provider_call_id);
       await requireOperational(tenantId);
       return sendJson(response, 200, { ...approvedAnswer(await dependencies.store.getConfig(tenantId), input.kind, input.key), wrap_up: await service.wrapUp(input.provider_call_id) });
     }
-    if (method === "POST" && url.pathname === "/tools/check-service-area") return handleServiceArea(request, response);
-    if (method === "POST" && url.pathname === "/tools/check-availability") return handleAvailability(request, response);
-    if (method === "POST" && url.pathname === "/tools/triage") return handleTriage(request, response);
-    if (method === "POST" && url.pathname === "/tools/book") return handleBooking(request, response);
-    if (method === "POST" && url.pathname === "/tools/request-human") return handleHandoff(request, response);
-    if (method === "POST" && url.pathname === "/tools/mark-spam") {
+    if (url.pathname === "/tools/check-service-area") return handleServiceArea(request, response);
+    if (url.pathname === "/tools/check-availability") return handleAvailability(request, response);
+    if (url.pathname === "/tools/triage") return handleTriage(request, response);
+    if (url.pathname === "/tools/book") return handleBooking(request, response);
+    if (url.pathname === "/tools/request-human") return handleHandoff(request, response);
+    if (url.pathname === "/tools/mark-spam") {
       const rawBody = await readBody(request);
       requireProviderAuth(request, rawBody);
       enforceProviderRate(request, "tool:mark-spam");
       const input = baseToolSchema.extend({ from_number: z.string().min(3).max(40), category: z.enum(SPAM_CATEGORIES), caller_quote: z.string().min(1).max(500) }).parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
       requireMatchingCallHeader(request, input.provider_call_id);
+      spendToolBudget(input.provider_call_id, "mark_spam_call");
       const tenantId = await tenantForCall(input.provider_call_id);
       await requireOperational(tenantId);
       return sendJson(response, 200, await service.markSpam({ tenantId, providerCallId: input.provider_call_id, fromNumber: input.from_number, category: input.category, callerQuote: input.caller_quote }));
     }
-    if (url.pathname.startsWith("/admin")) return handleAdmin(request, response, url);
     throw new HttpError(404, "Not found");
   }
 
@@ -1627,7 +1677,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         try {
           assistantId = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "provisioned_assistant_id");
           if (!assistantId) {
-            assistantId = await provisioner.createAssistant({ tenantId: account.tenantId, businessName: config.businessName, assistantUpdate: buildTelnyxAssistantUpdate(config, dependencies.env.PUBLIC_BASE_URL) });
+            assistantId = await provisioner.createAssistant({ tenantId: account.tenantId, businessName: config.businessName, assistantUpdate: buildTelnyxAssistantUpdate(config, dependencies.env.PUBLIC_BASE_URL, { voice: dependencies.env.TELNYX_VOICE }) });
             await dependencies.store.saveIntegrationSecret(account.tenantId, "telnyx", "provisioned_assistant_id", assistantId);
           }
           inboundNumber = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number");
@@ -2077,6 +2127,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     enforceProviderRate(request, "tool:save-intake");
     const input = intakeSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
+    spendToolBudget(input.provider_call_id, "save_intake");
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
     const result = await service.saveIntake({
@@ -2108,6 +2159,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     enforceProviderRate(request, "tool:check-availability");
     const input = availabilitySchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
+    spendToolBudget(input.provider_call_id, "check_availability");
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
     const result = await service.checkAvailability({
@@ -2125,6 +2177,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     enforceProviderRate(request, "tool:check-service-area");
     const input = serviceAreaSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
+    spendToolBudget(input.provider_call_id, "check_service_area");
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
     const result = await service.checkServiceArea({
@@ -2141,6 +2194,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     enforceProviderRate(request, "tool:triage");
     const input = triageSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
+    spendToolBudget(input.provider_call_id, "triage_call");
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
     const result = await service.triageCall({
@@ -2161,6 +2215,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     enforceProviderRate(request, "tool:book");
     const input = bookingSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
+    spendToolBudget(input.provider_call_id, "book_slot");
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
     const result = await service.bookConfirmedSlot({
@@ -2184,6 +2239,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     enforceProviderRate(request, "tool:request-human");
     const input = handoffSchema.parse(unwrapToolPayload(parseJson<unknown>(rawBody)));
     requireMatchingCallHeader(request, input.provider_call_id);
+    spendToolBudget(input.provider_call_id, "request_human");
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
     if (input.reason === "explicit_request") {
@@ -2381,7 +2437,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (method === "GET" && url.pathname === "/admin/prompt") {
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
-      return sendHtml(response, 200, renderPrompt(config, dependencies.env.PUBLIC_BASE_URL));
+      return sendHtml(response, 200, renderPrompt(config, dependencies.env.PUBLIC_BASE_URL, dependencies.env.TELNYX_VOICE));
     }
     const recordingMatch = /^\/admin\/provider\/telnyx\/recordings\/(.+)$/.exec(url.pathname);
     if (method === "GET" && recordingMatch?.[1]) {
@@ -2586,6 +2642,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const report = await getActivationReport();
     if (!report.go) throw new HttpError(503, "Commercial activation gate is not satisfied");
   }
+}
+
+function toolForPath(pathname: string): VoiceToolName | null {
+  return pathname.startsWith("/tools/") ? TOOL_ROUTES[pathname.slice(7)] ?? null : null;
 }
 
 function unwrapToolPayload(value: unknown): unknown {

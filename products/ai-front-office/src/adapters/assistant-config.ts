@@ -19,7 +19,7 @@ async function synchronize(store: Store, env: Environment, config: BusinessConfi
   const update = async (value: BusinessConfig) => {
     if (env.DEMO_MODE || !assistantId) return;
     if (!env.TELNYX_API_KEY) throw new Error("Voice configuration is unavailable");
-    const response = await withTimeout(fetcher(`https://api.telnyx.com/v2/ai/assistants/${encodeURIComponent(assistantId)}`, { method: "POST", headers: { authorization: `Bearer ${env.TELNYX_API_KEY}`, "content-type": "application/json" }, body: JSON.stringify(buildTelnyxAssistantUpdate(value, env.PUBLIC_BASE_URL)) }), 8_000);
+    const response = await withTimeout(fetcher(`https://api.telnyx.com/v2/ai/assistants/${encodeURIComponent(assistantId)}`, { method: "POST", headers: { authorization: `Bearer ${env.TELNYX_API_KEY}`, "content-type": "application/json" }, body: JSON.stringify(buildTelnyxAssistantUpdate(value, env.PUBLIC_BASE_URL, { voice: env.TELNYX_VOICE })) }), 8_000);
     if (!response.ok) throw new Error(`Voice configuration update failed with HTTP ${response.status}`);
   };
   await update(config);

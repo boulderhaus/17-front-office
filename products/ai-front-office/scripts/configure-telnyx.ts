@@ -11,21 +11,21 @@ export interface AssistantPush {
 }
 
 /**
- * Every assistant we run gets the current prompt, tools and telephony_settings (six-minute
- * time_limit_secs, idle timers): the demo/template assistant plus each shop's provisioned assistant.
+ * Every assistant we run gets the current prompt, tools, voice (TELNYX_VOICE), turn-taking and
+ * telephony_settings (six-minute time_limit_secs, idle timers): the demo/template assistant plus each shop's provisioned assistant.
  */
-export async function planAssistantPushes(input: { store: Store; defaultTenantId: string; demoAssistantId?: string | undefined; publicBaseUrl: string }): Promise<AssistantPush[]> {
+export async function planAssistantPushes(input: { store: Store; defaultTenantId: string; demoAssistantId?: string | undefined; publicBaseUrl: string; voice?: string | undefined }): Promise<AssistantPush[]> {
   const pushes: AssistantPush[] = [];
   const seen = new Set<string>();
   if (input.demoAssistantId) {
-    pushes.push({ tenantId: input.defaultTenantId, assistantId: input.demoAssistantId, update: buildTelnyxAssistantUpdate(await input.store.getConfig(input.defaultTenantId), input.publicBaseUrl) });
+    pushes.push({ tenantId: input.defaultTenantId, assistantId: input.demoAssistantId, update: buildTelnyxAssistantUpdate(await input.store.getConfig(input.defaultTenantId), input.publicBaseUrl, { voice: input.voice }) });
     seen.add(input.demoAssistantId);
   }
   for (const tenantId of (await input.store.listTenantIds()).sort()) {
     const route = await input.store.getProviderRouteForTenant("telnyx", tenantId);
     if (!route || seen.has(route.externalId)) continue;
     seen.add(route.externalId);
-    pushes.push({ tenantId, assistantId: route.externalId, update: buildTelnyxAssistantUpdate(await input.store.getConfig(tenantId), input.publicBaseUrl) });
+    pushes.push({ tenantId, assistantId: route.externalId, update: buildTelnyxAssistantUpdate(await input.store.getConfig(tenantId), input.publicBaseUrl, { voice: input.voice }) });
   }
   return pushes;
 }
@@ -37,11 +37,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const runtime = await createRuntime(env);
 
   try {
-    const pushes = await planAssistantPushes({ store: runtime.store, defaultTenantId: env.DEFAULT_TENANT_ID, demoAssistantId: env.TELNYX_ASSISTANT_ID, publicBaseUrl: env.PUBLIC_BASE_URL });
+    const pushes = await planAssistantPushes({ store: runtime.store, defaultTenantId: env.DEFAULT_TENANT_ID, demoAssistantId: env.TELNYX_ASSISTANT_ID, publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE });
     if (!apply) {
       console.log(JSON.stringify({
         mode: "dry_run",
-        assistants: pushes.map((push) => ({ tenantId: push.tenantId, assistantId: push.assistantId, telephony_settings: push.update.telephony_settings })),
+        assistants: pushes.map((push) => ({ tenantId: push.tenantId, assistantId: push.assistantId, voice_settings: push.update.voice_settings, telephony_settings: push.update.telephony_settings })),
         demoUpdate: pushes.find((push) => push.assistantId === env.TELNYX_ASSISTANT_ID)?.update ?? null,
       }, null, 2));
     } else {
