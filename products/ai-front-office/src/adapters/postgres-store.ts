@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import pg from "pg";
 import type { Store } from "../ports.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, CustomerRecord, OutboxNotification, OwnerAccount, OwnerWorkspaceInput, PilotSignup, ProviderRoute, SubscriptionRecord, ToolEvent, UsageSummary } from "../domain/models.js";
@@ -11,6 +12,7 @@ type Row = Record<string, unknown>;
 export class PostgresStore implements Store {
   readonly #pool: pg.Pool;
   readonly #lockPool: pg.Pool;
+  readonly #lockSession = new AsyncLocalStorage<{ client: pg.PoolClient; held: Set<string>; broken: boolean }>();
 
   constructor(databaseUrl: string, private readonly cryptoBox: CryptoBox) {
     this.#pool = new Pool({ connectionString: databaseUrl, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 3_000 });
@@ -28,21 +30,40 @@ export class PostgresStore implements Store {
     await this.#pool.query("SELECT 1");
   }
 
+  /**
+   * Session-level advisory locks. Nested locks (call -> calendar, config ->
+   * assistant-config) reuse the outer session, so one operation never needs two
+   * lock connections: before this, five overlapping bookings exhausted the pool
+   * and all of them failed. Waits are bounded with try-lock polling because
+   * lock_timeout does not bound pg_advisory_lock in practice.
+   */
   async withLock<T>(key: string, task: () => Promise<T>): Promise<T> {
-    const client = await this.#lockPool.connect();
-    let destroy = false;
-    try {
-      await client.query("SET lock_timeout = '3000ms'");
-      await client.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [key]);
-      return await task();
-    } finally {
+    const current = this.#lockSession.getStore();
+    if (current) {
+      if (current.held.has(key)) return task();
+      await acquireAdvisoryLock(current.client, key);
+      current.held.add(key);
       try {
-        const unlocked = await client.query("SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS unlocked", [key]);
-        destroy = unlocked.rows[0]?.unlocked !== true;
-      } catch {
-        destroy = true;
+        return await task();
+      } finally {
+        current.held.delete(key);
+        await releaseAdvisoryLock(current.client, key).catch(() => { current.broken = true; });
       }
-      client.release(destroy);
+    }
+    const client = await this.#lockPool.connect();
+    const session = { client, held: new Set([key]), broken: false };
+    try {
+      await acquireAdvisoryLock(client, key);
+    } catch (error) {
+      client.release();
+      throw error;
+    }
+    try {
+      return await this.#lockSession.run(session, task);
+    } finally {
+      await releaseAdvisoryLock(client, key).catch(() => { session.broken = true; });
+      // A session that may still hold a lock must never return to the pool.
+      client.release(session.broken);
     }
   }
 
@@ -685,4 +706,21 @@ function mapPilotSignup(row: Row, cryptoBox: CryptoBox): PilotSignup {
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };
+}
+
+const LOCK_WAIT_MS = 3_000;
+
+async function acquireAdvisoryLock(client: pg.PoolClient, key: string): Promise<void> {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    const result = await client.query("SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked", [key]);
+    if (result.rows[0]?.locked === true) return;
+    if (Date.now() >= deadline) throw new Error(`Lock wait timed out for ${key.split(":")[0]}`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+async function releaseAdvisoryLock(client: pg.PoolClient, key: string): Promise<void> {
+  const result = await client.query("SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS unlocked", [key]);
+  if (result.rows[0]?.unlocked !== true) throw new Error("Advisory lock was not held");
 }
