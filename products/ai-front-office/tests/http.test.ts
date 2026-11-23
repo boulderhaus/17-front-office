@@ -716,7 +716,9 @@ describe("HTTP boundary", () => {
     expect(landingText).toContain("One new paying customer can cover the month.");
     expect(landingHtml).toContain("$100 after job expenses");
     expect(landingHtml).toContain("Get the $49 plan");
-    expect(landingHtml).toContain("EXAMPLE OWNER ALERT");
+    expect(landingHtml).toContain("EXAMPLE CALL SUMMARY");
+    expect(landingHtml).toContain("Example completed call checklist");
+    for (const item of ["Number confirmed", "Service area checked", "Details captured", "Owner alerted", "Recording + transcript"]) expect(landingHtml).toContain(item);
     expect(landingHtml).not.toContain("ServiceTitan’s contractor benchmarks");
     expect(landingHtml).toContain("Optional: try a test call.");
     expect(landingHtml).toContain("automated checks either way");
