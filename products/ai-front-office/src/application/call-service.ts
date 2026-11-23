@@ -12,11 +12,29 @@ import type {
 } from "../domain/models.js";
 import { evaluateServiceArea, isInServiceArea } from "../domain/config.js";
 import { triageEmergency } from "../domain/triage.js";
-import { audioRecordingEnabled } from "../voice/system-prompt.js";
+import { audioRecordingEnabled, WRAP_UP_AFTER_SECONDS } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import { BookingCoordinator } from "./booking-coordinator.js";
 import { redactError, withRetry } from "./retry.js";
 import { UsageAlertService } from "./usage-alerts.js";
+
+/** Sticky quality flag: a spam mark was refused or undone, so this call always counts and reaches the owner. */
+const SPAM_REFUSED = "spam_refused";
+
+function appendFlag(flags: string[], flag: string): string[] {
+  return flags.includes(flag) ? flags : [...flags, flag];
+}
+
+/** Undo a spam mark (emergency or human request surfaced) and make the refusal sticky. */
+function withoutSpamMark(call: CallRecord): CallRecord {
+  if (call.billingDisposition !== "spam_excluded" && call.outcome !== "ignored_spam") return call;
+  return {
+    ...call,
+    billingDisposition: "not_billable",
+    outcome: call.outcome === "ignored_spam" ? "in_progress" : call.outcome,
+    qualityFlags: appendFlag(call.qualityFlags.filter((flag) => flag !== "spam_excluded"), SPAM_REFUSED),
+  };
+}
 
 const EMPTY_FIELDS: CollectedCallFields = {
   callerName: null,
@@ -81,12 +99,68 @@ export class CallService {
     fromNumber: string;
     fields: Partial<CollectedCallFields>;
     recordingDisclosureDeclined?: boolean;
-  }): Promise<{ status: "saved"; missing: string[] }> {
+  }): Promise<{ status: "saved"; missing: string[]; wrap_up: boolean }> {
     await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
     return this.store.withLock(`call:${input.providerCallId}`, () => this.saveIntakeClaimed(input));
   }
 
-  private async saveIntakeClaimed(input: Parameters<CallService["saveIntake"]>[0]): Promise<{ status: "saved"; missing: string[] }> {
+  /**
+   * The assistant decided this is a vendor, solicitor, recruiter, robocall or wrong number.
+   * Marked calls are spam_excluded (never billed or counted, no owner alerts). Every guard must pass
+   * first; otherwise the call is flagged spam_refused for good (so a hangup in the same turn still
+   * counts and reaches the owner) and the assistant is told to keep helping. The tool's own
+   * from_number is never trusted: only the caller ID Telnyx gave us at initialization.
+   */
+  async markSpam(input: {
+    tenantId: string;
+    providerCallId: string;
+    /** Ignored: caller ID comes only from the provider-recorded call. */
+    fromNumber: string;
+    category: string;
+    callerQuote: string;
+  }): Promise<{ status: "marked" | "continue"; instruction: string }> {
+    const keepGoing = { status: "continue" as const, instruction: "This caller may be a customer. Do not hang up; continue the normal intake." };
+    return this.store.withLock(`call:${input.providerCallId}`, async () => {
+      const started = this.clock.now();
+      const existing = await this.store.getCallByProviderId(input.providerCallId);
+      // No provider-recorded call (or another shop's): never mark, never create one from a tool call.
+      if (!existing || existing.tenantId !== input.tenantId) return keepGoing;
+      const config = await this.store.getConfig(input.tenantId);
+      const { fields } = existing;
+      const safetyText = [fields.problemDescription, fields.serviceCategory, fields.callerName, fields.callbackNumber, input.callerQuote].filter(Boolean).join("\n");
+      const reason = existing.qualityFlags.includes(SPAM_REFUSED) ? "previously_refused"
+        : existing.emergency?.emergency || triageEmergency(safetyText, config).emergency ? "emergency"
+          : fields.humanRequested ? "human_requested"
+            : fields.problemDescription.trim() || fields.serviceCategory?.trim() || fields.callerName?.trim() || fields.callbackNumber?.trim() || fields.address?.trim() ? "lead_details_captured"
+              : !isAllowedCustomerNumber(existing.fromNumber) ? "caller_id_unknown"
+                : await this.store.getBookingForCall(existing.id) ? "booking_exists"
+                  : await this.store.isKnownCustomer(input.tenantId, existing.fromNumber) ? "existing_customer"
+                    : null;
+      if (reason) {
+        const refused: CallRecord = { ...existing, qualityFlags: appendFlag(existing.qualityFlags, SPAM_REFUSED), updatedAt: this.clock.now().toISOString() };
+        await this.store.saveCall(refused);
+        await this.audit(refused, "call.mark_spam", started, "failed", { category: input.category, refused: reason }, null);
+        return keepGoing;
+      }
+      const call: CallRecord = { ...existing, outcome: "ignored_spam", billingDisposition: "spam_excluded", qualityFlags: appendFlag(existing.qualityFlags, "spam_excluded"), updatedAt: this.clock.now().toISOString() };
+      await this.store.saveCall(call);
+      await this.audit(call, "call.mark_spam", started, "success", { category: input.category }, null);
+      return { status: "marked", instruction: "Say the fixed service-calls-only goodbye and invoke hangup in the same turn." };
+    });
+  }
+
+  /** True once the call passes the soft five-minute limit, unless an emergency or human handoff is under way. */
+  async wrapUp(providerCallId: string): Promise<boolean> {
+    const call = await this.store.getCallByProviderId(providerCallId);
+    return call ? this.wrapUpFor(call) : false;
+  }
+
+  private wrapUpFor(call: CallRecord): boolean {
+    if (call.emergency?.emergency || call.fields.humanRequested) return false;
+    return this.clock.now().getTime() - Date.parse(call.startedAt) >= WRAP_UP_AFTER_SECONDS * 1000;
+  }
+
+  private async saveIntakeClaimed(input: Parameters<CallService["saveIntake"]>[0]): Promise<{ status: "saved"; missing: string[]; wrap_up: boolean }> {
     const existing = await this.store.getCallByProviderId(input.providerCallId);
     if (!existing || existing.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
     const incoming = completePartialFields(input.fields);
@@ -94,7 +168,7 @@ export class CallService {
     const fields = mergeCollectedFields(existing.fields, incoming);
     const config = await this.store.getConfig(input.tenantId);
     const emergency = mergeEmergencyDecision(existing.emergency, triageEmergency(`${existing.fields.problemDescription}\n${fields.problemDescription}`, config));
-    const call: CallRecord = {
+    const updated: CallRecord = {
       ...existing,
       fromNumber: existing.fromNumber === "unknown" && isAllowedCustomerNumber(input.fromNumber) ? input.fromNumber : existing.fromNumber,
       fields,
@@ -103,6 +177,8 @@ export class CallService {
       consentState: input.recordingDisclosureDeclined ? "declined" : existing.consentState,
       updatedAt: this.clock.now().toISOString(),
     };
+    // An emergency or a request for a person means this was never spam.
+    const call = emergency.emergency || fields.humanRequested ? withoutSpamMark(updated) : updated;
     await this.store.saveCall(call);
     if (emergency.emergency) await this.queueHumanHandoffClaimed({ tenantId: input.tenantId, providerCallId: input.providerCallId, fromNumber: call.fromNumber, problemDescription: fields.problemDescription, urgent: emergency });
     const missing = [
@@ -112,7 +188,8 @@ export class CallService {
       !fields.problemDescription.trim() ? "problem_description" : null,
       !fields.serviceCategory?.trim() ? "service_category" : null,
     ].filter((value): value is string => value !== null);
-    return { status: "saved", missing };
+    // The model has no clock; the soft five-minute limit rides on tool results.
+    return { status: "saved", missing, wrap_up: this.wrapUpFor((await this.store.getCallByProviderId(input.providerCallId)) ?? call) };
   }
 
   async checkAvailability(input: {
@@ -338,7 +415,8 @@ export class CallService {
     if (!existing || existing.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
     const now = this.clock.now().toISOString();
     const call: CallRecord = {
-      ...existing,
+      // A person or an emergency was requested: never leave the call excluded as spam.
+      ...withoutSpamMark(existing),
       fromNumber: existing.fromNumber === "unknown" && isAllowedCustomerNumber(input.fromNumber) ? input.fromNumber : existing.fromNumber,
       fields: {
         ...existing.fields,
@@ -417,8 +495,11 @@ export class CallService {
       call.emergency,
       triageEmergency(rawSafetyText, config, input.llmEmergencyScore, input.llmEmergencyReason),
     );
-    // An emergency is never dropped as spam, whatever the classifier said.
-    const spamExcluded = !emergency.emergency && (call.billingDisposition === "spam_excluded" || input.isSpam === true);
+    // An emergency, a request for a person, or a refused spam mark is never dropped as spam, whatever the classifier said.
+    const spamExcluded = !emergency.emergency
+      && !fields.humanRequested
+      && !call.qualityFlags.includes(SPAM_REFUSED)
+      && (call.billingDisposition === "spam_excluded" || input.isSpam === true);
     call = {
       ...call,
       fromNumber: call.fromNumber === "unknown" && isAllowedCustomerNumber(input.fromNumber) ? input.fromNumber : call.fromNumber,

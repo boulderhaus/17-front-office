@@ -186,6 +186,10 @@ export class InMemoryStore implements Store {
     this.customers.set(key, structuredClone(existing ? { ...customer, id: existing.id, createdAt: existing.createdAt } : customer));
   }
 
+  async isKnownCustomer(tenantId: string, phone: string): Promise<boolean> {
+    return this.customers.has(`${tenantId}:${phone}`);
+  }
+
   async getBookingForCall(callId: string): Promise<BookingRecord | null> {
     return structuredClone([...this.bookings.values()].find((booking) => booking.callId === callId) ?? null);
   }

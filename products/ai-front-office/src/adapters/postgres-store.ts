@@ -303,6 +303,11 @@ export class PostgresStore implements Store {
     );
   }
 
+  async isKnownCustomer(tenantId: string, phone: string): Promise<boolean> {
+    const result = await this.#pool.query("SELECT 1 FROM customers WHERE tenant_id=$1 AND phone_hash=$2 LIMIT 1", [tenantId, this.cryptoBox.hashLookup(phone)]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
   async getBookingForCall(callId: string): Promise<BookingRecord | null> {
     const result = await this.#pool.query("SELECT * FROM booking_requests WHERE call_id = $1", [callId]);
     return result.rows[0] ? mapBooking(result.rows[0] as Row) : null;

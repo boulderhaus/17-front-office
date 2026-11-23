@@ -113,6 +113,11 @@ export class TelnyxProvisioner {
     return true;
   }
 
+  /** Set carrier spam screening on the number. Idempotent; safe on every activation. */
+  async enableCallScreening(phoneNumber: string, setting: CallScreeningSetting): Promise<CallScreeningResult> {
+    return ensureInboundCallScreening({ apiKey: this.options.apiKey, phoneNumber, setting, apply: true, fetcher: this.options.fetcher });
+  }
+
   /** Give back a shop's number and assistant when the shop is deleted, so nothing keeps billing. */
   async release(input: { phoneNumber: string | null; assistantId: string | null }): Promise<void> {
     if (input.phoneNumber && this.options.campaignId) {
@@ -144,6 +149,59 @@ export class TelnyxProvisioner {
     }
     return payload;
   }
+}
+
+/**
+ * Telnyx Inbound Call Screening (PATCH /v2/phone_numbers/{id}/voice, field inbound_call_screening,
+ * enum disabled | reject_calls | flag_calls). Telnyx scores calls by Nomorobo/YouMail/CallerAPI
+ * reputation, number validity and SHAKEN/STIR. flag_calls labels likely spam ("SPAM LIKELY" caller
+ * name, X-Telnyx-Call-Screening header, call_screening_result on call events) and still delivers it;
+ * reject_calls drops it at the network with no record. Default is flag: forwarded calls and new
+ * mobiles can false-positive, and a dropped emergency caller leaves no trace.
+ */
+export type CallScreeningMode = "flag" | "reject" | "off";
+export type CallScreeningSetting = "flag_calls" | "reject_calls" | "disabled";
+
+export function callScreeningSetting(mode: CallScreeningMode): CallScreeningSetting {
+  return mode === "reject" ? "reject_calls" : mode === "off" ? "disabled" : "flag_calls";
+}
+
+export interface CallScreeningResult {
+  phoneNumber: string;
+  numberId: string | null;
+  current: string | null;
+  action: "already_set" | "set" | "would_set" | "not_found";
+}
+
+/** Idempotent: reads the number's voice settings and writes the setting only when apply is true and it differs. */
+export async function ensureInboundCallScreening(input: { apiKey: string; phoneNumber: string; setting: CallScreeningSetting; apply: boolean; fetcher?: typeof fetch | undefined }): Promise<CallScreeningResult> {
+  const request = async (path: string, init?: RequestInit): Promise<Record<string, unknown>> => {
+    const target = path.startsWith("https://") ? path : `https://api.telnyx.com/v2${path}`;
+    const response = await withTimeout((input.fetcher ?? fetch)(target, {
+      ...init,
+      headers: { authorization: `Bearer ${input.apiKey}`, "content-type": "application/json", ...init?.headers },
+    }), 10_000);
+    const payload = await response.json().catch(() => ({})) as Record<string, unknown> & { errors?: Array<{ detail?: string }> };
+    if (!response.ok) throw new Error(`Telnyx call screening request failed with HTTP ${response.status}${payload.errors?.[0]?.detail ? `: ${payload.errors[0].detail}` : ""}`);
+    return payload;
+  };
+  const url = new URL("https://api.telnyx.com/v2/phone_numbers");
+  url.searchParams.set("filter[phone_number]", input.phoneNumber);
+  const found = await request(url.toString()) as { data?: Array<{ id?: unknown; phone_number?: unknown }> };
+  const id = found.data?.find((item) => item.phone_number === input.phoneNumber)?.id;
+  if (typeof id !== "string") return { phoneNumber: input.phoneNumber, numberId: null, current: null, action: "not_found" };
+  const voice = objectData(await request(`/phone_numbers/${encodeURIComponent(id)}/voice`));
+  const current = typeof voice.inbound_call_screening === "string" ? voice.inbound_call_screening : null;
+  if (current === input.setting) return { phoneNumber: input.phoneNumber, numberId: id, current, action: "already_set" };
+  if (!input.apply) return { phoneNumber: input.phoneNumber, numberId: id, current, action: "would_set" };
+  const updated = objectData(await request(`/phone_numbers/${encodeURIComponent(id)}/voice`, {
+    method: "PATCH",
+    body: JSON.stringify({ inbound_call_screening: input.setting }),
+  }));
+  if (updated.inbound_call_screening !== undefined && updated.inbound_call_screening !== input.setting) {
+    throw new Error("Telnyx did not persist inbound call screening");
+  }
+  return { phoneNumber: input.phoneNumber, numberId: id, current, action: "set" };
 }
 
 /** Carrier codes owners dial on their business phone to forward calls to their Front Office number. */

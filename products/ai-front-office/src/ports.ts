@@ -43,6 +43,8 @@ export interface Store {
   deleteWorkspace(tenantId: string): Promise<void>;
   deleteCall(tenantId: string, callId: string): Promise<boolean>;
   upsertCustomer(customer: CustomerRecord): Promise<void>;
+  /** True when this number already has a customer record in this shop (a past non-spam call). */
+  isKnownCustomer(tenantId: string, phone: string): Promise<boolean>;
   getBookingForCall(callId: string): Promise<BookingRecord | null>;
   listBookingsForTenant(tenantId: string): Promise<BookingRecord[]>;
   saveBooking(booking: BookingRecord): Promise<void>;

@@ -346,6 +346,26 @@ describe("HTTP boundary", () => {
     expect(await store.getCallByProviderId("v3:signed-call")).not.toBeNull();
     // No recording notice by default, so consent is not recorded as given.
     expect((await store.getCallByProviderId("v3:signed-call"))?.consentState).toBe("unknown");
+    expect(initBody.dynamic_variables.caller_reputation).toBe("unknown");
+
+    // Telnyx flag-mode screening reaches the assistant as a hint for a faster intent check, never a hang-up.
+    const flagged = JSON.stringify({
+      data: {
+        record_type: "event", event_type: "assistant.initialization", id: "event-initialization-flagged",
+        occurred_at: "2026-01-15T08:00:00.000Z",
+        payload: {
+          telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+15555550199",
+          telnyx_end_user_target: "+15555550111", call_control_id: "v3:flagged-call", assistant_id: "assistant-synthetic",
+          call_screening_result: "spam_likely",
+        },
+      },
+    });
+    const flaggedBody = await (await fetch(`${baseUrl}/webhooks/telnyx`, {
+      method: "POST", headers: signedHeaders(flagged, privateKey, clock.now()), body: flagged,
+    })).json() as { dynamic_variables: Record<string, unknown> };
+    expect(flaggedBody.dynamic_variables.caller_reputation).toBe("likely_spam");
+    expect(flaggedBody.dynamic_variables.call_access).toBe("allowed");
+    expect((await store.getCallByProviderId("v3:flagged-call"))?.billingDisposition).not.toBe("spam_excluded");
 
     const intake = JSON.stringify({
       provider_call_id: "v3:signed-call", from_number: "+15555550110", caller_name: "Signed Caller",

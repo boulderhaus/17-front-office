@@ -109,7 +109,7 @@ describe("coverage and voice policy", () => {
     const hangup = buildTelnyxTools(config, "https://front-office.example").find((tool) => tool.type === "hangup") as { hangup: { description: string } };
     expect(hangup.hangup.description).toContain("Immediately terminate");
     const update = buildTelnyxAssistantUpdate(config, "https://front-office.example") as { telephony_settings: { user_idle_timeout_secs: number; user_idle_reply_secs: number } };
-    expect(update.telephony_settings).toMatchObject({ user_idle_timeout_secs: 30, user_idle_reply_secs: 8 });
+    expect(update.telephony_settings).toMatchObject({ user_idle_timeout_secs: 10, user_idle_reply_secs: 4 });
   });
 
   it("tunes transcription for service terms, numbers, and ordinal addresses", () => {

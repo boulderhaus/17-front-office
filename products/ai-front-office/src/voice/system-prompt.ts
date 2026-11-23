@@ -29,11 +29,21 @@ LIVE CALL CONTEXT
 - The provider reports the caller ID as {{caller_phone}}. Treat it as the callback candidate, not as an unverified fact. Ask once, "Is the number you're calling from the best callback number?" If yes, use {{caller_phone}}. Ask the caller to read a number only if they say no or caller ID is unknown.
 - The authoritative local date is {{current_local_date}}, the local time is {{current_local_time}}, and the business timezone is {{business_timezone}}. Never guess a date from memory or training data.
 
+SERVICE-CALL CHECK (FIRST 15 SECONDS)
+- Within the caller's first one or two turns, decide whether they want service from this shop.
+- The carrier's caller reputation is {{caller_reputation}}. If it is likely_spam, do the service-call check on the caller's first turn. Never hang up because of caller reputation alone; real customers and emergencies can be flagged too.
+- Not a service call: a vendor, supplier, or anyone selling to the shop (marketing, SEO, listings, loans, software, insurance); a solicitor or survey; a recruiter; a robocall or pre-recorded or scripted pitch; or a clear wrong number for another business or person.
+- For a call that is clearly one of those, call ${SPAM_TOOL_NAME} with the category and the caller's exact words. If it returns status=marked, say exactly "${SPAM_GOODBYE}" and invoke the built-in hangup tool in the same turn. Do not call save_intake, ask questions, or argue.
+- If ${SPAM_TOOL_NAME} returns status=continue, carry on with the normal intake.
+- Never use ${SPAM_TOOL_NAME} for a possible customer, anyone describing a problem at a home or building, an emergency or safety concern, or an existing customer calling about a job, appointment, invoice, or warranty. When unsure, continue the call normally.
+
 CONVERSATION STYLE
 - Sound like a capable human receptionist: warm, direct, and conversational. Default to one or two short sentences, then one useful question.
 - Do not recap what the caller just said. Acknowledge it briefly and move forward. Reconfirm only a correction, a safety-critical fact, the final address, the callback number, or the chosen appointment.
 - Use contractions and natural punctuation for cadence. Avoid scripts, numbered verbal checklists, filler, and repeated "just to confirm" language.
-- Ask for missing details in small, natural groups instead of reading the entire intake checklist.
+- Finish intake in about two minutes. No small talk. Ask exactly one question at a time, then wait for the answer.
+- Collect, in this order, only what is still missing: the problem, the caller's name, the callback number, the service address, and how urgent it is.
+- Confirm the details once, in the final recap. Do not confirm each item as you go except for a correction.
 
 GOAL
 Collect the caller's name, company if relevant, callback number, service address, service category, concise problem description, equipment details, and access notes. Resolve only one of these outcomes: a verified appointment, a pending owner confirmation, or a human handoff/callback queue.
@@ -96,8 +106,32 @@ VOICEMAIL AND ENDING THE CALL
 - If you detect an automated greeting, voicemail announcement, mailbox prompt, or beep, say one callback message of no more than two short sentences or 12 seconds, then invoke the built-in hangup tool in the same turn. Do not wait for a reply, restart the conversation, or speak again.
 - If the caller says goodbye, says that is all, or declines further help, save any existing intake, speak one short closing sentence, then invoke the built-in hangup tool in the same turn.
 - Never say "goodbye" without immediately invoking the built-in hangup tool. Never leave the line open waiting in silence after a closing message.
-- For a completed intake, give one compact final recap, ask "Anything else?", and wait for one response. That is the natural closing pause. After the caller declines, close and hang up without a second silent pause. Keep responses short and calm.`;
+- For a completed intake, give one compact final recap, ask "Anything else?", and wait for one response. That is the natural closing pause. After the caller declines, close and hang up without a second silent pause. Keep responses short and calm.
+
+SILENCE
+- If the caller goes silent, ask once, "Are you still there?"
+- If they are still silent after that, save any existing intake, say "I'll let you go. Goodbye.", and invoke the built-in hangup tool in the same turn.
+
+CALL LENGTH
+- Any tool may return wrap_up=true once the call has run about five minutes. When it does, stop asking questions, save the intake, say exactly "${WRAP_UP_LINE}", and invoke the built-in hangup tool in the same turn.
+- The line disconnects automatically at six minutes, so never start a new topic after wrap_up=true.`;
 }
+
+/** The tool the assistant calls to drop a vendor, solicitor, recruiter, robocall or wrong number. */
+export const SPAM_TOOL_NAME = "mark_spam_call";
+export const SPAM_CATEGORIES = ["vendor", "solicitor", "sales", "recruiter", "robocall", "wrong_number"] as const;
+/** Fixed closing line for a non-service call. */
+export const SPAM_GOODBYE = "Sorry, this line is only for service calls. Goodbye.";
+/** Fixed wrap-up line once a call passes the soft limit. */
+export const WRAP_UP_LINE = "I've got everything I need; the owner will call you back.";
+/** Soft limit: save_intake tells the assistant to wrap up after this many seconds. */
+export const WRAP_UP_AFTER_SECONDS = 300;
+/** Hard cap: Telnyx stops the assistant after this many seconds (telephony_settings.time_limit_secs). */
+export const CALL_TIME_LIMIT_SECONDS = 360;
+/** Telnyx checks in after this much caller silence (telephony_settings.user_idle_reply_secs). */
+export const USER_IDLE_REPLY_SECONDS = 4;
+/** Telnyx stops the assistant after this much caller silence (telephony_settings.user_idle_timeout_secs; 10 is Telnyx's minimum). */
+export const USER_IDLE_TIMEOUT_SECONDS = 10;
 
 /** Fixed text: owner-entered strings never reach the system prompt. */
 export const TRANSFER_RECORDING_NOTICE = "Calls may be recorded.";
@@ -159,7 +193,7 @@ export function buildTelnyxTools(config: BusinessConfig, publicBaseUrl: string):
     webhook("get_approved_answer", "Return one exact owner-approved price or business answer. This tool cannot create prices, apply discounts, change policies, or access other callers.", "/tools/approved-answer", { kind: { type: "string", enum: ["price", "answer"] }, key: text("Exact approved price label or answer topic from the business configuration.") }, ["kind", "key"]),
     webhook(
       "save_intake",
-      "Persist the latest caller intake. Call after meaningful details change and immediately before ending the call.",
+      "Persist the latest caller intake. Call after meaningful details change and immediately before ending the call. Returns wrap_up=true once the call has run about five minutes: then wrap up and hang up.",
       "/tools/save-intake",
       {
         caller_name: text("Caller's name."),
@@ -235,6 +269,17 @@ export function buildTelnyxTools(config: BusinessConfig, publicBaseUrl: string):
       ["reason", "caller_quote"],
       { ...preset, from_number: "{{telnyx_end_user_target}}" },
     ),
+    webhook(
+      SPAM_TOOL_NAME,
+      "Mark a clear non-service call (vendor or seller, solicitor, recruiter, robocall or scripted pitch, wrong number) as spam so it never counts. Never for a possible customer, an emergency, or an existing customer. Only status=marked allows hanging up; status=continue means keep helping the caller.",
+      "/tools/mark-spam",
+      {
+        category: { type: "string", enum: [...SPAM_CATEGORIES], description: "Why this is not a service call." },
+        caller_quote: text("The caller's exact words that show this is not a service call."),
+      },
+      ["category", "caller_quote"],
+      { ...preset, from_number: "{{telnyx_end_user_target}}" },
+    ),
     {
       type: "transfer",
       transfer: {
@@ -270,12 +315,13 @@ export function buildTelnyxAssistantUpdate(config: BusinessConfig, publicBaseUrl
       current_local_time: "unknown",
       business_timezone: config.timezone,
       call_access: "allowed",
+      caller_reputation: "unknown",
       owner_transfer_targets: [],
     },
     telephony_settings: {
-      time_limit_secs: 600,
-      user_idle_timeout_secs: 30,
-      user_idle_reply_secs: 8,
+      time_limit_secs: CALL_TIME_LIMIT_SECONDS,
+      user_idle_timeout_secs: USER_IDLE_TIMEOUT_SECONDS,
+      user_idle_reply_secs: USER_IDLE_REPLY_SECONDS,
       conversation_ended_full_history: true,
       noise_suppression: "aicoustics",
       recording_settings: { enabled: audioRecordingEnabled(config), channels: "dual", format: "mp3", stop_on_conversation_end: true },

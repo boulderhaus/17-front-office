@@ -38,6 +38,12 @@ const schema = z.object({
    */
   TELNYX_VOICEMAIL_APP_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional()),
   TELNYX_MESSAGING_APPROVED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  /**
+   * Telnyx Inbound Call Screening on shop numbers. "flag" (default) labels likely spam and still lets it
+   * reach the assistant, which checks intent sooner. "reject" drops it at the carrier with no record or
+   * alert, so a forwarded or new-mobile emergency caller could be lost; opt in only deliberately.
+   */
+  CALL_SCREENING_MODE: z.preprocess((value) => value === "" ? undefined : value, z.enum(["flag", "reject", "off"]).default("flag")),
   FOUNDER_WELCOME_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   SUPPORT_EMAIL: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
   // Owner-facing controls stay hidden until each capability passes live acceptance.
