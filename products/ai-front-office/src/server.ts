@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { resolve } from "node:path";
 import { OutboxWorker } from "./application/outbox-worker.js";
 import { CallService } from "./application/call-service.js";
 import { DataDeletionService } from "./application/data-deletion.js";
@@ -12,7 +13,7 @@ import { createRuntime } from "./runtime.js";
 const env = loadEnvironment(process.env);
 const runtime = await createRuntime(env);
 const logger = (entry: Record<string, unknown>): void => console.log(JSON.stringify({ timestamp: new Date().toISOString(), ...entry }));
-const handler = createRequestHandler({ env, store: runtime.store, calendar: runtime.calendar, clock: systemClock, integrations: runtime.integrations, logger });
+const handler = createRequestHandler({ env, store: runtime.store, calendar: runtime.calendar, clock: systemClock, integrations: runtime.integrations, logger, ownerWeb: { dir: resolve(process.cwd(), "web/dist") } });
 const server = createServer(handler);
 server.requestTimeout = 15_000;
 server.headersTimeout = 10_000;

@@ -37,7 +37,9 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: products/ai-front-office/package-lock.json
+          cache-dependency-path: |
+            products/ai-front-office/package-lock.json
+            products/ai-front-office/web/package-lock.json
       - run: npm ci
       - run: npm audit --audit-level=high
       # Twice: the second run must be a clean no-op.
@@ -46,3 +48,6 @@ jobs:
       - run: npm run check
       - run: npm run build
       - run: npm run simulate:launch
+      - name: Build the owner app (React)
+        working-directory: products/ai-front-office/web
+        run: npm ci && npm audit --audit-level=high && npm run build
