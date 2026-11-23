@@ -182,11 +182,16 @@ describe("life-safety phrasing", () => {
     "I'm getting fumes from the furnace and a headache", "smoke is coming out of the vent", "There is smoke in the house",
     "the outlet is on fire", "I see flames", "CO detector is going off", "carbon-monoxide alarm", "I cannot breathe",
     "smells like rotten eggs", "gas smell in the hallway",
+    "There's a fire in the furnace closet", "the room is full of smoke", "gas is leaking from the meter", "I noticed a smell of gas",
+    "both CO alarms are going off", "flames coming out of the furnace", "No, it's not a joke, I smell gas",
+    "I don't think it's a gas leak but I smell gas now",
   ])("escalates: %s", (text) => {
     expect(triageEmergency(text, config).severity).toBe("life_safety");
   });
   it.each([
     "my furnace won't fire", "the pilot won't fire up", "smoke detector is chirping, low battery", "I want to schedule a fireplace inspection",
+    "the flame sensor failed and the furnace won't stay lit", "weak pilot flame", "No, I don't smell gas", "there's no gas leak, just no heat",
+    "I haven't noticed any gas smell", "nope, I don't see smoke",
   ])("does not escalate: %s", (text) => {
     expect(triageEmergency(text, config).severity).not.toBe("life_safety");
   });
@@ -249,5 +254,24 @@ describe("usage billing period", () => {
   it("falls back to the calendar month without a current period", () => {
     expect(currentBillingPeriod(new Date("2026-11-23T12:00:00Z"), null)).toEqual(["2026-11-01T00:00:00.000Z", "2026-12-01T00:00:00.000Z"]);
     expect(currentBillingPeriod(new Date("2026-11-23T12:00:00Z"), "2026-11-01T00:00:00.000Z")[0]).toBe("2026-11-01T00:00:00.000Z");
+  });
+});
+
+describe("model score guard", () => {
+  it("ignores a non-finite model score instead of erasing an urgent match", () => {
+    expect(triageEmergency("no heat and an elderly resident", { emergencyKeywords: [], emergencyThreshold: 0.7 }, Number.NaN).emergency).toBe(true);
+  });
+});
+
+describe("service area address shapes", () => {
+  const config = { ...createDemoConfig(), serviceAreaTerms: ["Sarasota FL", "34236"] };
+  it.each([
+    "100 Bay St, Sarasota, FL 34236, USA", "100 Bay St, Apt 4, Sarasota, FL", "100 Bay St, Sarasota, FL 34236-1234",
+    "Sarasota, FL", "100 Bay Street, 34236",
+  ])("covers %s", (address) => {
+    expect(evaluateServiceArea(address, config).status).toBe("covered");
+  });
+  it.each(["34236 Lake Shore Dr, Chicago, IL 60601", "1200 Main St, Sarasota Springs, NY 12866", "100 Bay St, Venice, FL 34285"])("does not cover %s", (address) => {
+    expect(evaluateServiceArea(address, config).status).toBe("outside");
   });
 });
