@@ -632,6 +632,8 @@ describe("HTTP boundary", () => {
     expect((await store.getConfig(account!.tenantId)).serviceAreaTerms).toEqual([]);
     const dashboard = await (await fetch(`${baseUrl}/app`, { headers: { cookie: ownerCookie } })).text();
     expect(dashboard).toContain("Set your call rules");
+    expect(dashboard).toContain("Urgent alerts are off.");
+    expect(await (await fetch(`${baseUrl}/demo`)).text()).not.toContain("Urgent alerts are off.");
     const teamPage = await (await fetch(`${baseUrl}/app/team`, { headers: { cookie: ownerCookie } })).text();
     const csrf = /name="csrf" value="([^"]+)"/.exec(teamPage)![1]!;
     const invite = await fetch(`${baseUrl}/app/team/invite`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, email: "teammate@synthetic.example" }) });

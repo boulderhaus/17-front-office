@@ -67,3 +67,18 @@ export function buildActivationReport(input: {
 function check(id: string, label: string, passed: boolean, detail: string): ReadinessCheck {
   return { id, label, status: passed ? "pass" : "block", detail };
 }
+
+/** Shop-level prerequisites for turning on a customer line. Empty means ready. */
+export function shopActivationBlockers(input: {
+  ownerPhoneConfigured: boolean;
+  urgentAlertsEnabled: boolean;
+  googleConnected: boolean;
+  serviceAreaConfigured: boolean;
+}): string[] {
+  return [
+    !input.ownerPhoneConfigured && "owner mobile number",
+    !input.urgentAlertsEnabled && "urgent text alerts (the owner has not opted in)",
+    !input.googleConnected && "Google Calendar",
+    !input.serviceAreaConfigured && "service area",
+  ].filter((value): value is string => typeof value === "string");
+}

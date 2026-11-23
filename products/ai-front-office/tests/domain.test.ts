@@ -1,3 +1,4 @@
+import { shopActivationBlockers } from "../src/application/readiness.js";
 import { describe, expect, it } from "vitest";
 import { createDemoConfig, evaluateServiceArea, isCoverageActive } from "../src/domain/config.js";
 import { triageEmergency } from "../src/domain/triage.js";
@@ -159,5 +160,13 @@ describe("operational safety", () => {
     const results = await runAllSimulations();
     expect(results).toHaveLength(15);
     expect(results.filter((item) => !item.passed)).toEqual([]);
+  });
+});
+
+describe("shop activation prerequisites", () => {
+  it("refuses activation when the owner has not opted into urgent alerts", () => {
+    expect(shopActivationBlockers({ ownerPhoneConfigured: true, urgentAlertsEnabled: false, googleConnected: true, serviceAreaConfigured: true }))
+      .toEqual(["urgent text alerts (the owner has not opted in)"]);
+    expect(shopActivationBlockers({ ownerPhoneConfigured: true, urgentAlertsEnabled: true, googleConnected: true, serviceAreaConfigured: true })).toEqual([]);
   });
 });

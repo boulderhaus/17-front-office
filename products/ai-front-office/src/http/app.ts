@@ -4,7 +4,7 @@ import type { IncomingMessage, RequestListener, ServerResponse } from "node:http
 import { resolve } from "node:path";
 import { z } from "zod";
 import { renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms } from "../admin/render.js";
-import { buildActivationReport, type ActivationReport } from "../application/readiness.js";
+import { buildActivationReport, shopActivationBlockers, type ActivationReport } from "../application/readiness.js";
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService } from "../application/call-service.js";
 import { approvedTransferTargets } from "../application/transfer-policy.js";
@@ -1231,7 +1231,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
           dependencies.store.getSubscription(account.tenantId),
         ]);
-        if (!ownerPhone || !googleConnected || config.serviceAreaTerms.length === 0) throw new HttpError(409, "Owner phone, Google Calendar, and service area must be configured before activation");
+        const shopBlockers = shopActivationBlockers({
+          ownerPhoneConfigured: Boolean(ownerPhone),
+          urgentAlertsEnabled: config.ownerNotificationRefs.length > 0,
+          googleConnected,
+          serviceAreaConfigured: config.serviceAreaTerms.length > 0,
+        });
+        if (shopBlockers.length > 0) throw new HttpError(409, `This shop is missing: ${shopBlockers.join(", ")}`);
         if (!stripeClient || subscription?.status !== "active") throw new HttpError(409, "An active paid subscription is required before activation");
         const existingRoute = await dependencies.store.getProviderRoute("telnyx", assistantId);
         if (existingRoute && existingRoute.tenantId !== account.tenantId) throw new HttpError(409, "That Telnyx assistant is already assigned to another tenant");
