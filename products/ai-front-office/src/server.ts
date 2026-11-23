@@ -7,13 +7,15 @@ import { OwnerSummaryService } from "./application/owner-summary-service.js";
 import { TelnyxRecordingClient } from "./adapters/telnyx.js";
 import { loadEnvironment } from "./config/environment.js";
 import { createRequestHandler } from "./http/app.js";
+import { createTelemetry } from "./adapters/posthog.js";
 import { systemClock } from "./ports.js";
 import { createRuntime } from "./runtime.js";
 
 const env = loadEnvironment(process.env);
 const runtime = await createRuntime(env);
 const logger = (entry: Record<string, unknown>): void => console.log(JSON.stringify({ timestamp: new Date().toISOString(), ...entry }));
-const handler = createRequestHandler({ env, store: runtime.store, calendar: runtime.calendar, clock: systemClock, integrations: runtime.integrations, logger, ownerWeb: { dir: resolve(process.cwd(), "web/dist") } });
+const telemetry = createTelemetry(env);
+const handler = createRequestHandler({ env, store: runtime.store, calendar: runtime.calendar, clock: systemClock, integrations: runtime.integrations, logger, telemetry, ownerWeb: { dir: resolve(process.cwd(), "web/dist") } });
 const server = createServer(handler);
 server.requestTimeout = 15_000;
 server.headersTimeout = 10_000;
@@ -45,6 +47,7 @@ const runWorker = async (): Promise<void> => {
           if (recovered > 0) logger({ level: "warn", event: "stale_calls_recovered", tenantId, recovered });
         } catch (error) {
           logger({ level: "error", event: "stale_call_recovery_failed", tenantId, error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });
+          telemetry.captureException(error, { route: "job:stale_call_recovery", tenantId });
         }
       }
     }
@@ -58,6 +61,7 @@ const runWorker = async (): Promise<void> => {
           if (result.deleted > 0 || result.failed > 0) logger({ level: result.failed > 0 ? "error" : "info", event: "retention_cycle", tenantId, ...result, retentionDays: config.dataRetentionDays });
         } catch (error) {
           logger({ level: "error", event: "retention_cycle_failed", tenantId, error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });
+          telemetry.captureException(error, { route: "job:retention", tenantId });
         }
       }
       const purgedWebhooks = await runtime.store.purgeWebhookEvents(new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString());
@@ -70,6 +74,7 @@ const runWorker = async (): Promise<void> => {
     }
   } catch (error) {
     logger({ level: "error", event: "outbox_failed", error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });
+    telemetry.captureException(error, { route: "job:outbox" });
   } finally {
     workerActive = false;
   }
@@ -81,7 +86,7 @@ await new Promise<void>((resolve, reject) => {
   server.once("error", reject);
   server.listen(env.PORT, env.HOST, () => resolve());
 });
-logger({ level: "info", event: "server_started", host: env.HOST, port: env.PORT, demoMode: env.DEMO_MODE });
+logger({ level: "info", event: "server_started", host: env.HOST, port: env.PORT, demoMode: env.DEMO_MODE, analytics: telemetry.enabled });
 void runWorker();
 
 const shutdown = async (signal: string): Promise<void> => {
@@ -89,6 +94,8 @@ const shutdown = async (signal: string): Promise<void> => {
   clearInterval(interval);
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await runtime.close();
+  // Deliver queued analytics and errors before the container stops.
+  await telemetry.shutdown().catch(() => undefined);
   process.exit(0);
 };
 process.once("SIGTERM", () => void shutdown("SIGTERM"));

@@ -8,7 +8,8 @@ import type { ApiCall } from "@/lib/types"
 
 export function CallHeader({ call, tone, label }: { call: ApiCall; tone: Tone; label: string }) {
   return (
-    <div className="flex items-start justify-between gap-3">
+    // ph-no-capture on every block that shows a caller's name, number or address: never sent to PostHog.
+    <div className="ph-no-capture flex items-start justify-between gap-3">
       <div className="min-w-0">
         <h2 className="text-2xl leading-tight font-semibold tracking-tight">{call.fields.callerName ?? "Unknown caller"}</h2>
         <p className="mt-1.5 text-[15px] text-foreground/85">{call.fields.problemDescription || "No problem summary captured"}</p>
@@ -31,7 +32,7 @@ export function SafetyNote({ call }: { call: ApiCall }) {
 export function ContactActions({ call, extra }: { call: ApiCall; extra?: ReactNode }) {
   const address = call.fields.address?.trim() || null
   return (
-    <div className="flex flex-wrap gap-2">
+    <div className="ph-no-capture flex flex-wrap gap-2">
       {call.phone && (
         <>
           <Button size="tap" className="min-w-36 flex-1" asChild><a href={`tel:${call.phone}`}><Phone />Call back</a></Button>
@@ -46,7 +47,7 @@ export function ContactActions({ call, extra }: { call: ApiCall; extra?: ReactNo
 
 export function Facts({ rows }: { rows: Array<[string, string]> }) {
   return (
-    <dl className="divide-y overflow-hidden rounded-xl border bg-card">
+    <dl className="ph-no-capture divide-y overflow-hidden rounded-xl border bg-card">
       {rows.map(([key, value]) => (
         <div key={key} className="grid grid-cols-[104px_1fr] gap-3 px-3.5 py-2.5">
           <dt className="text-[13px] font-semibold text-muted-foreground">{key}</dt>

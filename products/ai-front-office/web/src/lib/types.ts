@@ -60,6 +60,8 @@ export interface ApiDashboard {
   checkoutConfigured: boolean
   /** Spam and calls under 15 seconds are left out of billedMinutes; the counts say how many. */
   usage: { billedMinutes: number; billableCalls: number; excludedSpamCalls: number; excludedShortCalls: number }
+  /** Present only when analytics is on: opaque account and shop ids for PostHog. */
+  analytics?: { distinctId: string; tenantId: string }
   calls: ApiCall[]
   tasks: ApiTask[]
 }

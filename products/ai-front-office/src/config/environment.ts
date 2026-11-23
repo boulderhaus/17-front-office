@@ -62,6 +62,10 @@ const schema = z.object({
   STRIPE_REALTIME_SMS_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   RESEND_API_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("re_").optional()),
   RESEND_FROM_EMAIL: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
+  // Product analytics + error tracking. Unset = everything off (tests, local).
+  POSTHOG_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().regex(/^phc_[A-Za-z0-9_-]{8,}$/, "POSTHOG_KEY must be a PostHog project API key (phc_...)").optional()),
+  // Only PostHog Cloud ingestion hosts: the /ingest proxy forwards here, so it must never be arbitrary.
+  POSTHOG_HOST: z.preprocess((value) => value === "" ? undefined : typeof value === "string" ? value.replace(/\/$/, "") : value, z.enum(["https://us.i.posthog.com", "https://eu.i.posthog.com"]).default("https://us.i.posthog.com")),
 });
 
 export type Environment = z.infer<typeof schema>;

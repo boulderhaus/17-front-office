@@ -68,7 +68,7 @@ export function CallPage() {
           <ContactActions call={call} extra={taskButton} />
           <Facts rows={facts} />
           {detail.data.recordingUrl && (
-            <div className="grid gap-2 rounded-xl border bg-secondary/60 p-3">
+            <div className="ph-no-capture grid gap-2 rounded-xl border bg-secondary/60 p-3">
               <span className="flex items-center gap-2 text-sm font-semibold"><Play className="size-4" />Recording</span>
               {/* preload=metadata fetches the recording header as the page opens, so Play starts at once. */}
               <audio controls preload="metadata" src={detail.data.recordingUrl} className="w-full" />
@@ -76,7 +76,7 @@ export function CallPage() {
           )}
           <details open className="rounded-xl border">
             <summary className="flex min-h-12 cursor-pointer items-center px-3.5 font-semibold">Read the call</summary>
-            <p className="px-3.5 pb-3.5 text-sm whitespace-pre-wrap text-foreground/85">{call.transcript ?? "Transcript unavailable"}</p>
+            <p className="ph-no-capture px-3.5 pb-3.5 text-sm whitespace-pre-wrap text-foreground/85">{call.transcript ?? "Transcript unavailable"}</p>
           </details>
           {detail.data.alerts.length > 0 && (
             <section className="grid gap-1">
