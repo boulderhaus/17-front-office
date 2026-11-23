@@ -570,13 +570,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return teamRoutes(request, response, url, dependencies, account, session);
     }
     if (method === "GET" && url.pathname === "/app") {
-      const [config, calls, tasks, usage, googleConnected, subscription] = await Promise.all([
+      const subscription = await dependencies.store.getSubscription(account.tenantId);
+      const [config, calls, tasks, usage, googleConnected] = await Promise.all([
         dependencies.store.getConfig(account.tenantId),
         dependencies.store.listCalls(account.tenantId, 50),
         dependencies.store.listCallbackTasks(account.tenantId, 100),
-        dependencies.store.getUsageSummary(account.tenantId, ...currentBillingPeriod(dependencies.clock.now())),
+        dependencies.store.getUsageSummary(account.tenantId, ...currentBillingPeriod(dependencies.clock.now(), subscription?.currentPeriodEnd)),
         isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
-        dependencies.store.getSubscription(account.tenantId),
       ]);
       return sendHtml(response, 200, renderOwnerDashboard({
         account,
@@ -1537,10 +1537,21 @@ function routeKey(pathname: string): string {
   return pathname;
 }
 
-function currentBillingPeriod(now: Date): [string, string] {
+/**
+ * The usage meter follows the shop's Stripe billing cycle so included minutes
+ * reset when the subscription renews. Without a current period (unpaid, or a
+ * stale record) it falls back to the UTC calendar month.
+ */
+export function currentBillingPeriod(now: Date, currentPeriodEnd?: string | null): [string, string] {
+  const end = currentPeriodEnd ? new Date(currentPeriodEnd) : null;
+  if (end && !Number.isNaN(end.getTime()) && end.getTime() > now.getTime()) {
+    const start = new Date(end.getTime());
+    start.setUTCMonth(start.getUTCMonth() - 1);
+    if (start.getTime() <= now.getTime()) return [start.toISOString(), end.toISOString()];
+  }
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
-  return [start.toISOString(), end.toISOString()];
+  const fallbackEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  return [start.toISOString(), fallbackEnd.toISOString()];
 }
 
 function normalizeUsPhone(value: string): string | null {

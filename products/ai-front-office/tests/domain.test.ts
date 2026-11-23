@@ -2,6 +2,7 @@ import { shopActivationBlockers } from "../src/application/readiness.js";
 import { isExplicitHumanRequest } from "../src/domain/human-request.js";
 import { RateLimiter } from "../src/http/security.js";
 import { renderQuickSetup } from "../src/admin/setup.js";
+import { currentBillingPeriod } from "../src/http/app.js";
 import { describe, expect, it } from "vitest";
 import { createDemoConfig, evaluateServiceArea, isCoverageActive, normalizeServiceAreaInput } from "../src/domain/config.js";
 import { triageEmergency } from "../src/domain/triage.js";
@@ -238,5 +239,15 @@ describe("recording consent evidence", () => {
     const tools = buildTelnyxTools(createDemoConfig(), "https://front-office.example") as Array<{ webhook?: { name: string; preset_body_fields: Record<string, unknown> } }>;
     const intake = tools.find((tool) => tool.webhook?.name === "save_intake")!;
     expect(intake.webhook!.preset_body_fields).not.toHaveProperty("recording_disclosure_given");
+  });
+});
+
+describe("usage billing period", () => {
+  it("follows the Stripe cycle so included minutes reset at renewal", () => {
+    expect(currentBillingPeriod(new Date("2026-11-23T12:00:00Z"), "2026-12-09T15:00:00.000Z")).toEqual(["2026-11-09T15:00:00.000Z", "2026-12-09T15:00:00.000Z"]);
+  });
+  it("falls back to the calendar month without a current period", () => {
+    expect(currentBillingPeriod(new Date("2026-11-23T12:00:00Z"), null)).toEqual(["2026-11-01T00:00:00.000Z", "2026-12-01T00:00:00.000Z"]);
+    expect(currentBillingPeriod(new Date("2026-11-23T12:00:00Z"), "2026-11-01T00:00:00.000Z")[0]).toBe("2026-11-01T00:00:00.000Z");
   });
 });
