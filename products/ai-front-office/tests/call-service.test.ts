@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { CapturingNotificationSender, InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
+import { DataDeletionService } from "../src/application/data-deletion.js";
 import { CallService } from "../src/application/call-service.js";
 import { OutboxWorker } from "../src/application/outbox-worker.js";
 import { createDemoConfig } from "../src/domain/config.js";
@@ -298,7 +299,7 @@ describe("call outcomes", () => {
   it("deletes expired call data and dependent records", async () => {
     await start("retention");
     const call = await service.finalize(summary("retention"));
-    expect(await store.deleteExpiredCalls("demo", "2027-01-01T00:00:00.000Z")).toBe(1);
+    expect(await new DataDeletionService(store, { deleteForCall: async () => undefined }).deleteExpired("demo", "2027-01-01T00:00:00.000Z", 100, "2027-01-01T00:00:00.000Z")).toEqual({ deleted: 1, failed: 0 });
     expect(await store.getCall(call.id)).toBeNull();
     expect(await store.listNotifications(call.id)).toEqual([]);
     expect(await store.getCallbackTaskForCall(call.id)).toBeNull();

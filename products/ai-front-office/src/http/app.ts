@@ -307,7 +307,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         ...(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID ? { realtimeSms: dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID } : {}),
       })
     : null;
-  const deletionService = new DataDeletionService(dependencies.store, dependencies.calendar, recordingClient);
+  const deletionService = new DataDeletionService(dependencies.store, recordingClient);
   const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
   const limiter = new RateLimiter();
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));

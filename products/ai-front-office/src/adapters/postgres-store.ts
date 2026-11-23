@@ -166,10 +166,12 @@ export class PostgresStore implements Store {
     return Number(result.rows[0]?.count ?? 0);
   }
 
-  async listExpiredCalls(tenantId: string, endedBefore: string, limit: number): Promise<CallRecord[]> {
+  async listExpiredCalls(tenantId: string, endedBefore: string, limit: number, now: string): Promise<CallRecord[]> {
     const result = await this.#pool.query(
-      "SELECT * FROM calls WHERE tenant_id=$1 AND ended_at IS NOT NULL AND ended_at < $2 ORDER BY ended_at LIMIT $3",
-      [tenantId, endedBefore, limit],
+      `SELECT * FROM calls WHERE tenant_id=$1 AND ended_at IS NOT NULL AND ended_at < $2
+         AND (retention_failed_at IS NULL OR retention_failed_at < $4::timestamptz - interval '24 hours')
+       ORDER BY ended_at LIMIT $3`,
+      [tenantId, endedBefore, limit, now],
     );
     return result.rows.map((row) => this.mapCall(row as Row));
   }
@@ -198,11 +200,8 @@ export class PostgresStore implements Store {
     }
   }
 
-  async deleteExpiredCalls(tenantId: string, endedBefore: string): Promise<number> {
-    const calls = await this.listExpiredCalls(tenantId, endedBefore, 1_000);
-    let deleted = 0;
-    for (const call of calls) if (await this.deleteCall(tenantId, call.id)) deleted += 1;
-    return deleted;
+  async markRetentionFailed(callId: string, at: string): Promise<void> {
+    await this.#pool.query("UPDATE calls SET retention_failed_at=$2 WHERE id=$1", [callId, at]);
   }
 
   async upsertCustomer(customer: CustomerRecord): Promise<void> {

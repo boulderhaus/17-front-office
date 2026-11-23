@@ -56,6 +56,7 @@ export class InMemoryStore implements Store {
   readonly ownerAccounts = new Map<string, OwnerAccount>();
   readonly providerRoutes = new Map<string, ProviderRoute>();
   readonly subscriptions = new Map<string, SubscriptionRecord>();
+  readonly retentionFailures = new Map<string, string>();
   readonly #mutex = new KeyedMutex();
 
   async ping(): Promise<void> {}
@@ -120,9 +121,11 @@ export class InMemoryStore implements Store {
     return [...this.calls.values()].filter((call) => call.tenantId === tenantId && call.fromNumber === phone && call.startedAt >= since).length;
   }
 
-  async listExpiredCalls(tenantId: string, endedBefore: string, limit: number): Promise<CallRecord[]> {
+  async listExpiredCalls(tenantId: string, endedBefore: string, limit: number, now: string): Promise<CallRecord[]> {
+    const retryAfter = new Date(Date.parse(now) - 24 * 60 * 60_000).toISOString();
     return [...this.calls.values()]
       .filter((call) => call.tenantId === tenantId && call.endedAt !== null && call.endedAt < endedBefore)
+      .filter((call) => { const failed = this.retentionFailures.get(call.id); return !failed || failed < retryAfter; })
       .sort((a, b) => (a.endedAt ?? "").localeCompare(b.endedAt ?? ""))
       .slice(0, limit)
       .map((call) => structuredClone(call));
@@ -141,12 +144,8 @@ export class InMemoryStore implements Store {
     return true;
   }
 
-  async deleteExpiredCalls(tenantId: string, endedBefore: string): Promise<number> {
-    const ids = [...this.calls.values()]
-      .filter((call) => call.tenantId === tenantId && call.endedAt !== null && call.endedAt < endedBefore)
-      .map((call) => call.id);
-    for (const id of ids) await this.deleteCall(tenantId, id);
-    return ids.length;
+  async markRetentionFailed(callId: string, at: string): Promise<void> {
+    if (this.calls.has(callId)) this.retentionFailures.set(callId, at);
   }
 
   async upsertCustomer(customer: CustomerRecord): Promise<void> {

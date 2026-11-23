@@ -31,9 +31,10 @@ export interface Store {
   saveCall(call: CallRecord): Promise<void>;
   listCalls(tenantId: string, limit: number): Promise<CallRecord[]>;
   countCallsFromNumberSince(tenantId: string, phone: string, since: string): Promise<number>;
-  listExpiredCalls(tenantId: string, endedBefore: string, limit: number): Promise<CallRecord[]>;
+  /** Expired calls, skipping any whose deletion failed within the last 24 hours before `now`. */
+  listExpiredCalls(tenantId: string, endedBefore: string, limit: number, now: string): Promise<CallRecord[]>;
+  markRetentionFailed(callId: string, at: string): Promise<void>;
   deleteCall(tenantId: string, callId: string): Promise<boolean>;
-  deleteExpiredCalls(tenantId: string, endedBefore: string): Promise<number>;
   upsertCustomer(customer: CustomerRecord): Promise<void>;
   getBookingForCall(callId: string): Promise<BookingRecord | null>;
   saveBooking(booking: BookingRecord): Promise<void>;
