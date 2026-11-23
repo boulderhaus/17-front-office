@@ -104,30 +104,19 @@ export function toolLimitReached(tool: VoiceToolName): ToolFailure {
   };
 }
 
-/** Counts tool calls per phone call, in memory. Calls are capped at six minutes, so entries expire after fifteen. */
-export class ToolCallBudget {
-  readonly #counts = new Map<string, { count: number; expiresAt: number }>();
+/**
+ * The per-call counts live in the store (tool_call_budgets), so they hold across replicas and restarts.
+ * Calls are capped at six minutes; the retention loop drops ledger rows untouched for two hours.
+ */
+export const TOOL_LEDGER_RETENTION_MS = 2 * 60 * 60_000;
 
-  constructor(private readonly ttlMs = 15 * 60_000, private readonly maxEntries = 20_000) {}
+/** Telnyx call-control ids are short; anything longer is not a call id and gets no budget row. */
+export const MAX_PROVIDER_CALL_ID_LENGTH = 200;
 
-  /** Record one call; false once the tool is over its limit for this phone call. */
-  take(providerCallId: string, tool: VoiceToolName, now = Date.now()): boolean {
-    const key = `${providerCallId}\u0000${tool}`;
-    const current = this.#counts.get(key);
-    if (!current || current.expiresAt <= now) {
-      if (this.#counts.size >= this.maxEntries) this.#prune(now);
-      this.#counts.set(key, { count: 1, expiresAt: now + this.ttlMs });
-      return true;
-    }
-    current.count += 1;
-    return current.count <= TOOL_CALL_LIMITS[tool];
-  }
-
-  #prune(now: number): void {
-    for (const [key, entry] of this.#counts) if (entry.expiresAt <= now) this.#counts.delete(key);
-    if (this.#counts.size >= this.maxEntries) {
-      const oldest = this.#counts.keys().next().value;
-      if (oldest !== undefined) this.#counts.delete(oldest);
-    }
-  }
+/** True while a tool's per-call count (after this call) is inside its budget. */
+export function withinToolBudget(tool: VoiceToolName, count: number): boolean {
+  return count <= TOOL_CALL_LIMITS[tool];
 }
+
+/** Why a tool answered take-a-message instead of running. Logged, never shown to the model. */
+export type ToolLimitReason = "budget" | "budget_unavailable" | "missing_call_id" | "rate_limited" | "deadline";

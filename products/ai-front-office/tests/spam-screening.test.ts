@@ -251,8 +251,9 @@ describe("tool endpoints", () => {
     await new CallService(store, new InMemoryCalendar(), clock, "https://front-office.example")
       .recordStarted({ eventId: "start:robo", tenantId: "demo", providerCallId: "robo", fromNumber: "+15555550177", startedAt: clock.now().toISOString() });
     const body = { provider_call_id: "robo", from_number: "+15555550177", category: "robocall", caller_quote: "This is an important message about your vehicle warranty" };
-    expect((await fetch(`${baseUrl}/tools/mark-spam`, { method: "POST", body: JSON.stringify(body) })).status).toBe(401);
-    expect((await post("/tools/mark-spam", { ...body, category: "customer" })).status).toBe(400);
+    expect(await (await fetch(`${baseUrl}/tools/mark-spam`, { method: "POST", body: JSON.stringify(body) })).json()).toMatchObject({ ok: false, status: "unavailable" });
+    expect(await (await post("/tools/mark-spam", { ...body, category: "customer" })).json()).toMatchObject({ ok: false, status: "unavailable" });
+    expect((await store.getCallByProviderId("robo"))?.billingDisposition).not.toBe("spam_excluded");
     const response = await post("/tools/mark-spam", body);
     expect(response.status).toBe(200);
     expect((await response.json() as { status: string }).status).toBe("marked");

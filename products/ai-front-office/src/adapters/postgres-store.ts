@@ -740,6 +740,36 @@ export class PostgresStore implements Store {
     return result.rowCount ?? 0;
   }
 
+  async incrementToolCallCount(providerCallId: string, tool: string, now: string): Promise<number> {
+    const result = await this.#pool.query(
+      `INSERT INTO tool_call_budgets(provider_call_id, tool, call_count, updated_at) VALUES ($1, $2, 1, $3)
+       ON CONFLICT (provider_call_id, tool) DO UPDATE SET call_count = tool_call_budgets.call_count + 1, updated_at = EXCLUDED.updated_at
+       RETURNING call_count`,
+      [providerCallId, tool, now],
+    );
+    const count = Number(result.rows[0]?.call_count);
+    if (!Number.isInteger(count) || count < 1) throw new Error("Tool budget increment returned no count");
+    return count;
+  }
+
+  async getToolResult(idempotencyKey: string): Promise<string | null> {
+    const result = await this.#pool.query("SELECT result::text AS result FROM tool_results WHERE idempotency_key = $1", [idempotencyKey]);
+    return result.rows[0] ? String(result.rows[0].result) : null;
+  }
+
+  async saveToolResult(idempotencyKey: string, providerCallId: string, value: string, now: string): Promise<void> {
+    await this.#pool.query(
+      "INSERT INTO tool_results(idempotency_key, provider_call_id, result, created_at) VALUES ($1, $2, $3::jsonb, $4) ON CONFLICT (idempotency_key) DO NOTHING",
+      [idempotencyKey, providerCallId, value, now],
+    );
+  }
+
+  async purgeToolLedger(before: string): Promise<number> {
+    const budgets = await this.#pool.query("DELETE FROM tool_call_budgets WHERE updated_at < $1", [before]);
+    const results = await this.#pool.query("DELETE FROM tool_results WHERE created_at < $1", [before]);
+    return (budgets.rowCount ?? 0) + (results.rowCount ?? 0);
+  }
+
   private mapCall(row: Row): CallRecord {
     return {
       id: String(row.id),

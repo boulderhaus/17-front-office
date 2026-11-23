@@ -12,6 +12,7 @@ import { OverageBillingService } from "./application/billing-jobs.js";
 import { createTelemetry } from "./adapters/posthog.js";
 import { systemClock } from "./ports.js";
 import { createRuntime } from "./runtime.js";
+import { TOOL_LEDGER_RETENTION_MS } from "./voice/tool-results.js";
 
 const env = loadEnvironment(process.env);
 const runtime = await createRuntime(env);
@@ -80,6 +81,8 @@ const runWorker = async (): Promise<void> => {
       }
       const purgedWebhooks = await runtime.store.purgeWebhookEvents(new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString());
       if (purgedWebhooks > 0) logger({ level: "info", event: "webhook_retention_cycle", purged: purgedWebhooks });
+      const purgedToolLedger = await runtime.store.purgeToolLedger(new Date(Date.now() - TOOL_LEDGER_RETENTION_MS).toISOString());
+      if (purgedToolLedger > 0) logger({ level: "info", event: "tool_ledger_retention_cycle", purged: purgedToolLedger });
     }
     if (Date.now() >= nextSummaryAt) {
       nextSummaryAt = Date.now() + 60_000;

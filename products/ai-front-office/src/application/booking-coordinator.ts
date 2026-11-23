@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { BookingAttempt, BookingRecord } from "../domain/models.js";
-import type { CalendarPort, Clock, Store } from "../ports.js";
+import type { CalendarPort, CallOptions, Clock, Store } from "../ports.js";
 import { redactError, withRetry } from "./retry.js";
 
 export interface BookSlotInput {
@@ -22,10 +22,15 @@ export class BookingCoordinator {
     private readonly clock: Clock,
   ) {}
 
-  async book(input: BookSlotInput): Promise<BookingRecord> {
+  /**
+   * `options.signal` is the voice tool deadline. Nothing is written once it fires, except the truth about a
+   * calendar write that was already sent: that is recorded as unknown so a retry can never book twice.
+   */
+  async book(input: BookSlotInput, options: CallOptions = {}): Promise<BookingRecord> {
     try {
-      return await this.bookUnderLock(input);
+      return await this.bookUnderLock(input, options.signal);
     } catch (error) {
+      options.signal?.throwIfAborted();
       // Another booking for this shop held the calendar past the wait limit: never fail the
       // caller's tool call; fall back to owner confirmation.
       if (error instanceof Error && error.message.startsWith("Lock wait timed out")) {
@@ -35,10 +40,11 @@ export class BookingCoordinator {
     }
   }
 
-  private async bookUnderLock(input: BookSlotInput): Promise<BookingRecord> {
+  private async bookUnderLock(input: BookSlotInput, signal?: AbortSignal): Promise<BookingRecord> {
     return this.store.withLock(`calendar:${input.tenantId}`, async () => {
       const existing = await this.store.getBookingForCall(input.callId);
       if (existing?.status === "confirmed" || existing?.status === "unknown") return existing;
+      signal?.throwIfAborted();
 
       const started = this.clock.now();
       const start = new Date(input.requestedStart);
@@ -65,13 +71,14 @@ export class BookingCoordinator {
       let created: { status: "confirmed" | "unknown"; providerEventId: string | null } | null = null;
       let createAttempted = false;
       try {
-        const free = await withRetry(() => this.calendar.isFree({ tenantId: input.tenantId, slot }), {
+        const free = await withRetry(() => this.calendar.isFree({ tenantId: input.tenantId, slot }, { signal }), {
           attempts: 1,
           baseDelayMs: 0,
           maxDelayMs: 0,
           timeoutMs: 900,
         });
         if (!free) {
+          signal?.throwIfAborted();
           const conflict = { ...booking, status: "conflict" as const, failureReason: "Requested slot is no longer free", updatedAt: this.clock.now().toISOString() };
           await this.store.saveBooking(conflict);
           await this.safeAudit(input.tenantId, input.callId, started, "failed", { status: "conflict", slot }, conflict.failureReason);
@@ -89,8 +96,9 @@ export class BookingCoordinator {
           problemDescription: input.problemDescription,
           idempotencyKey: `calendar:${input.tenantId}:${input.callId}:${slot.start}`,
         };
+        signal?.throwIfAborted();
         createAttempted = true;
-        created = await withRetry(() => this.calendar.createEvent(attempt), {
+        created = await withRetry(() => this.calendar.createEvent(attempt, { signal }), {
           attempts: 1,
           baseDelayMs: 0,
           maxDelayMs: 0,
@@ -98,7 +106,7 @@ export class BookingCoordinator {
         });
         const createdEvent = created;
         const writeVerified = createdEvent.status === "confirmed" && createdEvent.providerEventId
-          ? await withRetry(() => this.calendar.verifyEvent({ tenantId: input.tenantId, providerEventId: createdEvent.providerEventId!, slot }), {
+          ? await withRetry(() => this.calendar.verifyEvent({ tenantId: input.tenantId, providerEventId: createdEvent.providerEventId!, slot }, { signal }), {
               attempts: 1,
               baseDelayMs: 0,
               maxDelayMs: 0,
@@ -136,6 +144,8 @@ export class BookingCoordinator {
           await this.safeAudit(input.tenantId, input.callId, started, "unknown", { status: "unknown", slot }, uncertain.failureReason);
           return uncertain;
         }
+        // Past the deadline with nothing sent to the calendar: write nothing more.
+        signal?.throwIfAborted();
         const pending = await this.pending(input, redactError(error), started, slot, booking);
         await this.safeAudit(input.tenantId, input.callId, started, "failed", { status: "pending", slot }, pending.failureReason);
         return pending;

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   AvailabilitySlot,
   BookingRecord,
@@ -96,15 +96,31 @@ export class CallService {
     });
   }
 
+  /**
+   * Idempotent on call + payload: a late or repeated identical save returns the first result and writes
+   * nothing. `signal` is the voice tool deadline; nothing is written once it fires.
+   */
   async saveIntake(input: {
     tenantId: string;
     providerCallId: string;
     fromNumber: string;
     fields: Partial<CollectedCallFields>;
     recordingDisclosureDeclined?: boolean;
+    signal?: AbortSignal | undefined;
   }): Promise<{ status: "saved"; missing: string[]; wrap_up: boolean }> {
+    input.signal?.throwIfAborted();
     await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
-    return this.store.withLock(`call:${input.providerCallId}`, () => this.saveIntakeClaimed(input));
+    const key = toolResultKey("save_intake", input.providerCallId, { fields: input.fields, declined: input.recordingDisclosureDeclined ?? null });
+    return this.store.withLock(`call:${input.providerCallId}`, async () => {
+      const stored = await this.store.getToolResult(key);
+      if (stored) {
+        const call = await this.store.getCallByProviderId(input.providerCallId);
+        return { ...(JSON.parse(stored) as { status: "saved"; missing: string[] }), wrap_up: call ? this.wrapUpFor(call) : false };
+      }
+      const result = await this.saveIntakeClaimed(input);
+      await this.store.saveToolResult(key, input.providerCallId, JSON.stringify({ status: result.status, missing: result.missing }), this.clock.now().toISOString());
+      return result;
+    });
   }
 
   /**
@@ -182,6 +198,7 @@ export class CallService {
     };
     // An emergency or a request for a person means this was never spam.
     const call = emergency.emergency || fields.humanRequested ? withoutSpamMark(updated) : updated;
+    input.signal?.throwIfAborted();
     await this.store.saveCall(call);
     if (emergency.emergency) await this.queueHumanHandoffClaimed({ tenantId: input.tenantId, providerCallId: input.providerCallId, fromNumber: call.fromNumber, problemDescription: fields.problemDescription, urgent: emergency });
     const missing = [
@@ -200,7 +217,10 @@ export class CallService {
     providerCallId: string;
     windowStart: string;
     windowEnd: string;
+    signal?: AbortSignal | undefined;
   }): Promise<{ slots: AvailabilitySlot[]; status: "available" | "pending" | "invalid_window"; message: string; spokenSummary: string | null; timezone: string }> {
+    const signal = input.signal;
+    signal?.throwIfAborted();
     const config = await this.store.getConfig(input.tenantId);
     const call = await this.ensureCall(input.tenantId, input.providerCallId, "unknown", this.clock.now().toISOString());
     if (call.emergency?.emergency) return { slots: [], status: "pending", message: "Emergency escalation is active. Do not offer appointments; the owner has been alerted.", spokenSummary: null, timezone: config.timezone };
@@ -226,15 +246,18 @@ export class CallService {
           bookableHours: config.bookableHours,
           minimumLeadTimeMinutes: config.minimumLeadTimeMinutes,
           now: this.clock.now().toISOString(),
-        }),
-        { attempts: 2, baseDelayMs: 50, maxDelayMs: 100, timeoutMs: 2_500 },
+        }, { signal }),
+        { attempts: 2, baseDelayMs: 50, maxDelayMs: 100, timeoutMs: 2_500, shouldRetry: () => !signal?.aborted },
       );
+      // Slots offered after the deadline were never heard by the caller: book_slot must not accept them.
+      signal?.throwIfAborted();
       const spokenSummary = slots.length > 0 ? formatSpokenSlots(slots, config.timezone, this.clock.now()) : null;
       await this.audit(call, "calendar.availability", started, "success", { count: slots.length, offeredStarts: slots.map((slot) => slot.start) }, null);
       return slots.length > 0
         ? { slots, status: "available", message: "Read spokenSummary exactly once, then ask the caller to choose one of these exact slots.", spokenSummary, timezone: config.timezone }
         : { slots: [], status: "pending", message: "No confirmed slot is available. Tell the caller the owner will follow up.", spokenSummary: null, timezone: config.timezone };
     } catch (error) {
+      signal?.throwIfAborted();
       await this.audit(call, "calendar.availability", started, "failed", {}, redactError(error));
       return { slots: [], status: "pending", message: "The calendar could not be confirmed. Tell the caller the owner will follow up.", spokenSummary: null, timezone: config.timezone };
     }
@@ -300,15 +323,31 @@ export class CallService {
     problemDescription: string;
     explicitConfirmation: boolean;
     diagnosticFeeAccepted: boolean;
+    /** The voice tool deadline: nothing is written once it fires, except the truth about a calendar write already sent. */
+    signal?: AbortSignal | undefined;
   }): Promise<{ status: "confirmed" | "pending" | "conflict" | "unknown"; message: string }> {
+    input.signal?.throwIfAborted();
     await this.ensureCall(input.tenantId, input.providerCallId, input.callbackNumber, this.clock.now().toISOString());
     return this.store.withLock(`call:${input.providerCallId}`, () => this.bookConfirmedSlotClaimed(input));
   }
 
+  /**
+   * Idempotent on call + slot once a booking was attempted (calendar write or owner-confirmation queue): a late
+   * or repeated book_slot for the same slot returns the first result and writes nothing, so it can never
+   * double-book. Validation refusals are not stored, so the caller can still confirm and try again.
+   */
   private async bookConfirmedSlotClaimed(input: Parameters<CallService["bookConfirmedSlot"]>[0]): Promise<{ status: "confirmed" | "pending" | "conflict" | "unknown"; message: string }> {
+    const key = toolResultKey("book_slot", input.providerCallId, Number.isFinite(Date.parse(input.slotStart)) ? new Date(input.slotStart).toISOString() : input.slotStart);
+    const stored = await this.store.getToolResult(key);
+    if (stored) return JSON.parse(stored) as { status: "confirmed" | "pending" | "conflict" | "unknown"; message: string };
+    const remember = async (result: { status: "confirmed" | "pending" | "conflict" | "unknown"; message: string }) => {
+      await this.store.saveToolResult(key, input.providerCallId, JSON.stringify(result), this.clock.now().toISOString());
+      return result;
+    };
     const config = await this.store.getConfig(input.tenantId);
     let call = await this.store.getCallByProviderId(input.providerCallId);
     if (!call || call.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
+    input.signal?.throwIfAborted();
     call = {
       ...call,
       fields: {
@@ -363,6 +402,7 @@ export class CallService {
       fields: { ...call.fields, requestedStart: input.slotStart, explicitSlotConfirmation: input.explicitConfirmation },
       updatedAt: this.clock.now().toISOString(),
     };
+    input.signal?.throwIfAborted();
     await this.store.saveCall(call);
     if (config.requireDiagnosticFeeAcceptance && config.priceSnippets.length === 0) {
       await this.queuePendingBooking(call, input.slotStart, config, "No owner-approved diagnostic fee is configured");
@@ -375,7 +415,7 @@ export class CallService {
     if (config.bookingMode === "confirm") {
       await this.queuePendingBooking(call, input.slotStart, config, "Owner confirmation mode is active");
       await this.ensureCallbackTask(call, config, "Confirm requested appointment", false);
-      return { status: "pending", message: "The requested time is saved for owner confirmation. Do not say it is booked." };
+      return remember({ status: "pending", message: "The requested time is saved for owner confirmation. Do not say it is booked." });
     }
     const booking = await this.#booking.book({
       tenantId: input.tenantId,
@@ -387,7 +427,7 @@ export class CallService {
       callbackNumber: input.callbackNumber,
       address: input.address,
       problemDescription: input.problemDescription,
-    });
+    }, { signal: input.signal });
     const message = booking.status === "confirmed"
       ? `The appointment is confirmed for ${formatLocalDateTime(booking.requestedStart!, config.timezone)}.`
       : booking.status === "conflict"
@@ -396,7 +436,10 @@ export class CallService {
     if (booking.status === "confirmed" && booking.writeVerifiedAt) {
       await this.completeCallbackTask(call.id, "verified_booking");
     }
-    return { status: booking.status === "checking" ? "pending" : booking.status, message };
+    const result = { status: booking.status === "checking" ? "pending" as const : booking.status, message };
+    // A calendar write was attempted: record the outcome even past the deadline, so a write that landed late is
+    // reported truthfully next time and never repeated. Nothing reached the calendar on "pending", so a retry may try again.
+    return booking.status === "pending" || booking.status === "checking" ? result : remember(result);
   }
 
   async queueHumanHandoff(input: {
@@ -994,4 +1037,21 @@ export function callerSpeech(transcript: string | null): string {
     if (speaker === "caller") lines.push(line.trim());
   }
   return lines.filter(Boolean).join("\n");
+}
+
+/** Idempotency key for a voice-tool write: tool + provider call + a hash of what makes the write unique. */
+function toolResultKey(tool: string, providerCallId: string, payload: unknown): string {
+  return `${tool}:${providerCallId}:${createHash("sha256").update(canonicalJson(payload)).digest("hex")}`;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }

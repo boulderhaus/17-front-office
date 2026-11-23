@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import type { CalendarPort, NotificationPort, Store } from "../ports.js";
+import type { CalendarPort, CallOptions, NotificationPort, Store } from "../ports.js";
 import type {
   AvailabilitySlot,
   BookingAttempt,
@@ -63,6 +63,8 @@ export class InMemoryStore implements Store {
   readonly providerRoutes = new Map<string, ProviderRoute>();
   readonly subscriptions = new Map<string, SubscriptionRecord>();
   readonly retentionFailures = new Map<string, string>();
+  readonly toolCallCounts = new Map<string, { count: number; updatedAt: string }>();
+  readonly toolResults = new Map<string, { result: string; createdAt: string }>();
   readonly #mutex = new KeyedMutex();
 
   async ping(): Promise<void> {}
@@ -442,6 +444,36 @@ export class InMemoryStore implements Store {
     }
     return purged;
   }
+
+  async incrementToolCallCount(providerCallId: string, tool: string, now: string): Promise<number> {
+    const key = `${providerCallId}\u0000${tool}`;
+    const count = (this.toolCallCounts.get(key)?.count ?? 0) + 1;
+    this.toolCallCounts.set(key, { count, updatedAt: now });
+    return count;
+  }
+
+  async getToolResult(idempotencyKey: string): Promise<string | null> {
+    return this.toolResults.get(idempotencyKey)?.result ?? null;
+  }
+
+  async saveToolResult(idempotencyKey: string, _providerCallId: string, result: string, now: string): Promise<void> {
+    if (!this.toolResults.has(idempotencyKey)) this.toolResults.set(idempotencyKey, { result, createdAt: now });
+  }
+
+  async purgeToolLedger(before: string): Promise<number> {
+    let purged = 0;
+    for (const [key, entry] of this.toolCallCounts) {
+      if (Date.parse(entry.updatedAt) >= Date.parse(before)) continue;
+      this.toolCallCounts.delete(key);
+      purged += 1;
+    }
+    for (const [key, entry] of this.toolResults) {
+      if (Date.parse(entry.createdAt) >= Date.parse(before)) continue;
+      this.toolResults.delete(key);
+      purged += 1;
+    }
+    return purged;
+  }
 }
 
 export class InMemoryCalendar implements CalendarPort {
@@ -458,7 +490,8 @@ export class InMemoryCalendar implements CalendarPort {
     bookableHours: BusinessConfig["bookableHours"];
     minimumLeadTimeMinutes: number;
     now: string;
-  }): Promise<AvailabilitySlot[]> {
+  }, options?: CallOptions): Promise<AvailabilitySlot[]> {
+    options?.signal?.throwIfAborted();
     if (this.failAvailability) throw new Error("Calendar unavailable");
     const earliest = Date.parse(input.now) + input.minimumLeadTimeMinutes * 60_000;
     const start = new Date(Math.max(Date.parse(input.windowStart), earliest));
@@ -470,14 +503,16 @@ export class InMemoryCalendar implements CalendarPort {
     return available ? [slot] : [];
   }
 
-  async isFree(input: { tenantId: string; slot: AvailabilitySlot }): Promise<boolean> {
+  async isFree(input: { tenantId: string; slot: AvailabilitySlot }, options?: CallOptions): Promise<boolean> {
+    options?.signal?.throwIfAborted();
     if (this.failAvailability) throw new Error("Calendar unavailable");
     const start = Date.parse(input.slot.start);
     const end = Date.parse(input.slot.end);
     return !this.events.some((event) => start < Date.parse(event.slot.end) && end > Date.parse(event.slot.start));
   }
 
-  async createEvent(attempt: BookingAttempt): Promise<{ status: "confirmed" | "unknown"; providerEventId: string | null }> {
+  async createEvent(attempt: BookingAttempt, options?: CallOptions): Promise<{ status: "confirmed" | "unknown"; providerEventId: string | null }> {
+    options?.signal?.throwIfAborted();
     if (this.failCreate === "known") throw new Error("Calendar rejected event");
     if (this.failCreate === "unknown") return { status: "unknown", providerEventId: null };
     if (!(await this.isFree({ tenantId: attempt.tenantId, slot: attempt.slot }))) throw new Error("Calendar conflict");
@@ -486,7 +521,8 @@ export class InMemoryCalendar implements CalendarPort {
     return { status: "confirmed", providerEventId: eventId };
   }
 
-  async verifyEvent(input: { providerEventId: string; slot: AvailabilitySlot }): Promise<boolean> {
+  async verifyEvent(input: { providerEventId: string; slot: AvailabilitySlot }, options?: CallOptions): Promise<boolean> {
+    options?.signal?.throwIfAborted();
     if (this.failVerify) return false;
     return this.events.some((event) => event.eventId === input.providerEventId && event.slot.start === input.slot.start && event.slot.end === input.slot.end);
   }

@@ -92,6 +92,19 @@ export interface Store {
   saveSubscription(subscription: SubscriptionRecord): Promise<void>;
   getSubscription(tenantId: string): Promise<SubscriptionRecord | null>;
   purgeWebhookEvents(before: string): Promise<number>;
+  /** Add one to this phone call's count for a voice tool and return the new count. Atomic across replicas. */
+  incrementToolCallCount(providerCallId: string, tool: string, now: string): Promise<number>;
+  /** The stored result of a completed voice-tool write, by idempotency key. */
+  getToolResult(idempotencyKey: string): Promise<string | null>;
+  /** Store a voice-tool write's result once; a later save for the same key is ignored. */
+  saveToolResult(idempotencyKey: string, providerCallId: string, result: string, now: string): Promise<void>;
+  /** Drop tool budgets and results last touched before `before`. */
+  purgeToolLedger(before: string): Promise<number>;
+}
+
+/** Lets a voice tool's deadline cancel provider HTTP calls still in flight. */
+export interface CallOptions {
+  signal?: AbortSignal | undefined;
 }
 
 export interface CalendarPort {
@@ -104,10 +117,10 @@ export interface CalendarPort {
     bookableHours: BusinessConfig["bookableHours"];
     minimumLeadTimeMinutes: number;
     now: string;
-  }): Promise<AvailabilitySlot[]>;
-  isFree(input: { tenantId: string; slot: AvailabilitySlot }): Promise<boolean>;
-  createEvent(attempt: BookingAttempt): Promise<{ status: "confirmed" | "unknown"; providerEventId: string | null }>;
-  verifyEvent(input: { tenantId: string; providerEventId: string; slot: AvailabilitySlot }): Promise<boolean>;
+  }, options?: CallOptions): Promise<AvailabilitySlot[]>;
+  isFree(input: { tenantId: string; slot: AvailabilitySlot }, options?: CallOptions): Promise<boolean>;
+  createEvent(attempt: BookingAttempt, options?: CallOptions): Promise<{ status: "confirmed" | "unknown"; providerEventId: string | null }>;
+  verifyEvent(input: { tenantId: string; providerEventId: string; slot: AvailabilitySlot }, options?: CallOptions): Promise<boolean>;
   deleteEvent(input: { tenantId: string; providerEventId: string }): Promise<void>;
 }
 

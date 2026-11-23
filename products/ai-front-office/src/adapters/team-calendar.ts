@@ -1,5 +1,5 @@
 import type { AvailabilitySlot, BookingAttempt } from "../domain/models.js";
-import type { CalendarPort, Store } from "../ports.js";
+import type { CalendarPort, CallOptions, Store } from "../ports.js";
 
 /** BookingCoordinator owns the tenant-wide lock; assignment occurs inside it. */
 export class TeamCalendar implements CalendarPort {
@@ -12,46 +12,46 @@ export class TeamCalendar implements CalendarPort {
       .map((member) => ({ ...member, calendar: this.forAccount(member.accountId, accounts.find((account) => account.id === member.accountId)?.role !== "member") }));
   }
 
-  async listAvailableSlots(input: Parameters<CalendarPort["listAvailableSlots"]>[0]): Promise<AvailabilitySlot[]> {
+  async listAvailableSlots(input: Parameters<CalendarPort["listAvailableSlots"]>[0], options?: CallOptions): Promise<AvailabilitySlot[]> {
     const config = await this.store.getConfig(input.tenantId);
-    if (!config.schedulingCalendars?.length) return this.solo.listAvailableSlots(input);
+    if (!config.schedulingCalendars?.length) return this.solo.listAvailableSlots(input, options);
     const members = await this.members(input.tenantId);
-    const results = await Promise.allSettled(members.map((member) => member.calendar.listAvailableSlots({ ...input, bookableHours: member.hours })));
+    const results = await Promise.allSettled(members.map((member) => member.calendar.listAvailableSlots({ ...input, bookableHours: member.hours }, options)));
     const successful = results.filter((result): result is PromiseFulfilledResult<AvailabilitySlot[]> => result.status === "fulfilled");
     if (!successful.length) throw new Error("No connected teammate calendar is available");
     return [...new Map(successful.flatMap((result) => result.value).map((slot) => [slot.start, slot])).values()].sort((a, b) => a.start.localeCompare(b.start)).slice(0, 3);
   }
 
-  async isFree(input: Parameters<CalendarPort["isFree"]>[0]): Promise<boolean> {
+  async isFree(input: Parameters<CalendarPort["isFree"]>[0], options?: CallOptions): Promise<boolean> {
     const config = await this.store.getConfig(input.tenantId);
-    if (!config.schedulingCalendars?.length) return this.solo.isFree(input);
-    return (await this.availableMembers(input)).length > 0;
+    if (!config.schedulingCalendars?.length) return this.solo.isFree(input, options);
+    return (await this.availableMembers(input, options)).length > 0;
   }
 
-  private async availableMembers(input: { tenantId: string; slot: AvailabilitySlot }) {
+  private async availableMembers(input: { tenantId: string; slot: AvailabilitySlot }, options?: CallOptions) {
     const config = await this.store.getConfig(input.tenantId);
     const members = await this.members(input.tenantId);
     const results = await Promise.all(members.map(async (member) => {
       try {
         // Use each member's hours as well as free/busy. Never assign outside their availability.
-        const slots = await member.calendar.listAvailableSlots({ tenantId: input.tenantId, windowStart: input.slot.start, windowEnd: input.slot.end, durationMinutes: (Date.parse(input.slot.end) - Date.parse(input.slot.start)) / 60_000, timezone: config.timezone, bookableHours: member.hours, minimumLeadTimeMinutes: 0, now: input.slot.start });
+        const slots = await member.calendar.listAvailableSlots({ tenantId: input.tenantId, windowStart: input.slot.start, windowEnd: input.slot.end, durationMinutes: (Date.parse(input.slot.end) - Date.parse(input.slot.start)) / 60_000, timezone: config.timezone, bookableHours: member.hours, minimumLeadTimeMinutes: 0, now: input.slot.start }, options);
         return slots.some((slot) => slot.start === input.slot.start && slot.end === input.slot.end) ? member : null;
       } catch { return null; }
     }));
     return results.filter((member): member is NonNullable<typeof member> => member !== null);
   }
 
-  async createEvent(attempt: BookingAttempt): Promise<{ status: "confirmed" | "unknown"; providerEventId: string | null }> {
+  async createEvent(attempt: BookingAttempt, options?: CallOptions): Promise<{ status: "confirmed" | "unknown"; providerEventId: string | null }> {
     const config = await this.store.getConfig(attempt.tenantId);
-    if (!config.schedulingCalendars?.length) return this.solo.createEvent(attempt);
-    const members = await this.availableMembers(attempt);
+    if (!config.schedulingCalendars?.length) return this.solo.createEvent(attempt, options);
+    const members = await this.availableMembers(attempt, options);
     if (!members.length) throw new Error("No teammate remains available for the selected time");
     const last = await this.store.getIntegrationSecret(attempt.tenantId, "scheduling", "last_assigned_account");
     const roster = (config.schedulingCalendars ?? []).filter((member) => member.enabled).map((member) => member.accountId);
     const ordered = [...roster.slice(roster.indexOf(last ?? "") + 1), ...roster.slice(0, roster.indexOf(last ?? "") + 1)];
     const chosen = ordered.map((id) => members.find((member) => member.accountId === id)).find(Boolean) ?? members[0]!;
     // Never try a second calendar after an ambiguous write: that would create two jobs.
-    const result = await chosen.calendar.createEvent({ ...attempt, idempotencyKey: `${attempt.idempotencyKey}:${chosen.accountId}` });
+    const result = await chosen.calendar.createEvent({ ...attempt, idempotencyKey: `${attempt.idempotencyKey}:${chosen.accountId}` }, options);
     if (!result.providerEventId) return result;
     await this.store.saveIntegrationSecret(attempt.tenantId, "scheduling", "last_assigned_account", chosen.accountId);
     return { ...result, providerEventId: `fo-team:${Buffer.from(JSON.stringify({ accountId: chosen.accountId, eventId: result.providerEventId })).toString("base64url")}` };
@@ -69,9 +69,9 @@ export class TeamCalendar implements CalendarPort {
     return { calendar: this.forAccount(account.id, account.role !== "member"), eventId: value.eventId };
   }
 
-  async verifyEvent(input: Parameters<CalendarPort["verifyEvent"]>[0]): Promise<boolean> {
+  async verifyEvent(input: Parameters<CalendarPort["verifyEvent"]>[0], options?: CallOptions): Promise<boolean> {
     const target = await this.eventCalendar(input.tenantId, input.providerEventId);
-    return target.calendar.verifyEvent({ ...input, providerEventId: target.eventId });
+    return target.calendar.verifyEvent({ ...input, providerEventId: target.eventId }, options);
   }
 
   async deleteEvent(input: Parameters<CalendarPort["deleteEvent"]>[0]): Promise<void> {
