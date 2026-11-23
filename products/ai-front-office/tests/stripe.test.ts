@@ -1,6 +1,11 @@
 import { createHmac } from "node:crypto";
+import { createServer } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { StripeBillingClient, subscriptionFromStripeEvent, verifyStripeWebhook } from "../src/adapters/stripe.js";
+import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
+import { demoEnvironment } from "../src/config/environment.js";
+import { createDemoConfig } from "../src/domain/config.js";
+import { createRequestHandler } from "../src/http/app.js";
 
 describe("Stripe billing boundary", () => {
   it("creates a cancellation-enabled portal for the server-selected customer only", async () => {
@@ -79,6 +84,78 @@ describe("Stripe billing boundary", () => {
       data: { object: { id: "sub_synthetic", status: "past_due", metadata: { tenant_id: "shop_synthetic" } } },
     }, existing, "2026-11-21T19:00:00.000Z");
     expect(older).toEqual(existing);
+  });
+
+  it.each(["active", "canceled"] as const)("does not overwrite %s access with a delayed checkout receipt", (status) => {
+    const existing = {
+      tenantId: "shop_synthetic", providerCustomerId: "cus_synthetic", providerSubscriptionId: "sub_synthetic",
+      status, currentPeriodEnd: "2026-12-21T00:00:00.000Z", providerEventCreatedAt: "2026-11-21T18:00:00.000Z",
+      createdAt: "2026-11-01T00:00:00.000Z", updatedAt: "2026-11-21T18:00:00.000Z",
+    };
+    const receipt = {
+      id: "evt_checkout_delayed", type: "checkout.session.completed", created: Date.parse("2026-11-21T18:00:01.000Z") / 1_000,
+      data: { object: { customer: "cus_synthetic", subscription: "sub_synthetic", client_reference_id: "shop_synthetic" } },
+    };
+    expect(subscriptionFromStripeEvent(receipt, existing, "2026-11-21T18:00:02.000Z")).toBeNull();
+  });
+
+  it("does not treat checkout completion alone as authoritative subscription state", () => {
+    expect(subscriptionFromStripeEvent({
+      id: "evt_checkout_first", type: "checkout.session.completed",
+      data: { object: { customer: "cus_synthetic", subscription: "sub_synthetic", client_reference_id: "shop_synthetic" } },
+    }, null, "2026-11-21T18:00:00.000Z")).toBeNull();
+  });
+
+  it("preserves signed subscription lifecycle state across delayed and replayed checkout webhooks", async () => {
+    const secret = "whsec_synthetic_abcdefghijklmnopqrstuvwxyz";
+    const now = new Date("2026-11-21T18:00:00.000Z");
+    const timestamp = String(now.getTime() / 1_000);
+    const store = new InMemoryStore();
+    await store.saveConfig(createDemoConfig());
+    const server = createServer(createRequestHandler({
+      env: demoEnvironment({ STRIPE_WEBHOOK_SECRET: secret, STRIPE_SECRET_KEY: "sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", STRIPE_PRICE_ID: "price_synthetic" }), store, calendar: new InMemoryCalendar(),
+      clock: { now: () => now }, integrations: {}, logger: () => undefined,
+    }));
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Test server did not bind");
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      const signup = await fetch(`${baseUrl}/signup`, {
+        method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ businessName: "Synthetic Heating", email: "billing@synthetic.example", password: "synthetic-password-42", consent: "yes" }),
+      });
+      expect(signup.status).toBe(303);
+      const account = await store.getOwnerAccountByEmail("billing@synthetic.example");
+      expect(account).not.toBeNull();
+      const tenantId = account!.tenantId;
+      const postEvent = (event: object, forged = false) => {
+        const raw = JSON.stringify(event);
+        const signature = createHmac("sha256", secret).update(`${timestamp}.${raw}`).digest("hex");
+        return fetch(`${baseUrl}/webhooks/stripe`, {
+          method: "POST", headers: { "content-type": "application/json", "stripe-signature": `t=${timestamp},v1=${forged ? "forged" : signature}` }, body: raw,
+        });
+      };
+      const subscriptionObject = { id: "sub_synthetic", customer: "cus_synthetic", status: "active", metadata: { tenant_id: tenantId } };
+      const active = { id: "evt_active", type: "customer.subscription.updated", created: Number(timestamp), data: { object: subscriptionObject } };
+      expect((await postEvent(active, true)).status).toBe(401);
+      expect(await store.getSubscription(tenantId)).toBeNull();
+      expect((await postEvent(active)).status).toBe(200);
+      expect((await store.getSubscription(tenantId))?.status).toBe("active");
+      const receipt = { id: "evt_receipt", type: "checkout.session.completed", created: Number(timestamp) + 1,
+        data: { object: { customer: "cus_synthetic", subscription: "sub_synthetic", client_reference_id: tenantId } } };
+      expect((await postEvent(receipt)).status).toBe(200);
+      expect((await store.getSubscription(tenantId))?.status).toBe("active");
+      const cancel = { id: "evt_cancel", type: "customer.subscription.deleted", created: Number(timestamp) + 2,
+        data: { object: { ...subscriptionObject, status: "canceled" } } };
+      expect((await postEvent(cancel)).status).toBe(200);
+      const replay = await postEvent(receipt);
+      expect(await replay.json()).toEqual({ received: true, duplicate: true });
+      expect((await store.getSubscription(tenantId))?.status).toBe("canceled");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("rejects a forged or expired signature", () => {

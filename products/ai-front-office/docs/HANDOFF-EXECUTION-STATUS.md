@@ -55,21 +55,36 @@ Source: Brock-supplied `AI-Front-Office-Codex-Handoff.md`, read in full on 2026-
 
 ## 5. Verification and independent review
 
-- Deployed and pushed commit `cae881b2`. Production readiness returns 200; old `/start` links return 303 to `/signup`; the yellow hero, explicit paid CTA, varied lower layout and centered FAQ are present on the live URL.
+- Website source through `336c0255` was merged into main by PR #1. The yellow hero, explicit paid CTA, varied lower layout, centered FAQ and restored five-item mascot receipt are live. The final closeout commit adds the billing regression below; its exact main/deployment SHAs are supplied in the chat handoff rather than inferred from this document.
 - Commercial activation still returns 503, `provider_test`, with two reported blocking checks. The readiness report is not a substitute for validating the external credentials.
-- Applying the latest tools to the existing test assistant was blocked: Telnyx rejected the runtime API key with HTTP 401 on the initial read. No assistant update was applied. The key is present, has no surrounding whitespace/quotes, and has the expected prefix; validation/replacement in the protected runtime store is required. Do not paste the key into chat or source control.
+- The previously failing Telnyx key was replaced in the protected runtime. Assistant reads and updates now return HTTP 200; independent revocation of the old key was not checked. The latest test-assistant configuration was applied and read back: seven named webhooks (including `get_approved_answer`), native transfer and hangup; Deepgram Flux, aicoustics suppression and full conversation history. Existing voice settings were unchanged. The pre-update assistant response is backed up in the encrypted integration-secret store under `assistant_backup_pre_handoff_20261122`.
+- Assistant initialization, TeXML status and messaging callbacks were read back at the existing Railway URL's `/webhooks/telnyx`; all seven tool URLs point to that same app. The one configured number is connected to the assistant's TeXML application. There is only one provider route, for the operator test workspace; per-customer assistant/number provisioning remains manual.
+- Critical recording gap: the provider still reports `recording_settings.enabled=true`. `RECORDING_CONSENT_APPROVED=false` blocks commercial activation but does not itself disable provider recording. Prior-consent behavior has not been proven. Do not open this setup to unconsented customer traffic.
+- A dedicated Google project and calendar-agent OAuth client were created in the requested organization account. Calendar API is enabled; only `calendar.events` and `calendar.freebusy` were declared. Branding uses the approved launch domain. Consent remains External/Testing and is not verified. New credentials are staged in protected Railway variables `GOOGLE_CLIENT_ID_NEXT` and `GOOGLE_CLIENT_SECRET_NEXT`; the current active client remains unchanged to avoid invalidating existing refresh tokens. A synthetic invalid-refresh-token probe returned `invalid_grant`, not `invalid_client`; this checks credential recognition, not calendar authorization.
+- The approved custom hostname is registered in Railway but is not live: DNS still returned NXDOMAIN. Namecheap requires a CNAME named `frontoffice` pointing to `g9dz19pg.up.railway.app`. The in-app Browser was not signed into Namecheap, so no DNS records were changed. Domain/TLS/ownership verification, OAuth publication/review and a fresh calendar grant remain pending.
+- Stripe is live. All three configured prices were read back active, USD/monthly, at 4900/500/1000 cents. The base price has zero subscriptions. No real payment, checkout completion or cancellation was performed. The restricted runtime key cannot read webhook configuration (HTTP 403 `more_permissions_required`); the four snapshot events are supported by the prior Workbench screenshots, not a fresh API readback.
+- Fixed a reproduced billing bug: a delayed checkout receipt could change active or canceled subscription state to `incomplete`. Non-subscription events now produce no subscription write. Synthetic HTTP coverage includes signup, forged-signature refusal, a signed active update, delayed checkout, cancellation and checkout replay; this is not a real Stripe payment test.
 
-- 91 tests passed with the disposable PostgreSQL integration enabled; TypeScript build passed; 15/15 local launch simulations passed. Simulations are not live provider proof.
+- Latest closeout run: 94 tests passed, one PostgreSQL integration test skipped; TypeScript build and 15/15 local launch simulations passed. An earlier full run passed 91 tests with disposable PostgreSQL enabled. No production database was used for tests. Simulations are not live provider proof.
 - All migrations applied successfully to an empty PostgreSQL 17 database and reran without reapplication.
 - Mobile landing and simplified signup inspected in the in-app Browser. No Chrome access used.
 - Gemini 3.1 Pro reviewed selected new source files, not the entire repository. Findings covered synchronization races, rollback uncertainty, phone normalization, invite spam, malformed event IDs and partial invite acceptance. Concrete fixes were added; rollback during total DB outage remains a fail-closed incident requiring reconciliation.
 - Claude review unavailable: CLI returned HTTP 400, “Credit balance is too low.” No Claude approval claimed.
 - Grok authored the supplied handoff; no separate completed code review by Grok is claimed.
 
+## 6. Unresolved billing and cutover risks
+
+- Subscription updates still trust snapshots rather than reconciling current provider state. Same-second subscription events/replays and processing-before-deduplication need an idempotent, tenant-serialized design; the checkout fix above does not solve these cases.
+- Period-end parsing still reads only subscription-level `current_period_end`. Current Stripe API versions moved periods to subscription items; select the configured base-price item's period and add realistic API-version fixtures before relying on renewal dates.
+- Signed subscription events are not yet strictly bound to the configured Front Office base price and existing customer/subscription identity. This matters because the Stripe account contains unrelated products. Checkout retries also use a new idempotency key per request, so durable session reuse remains open.
+- The production database contains one configured operator test workspace, no owner/member accounts and no subscription rows. There are no onboarded customer tenants; external carrier forwarding has not been independently audited.
+- Effective flags remain provider-test=true, messaging-approved=false, recording-approved=false, demo=false, founder-welcome=false (default/unset). The existing live-provider proof timestamp is set but does not certify the newly applied assistant configuration.
+- Railway service source has no GitHub repo or image configured. Deploys are manual CLI uploads; pushing main does not deploy. PostgreSQL migrations run at container startup before the HTTP server. No down-migration/automatic database restore is supplied.
+
 ## Next release order
 
-1. Deploy tested source without changing provider-test/commercial approval flags.
-2. Apply and inspect latest assistant tool configuration on the consenting test line only.
+1. Verify the final source/deployment identifiers supplied in the chat handoff; preserve provider-test/commercial approval flags.
+2. Latest assistant config is applied and inspected; run real calls only with consenting test participants.
 3. Close speech-output enforcement and minimal-context gaps; run the full live adversarial/smoke matrix.
 4. Verify Google booking, SMS delivery, checkout, webhook state, cancellation and per-shop routing.
 5. Implement safe optional self-call, subscription-cycle overage billing and full offboarding; prove mobile setup time.
