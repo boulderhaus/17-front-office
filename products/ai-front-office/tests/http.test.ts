@@ -54,6 +54,13 @@ describe("HTTP boundary", () => {
     expect(statuses[10]).toBe(429);
   });
 
+  it("makes no spam-exclusion promise until a real spam signal exists", async () => {
+    for (const path of ["/", "/signup", "/terms", "/privacy", "/demo"]) {
+      const html = (await (await fetch(`${baseUrl}${path}`)).text()).toLowerCase();
+      expect(html, path).not.toMatch(/spam minutes don|spam doesn|spam is excluded|provider-classified spam/);
+    }
+  });
+
   it("lets billing forms redirect to Stripe without loosening other CSP directives", async () => {
     const csp = (await fetch(`${baseUrl}/signup`)).headers.get("content-security-policy") ?? "";
     expect(csp).toContain("form-action 'self' https://checkout.stripe.com https://billing.stripe.com");

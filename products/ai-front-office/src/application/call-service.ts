@@ -405,7 +405,8 @@ export class CallService {
       call.emergency,
       triageEmergency(rawSafetyText, config, input.llmEmergencyScore, input.llmEmergencyReason),
     );
-    const spamExcluded = call.billingDisposition === "spam_excluded" || input.isSpam === true;
+    // An emergency is never dropped as spam, whatever the classifier said.
+    const spamExcluded = !emergency.emergency && (call.billingDisposition === "spam_excluded" || input.isSpam === true);
     call = {
       ...call,
       fromNumber: call.fromNumber === "unknown" && isAllowedCustomerNumber(input.fromNumber) ? input.fromNumber : call.fromNumber,

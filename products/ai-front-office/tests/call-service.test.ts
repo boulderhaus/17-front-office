@@ -309,6 +309,13 @@ describe("call outcomes", () => {
     expect(call.emergency?.severity).toBe("life_safety");
   });
 
+  it("never drops an emergency as spam", async () => {
+    await start("spam-emergency");
+    const call = await service.finalize({ ...summary("spam-emergency", { problemDescription: "Unknown" }), transcript: "Caller: I smell gas in the basement", isSpam: true });
+    expect(call.outcome).toBe("handoff_queued");
+    expect(call.emergency?.severity).toBe("life_safety");
+  });
+
   it("deletes expired call data and dependent records", async () => {
     await start("retention");
     const call = await service.finalize(summary("retention"));
