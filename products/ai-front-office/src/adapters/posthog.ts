@@ -127,6 +127,9 @@ export function createTelemetry(env: Pick<Environment, "POSTHOG_KEY" | "POSTHOG_
   return {
     enabled: true,
     capture(event, distinctId, tenantId, properties = {}) {
+      // Only opaque ids ever become a PostHog identity.
+      const opaque = (value: string | null | undefined) => typeof value === "string" && /^[A-Za-z0-9_:.-]{1,80}$/.test(value) && !looksLikeContactDetail(value);
+      if (!opaque(distinctId) || (tenantId && !opaque(tenantId))) return;
       client.capture({
         distinctId,
         event,

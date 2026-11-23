@@ -81,7 +81,19 @@ export async function proxyToPostHog(
   } catch {
     throw new HttpError(502, "Analytics upstream unavailable");
   }
-  const payload = Buffer.from(await upstream.arrayBuffer());
+  // Cap what we buffer from upstream too; PostHog's scripts are well under this.
+  const declared = Number(upstream.headers.get("content-length") ?? 0);
+  if (declared > MAX_PROXY_BODY_BYTES) throw new HttpError(502, "Analytics upstream response too large");
+  const chunks: Buffer[] = [];
+  let received = 0;
+  if (upstream.body) {
+    for await (const chunk of upstream.body as unknown as AsyncIterable<Uint8Array>) {
+      received += chunk.byteLength;
+      if (received > MAX_PROXY_BODY_BYTES) throw new HttpError(502, "Analytics upstream response too large");
+      chunks.push(Buffer.from(chunk));
+    }
+  }
+  const payload = Buffer.concat(chunks);
   const responseHeaders: Record<string, string | number> = { "content-length": payload.length };
   for (const name of FORWARDED_RESPONSE_HEADERS) {
     const value = upstream.headers.get(name);
