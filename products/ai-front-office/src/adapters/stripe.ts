@@ -16,6 +16,8 @@ export interface StripePrices {
   pro?: string;
   team?: string;
   fleet?: string;
+  /** Older prices still on live subscriptions (e.g. STRIPE_PRICE_ID_PLUS once STRIPE_PRICE_ID_PRO is set): recognized, never sold. */
+  legacy?: string[];
   dailySms?: string;
   realtimeSms?: string;
 }
@@ -46,7 +48,7 @@ export class StripeBillingClient {
   }
 
   private planPrices(): string[] {
-    return [this.prices.base, this.prices.pro, this.prices.team, this.prices.fleet].filter((value): value is string => Boolean(value));
+    return [this.prices.base, this.prices.pro, this.prices.team, this.prices.fleet, ...(this.prices.legacy ?? [])].filter((value): value is string => Boolean(value));
   }
 
   /** True when a subscription's prices include one of our plans (not just an add-on or a stranger's price). */
@@ -162,13 +164,18 @@ export class StripeBillingClient {
       target = intent ? { payment_intent: intent } : charge ? { charge } : null;
     }
     if (!target) throw new Error("The first invoice has no card payment to refund");
+    // A refund made by an earlier attempt (even past the 24-hour idempotency window) is returned, never repeated.
+    const query = "charge" in target ? `charge=${encodeURIComponent(target.charge)}` : `payment_intent=${encodeURIComponent(target.payment_intent)}`;
+    const earlier = await this.get(`refunds?${query}&limit=100`) as { data?: Array<{ id?: string; amount?: number; status?: string; metadata?: Record<string, string> }> };
+    const made = earlier.data?.find((item) => item.metadata?.front_office === "lead_guarantee" && item.metadata?.tenant_id === input.tenantId && item.status !== "failed" && item.status !== "canceled");
+    if (made?.id) return { refundId: made.id, amountCents: made.amount ?? first.amount_paid ?? 0, invoiceId: first.id };
     const refund = await this.post("refunds", new URLSearchParams({
       ...target,
       reason: "requested_by_customer",
       "metadata[tenant_id]": input.tenantId,
       "metadata[front_office]": "lead_guarantee",
       "metadata[invoice_id]": first.id,
-    }), `fo-lead-guarantee:${input.tenantId}`);
+    }), `lead-refund:${input.tenantId}`);
     if (!refund.ok || typeof refund.payload.id !== "string") throw new Error(`Stripe refund failed with HTTP ${refund.status}${refund.payload.error?.message ? `: ${refund.payload.error.message}` : ""}`);
     return { refundId: refund.payload.id, amountCents: typeof refund.payload.amount === "number" ? refund.payload.amount : first.amount_paid ?? 0, invoiceId: first.id };
   }
@@ -256,14 +263,14 @@ export class StripeBillingClient {
   }
 
   /** A finished Checkout Session, read back when the owner returns, before the webhook may have landed. */
-  async retrieveCheckoutSession(sessionId: string): Promise<{ id: string; status: string; tenantId: string | null; subscriptionId: string | null }> {
+  async retrieveCheckoutSession(sessionId: string): Promise<{ id: string; status: string; paymentStatus: string | null; tenantId: string | null; subscriptionId: string | null }> {
     const response = await withTimeout(this.fetcher(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}`, {
       headers: { authorization: `Bearer ${this.secretKey}` },
     }), 6_000);
-    const payload = await response.json().catch(() => ({})) as { id?: string; status?: string; client_reference_id?: string | null; subscription?: string | { id?: string } | null };
+    const payload = await response.json().catch(() => ({})) as { id?: string; status?: string; payment_status?: string; client_reference_id?: string | null; subscription?: string | { id?: string } | null };
     if (!response.ok || payload.id !== sessionId) throw new Error(`Stripe checkout lookup failed with HTTP ${response.status}`);
     const subscription = typeof payload.subscription === "string" ? payload.subscription : payload.subscription?.id ?? null;
-    return { id: payload.id, status: payload.status ?? "open", tenantId: payload.client_reference_id ?? null, subscriptionId: subscription };
+    return { id: payload.id, status: payload.status ?? "open", paymentStatus: payload.payment_status ?? null, tenantId: payload.client_reference_id ?? null, subscriptionId: subscription };
   }
 
   /** Expire an unpaid Checkout Session so it can no longer start a subscription. */
@@ -401,6 +408,35 @@ export function subscriptionFromStripeEvent(event: StripeEvent, existing: Subscr
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
+}
+
+/**
+ * A successful charge in a Stripe event, with the shop it belongs to and when it was paid: `invoice.paid` /
+ * `invoice.payment_succeeded` with money collected (paid_at), or `checkout.session.completed` that collected
+ * payment (event time). Null for anything else, including $0 invoices.
+ */
+export function firstChargeFromEvent(event: StripeEvent): { tenantId: string; at: string } | null {
+  const object = event.data.object as Record<string, unknown> & {
+    amount_paid?: number; amount_total?: number; payment_status?: string; client_reference_id?: string;
+    status_transitions?: { paid_at?: number | null };
+    metadata?: Record<string, unknown>;
+    subscription_details?: { metadata?: Record<string, unknown> };
+    parent?: { subscription_details?: { metadata?: Record<string, unknown> } };
+  };
+  const eventAt = typeof event.created === "number" ? new Date(event.created * 1_000).toISOString() : null;
+  if (event.type === "invoice.paid" || event.type === "invoice.payment_succeeded") {
+    if (!(typeof object.amount_paid === "number" && object.amount_paid > 0)) return null;
+    // Older API versions carry the subscription's metadata on subscription_details, newer ones under parent.
+    const tenant = object.parent?.subscription_details?.metadata?.tenant_id ?? object.subscription_details?.metadata?.tenant_id ?? object.metadata?.tenant_id;
+    const paidAt = typeof object.status_transitions?.paid_at === "number" ? new Date(object.status_transitions.paid_at * 1_000).toISOString() : eventAt;
+    return typeof tenant === "string" && paidAt ? { tenantId: tenant, at: paidAt } : null;
+  }
+  if (event.type === "checkout.session.completed") {
+    if (object.payment_status !== "paid" || !(typeof object.amount_total === "number" && object.amount_total > 0)) return null;
+    const tenant = typeof object.client_reference_id === "string" ? object.client_reference_id : object.metadata?.tenant_id;
+    return typeof tenant === "string" && eventAt ? { tenantId: tenant, at: eventAt } : null;
+  }
+  return null;
 }
 
 export function normalizeSubscriptionStatus(value: string): SubscriptionRecord["status"] {

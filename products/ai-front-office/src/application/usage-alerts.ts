@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { formatEmailBody } from "../adapters/resend.js";
 import type { BusinessConfig, OutboxNotification, UsageSummary } from "../domain/models.js";
 import { currentBillingPeriod, dueUsageAlerts } from "../domain/usage.js";
-import { perCall } from "../domain/plans.js";
 import type { Clock, Store } from "../ports.js";
 
 /**
@@ -57,11 +56,12 @@ export class UsageAlertService {
 
 /**
  * Plain words for a busy owner: the real numbers, the price of an extra call, and what to do.
- * "Front Office: you've answered 45 of your 60 calls this month. Extra calls are 75¢ each. Change plans in Settings."
+ * "Front Office: you've answered 45 of your 60 calls this month. Extra calls are $0.75 each. Change plans in Settings."
+ * Dollars, never "¢": ¢ is outside GSM-7 and would double the SMS segments.
  */
 export function usageAlertText(config: Pick<BusinessConfig, "includedCalls" | "overageCentsPerCall">, usage: Pick<UsageSummary, "billableCalls">, percent: number): { subject: string; sms: string } {
   const included = config.includedCalls;
-  const sms = `Front Office: you've answered ${usage.billableCalls} of your ${included} calls this month. Extra calls are ${perCall(config.overageCentsPerCall)} each. Change plans in Settings.`;
+  const sms = `Front Office: you've answered ${usage.billableCalls} of your ${included} calls this month. Extra calls are $${(config.overageCentsPerCall / 100).toFixed(2)} each. Change plans in Settings.`;
   return {
     subject: percent >= 100 ? `Front Office: you've answered all ${included} of your calls this month` : `Front Office: you've answered ${usage.billableCalls} of your ${included} calls`,
     sms,

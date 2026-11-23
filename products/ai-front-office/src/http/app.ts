@@ -14,7 +14,7 @@ import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
 import { renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
 import { chargeSentence, isPaidStatus } from "../domain/billing.js";
-import { introCouponId, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, type Plan, type PlanId } from "../domain/plans.js";
+import { introCouponId, legacyPlanPriceIds, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, type Plan, type PlanId } from "../domain/plans.js";
 import { GuaranteeError, LeadGuaranteeService, recordFirstPaid } from "../application/billing-jobs.js";
 import { callsCsv } from "./calls-csv.js";
 import { hoursFromChoice } from "../domain/hours.js";
@@ -76,7 +76,7 @@ import {
   toTelnyxTexmlCallSummary,
   verifyTelnyxWebhook,
 } from "../adapters/telnyx.js";
-import { StripeBillingClient, subscriptionFromStripeEvent, verifyStripeWebhook } from "../adapters/stripe.js";
+import { firstChargeFromEvent, StripeBillingClient, subscriptionFromStripeEvent, verifyStripeWebhook } from "../adapters/stripe.js";
 import { noopTelemetry, type Telemetry } from "../adapters/posthog.js";
 import { injectAnalytics, POSTHOG_PROXY_PREFIX, proxyToPostHog } from "./posthog-proxy.js";
 import {
@@ -1615,7 +1615,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       });
       if (isPaidStatus(live.status)) {
         await dependencies.store.deleteIntegrationSecret(account.tenantId, "stripe", "open_checkout");
-        await recordFirstPaid(dependencies.store, account.tenantId, now);
+        // The card was charged in this checkout (no trial): that is the first successful charge.
+        if (checkout.paymentStatus === "paid") await recordFirstPaid(dependencies.store, account.tenantId, now);
         telemetry.capture("checkout_completed", account.tenantId, account.tenantId, { source: "return" });
       }
     });
@@ -2021,10 +2022,15 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           await dependencies.store.saveSubscription(record);
           if (isPaidStatus(record.status)) {
             await dependencies.store.deleteIntegrationSecret(tenantId, "stripe", "open_checkout");
-            await recordFirstPaid(dependencies.store, tenantId, now);
           }
         }
       });
+    }
+    // The guarantee clock and overage clamping start at the first successful charge, taken from Stripe:
+    // a paid invoice (paid_at), or a checkout completed with payment. Idempotent (keeps the earliest).
+    const firstCharge = firstChargeFromEvent(event);
+    if (firstCharge && await dependencies.store.getOwnerAccountByTenant(firstCharge.tenantId)) {
+      await recordFirstPaid(dependencies.store, firstCharge.tenantId, firstCharge.at);
     }
     const firstReceipt = await dependencies.store.claimWebhook(`stripe:${event.id}`);
     if (!firstReceipt) return sendJson(response, 200, { received: true, duplicate: true });
@@ -2750,6 +2756,7 @@ export function createStripeClient(env: Environment, fetcher: typeof fetch): Str
     ...(prices.pro ? { pro: prices.pro } : {}),
     ...(prices.team ? { team: prices.team } : {}),
     ...(prices.fleet ? { fleet: prices.fleet } : {}),
+    legacy: Object.values(legacyPlanPriceIds(env)).flat(),
     ...(env.STRIPE_DAILY_SMS_PRICE_ID ? { dailySms: env.STRIPE_DAILY_SMS_PRICE_ID } : {}),
     ...(env.STRIPE_REALTIME_SMS_PRICE_ID ? { realtimeSms: env.STRIPE_REALTIME_SMS_PRICE_ID } : {}),
   }, fetcher);

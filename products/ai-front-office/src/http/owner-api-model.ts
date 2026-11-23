@@ -192,7 +192,7 @@ export function apiDashboard(input: {
       plans: input.plans ?? [],
     },
     onboarding: input.onboarding ?? { hoursSet: false, completed: false },
-    guarantee: input.guarantee ?? { state: "none", leads: 0, windowEndsAt: null, claimUntil: null, refund: null },
+    guarantee: input.guarantee ?? { state: "none", leads: 0, complete: true, windowEndsAt: null, claimUntil: null, refund: null },
     usage: {
       countedCalls: input.usage.billableCalls,
       includedCalls: c.includedCalls,

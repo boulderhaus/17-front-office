@@ -32,6 +32,8 @@ export interface Plan {
   who: string;
   /** Stripe price, or null where checkout isn't configured (the plan is display-only). */
   priceId: string | null;
+  /** Older prices for this plan still on live subscriptions (recognized, never sold). */
+  legacyPriceIds: string[];
 }
 
 type PlanEnv = Pick<Environment,
@@ -50,6 +52,19 @@ export function planPriceIds(env: Pick<PlanEnv, "STRIPE_PRICE_ID" | "STRIPE_PRIC
     pro: env.STRIPE_PRICE_ID_PRO ?? env.STRIPE_PRICE_ID_PLUS,
     team: env.STRIPE_PRICE_ID_TEAM,
     fleet: env.STRIPE_PRICE_ID_FLEET,
+  };
+}
+
+/**
+ * The PR #16 prices once the new ones are set: STRIPE_PRICE_ID stays Solo and STRIPE_PRICE_ID_PLUS stays Pro,
+ * so subscriptions already paying on them keep being recognized (and keep their plan) after the switch.
+ */
+export function legacyPlanPriceIds(env: Pick<PlanEnv, "STRIPE_PRICE_ID" | "STRIPE_PRICE_ID_PLUS" | "STRIPE_PRICE_ID_SOLO" | "STRIPE_PRICE_ID_PRO">): Record<PlanId, string[]> {
+  return {
+    solo: env.STRIPE_PRICE_ID && env.STRIPE_PRICE_ID_SOLO && env.STRIPE_PRICE_ID !== env.STRIPE_PRICE_ID_SOLO ? [env.STRIPE_PRICE_ID] : [],
+    pro: env.STRIPE_PRICE_ID_PLUS && env.STRIPE_PRICE_ID_PRO && env.STRIPE_PRICE_ID_PLUS !== env.STRIPE_PRICE_ID_PRO ? [env.STRIPE_PRICE_ID_PLUS] : [],
+    team: [],
+    fleet: [],
   };
 }
 
@@ -98,6 +113,7 @@ export function planCatalog(env: PlanEnv): Plan[] {
       blurb: planBlurb(configured[id].includedCalls),
       who: DEFAULT_PLANS[id].who,
       priceId: prices[id] ?? null,
+      legacyPriceIds: legacyPlanPriceIds(env)[id],
     }));
 }
 
@@ -116,7 +132,7 @@ export function pickPlan(plans: Plan[], value: unknown): Plan {
 
 /** Which plan a Stripe subscription is on, from its price ids; null when it is none of ours. */
 export function planForPriceIds(plans: Plan[], priceIds: string[]): Plan | null {
-  return plans.find((plan) => plan.priceId !== null && priceIds.includes(plan.priceId)) ?? null;
+  return plans.find((plan) => (plan.priceId !== null && priceIds.includes(plan.priceId)) || plan.legacyPriceIds.some((id) => priceIds.includes(id))) ?? null;
 }
 
 /** The first month with a percent-off coupon, discount rounded to the cent: $49.99 at 50% off → $24.99. */

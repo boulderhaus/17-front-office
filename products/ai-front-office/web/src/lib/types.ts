@@ -107,7 +107,9 @@ export type PlanId = "solo" | "pro" | "team" | "fleet"
 export interface ApiPlan { id: PlanId; label: string; priceCents: number; firstMonthCents: number; includedCalls: number; overageCentsPerCall: number; blurb: string; who: string; chargeNote: string }
 
 export interface Guarantee {
-  state: "none" | "watching" | "eligible" | "refunded" | "closed"
+  state: "none" | "watching" | "eligible" | "pending" | "refunded" | "closed"
+  /** False when the server could not read every call in the window: never eligible then. */
+  complete: boolean
   /** Real customer leads in the first 30 days so far. */
   leads: number
   windowEndsAt: string | null
