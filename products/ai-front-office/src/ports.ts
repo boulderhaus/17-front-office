@@ -39,6 +39,7 @@ export interface Store {
   deleteCall(tenantId: string, callId: string): Promise<boolean>;
   upsertCustomer(customer: CustomerRecord): Promise<void>;
   getBookingForCall(callId: string): Promise<BookingRecord | null>;
+  listBookingsForTenant(tenantId: string): Promise<BookingRecord[]>;
   saveBooking(booking: BookingRecord): Promise<void>;
   getCallbackTaskForCall(callId: string): Promise<CallbackTask | null>;
   listOpenCallbackTasks(tenantId: string, limit: number): Promise<CallbackTask[]>;
@@ -68,7 +69,7 @@ export interface Store {
   createPasswordReset(accountId: string, tokenHash: string, expiresAt: string): Promise<void>;
   /** Atomically mark an unexpired, unused token used; returns its account or null. */
   consumePasswordReset(tokenHash: string, now: string): Promise<string | null>;
-  /** Replace the password and revoke every existing session. */
+  /** Replace the password, revoke every existing session, and void every outstanding reset link. */
   updateOwnerPassword(accountId: string, passwordHash: string, updatedAt: string): Promise<void>;
   revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void>;
   getUsageSummary(tenantId: string, periodStart: string, periodEnd: string): Promise<UsageSummary>;

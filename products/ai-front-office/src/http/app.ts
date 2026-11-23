@@ -766,7 +766,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         dependencies.store.listCallbackTasks(account.tenantId, 100_000),
         dependencies.store.getSubscription(account.tenantId),
       ]);
-      const bookings = (await Promise.all(calls.map((call) => dependencies.store.getBookingForCall(call.id)))).filter(Boolean);
+      const bookings = await dependencies.store.listBookingsForTenant(account.tenantId);
       const body = JSON.stringify({
         exportedAt: dependencies.clock.now().toISOString(),
         account: { email: account.email, displayName: account.displayName, createdAt: account.createdAt },
@@ -798,7 +798,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (form.get("confirm")?.trim().toLowerCase() !== "delete") throw new HttpError(400, "Type DELETE to confirm");
       if (!await verifyOwnerPassword(form.get("password") ?? "", account.passwordHash)) throw new HttpError(403, "Password is incorrect");
       const subscription = await dependencies.store.getSubscription(account.tenantId);
-      if (subscription && ["active", "trialing", "past_due", "unpaid"].includes(subscription.status)) {
+      // Only once billing has fully ended: anything but a cancelled subscription may still charge.
+      if (subscription?.providerSubscriptionId && subscription.status !== "canceled") {
         throw new HttpError(409, "Cancel your subscription in Billing first. You can delete your account once it has ended.");
       }
       await pauseLiveRoute(account.tenantId)

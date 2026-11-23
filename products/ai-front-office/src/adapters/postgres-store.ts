@@ -541,7 +541,23 @@ export class PostgresStore implements Store {
   }
 
   async updateOwnerPassword(accountId: string, passwordHash: string, updatedAt: string): Promise<void> {
-    await this.#pool.query("UPDATE owner_accounts SET password_hash=$2, session_version=session_version+1, updated_at=$3 WHERE id=$1", [accountId, passwordHash, updatedAt]);
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("UPDATE owner_accounts SET password_hash=$2, session_version=session_version+1, updated_at=$3 WHERE id=$1", [accountId, passwordHash, updatedAt]);
+      await client.query("DELETE FROM password_reset_tokens WHERE account_id=$1", [accountId]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listBookingsForTenant(tenantId: string): Promise<BookingRecord[]> {
+    const result = await this.#pool.query("SELECT * FROM booking_requests WHERE tenant_id=$1 ORDER BY created_at", [tenantId]);
+    return result.rows.map((row) => mapBooking(row as Row));
   }
 
   async revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void> {

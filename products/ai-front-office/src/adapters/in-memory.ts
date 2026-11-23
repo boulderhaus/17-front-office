@@ -332,6 +332,11 @@ export class InMemoryStore implements Store {
   async updateOwnerPassword(accountId: string, passwordHash: string, updatedAt: string): Promise<void> {
     const account = this.ownerAccounts.get(accountId);
     if (account) this.ownerAccounts.set(accountId, { ...account, passwordHash, sessionVersion: (account.sessionVersion ?? 0) + 1, updatedAt });
+    for (const [hash, reset] of this.passwordResets) if (reset.accountId === accountId) this.passwordResets.delete(hash);
+  }
+
+  async listBookingsForTenant(tenantId: string): Promise<BookingRecord[]> {
+    return [...this.bookings.values()].filter((booking) => booking.tenantId === tenantId).map((booking) => structuredClone(booking));
   }
 
   async revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void> {

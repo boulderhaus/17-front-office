@@ -720,6 +720,8 @@ describe("HTTP boundary", () => {
     const now = new Date().toISOString();
     await store.saveSubscription({ tenantId: account.tenantId, providerCustomerId: "cus_x", providerSubscriptionId: "sub_x", status: "active", currentPeriodEnd: null, providerEventCreatedAt: now, createdAt: now, updatedAt: now });
     expect((await remove("long-password-for-tests")).status).toBe(409);
+    await store.saveSubscription({ tenantId: account.tenantId, providerCustomerId: "cus_x", providerSubscriptionId: "sub_x", status: "incomplete", currentPeriodEnd: null, providerEventCreatedAt: now, createdAt: now, updatedAt: now });
+    expect((await remove("long-password-for-tests")).status).toBe(409);
     await store.saveSubscription({ tenantId: account.tenantId, providerCustomerId: "cus_x", providerSubscriptionId: "sub_x", status: "canceled", currentPeriodEnd: null, providerEventCreatedAt: now, createdAt: now, updatedAt: now });
     const deleted = await remove("long-password-for-tests");
     expect(deleted.status).toBe(303);

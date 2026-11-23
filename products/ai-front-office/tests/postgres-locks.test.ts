@@ -79,7 +79,9 @@ describe.skipIf(!databaseUrl)("PostgreSQL advisory locks under overlapping calls
     await store.createPasswordReset(accountId, `hash2-${accountId}`, "2026-01-01T00:30:00.000Z");
     expect(await store.consumePasswordReset(`hash2-${accountId}`, "2026-01-01T00:10:00.000Z")).toBe(accountId);
     expect(await store.consumePasswordReset(`hash2-${accountId}`, "2026-01-01T00:11:00.000Z")).toBeNull();
+    await store.createPasswordReset(accountId, `sibling-${accountId}`, "2026-01-01T00:30:00.000Z");
     await store.updateOwnerPassword(accountId, "scrypt-v1:new:hash", "2026-01-01T00:12:00.000Z");
+    expect(await store.consumePasswordReset(`sibling-${accountId}`, "2026-01-01T00:13:00.000Z")).toBeNull();
     expect(await store.getOwnerAccountById(accountId)).toMatchObject({ passwordHash: "scrypt-v1:new:hash", sessionVersion: 1 });
   });
 });
