@@ -1,4 +1,5 @@
 import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
+import { CARRIER_CHOICES, forwardingPlan, type CarrierInfo, type ForwardingPlan } from "../domain/forwarding.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, OutboxNotification, OwnerAccount, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 
 /** What the owner app may see about a call. No tenant ids, provider ids or internal flags. */
@@ -35,7 +36,17 @@ export interface ApiTask {
 
 export interface ApiDashboard {
   /** The shop's Front Office number and the carrier codes that forward the owner's business line to it. */
-  line: { number: string | null; mode: BusinessConfig["operationMode"]; forwarding: Array<{ carrier: string; on: string; off: string }> };
+  line: {
+    number: string | null;
+    mode: BusinessConfig["operationMode"];
+    forwarding: Array<{ carrier: string; on: string; off: string }>;
+    /** The owner's own business number and how to forward it. */
+    business: { number: string | null; carrier: CarrierInfo | null; plan: ForwardingPlan | null; choices: typeof CARRIER_CHOICES };
+    /** When a call last proved forwarding works. */
+    confirmedAt: string | null;
+    check: { status: "idle" | "calling" | "passed" | "not_reached"; method: "auto" | "manual" | null; startedAt: string | null };
+    helpRequestedAt: string | null;
+  };
   csrf: string;
   now: string;
   preview: boolean;
@@ -118,11 +129,12 @@ export function apiDashboard(input: {
   now: string;
   preview: boolean;
   lineNumber?: string | null | undefined;
+  forwarding?: ForwardingState | undefined;
 }): ApiDashboard {
   const c = input.config;
   const lineNumber = input.lineNumber ?? null;
   return {
-    line: { number: lineNumber, mode: c.operationMode, forwarding: lineNumber ? forwardingInstructions(lineNumber, c.operationMode) : [] },
+    line: lineModel(lineNumber, c.operationMode, input.forwarding, input.now),
     csrf: input.csrf,
     now: input.now,
     preview: input.preview,
@@ -149,6 +161,40 @@ export function apiDashboard(input: {
     },
     calls: input.calls.map(apiCall),
     tasks: input.tasks.map(apiTask),
+  };
+}
+
+export interface ForwardingState {
+  businessNumber: string | null;
+  carrier: CarrierInfo | null;
+  confirmedAt: string | null;
+  check: { startedAt: string; method: "auto" | "manual" } | null;
+  helpRequestedAt: string | null;
+}
+
+/** How long a check waits for the forwarded call before saying it didn't reach us. */
+export const FORWARDING_CHECK_WINDOW_MS = 90_000;
+
+function lineModel(lineNumber: string | null, mode: BusinessConfig["operationMode"], state: ForwardingState | undefined, now: string): ApiDashboard["line"] {
+  const check = state?.check ?? null;
+  const confirmedAt = state?.confirmedAt ?? null;
+  const status: ApiDashboard["line"]["check"]["status"] = !check ? "idle"
+    : confirmedAt && confirmedAt >= check.startedAt ? "passed"
+    : Date.parse(now) - Date.parse(check.startedAt) < FORWARDING_CHECK_WINDOW_MS ? "calling"
+    : "not_reached";
+  return {
+    number: lineNumber,
+    mode,
+    forwarding: lineNumber ? forwardingInstructions(lineNumber, mode) : [],
+    business: {
+      number: state?.businessNumber ?? null,
+      carrier: state?.carrier ?? null,
+      plan: lineNumber && state?.carrier ? forwardingPlan(state.carrier.family, lineNumber, mode) : null,
+      choices: CARRIER_CHOICES,
+    },
+    confirmedAt,
+    check: { status, method: check?.method ?? null, startedAt: check?.startedAt ?? null },
+    helpRequestedAt: state?.helpRequestedAt ?? null,
   };
 }
 

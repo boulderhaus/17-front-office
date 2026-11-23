@@ -38,8 +38,34 @@ export interface ForwardingCode {
   off: string
 }
 
+export type CarrierFamily = "verizon" | "gsm" | "office" | "unknown"
+
+export interface ForwardingPlan {
+  family: CarrierFamily
+  on: string | null
+  off: string | null
+  dialLink: string | null
+  offDialLink: string | null
+  what: string
+  tips: string[]
+  iphoneTip: string | null
+}
+
 export interface ApiDashboard {
-  line: { number: string | null; mode: "overflow" | "after_hours" | "always"; forwarding: ForwardingCode[] }
+  line: {
+    number: string | null
+    mode: "overflow" | "after_hours" | "always"
+    forwarding: ForwardingCode[]
+    business: {
+      number: string | null
+      carrier: { name: string | null; lineType: string | null; family: CarrierFamily; chosen: boolean } | null
+      plan: ForwardingPlan | null
+      choices: Array<{ family: Exclude<CarrierFamily, "unknown">; label: string }>
+    }
+    confirmedAt: string | null
+    check: { status: "idle" | "calling" | "passed" | "not_reached"; method: "auto" | "manual" | null; startedAt: string | null }
+    helpRequestedAt: string | null
+  }
   csrf: string
   now: string
   preview: boolean

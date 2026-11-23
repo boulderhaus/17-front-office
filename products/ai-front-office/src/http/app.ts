@@ -31,6 +31,9 @@ import type { OwnerSession } from "../security/owner-auth.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
 import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
 import { NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
+import { TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
+import { carrierFamily, forwardingOffInstruction, type CarrierFamily, type CarrierInfo } from "../domain/forwarding.js";
+import { FORWARDING_CHECK_WINDOW_MS, type ForwardingState } from "./owner-api-model.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import {
   asTelnyxConversationEnded,
@@ -716,6 +719,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     ]);
     const model = apiDashboard({
       account, config, calls, tasks, usage, googleConnected, subscription, csrf, lineNumber,
+      forwarding: await readForwarding(account.tenantId),
       checkoutConfigured: Boolean(stripeClient || dependencies.env.FOUNDING_CHECKOUT_URL),
       now: dependencies.clock.now().toISOString(),
       preview: false,
@@ -730,6 +734,89 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const method = request.method ?? "GET";
     const owner = account.role !== "member";
     if (method === "GET" && url.pathname === "/api/app/dashboard") return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    if (method === "POST" && url.pathname === "/api/app/line/business-number") {
+      if (!owner) throw new HttpError(403, "Only the owner can set up call forwarding");
+      const body = await readApiJson(request, session, 1_000) as { number?: unknown; family?: unknown };
+      if (!limiter.allow(`business-number:${account.tenantId}`, 30, 60 * 60_000)) throw new HttpError(429, "Too many tries. Please try again in a bit.");
+      const number = typeof body.number === "string" ? normalizeUsPhone(body.number) : null;
+      if (!number) throw new HttpError(400, "Enter your business phone number, like (941) 555-0123");
+      const lineNumber = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number");
+      if (lineNumber && number === lineNumber) throw new HttpError(400, "That’s your Front Office number. Enter the number your customers call today.");
+      const chosen = body.family === "verizon" || body.family === "gsm" || body.family === "office" ? body.family as CarrierFamily : null;
+      const previous = await readForwarding(account.tenantId);
+      let carrier: CarrierInfo;
+      if (chosen) {
+        carrier = { name: previous.businessNumber === number ? previous.carrier?.name ?? null : null, lineType: previous.businessNumber === number ? previous.carrier?.lineType ?? null : null, family: chosen, chosen: true };
+      } else if (previous.businessNumber === number && previous.carrier) {
+        carrier = previous.carrier;
+      } else {
+        if (!limiter.allow(`carrier-lookup:${account.tenantId}`, 10, 60 * 60_000)) throw new HttpError(429, "Too many tries. Please try again in a bit.");
+        const found = dependencies.env.TELNYX_API_KEY
+          ? await new TelnyxForwardingClient({ apiKey: dependencies.env.TELNYX_API_KEY, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })
+            .lookupCarrier(number).catch((error) => { log({ level: "warn", event: "carrier_lookup_failed", tenantId: account.tenantId, error: safeError(error) }); return { name: null, lineType: null }; })
+          : { name: null, lineType: null };
+        carrier = { ...found, family: carrierFamily(found.name, found.lineType), chosen: false };
+      }
+      await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "business_number", number);
+      await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify(carrier));
+      return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    }
+    if (method === "POST" && url.pathname === "/api/app/line/check") {
+      if (!owner) throw new HttpError(403, "Only the owner can check call forwarding");
+      await readApiJson(request, session, 1_000);
+      const [lineNumber, state] = await Promise.all([
+        dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
+        readForwarding(account.tenantId),
+      ]);
+      if (!lineNumber) throw new HttpError(409, "Turn on your Front Office line first.");
+      if (!state.businessNumber) throw new HttpError(409, "Add your business phone number first.");
+      if (!limiter.allow(`forwarding-check:${account.tenantId}`, 6, 60 * 60_000)) throw new HttpError(429, "That’s a lot of checks. Please wait a few minutes and try again.");
+      const startedAt = dependencies.clock.now().toISOString();
+      const connectionId = dependencies.env.TELNYX_CHECK_CONNECTION_ID;
+      const from = dependencies.env.TELNYX_FROM_NUMBER;
+      let method: "auto" | "manual" = "manual";
+      let callControlId: string | null = null;
+      if (connectionId && from && dependencies.env.TELNYX_API_KEY && !dependencies.env.PROVIDER_TEST_MODE) {
+        callControlId = await new TelnyxForwardingClient({ apiKey: dependencies.env.TELNYX_API_KEY, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })
+          .placeCheckCall({ connectionId, from, to: state.businessNumber, tenantId: account.tenantId, webhookUrl: `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx` })
+          .catch((error) => { log({ level: "error", event: "forwarding_check_call_failed", tenantId: account.tenantId, error: safeError(error) }); return null; });
+        if (callControlId) method = "auto";
+      }
+      await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "check", JSON.stringify({ startedAt, method, callControlId }));
+      log({ level: "info", event: "forwarding_check_started", tenantId: account.tenantId, method });
+      return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    }
+    if (method === "POST" && url.pathname === "/api/app/line/help") {
+      if (!owner) throw new HttpError(403, "Only the owner can ask for setup help");
+      await readApiJson(request, session, 1_000);
+      if (!limiter.allow(`forwarding-help:${account.tenantId}`, 3, 24 * 60 * 60_000)) throw new HttpError(429, "We already have your request. We’ll call you soon.");
+      const [config, state, ownerPhone, lineNumber] = await Promise.all([
+        dependencies.store.getConfig(account.tenantId),
+        readForwarding(account.tenantId),
+        dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary"),
+        dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
+      ]);
+      const now = dependencies.clock.now().toISOString();
+      await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "help_requested_at", now);
+      if (dependencies.env.SUPPORT_EMAIL) {
+        await dependencies.store.enqueueNotification({
+          id: randomUUID(), tenantId: account.tenantId, callId: null, channel: "email", destinationRef: `email:${dependencies.env.SUPPORT_EMAIL}`,
+          body: formatEmailBody(`Forwarding help: ${config.businessName}`, [
+            `${config.businessName} wants help setting up call forwarding.`,
+            `Call them back: ${ownerPhone ?? state.businessNumber ?? "no number on file"}`,
+            `Business number: ${state.businessNumber ?? "not entered"}`,
+            `Carrier: ${state.carrier?.name ?? "unknown"} (${state.carrier?.family ?? "unknown"}, ${state.carrier?.lineType ?? "unknown line type"})`,
+            `Forward to (Front Office number): ${lineNumber ?? "line not turned on yet"}`,
+            `Account: ${account.email}`,
+          ].join("\n")),
+          priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
+          idempotencyKey: `forwarding-help:${account.tenantId}:${now.slice(0, 13)}`,
+          providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
+        });
+      }
+      log({ level: "warn", event: "forwarding_help_requested", tenantId: account.tenantId, emailed: Boolean(dependencies.env.SUPPORT_EMAIL) });
+      return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    }
     if (method === "POST" && url.pathname === "/api/app/line/go-live") {
       if (!owner) throw new HttpError(403, "Only the owner can turn on the line");
       await readApiJson(request, session, 1_000);
@@ -1388,6 +1475,46 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }).setPaused(true);
   }
 
+  async function readForwarding(tenantId: string): Promise<ForwardingState> {
+    const [businessNumber, carrierJson, confirmedAt, checkJson, helpRequestedAt] = await Promise.all([
+      dependencies.store.getIntegrationSecret(tenantId, "forwarding", "business_number"),
+      dependencies.store.getIntegrationSecret(tenantId, "forwarding", "carrier"),
+      dependencies.store.getIntegrationSecret(tenantId, "forwarding", "confirmed_at"),
+      dependencies.store.getIntegrationSecret(tenantId, "forwarding", "check"),
+      dependencies.store.getIntegrationSecret(tenantId, "forwarding", "help_requested_at"),
+    ]);
+    const parse = <T>(value: string | null): T | null => { try { return value ? JSON.parse(value) as T : null; } catch { return null; } };
+    const check = parse<{ startedAt: string; method: "auto" | "manual" }>(checkJson);
+    return { businessNumber, carrier: parse<CarrierInfo>(carrierJson), confirmedAt, check: check ? { startedAt: check.startedAt, method: check.method } : null, helpRequestedAt };
+  }
+
+  /**
+   * Every inbound call proves the forwarded line reaches us. A call from our check number (or
+   * the owner's own business number, which some carriers show) during an open check is the
+   * check itself: confirm it, hang up our side, and skip the call record.
+   */
+  async function noteForwardedCall(tenantId: string, callerPhone: string, callControlId: string): Promise<"check" | "customer"> {
+    const now = dependencies.clock.now();
+    const [checkJson, businessNumber] = await Promise.all([
+      dependencies.store.getIntegrationSecret(tenantId, "forwarding", "check"),
+      dependencies.store.getIntegrationSecret(tenantId, "forwarding", "business_number"),
+    ]);
+    let check: { startedAt: string; method?: "auto" | "manual"; callControlId?: string | null } | null = null;
+    try { check = checkJson ? JSON.parse(checkJson) : null; } catch { check = null; }
+    const open = check && now.getTime() - Date.parse(check.startedAt) < FORWARDING_CHECK_WINDOW_MS;
+    // Some carriers show the forwarding phone's own number; trust that only for our automatic check call.
+    const fromCheck = callerPhone === dependencies.env.TELNYX_FROM_NUMBER || (check?.method === "auto" && businessNumber !== null && callerPhone === businessNumber);
+    await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "confirmed_at", now.toISOString());
+    if (!open || !fromCheck) return "customer";
+    await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check_inbound_call", callControlId);
+    if (check?.callControlId && dependencies.env.TELNYX_API_KEY) {
+      await new TelnyxForwardingClient({ apiKey: dependencies.env.TELNYX_API_KEY, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })
+        .hangUp(check.callControlId).catch((error) => log({ level: "warn", event: "forwarding_check_hangup_failed", tenantId, error: safeError(error) }));
+    }
+    log({ level: "info", event: "forwarding_check_passed", tenantId });
+    return "check";
+  }
+
   async function handleBillingLapse(tenantId: string, status: SubscriptionRecord["status"], eventId: string): Promise<void> {
     const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
     if (account?.status !== "active") return;
@@ -1404,10 +1531,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     });
     const now = dependencies.clock.now().toISOString();
     const statusWords = status === "past_due" ? "past due" : status === "canceled" ? "cancelled" : status.replace("_", " ");
+    const offCode = forwardingOffInstruction((await readForwarding(tenantId)).carrier?.family ?? null);
     for (const destinationRef of config.ownerNotificationRefs) {
       await dependencies.store.enqueueNotification({
         id: randomUUID(), tenantId, callId: null, channel: "sms", destinationRef,
-        body: `Front Office is paused: your subscription is ${statusWords}. Calls forwarded to your Front Office line will not be answered. Update billing in your dashboard or turn off call forwarding.`,
+        body: `Front Office is paused: your subscription is ${statusWords}. Calls forwarded to your Front Office line will not be answered. Update billing in your dashboard, or ${offCode.charAt(0).toLowerCase()}${offCode.slice(1)}`,
         priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
         idempotencyKey: `billing-lapse:${tenantId}:${eventId}:${destinationRef}`,
         providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
@@ -1581,6 +1709,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       await requireOperational(tenantId);
       const config = await dependencies.store.getConfig(tenantId);
       const callerPhone = initialization.data.payload.telnyx_end_user_target ?? "unknown";
+      if (await noteForwardedCall(tenantId, callerPhone, initialization.data.payload.call_control_id) === "check") {
+        // Our own forwarding check reached the shop: confirm it and end the call without a call record.
+        return sendJson(response, 200, {
+          dynamic_variables: { tenant_id: config.tenantId, business_name: config.businessName, call_direction: "inbound", opening_greeting: "Forwarding check complete. Goodbye.", caller_phone: callerPhone, call_access: "forwarding_check", owner_transfer_targets: [] },
+          conversation: { metadata: { tenant_id: config.tenantId } },
+        });
+      }
       const recentCalls = /^\+1[2-9]\d{9}$/.test(callerPhone)
         ? await dependencies.store.countCallsFromNumberSince(config.tenantId, callerPhone, new Date(dependencies.clock.now().getTime() - 24 * 60 * 60_000).toISOString())
         : 0;
@@ -1614,6 +1749,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (envelope.data.event_type === "call.conversation.ended") {
       const ended = asTelnyxConversationEnded(envelope);
       const routedTenantId = await tenantForAssistant(ended.data.payload.assistant_id);
+      if (await dependencies.store.getIntegrationSecret(routedTenantId, "forwarding", "check_inbound_call") === ended.data.payload.call_control_id) {
+        return sendJson(response, 200, { received: true, forwardingCheck: true });
+      }
       const existing = await dependencies.store.getCallByProviderId(ended.data.payload.call_control_id);
       const tenantId = existing?.tenantId ?? routedTenantId;
       if (tenantId !== routedTenantId) throw new HttpError(403, "Webhook assistant does not match the call tenant");
