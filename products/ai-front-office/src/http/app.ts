@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -11,6 +13,7 @@ import { approvedTransferTargets } from "../application/transfer-policy.js";
 import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
 import { renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
+import { apiCall, apiDashboard, apiSettings, apiTask, settingsForm, type ApiCallDetail } from "./owner-api-model.js";
 import { approvedAnswer } from "../domain/approved-answer.js";
 import { isExplicitHumanRequest } from "../domain/human-request.js";
 import { saveAssistantConfig } from "../adapters/assistant-config.js";
@@ -21,6 +24,7 @@ import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
+import type { OwnerSession } from "../security/owner-auth.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
 import { buildTelnyxGreeting, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
@@ -163,6 +167,8 @@ export interface AppDependencies {
   logger?: (entry: Record<string, unknown>) => void;
   /** Outbound HTTP for Stripe and Telnyx routing; tests inject a fake. */
   fetcher?: typeof fetch;
+  /** The built React owner app (web/dist). When absent, /app and /demo stay server-rendered. */
+  ownerWeb?: { dir: string };
 }
 
 function publicOwnerDemo(now: Date): {
@@ -296,13 +302,18 @@ function publicOwnerDemo(now: Date): {
   };
 }
 
+const OWNER_APP_PATH = /^\/app(?:\/(?:jobs|calendar|settings|calls\/[0-9a-f-]{36}))?\/?$/i;
+const DEMO_APP_PATH = /^\/demo(?:\/(?:jobs|calendar|calls\/[A-Za-z0-9-]{1,64}))?\/?$/;
+function isOwnerAppPath(pathname: string): boolean { return OWNER_APP_PATH.test(pathname); }
+function isDemoAppPath(pathname: string): boolean { return DEMO_APP_PATH.test(pathname); }
+
 function ownerDashboardView(value: string | null): "today" | "pipeline" | "calendar" {
   return value === "pipeline" || value === "calendar" ? value : "today";
 }
 
 export function createRequestHandler(dependencies: AppDependencies): RequestListener {
   const service = new CallService(dependencies.store, dependencies.calendar, dependencies.clock, dependencies.env.PUBLIC_BASE_URL);
-  const recordingClient = dependencies.env.TELNYX_API_KEY ? new TelnyxRecordingClient(dependencies.env.TELNYX_API_KEY) : null;
+  const recordingClient = dependencies.env.TELNYX_API_KEY ? new TelnyxRecordingClient(dependencies.env.TELNYX_API_KEY, dependencies.fetcher ?? fetch) : null;
   const routingClient = dependencies.env.TELNYX_API_KEY && dependencies.env.TELNYX_FROM_NUMBER && dependencies.env.TELNYX_ASSISTANT_ID
     ? new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: dependencies.env.TELNYX_FROM_NUMBER, assistantId: dependencies.env.TELNYX_ASSISTANT_ID })
     : null;
@@ -317,6 +328,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
   const limiter = new RateLimiter();
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));
+  let ownerWebIndex: Promise<string | null> | null = null;
+  const WEB_TYPES: Record<string, string> = { js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", woff2: "font/woff2", woff: "font/woff", svg: "image/svg+xml", png: "image/png" };
+  const recordingUrls = new Map<string, { url: string; expiresAt: number }>();
 
   return (request, response) => {
     void handle(request, response).catch((error: unknown) => {
@@ -365,6 +379,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
       return sendHtml(response, 200, renderLanding(config));
     }
+    if (method === "GET" && url.pathname.startsWith("/web/assets/")) return serveWebAsset(response, url.pathname.slice("/web/assets/".length));
+    if (url.pathname.startsWith("/api/demo/")) return handleDemoApi(request, response, url);
+    if (url.pathname.startsWith("/api/app/")) return handleOwnerApi(request, response, url);
+    if (method === "GET" && isDemoAppPath(url.pathname) && await sendOwnerWeb(response)) return;
     if (method === "GET" && url.pathname === "/demo") {
       const demo = publicOwnerDemo(dependencies.clock.now());
       return sendHtml(response, 200, renderOwnerDashboard({
@@ -568,6 +586,287 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     throw new HttpError(404, "Not found");
   }
 
+  // ---- React owner app (web/dist) ----------------------------------------------
+  function loadOwnerWebIndex(): Promise<string | null> {
+    if (!dependencies.ownerWeb) return Promise.resolve(null);
+    ownerWebIndex ??= readFile(resolve(dependencies.ownerWeb.dir, "index.html"), "utf8").catch(() => null);
+    return ownerWebIndex;
+  }
+  async function sendOwnerWeb(response: ServerResponse): Promise<boolean> {
+    const html = await loadOwnerWebIndex();
+    if (!html) return false;
+    sendHtml(response, 200, html);
+    return true;
+  }
+  async function serveWebAsset(response: ServerResponse, name: string): Promise<void> {
+    const extension = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.([a-z0-9]+)$/.exec(name)?.[1];
+    if (!dependencies.ownerWeb || !extension || !WEB_TYPES[extension]) throw new HttpError(404, "Not found");
+    const body = await readFile(resolve(dependencies.ownerWeb.dir, "assets", name)).catch(() => null);
+    if (!body) throw new HttpError(404, "Not found");
+    response.writeHead(200, { "content-type": WEB_TYPES[extension]!, "content-length": body.length, "cache-control": "public, max-age=31536000, immutable" });
+    response.end(body);
+  }
+
+  // ---- Recordings: look up once, then stream from our origin so playback starts at once ----
+  async function recordingDownloadUrl(providerCallId: string): Promise<string | null> {
+    const now = Date.now();
+    const cached = recordingUrls.get(providerCallId);
+    if (cached && cached.expiresAt > now) return cached.url;
+    const url = await recordingClient!.getDownloadUrl(providerCallId);
+    if (url) {
+      if (recordingUrls.size > 500) recordingUrls.delete(recordingUrls.keys().next().value!);
+      recordingUrls.set(providerCallId, { url, expiresAt: now + 4 * 60_000 });
+    }
+    return url;
+  }
+  async function streamRecording(request: IncomingMessage, response: ServerResponse, providerCallId: string, downloadUrl: string): Promise<void> {
+    const range = typeof request.headers.range === "string" && /^bytes=\d*-\d*$/.test(request.headers.range) ? request.headers.range : null;
+    // Abort the download if Telnyx's storage is slow or the listener leaves.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8_000);
+    request.once("close", () => controller.abort());
+    const upstream = await (dependencies.fetcher ?? fetch)(downloadUrl, { signal: controller.signal, ...(range ? { headers: { range } } : {}) })
+      .catch(() => null)
+      .finally(() => clearTimeout(timer));
+    const contentType = upstream?.headers.get("content-type") ?? "";
+    const audioLike = contentType.startsWith("audio/") || contentType.startsWith("application/octet-stream") || contentType === "";
+    if (upstream?.status === 416) {
+      await upstream.body?.cancel().catch(() => undefined);
+      response.writeHead(416, { "content-range": upstream.headers.get("content-range") ?? "bytes */*", "cache-control": "no-store" });
+      response.end();
+      return;
+    }
+    if (!upstream || (upstream.status !== 200 && upstream.status !== 206) || !upstream.body || (upstream.url !== "" && !upstream.url.startsWith("https://")) || !audioLike) {
+      await upstream?.body?.cancel().catch(() => undefined);
+      // An expired or revoked link is looked up again next time.
+      if (!upstream || [401, 403, 404].includes(upstream.status)) recordingUrls.delete(providerCallId);
+      throw new HttpError(502, "The recording could not be loaded. Please try again.");
+    }
+    const headers: Record<string, string> = {
+      "content-type": contentType.startsWith("audio/") ? contentType : "audio/mpeg",
+      "accept-ranges": "bytes",
+      // Signed-in audio: never kept in any cache, not even this browser's.
+      "cache-control": "private, no-store",
+    };
+    for (const name of ["content-length", "content-range"]) {
+      const value = upstream.headers.get(name);
+      if (value) headers[name] = value;
+    }
+    response.writeHead(upstream.status, headers);
+    await pipeline(Readable.fromWeb(upstream.body as never), response).catch(() => controller.abort());
+  }
+
+  // ---- Owner JSON API ------------------------------------------------------------
+  async function authenticateOwner(request: IncomingMessage): Promise<{ session: OwnerSession; account: OwnerAccount } | null> {
+    const session = verifyOwnerSession(readCookie(request, "afo_owner"), dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
+    if (!session) return null;
+    const account = await dependencies.store.getOwnerAccountById(session.accountId);
+    if (!account || account.tenantId !== session.tenantId || account.status === "suspended" || !sessionMatchesAccount(session, account)) return null;
+    return { session, account };
+  }
+  async function readApiJson(request: IncomingMessage, session: OwnerSession, limit: number): Promise<unknown> {
+    // JSON plus a header token: a cross-site form can send neither.
+    if (!String(request.headers["content-type"] ?? "").startsWith("application/json")) throw new HttpError(415, "Send JSON");
+    const token = request.headers["x-csrf-token"];
+    if (!verifyOwnerCsrf(session, typeof token === "string" ? token : null)) throw new HttpError(403, "Invalid CSRF token");
+    const raw = await readBody(request, limit);
+    return raw.trim() ? parseJson<unknown>(raw) : {};
+  }
+  async function ownerDashboardModel(account: OwnerAccount, csrf: string) {
+    const subscription = await dependencies.store.getSubscription(account.tenantId);
+    const [config, calls, tasks, usage, googleConnected] = await Promise.all([
+      dependencies.store.getConfig(account.tenantId),
+      dependencies.store.listCalls(account.tenantId, 50),
+      dependencies.store.listCallbackTasks(account.tenantId, 100),
+      dependencies.store.getUsageSummary(account.tenantId, ...currentBillingPeriod(dependencies.clock.now(), subscription?.currentPeriodEnd)),
+      isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
+    ]);
+    return apiDashboard({
+      account, config, calls, tasks, usage, googleConnected, subscription, csrf,
+      checkoutConfigured: Boolean(stripeClient || dependencies.env.FOUNDING_CHECKOUT_URL),
+      now: dependencies.clock.now().toISOString(),
+      preview: false,
+    });
+  }
+  async function handleOwnerApi(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    const auth = await authenticateOwner(request);
+    if (!auth) return sendJson(response, 401, { error: "Sign in again", login: "/login" });
+    const { session, account } = auth;
+    const method = request.method ?? "GET";
+    const owner = account.role !== "member";
+    if (method === "GET" && url.pathname === "/api/app/dashboard") return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    if (url.pathname === "/api/app/settings") {
+      if (!owner) throw new HttpError(403, "Only the owner can change shop settings");
+      if (method === "PUT") {
+        const body = await readApiJson(request, session, 64_000);
+        let form: URLSearchParams;
+        try { form = settingsForm(body); } catch (error) { throw new HttpError(400, error instanceof Error ? error.message : "Invalid settings"); }
+        await saveOwnerSettings(account, form);
+      } else if (method !== "GET") throw new HttpError(405, "Method not allowed");
+      const [config, googleConnected, ownerPhone, subscription] = await Promise.all([
+        dependencies.store.getConfig(account.tenantId),
+        isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
+        dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary"),
+        dependencies.store.getSubscription(account.tenantId),
+      ]);
+      return sendJson(response, 200, {
+        csrf: session.csrf,
+        values: apiSettings(config),
+        status: account.status,
+        businessName: config.businessName,
+        plan: { flatMonthlyPriceCents: config.flatMonthlyPriceCents, includedMinutes: config.includedMinutes, overageCentsPerMinute: config.overageCentsPerMinute, paid: subscription?.status === "active" },
+        integrations: {
+          googleAvailable: anyGoogleClient(dependencies.env),
+          googleConnected,
+          ownerPhoneConfigured: Boolean(ownerPhone),
+          weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
+          dailySmsAvailable: Boolean(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID),
+          realtimeSmsAvailable: Boolean(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID),
+          directBookingAvailable: dependencies.env.DIRECT_BOOKING_BETA,
+        },
+      });
+    }
+    const taskMatch = /^\/api\/app\/calls\/([0-9a-f-]{36})\/task$/i.exec(url.pathname);
+    if (method === "POST" && taskMatch?.[1]) {
+      const body = await readApiJson(request, session, 4_000) as { action?: unknown; minutes?: unknown };
+      const action = body.action === "complete" || body.action === "reopen" || body.action === "snooze" ? body.action : null;
+      if (!action) throw new HttpError(400, "Choose complete, reopen or snooze");
+      const task = await ownerTaskAction(account, taskMatch[1], action, typeof body.minutes === "number" ? body.minutes : undefined);
+      return sendJson(response, 200, { task: apiTask(task) });
+    }
+    const callMatch = /^\/api\/app\/calls\/([0-9a-f-]{36})$/i.exec(url.pathname);
+    if (callMatch?.[1] && method === "DELETE") {
+      if (!owner) throw new HttpError(403, "Only the owner can delete call records");
+      const body = await readApiJson(request, session, 1_000) as { confirm?: unknown };
+      if (body.confirm !== "delete") throw new HttpError(400, "Deletion confirmation is required");
+      const deleted = await deletionService.deleteCall(account.tenantId, callMatch[1])
+        .catch(() => { throw new HttpError(502, "Provider deletion failed. The local record was retained so deletion can be retried."); });
+      if (!deleted) throw new HttpError(404, "Call not found");
+      return sendJson(response, 200, { deleted: true });
+    }
+    if (callMatch?.[1] && method === "GET") {
+      const call = await dependencies.store.getCall(callMatch[1]);
+      if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Call not found");
+      const [booking, task, notifications] = await Promise.all([
+        dependencies.store.getBookingForCall(call.id),
+        dependencies.store.getCallbackTaskForCall(call.id),
+        dependencies.store.listNotifications(call.id),
+      ]);
+      const detail: ApiCallDetail = {
+        call: apiCall(call),
+        recordingUrl: call.recordingUrl?.startsWith("https://") ? `/app/provider/telnyx/recordings/${encodeURIComponent(call.providerCallId)}?stream=1` : null,
+        booking: booking ? { status: booking.status, requestedStart: booking.requestedStart } : null,
+        task: task && task.tenantId === account.tenantId ? apiTask(task) : null,
+        alerts: notifications.filter((item) => item.channel === "sms" && item.tenantId === account.tenantId).map((item) => ({ priority: item.priority, state: item.state })),
+        canDelete: owner,
+      };
+      return sendJson(response, 200, detail);
+    }
+    throw new HttpError(404, "Not found");
+  }
+  async function handleDemoApi(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    if ((request.method ?? "GET") !== "GET") throw new HttpError(405, "The demo is read-only");
+    const demo = publicOwnerDemo(dependencies.clock.now());
+    if (url.pathname === "/api/demo/dashboard") {
+      return sendJson(response, 200, apiDashboard({ ...demo, googleConnected: true, csrf: "", checkoutConfigured: false, now: dependencies.clock.now().toISOString(), preview: true }));
+    }
+    const callMatch = /^\/api\/demo\/calls\/([^/]+)$/.exec(url.pathname);
+    const call = callMatch?.[1] ? demo.calls.find((item) => item.id === callMatch[1]) : undefined;
+    if (!call) throw new HttpError(404, "Not found");
+    const task = demo.tasks.find((item) => item.callId === call.id);
+    const detail: ApiCallDetail = { call: apiCall(call), recordingUrl: null, booking: null, task: task ? apiTask(task) : null, alerts: [], canDelete: false };
+    return sendJson(response, 200, detail);
+  }
+
+  /** One path for the settings form and the JSON API, so validation and side effects stay identical. */
+  async function saveOwnerSettings(account: OwnerAccount, form: URLSearchParams): Promise<void> {
+    await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
+    const current = await dependencies.store.getConfig(account.tenantId);
+    const updated = configFromForm(current, form, "owner");
+    if (!dependencies.env.DIRECT_BOOKING_BETA) updated.bookingMode = "confirm";
+    if (!dependencies.env.WARM_TRANSFER_BETA) updated.warmTransferEnabled = false;
+    updated.flatMonthlyPriceCents = current.flatMonthlyPriceCents;
+    updated.includedMinutes = current.includedMinutes;
+    updated.overageCentsPerMinute = current.overageCentsPerMinute;
+    updated.customerSmsEnabled = current.customerSmsEnabled;
+    if (updated.ownerWeeklyEmailEnabled && !(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL)) {
+      throw new HttpError(503, "Weekly email delivery is not configured yet");
+    }
+    if (updated.ownerDailySmsEnabled && !dependencies.env.STRIPE_DAILY_SMS_PRICE_ID) throw new HttpError(503, "Daily SMS billing is not configured yet");
+    if (updated.ownerRealtimeSmsEnabled && !dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID) throw new HttpError(503, "Instant lead SMS billing is not configured yet");
+    const addOnsChanged = updated.ownerDailySmsEnabled !== current.ownerDailySmsEnabled
+      || updated.ownerRealtimeSmsEnabled !== current.ownerRealtimeSmsEnabled;
+    let addOnSubscriptionId: string | null = null;
+    if (addOnsChanged) {
+      const subscription = await dependencies.store.getSubscription(account.tenantId);
+      if (subscription?.status === "active") {
+        if (!stripeClient || !subscription.providerSubscriptionId) throw new HttpError(503, "Subscription add-on billing is not available yet");
+        addOnSubscriptionId = subscription.providerSubscriptionId;
+      }
+    }
+    if (account.status !== "active") updated.paused = true;
+    if (updated.paused !== current.paused) updated.pausedForBilling = false;
+    const ownerPhone = form.get("ownerPhone")?.trim();
+    if (ownerPhone) {
+      if (!/^\+[1-9]\d{7,14}$/.test(ownerPhone)) throw new HttpError(400, "Owner phone must use E.164 format");
+      await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner-primary", ownerPhone);
+      updated.ownerNotificationRefs = ["owner-primary"];
+      updated.ownerTransferNumberRef = "owner-primary";
+    }
+    let liveRouteChange: TelnyxVoiceRoutingClient | null = null;
+    if (account.status === "active" && updated.paused !== current.paused) {
+      const [route, inboundNumber] = await Promise.all([
+        dependencies.store.getProviderRouteForTenant("telnyx", account.tenantId),
+        dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
+      ]);
+      if (!dependencies.env.TELNYX_API_KEY || !route || !inboundNumber) throw new HttpError(409, "The live phone route is not configured for this shop");
+      liveRouteChange = new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: inboundNumber, assistantId: route.externalId });
+      await liveRouteChange.setPaused(updated.paused)
+        .catch(() => { throw new HttpError(502, "Telnyx could not change the live phone route; your setting was not changed"); });
+    }
+    if (addOnSubscriptionId) {
+      await stripeClient!.syncAddOns(addOnSubscriptionId, {
+        dailySms: updated.ownerDailySmsEnabled,
+        realtimeSms: updated.ownerRealtimeSmsEnabled,
+      }).catch(async (error) => {
+        if (liveRouteChange) await liveRouteChange.setPaused(current.paused).catch(() => undefined);
+        log({ level: "error", event: "owner_addon_sync_failed", tenantId: account.tenantId, error: safeError(error) });
+        throw new HttpError(502, "Stripe could not update the notification add-ons; settings were not changed");
+      });
+    }
+    try {
+      await saveAssistantConfig(dependencies.store, dependencies.env, updated);
+    } catch (error) {
+      if (liveRouteChange) await liveRouteChange.setPaused(current.paused).catch((rollbackError) => log({ level: "error", event: "owner_route_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
+      if (addOnSubscriptionId) await stripeClient!.syncAddOns(addOnSubscriptionId, {
+        dailySms: current.ownerDailySmsEnabled,
+        realtimeSms: current.ownerRealtimeSmsEnabled,
+      }).catch((rollbackError) => log({ level: "error", event: "owner_addon_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
+      throw error;
+    }
+    });
+  }
+
+  /** Owner follow-up actions, shared by the form posts and the JSON API. Another shop's call is a 404. */
+  async function ownerTaskAction(account: OwnerAccount, callId: string, action: "complete" | "reopen" | "snooze", minutes?: number): Promise<CallbackTask> {
+    const task = await dependencies.store.getCallbackTaskForCall(callId);
+    if (!task || task.tenantId !== account.tenantId) throw new HttpError(404, "Task not found");
+    const now = dependencies.clock.now();
+    let next: CallbackTask;
+    if (action === "complete") {
+      next = { ...task, status: "completed", completedAt: now.toISOString(), completionSource: "owner", updatedAt: now.toISOString() };
+    } else if (action === "reopen") {
+      if (task.status !== "completed") throw new HttpError(404, "Completed task not found");
+      next = { ...task, status: "open", dueAt: now.toISOString(), completedAt: null, completionSource: null, updatedAt: now.toISOString() };
+    } else {
+      if (task.status === "completed" || task.status === "cancelled") throw new HttpError(404, "Task not found");
+      if (minutes === undefined || ![60, 240, 1_440].includes(minutes)) throw new HttpError(400, "Choose a valid reminder time");
+      next = { ...task, status: "snoozed", dueAt: new Date(now.getTime() + minutes * 60_000).toISOString(), completedAt: null, completionSource: null, updatedAt: now.toISOString() };
+    }
+    await dependencies.store.saveCallbackTask(next);
+    return next;
+  }
+
   async function handleOwner(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     const sessionValue = readCookie(request, "afo_owner");
     const session = verifyOwnerSession(sessionValue, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
@@ -609,6 +908,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (method === "POST" && url.pathname === "/app/team/invite" && !limiter.allow(`invite:${account.id}`, 10, 60 * 60_000)) throw new HttpError(429, "Too many invitations. Please try again later.");
       return teamRoutes(request, response, url, dependencies, account, session);
     }
+    if (method === "GET" && isOwnerAppPath(url.pathname) && await sendOwnerWeb(response)) return;
     if (method === "GET" && url.pathname === "/app") {
       const subscription = await dependencies.store.getSubscription(account.tenantId);
       const [config, calls, tasks, usage, googleConnected] = await Promise.all([
@@ -718,71 +1018,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (method === "POST" && url.pathname === "/app/config") {
       const form = parseForm(await readBody(request, 64_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
-      await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
-      const current = await dependencies.store.getConfig(account.tenantId);
-      const updated = configFromForm(current, form, "owner");
-      if (!dependencies.env.DIRECT_BOOKING_BETA) updated.bookingMode = "confirm";
-      if (!dependencies.env.WARM_TRANSFER_BETA) updated.warmTransferEnabled = false;
-      updated.flatMonthlyPriceCents = current.flatMonthlyPriceCents;
-      updated.includedMinutes = current.includedMinutes;
-      updated.overageCentsPerMinute = current.overageCentsPerMinute;
-      updated.customerSmsEnabled = current.customerSmsEnabled;
-      if (updated.ownerWeeklyEmailEnabled && !(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL)) {
-        throw new HttpError(503, "Weekly email delivery is not configured yet");
-      }
-      if (updated.ownerDailySmsEnabled && !dependencies.env.STRIPE_DAILY_SMS_PRICE_ID) throw new HttpError(503, "Daily SMS billing is not configured yet");
-      if (updated.ownerRealtimeSmsEnabled && !dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID) throw new HttpError(503, "Instant lead SMS billing is not configured yet");
-      const addOnsChanged = updated.ownerDailySmsEnabled !== current.ownerDailySmsEnabled
-        || updated.ownerRealtimeSmsEnabled !== current.ownerRealtimeSmsEnabled;
-      let addOnSubscriptionId: string | null = null;
-      if (addOnsChanged) {
-        const subscription = await dependencies.store.getSubscription(account.tenantId);
-        if (subscription?.status === "active") {
-          if (!stripeClient || !subscription.providerSubscriptionId) throw new HttpError(503, "Subscription add-on billing is not available yet");
-          addOnSubscriptionId = subscription.providerSubscriptionId;
-        }
-      }
-      if (account.status !== "active") updated.paused = true;
-      if (updated.paused !== current.paused) updated.pausedForBilling = false;
-      const ownerPhone = form.get("ownerPhone")?.trim();
-      if (ownerPhone) {
-        if (!/^\+[1-9]\d{7,14}$/.test(ownerPhone)) throw new HttpError(400, "Owner phone must use E.164 format");
-        await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner-primary", ownerPhone);
-        updated.ownerNotificationRefs = ["owner-primary"];
-        updated.ownerTransferNumberRef = "owner-primary";
-      }
-      let liveRouteChange: TelnyxVoiceRoutingClient | null = null;
-      if (account.status === "active" && updated.paused !== current.paused) {
-        const [route, inboundNumber] = await Promise.all([
-          dependencies.store.getProviderRouteForTenant("telnyx", account.tenantId),
-          dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
-        ]);
-        if (!dependencies.env.TELNYX_API_KEY || !route || !inboundNumber) throw new HttpError(409, "The live phone route is not configured for this shop");
-        liveRouteChange = new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: inboundNumber, assistantId: route.externalId });
-        await liveRouteChange.setPaused(updated.paused)
-          .catch(() => { throw new HttpError(502, "Telnyx could not change the live phone route; your setting was not changed"); });
-      }
-      if (addOnSubscriptionId) {
-        await stripeClient!.syncAddOns(addOnSubscriptionId, {
-          dailySms: updated.ownerDailySmsEnabled,
-          realtimeSms: updated.ownerRealtimeSmsEnabled,
-        }).catch(async (error) => {
-          if (liveRouteChange) await liveRouteChange.setPaused(current.paused).catch(() => undefined);
-          log({ level: "error", event: "owner_addon_sync_failed", tenantId: account.tenantId, error: safeError(error) });
-          throw new HttpError(502, "Stripe could not update the notification add-ons; settings were not changed");
-        });
-      }
-      try {
-        await saveAssistantConfig(dependencies.store, dependencies.env, updated);
-      } catch (error) {
-        if (liveRouteChange) await liveRouteChange.setPaused(current.paused).catch((rollbackError) => log({ level: "error", event: "owner_route_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
-        if (addOnSubscriptionId) await stripeClient!.syncAddOns(addOnSubscriptionId, {
-          dailySms: current.ownerDailySmsEnabled,
-          realtimeSms: current.ownerRealtimeSmsEnabled,
-        }).catch((rollbackError) => log({ level: "error", event: "owner_addon_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
-        throw error;
-      }
-      });
+      await saveOwnerSettings(account, form);
       return redirect(response, "/app/settings?saved=1");
     }
     if (method === "GET" && url.pathname === "/app/account/export") {
@@ -880,8 +1116,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       }
       const call = await dependencies.store.getCallByProviderId(providerCallId);
       if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Recording not found");
-      const downloadUrl = await recordingClient.getDownloadUrl(providerCallId);
+      const downloadUrl = await recordingDownloadUrl(providerCallId);
       if (!downloadUrl) throw new HttpError(404, "Recording is not available yet");
+      if (url.searchParams.get("stream") === "1") return streamRecording(request, response, providerCallId, downloadUrl);
       response.writeHead(302, { location: downloadUrl, "cache-control": "no-store" });
       response.end();
       return;
@@ -900,51 +1137,21 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (method === "POST" && completeTaskMatch?.[1]) {
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
-      const task = await dependencies.store.getCallbackTaskForCall(completeTaskMatch[1]);
-      if (!task || task.tenantId !== account.tenantId) throw new HttpError(404, "Task not found");
-      await dependencies.store.saveCallbackTask({
-        ...task,
-        status: "completed",
-        completedAt: dependencies.clock.now().toISOString(),
-        completionSource: "owner",
-        updatedAt: dependencies.clock.now().toISOString(),
-      });
+      const task = await ownerTaskAction(account, completeTaskMatch[1], "complete");
       return redirect(response, `/app?completed=${encodeURIComponent(task.callId)}#inbox`);
     }
     const reopenTaskMatch = /^\/app\/calls\/([0-9a-f-]+)\/task\/reopen$/i.exec(url.pathname);
     if (method === "POST" && reopenTaskMatch?.[1]) {
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
-      const task = await dependencies.store.getCallbackTaskForCall(reopenTaskMatch[1]);
-      if (!task || task.tenantId !== account.tenantId || task.status !== "completed") throw new HttpError(404, "Completed task not found");
-      const now = dependencies.clock.now().toISOString();
-      await dependencies.store.saveCallbackTask({
-        ...task,
-        status: "open",
-        dueAt: now,
-        completedAt: null,
-        completionSource: null,
-        updatedAt: now,
-      });
+      const task = await ownerTaskAction(account, reopenTaskMatch[1], "reopen");
       return redirect(response, `/app?call=${encodeURIComponent(task.callId)}#inbox`);
     }
     const snoozeTaskMatch = /^\/app\/calls\/([0-9a-f-]+)\/task\/snooze$/i.exec(url.pathname);
     if (method === "POST" && snoozeTaskMatch?.[1]) {
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
-      const task = await dependencies.store.getCallbackTaskForCall(snoozeTaskMatch[1]);
-      if (!task || task.tenantId !== account.tenantId || task.status === "completed" || task.status === "cancelled") throw new HttpError(404, "Task not found");
-      const minutes = Number(form.get("minutes"));
-      if (![60, 240, 1_440].includes(minutes)) throw new HttpError(400, "Choose a valid reminder time");
-      const now = dependencies.clock.now();
-      await dependencies.store.saveCallbackTask({
-        ...task,
-        status: "snoozed",
-        dueAt: new Date(now.getTime() + minutes * 60_000).toISOString(),
-        completedAt: null,
-        completionSource: null,
-        updatedAt: now.toISOString(),
-      });
+      await ownerTaskAction(account, snoozeTaskMatch[1], "snooze", Number(form.get("minutes")));
       return redirect(response, "/app#inbox");
     }
     const callMatch = /^\/app\/calls\/([0-9a-f-]+)$/i.exec(url.pathname);
@@ -1713,6 +1920,11 @@ function routeKey(pathname: string): string {
   if (pathname.startsWith("/tools/")) return `tool:${pathname.slice(7)}`;
   if (pathname.startsWith("/admin/calls/")) return "admin:call";
   if (pathname.startsWith("/app/calls/")) return "owner:call";
+  if (pathname.startsWith("/app/provider/")) return "owner:recording";
+  if (pathname.startsWith("/api/app/")) return "owner:api";
+  if (pathname.startsWith("/api/demo/")) return "demo:api";
+  if (pathname.startsWith("/web/")) return "web:asset";
+  if (pathname.startsWith("/demo/")) return "/demo";
   if (pathname.startsWith("/app")) return "owner:app";
   return pathname;
 }

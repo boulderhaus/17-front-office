@@ -1,0 +1,35 @@
+export function compactDate(value: string, tz: string): string {
+  return new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value))
+}
+
+export function timeOnly(value: string, tz: string): string {
+  return new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit" }).format(new Date(value))
+}
+
+export function dateKey(value: Date, tz: string): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(value)
+}
+
+export function dayLabel(value: string, tz: string, nowMs: number): string {
+  const key = dateKey(new Date(value), tz)
+  if (key === dateKey(new Date(nowMs), tz)) return "Today"
+  if (key === dateKey(new Date(nowMs + 86_400_000), tz)) return "Tomorrow"
+  return new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", month: "short", day: "numeric" }).format(new Date(value))
+}
+
+export function formatPhone(phone: string): string {
+  const match = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(phone)
+  return match ? `(${match[1]}) ${match[2]}-${match[3]}` : phone
+}
+
+export function outcomeWords(outcome: string): string {
+  return ({ in_progress: "On the call", booked: "Booked", pending_confirmation: "Needs your OK", handoff_queued: "Call back", ignored_spam: "Spam", failed: "Failed" } as Record<string, string>)[outcome] ?? outcome
+}
+
+export function notificationWords(state: string): string {
+  return ({ pending: "Queued", sending: "Sending", sent: "Sent", delivered: "Delivered", delivery_failed: "Not delivered", delivery_unconfirmed: "Sent, not confirmed", retry: "Retrying", dead: "Failed" } as Record<string, string>)[state] ?? state
+}
+
+export function mapsUrl(address: string): string {
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`
+}
