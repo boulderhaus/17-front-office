@@ -55,6 +55,10 @@ Source: Brock-supplied `AI-Front-Office-Codex-Handoff.md`, read in full on 2026-
 
 ## 5. Verification and independent review
 
+- Deployed and pushed commit `cae881b2`. Production readiness returns 200; old `/start` links return 303 to `/signup`; the yellow hero, explicit paid CTA, varied lower layout and centered FAQ are present on the live URL.
+- Commercial activation still returns 503, `provider_test`, with two reported blocking checks. The readiness report is not a substitute for validating the external credentials.
+- Applying the latest tools to the existing test assistant was blocked: Telnyx rejected the runtime API key with HTTP 401 on the initial read. No assistant update was applied. The key is present, has no surrounding whitespace/quotes, and has the expected prefix; validation/replacement in the protected runtime store is required. Do not paste the key into chat or source control.
+
 - 91 tests passed with the disposable PostgreSQL integration enabled; TypeScript build passed; 15/15 local launch simulations passed. Simulations are not live provider proof.
 - All migrations applied successfully to an empty PostgreSQL 17 database and reran without reapplication.
 - Mobile landing and simplified signup inspected in the in-app Browser. No Chrome access used.
