@@ -687,6 +687,24 @@ describe("HTTP boundary", () => {
     expect((await store.getConfig(account!.tenantId)).serviceAreaTerms).toEqual(["Sarasota FL", "34236"]);
   });
 
+  it("keeps direct booking and warm transfer hidden and off for owners until their beta flags are on", async () => {
+    const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Air", email: "beta@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
+    const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
+    const page = await (await fetch(`${baseUrl}/app/setup`, { headers: { cookie } })).text();
+    expect(page).not.toContain("warmTransferEnabled");
+    expect(page).not.toContain("Book available times on my calendar");
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
+    const saved = await fetch(`${baseUrl}/app/setup`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({
+      csrf, businessName: "Synthetic Air", serviceAreaTerms: "Sarasota FL", timezone: "America/New_York", operationMode: "overflow", start: "17:00", end: "08:00",
+      bookStart: "08:00", bookEnd: "17:00", bookingMode: "direct", warmTransferEnabled: "on", greeting: "Hi, I'm the owner's AI assistant. How can I help?", prices: "", answers: "", disclosureApproved: "yes",
+    }) });
+    expect(saved.status).toBe(303);
+    const account = await store.getOwnerAccountByEmail("beta@synthetic.example");
+    expect(await store.getConfig(account!.tenantId)).toMatchObject({ bookingMode: "confirm", warmTransferEnabled: false });
+    const settings = await (await fetch(`${baseUrl}/app/settings`, { headers: { cookie } })).text();
+    expect(settings).not.toContain("direct booking</option>");
+  });
+
   it("persists owner-approved scripts and coverage rules from the admin form", async () => {
     const login = await fetch(`${baseUrl}/admin/login`, {
       method: "POST",

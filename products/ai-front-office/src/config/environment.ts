@@ -30,6 +30,9 @@ const schema = z.object({
   TELNYX_ASSISTANT_ID: z.string().min(1).optional(),
   TELNYX_MESSAGING_APPROVED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   FOUNDER_WELCOME_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  // Owner-facing controls stay hidden until each capability passes live acceptance.
+  DIRECT_BOOKING_BETA: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  WARM_TRANSFER_BETA: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   FOUNDER_WELCOME_FROM_NUMBER: z.preprocess(
     (value) => value === "" ? undefined : value,
     z.string().regex(/^\+[1-9]\d{7,14}$/, "FOUNDER_WELCOME_FROM_NUMBER must use E.164 format").optional(),

@@ -540,7 +540,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const member = account.role === "member";
     if (url.pathname === "/app/setup") {
       if (member) throw new HttpError(403, "Only the owner can change the shop’s call setup");
-      if (method === "GET") return sendHtml(response, 200, renderQuickSetup(await dependencies.store.getConfig(account.tenantId), session.csrf, await isGoogleConnected(dependencies.env, dependencies.store, account.tenantId)));
+      if (method === "GET") return sendHtml(response, 200, renderQuickSetup(await dependencies.store.getConfig(account.tenantId), session.csrf, await isGoogleConnected(dependencies.env, dependencies.store, account.tenantId), { directBooking: dependencies.env.DIRECT_BOOKING_BETA, warmTransfer: dependencies.env.WARM_TRANSFER_BETA }));
       if (method !== "POST") throw new HttpError(405, "Method not allowed");
       const form = parseForm(await readBody(request, 20_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
@@ -559,7 +559,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         const current = await dependencies.store.getConfig(account.tenantId);
         if (phone) await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner-primary", phone);
         if (form.get("ownerSmsConsent") === "yes" && !phone && !await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")) throw new HttpError(400, "Add a mobile number for text alerts");
-        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, businessName: data.businessName, timezone: data.timezone, serviceAreaTerms: serviceArea.terms, operationMode: data.operationMode, afterHours: { ...current.afterHours, weekdayStart: data.start, weekdayEnd: data.end }, bookableHours: { weekdayStart: data.bookStart, weekdayEnd: data.bookEnd, weekends: form.get("weekends") === "on" }, bookingMode: data.bookingMode, greeting: data.greeting, priceSnippets: parseLines(data.prices, 30).map((text, index) => ({ label: `Approved price ${index + 1}`, text })), approvedKnowledge: parseLines(data.answers, 30).map((text, index) => ({ topic: `Approved answer ${index + 1}`, text })), ownerNotificationRefs: form.get("ownerSmsConsent") === "yes" ? ["owner-primary"] : [], ownerTransferNumberRef: "owner-primary", warmTransferEnabled: form.get("warmTransferEnabled") === "on" });
+        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, businessName: data.businessName, timezone: data.timezone, serviceAreaTerms: serviceArea.terms, operationMode: data.operationMode, afterHours: { ...current.afterHours, weekdayStart: data.start, weekdayEnd: data.end }, bookableHours: { weekdayStart: data.bookStart, weekdayEnd: data.bookEnd, weekends: form.get("weekends") === "on" }, bookingMode: dependencies.env.DIRECT_BOOKING_BETA ? data.bookingMode : "confirm", greeting: data.greeting, priceSnippets: parseLines(data.prices, 30).map((text, index) => ({ label: `Approved price ${index + 1}`, text })), approvedKnowledge: parseLines(data.answers, 30).map((text, index) => ({ topic: `Approved answer ${index + 1}`, text })), ownerNotificationRefs: form.get("ownerSmsConsent") === "yes" ? ["owner-primary"] : [], ownerTransferNumberRef: "owner-primary", warmTransferEnabled: dependencies.env.WARM_TRANSFER_BETA && form.get("warmTransferEnabled") === "on" });
       });
       return redirect(response, "/app?setup=saved");
     }
@@ -646,6 +646,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
         dailySmsAvailable: Boolean(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID),
         realtimeSmsAvailable: Boolean(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID),
+        directBookingAvailable: dependencies.env.DIRECT_BOOKING_BETA,
       }, "owner"));
     }
     if (method === "POST" && url.pathname === "/app/config") {
@@ -654,6 +655,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
       const current = await dependencies.store.getConfig(account.tenantId);
       const updated = configFromForm(current, form);
+      if (!dependencies.env.DIRECT_BOOKING_BETA) updated.bookingMode = "confirm";
+      if (!dependencies.env.WARM_TRANSFER_BETA) updated.warmTransferEnabled = false;
       updated.flatMonthlyPriceCents = current.flatMonthlyPriceCents;
       updated.includedMinutes = current.includedMinutes;
       updated.overageCentsPerMinute = current.overageCentsPerMinute;
