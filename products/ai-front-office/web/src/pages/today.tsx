@@ -11,8 +11,9 @@ import { CallLink, Empty, Muted, SectionTitle, ToneBadge, ToneDot } from "@/comp
 import { CallHeader, ContactActions, Facts, phoneFact, SafetyNote } from "@/components/app/call-parts"
 import { api } from "@/lib/api"
 import { derive, shortAddress, urgency } from "@/lib/derive"
-import { compactDate, dayLabel, formatPhone, timeOnly } from "@/lib/format"
+import { compactDate, dayLabel, timeOnly } from "@/lib/format"
 import { useMode } from "@/lib/mode"
+import { ForwardingCard } from "@/components/app/forwarding-card"
 import type { ApiCall, ApiDashboard, ApiTask } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -53,7 +54,7 @@ export function TodayPage() {
       <div className={cn("grid min-w-0 gap-5", selected && "max-lg:hidden")}>
         <Banners dashboard={dashboard} />
         {!preview && dashboard.viewer.role === "owner" && <SetupCard dashboard={dashboard} />}
-        {!preview && dashboard.viewer.role === "owner" && dashboard.viewer.status === "active" && dashboard.line.number && <ForwardingCard dashboard={dashboard} open={dashboard.calls.length === 0} />}
+        {!preview && dashboard.viewer.role === "owner" && dashboard.viewer.status === "active" && dashboard.line.number && <ForwardingCard dashboard={dashboard} />}
         <StatCards dashboard={dashboard} />
         <section id="inbox" className="grid gap-2.5">
           <SectionTitle title="Needs your attention" count={d.actionable.length} />
@@ -186,39 +187,6 @@ function SetupCard({ dashboard }: { dashboard: ApiDashboard }) {
         ) : null}
         {dashboard.viewer.status !== "active" && <p className="text-[13px] text-muted-foreground">After payment we check your line and turn it on. Your dashboard shows when calls are being answered. A test call is optional.</p>}
       </CardContent>
-    </Card>
-  )
-}
-
-function ForwardingCard({ dashboard, open }: { dashboard: ApiDashboard; open: boolean }) {
-  const number = dashboard.line.number!
-  return (
-    <Card className="relative gap-0 overflow-hidden border-brand-ink/15 py-0">
-      <span aria-hidden className="absolute inset-y-0 left-0 w-1.5 bg-brand-yellow" />
-      <details open={open} className="group">
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-4">
-          <span className="grid gap-0.5">
-            <small className="text-[13px] font-medium text-muted-foreground">Your Front Office number</small>
-            <strong className="tabular text-xl font-semibold tracking-tight"><Phone className="mr-1.5 inline size-4 align-[-2px]" />{formatPhone(number)}</strong>
-          </span>
-          <span className="flex items-center gap-1 text-sm font-semibold">Forward your calls<ChevronRight className="size-4 transition-transform group-open:rotate-90" /></span>
-        </summary>
-        <div className="grid gap-3 border-t px-5 py-4 text-sm">
-          <p>Keep your business number. On your business phone, dial your carrier’s code and press call. {dashboard.line.mode === "always" ? "Every call" : "Calls you don’t pick up"} will ring through to Front Office.</p>
-          <dl className="grid gap-2">
-            {dashboard.line.forwarding.map((row) => (
-              <div key={row.carrier} className="grid gap-1 rounded-lg border bg-muted/40 px-3 py-2.5">
-                <dt className="text-[13px] font-medium text-muted-foreground">{row.carrier}</dt>
-                <dd className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                  <code className="rounded bg-brand-yellow/60 px-1.5 py-0.5 font-mono text-[15px] font-semibold break-all">{row.on}</code>
-                  <small className="text-muted-foreground">off: <code className="font-mono">{row.off}</code></small>
-                </dd>
-              </div>
-            ))}
-          </dl>
-          <p className="text-[13px] text-muted-foreground">To test: call your business number from another phone and let it ring. Office phone systems (RingCentral, Google Voice, Ooma) set this under call forwarding or “when unanswered”.</p>
-        </div>
-      </details>
     </Card>
   )
 }
