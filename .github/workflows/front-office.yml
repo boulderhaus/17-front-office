@@ -1,0 +1,48 @@
+name: front-office
+
+on:
+  pull_request:
+    paths: ["products/ai-front-office/**", ".github/workflows/front-office.yml"]
+  push:
+    branches: [main]
+    paths: ["products/ai-front-office/**", ".github/workflows/front-office.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: products/ai-front-office
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: afo_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d afo_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/afo_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/afo_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: products/ai-front-office/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      # Twice: the second run must be a clean no-op.
+      - run: npm run migrate
+      - run: npm run migrate
+      - run: npm run check
+      - run: npm run build
+      - run: npm run simulate:launch
