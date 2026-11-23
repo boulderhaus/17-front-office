@@ -195,7 +195,7 @@ export function settingsForm(body: unknown): URLSearchParams {
     if (!SETTINGS_FIELDS.has(key)) continue;
     if (value === true) form.set(key, "on");
     else if (value === false || value === null || value === undefined) continue;
-    else if (typeof value === "string" || typeof value === "number") form.set(key, String(value).slice(0, 4_000));
+    else if (typeof value === "string" || typeof value === "number") form.set(key, String(value));
     else throw new Error(`Invalid value for ${key}`);
   }
   return form;

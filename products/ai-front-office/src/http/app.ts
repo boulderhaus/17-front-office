@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -620,27 +621,39 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   }
   async function streamRecording(request: IncomingMessage, response: ServerResponse, providerCallId: string, downloadUrl: string): Promise<void> {
     const range = typeof request.headers.range === "string" && /^bytes=\d*-\d*$/.test(request.headers.range) ? request.headers.range : null;
-    const upstream = await withTimeout((dependencies.fetcher ?? fetch)(downloadUrl, range ? { headers: { range } } : {}), 8_000)
-      .catch(() => null);
-    if (!upstream || (upstream.status !== 200 && upstream.status !== 206) || !upstream.body) {
-      recordingUrls.delete(providerCallId);
+    // Abort the download if Telnyx's storage is slow or the listener leaves.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8_000);
+    request.once("close", () => controller.abort());
+    const upstream = await (dependencies.fetcher ?? fetch)(downloadUrl, { signal: controller.signal, ...(range ? { headers: { range } } : {}) })
+      .catch(() => null)
+      .finally(() => clearTimeout(timer));
+    const contentType = upstream?.headers.get("content-type") ?? "";
+    const audioLike = contentType.startsWith("audio/") || contentType.startsWith("application/octet-stream") || contentType === "";
+    if (upstream?.status === 416) {
+      await upstream.body?.cancel().catch(() => undefined);
+      response.writeHead(416, { "content-range": upstream.headers.get("content-range") ?? "bytes */*", "cache-control": "no-store" });
+      response.end();
+      return;
+    }
+    if (!upstream || (upstream.status !== 200 && upstream.status !== 206) || !upstream.body || (upstream.url !== "" && !upstream.url.startsWith("https://")) || !audioLike) {
+      await upstream?.body?.cancel().catch(() => undefined);
+      // An expired or revoked link is looked up again next time.
+      if (!upstream || [401, 403, 404].includes(upstream.status)) recordingUrls.delete(providerCallId);
       throw new HttpError(502, "The recording could not be loaded. Please try again.");
     }
     const headers: Record<string, string> = {
-      "content-type": upstream.headers.get("content-type")?.startsWith("audio/") ? upstream.headers.get("content-type")! : "audio/mpeg",
+      "content-type": contentType.startsWith("audio/") ? contentType : "audio/mpeg",
       "accept-ranges": "bytes",
-      "cache-control": "private, max-age=300",
+      // Signed-in audio: never kept in any cache, not even this browser's.
+      "cache-control": "private, no-store",
     };
     for (const name of ["content-length", "content-range"]) {
       const value = upstream.headers.get(name);
       if (value) headers[name] = value;
     }
     response.writeHead(upstream.status, headers);
-    const audio = Readable.fromWeb(upstream.body as never);
-    audio.on("error", () => response.destroy());
-    // A listener who skips or leaves must not keep the upstream download open.
-    response.on("close", () => audio.destroy());
-    audio.pipe(response);
+    await pipeline(Readable.fromWeb(upstream.body as never), response).catch(() => controller.abort());
   }
 
   // ---- Owner JSON API ------------------------------------------------------------

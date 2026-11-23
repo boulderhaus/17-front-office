@@ -200,7 +200,9 @@ describe("Owner JSON API and React app serving", () => {
         return new Response(JSON.stringify({ data: [{ download_urls: { mp3: "https://recordings.example/owner-call.mp3?sig=1" } }] }), { status: 200, headers: { "content-type": "application/json" } });
       }
       if (url.startsWith("https://recordings.example/")) {
-        seen.push(`audio:${new Headers(init?.headers).get("range") ?? "all"}`);
+        const range = new Headers(init?.headers).get("range");
+        if (range === "bytes=99-") return new Response(null, { status: 416, headers: { "content-range": "bytes */10" } });
+        seen.push(`audio:${range ?? "all"}`);
         return new Response(new Uint8Array([1, 2, 3, 4]), { status: 206, headers: { "content-type": "audio/mpeg", "content-range": "bytes 0-3/10", "content-length": "4" } });
       }
       return realFetch(input, init);
@@ -215,8 +217,12 @@ describe("Owner JSON API and React app serving", () => {
     // A second range request reuses the looked-up link.
     await (await realFetch(`${baseUrl}${detail.recordingUrl}`, { headers: { cookie: owner.cookie, range: "bytes=4-" } })).arrayBuffer();
     expect(seen).toEqual(["lookup", "audio:bytes=0-3", "audio:bytes=4-"]);
+    const pastEnd = await realFetch(`${baseUrl}${detail.recordingUrl}`, { headers: { cookie: owner.cookie, range: "bytes=99-" } });
+    expect(pastEnd.status).toBe(416);
+    expect(pastEnd.headers.get("content-range")).toBe("bytes */10");
+    expect(audio.headers.get("cache-control")).toBe("private, no-store");
     const crossShop = await realFetch(`${baseUrl}${detail.recordingUrl}`, { headers: { cookie: other.cookie } });
     expect(crossShop.status).toBe(404);
-    expect(seen).toHaveLength(3);
+    expect(seen).toHaveLength(3); // no lookup after the 416, and none for the other shop
   });
 });
