@@ -70,7 +70,7 @@ export class StripeBillingClient {
     return data.url;
   }
 
-  async createCheckout(input: { tenantId: string; email: string; customerId?: string | null; successUrl: string; cancelUrl: string; idempotencyKey: string; dailySms: boolean; realtimeSms: boolean; now?: Date }): Promise<{ id: string; url: string; expiresAt: string }> {
+  async createCheckout(input: { tenantId: string; email: string; customerId?: string | null; successUrl: string; cancelUrl: string; idempotencyKey: string; dailySms: boolean; realtimeSms: boolean; now?: Date; trialDays?: number; submitMessage?: string }): Promise<{ id: string; url: string; expiresAt: string }> {
     // Sessions expire in ~31 minutes (Stripe's minimum is 30) so a stale one cannot be paid later.
     const expiresAt = Math.floor((input.now ?? new Date()).getTime() / 1_000) + 31 * 60;
     const body = new URLSearchParams({
@@ -85,7 +85,12 @@ export class StripeBillingClient {
       "subscription_data[metadata][tenant_id]": input.tenantId,
       success_url: input.successUrl,
       cancel_url: input.cancelUrl,
+      // Card upfront every time, trial or not.
+      payment_method_collection: "always",
     });
+    if (input.trialDays && input.trialDays > 0) body.set("subscription_data[trial_period_days]", String(Math.floor(input.trialDays)));
+    // Said again on Stripe's page, right above the button, so nobody is surprised by the charge date.
+    if (input.submitMessage) body.set("custom_text[submit][message]", input.submitMessage.slice(0, 1_000));
     let lineItem = 1;
     for (const [enabled, price, label] of [[input.dailySms, this.prices.dailySms, "daily SMS"], [input.realtimeSms, this.prices.realtimeSms, "instant lead SMS"]] as const) {
       if (!enabled) continue;
@@ -105,6 +110,17 @@ export class StripeBillingClient {
     const payload = await response.json().catch(() => ({})) as { id?: string; url?: string; error?: { message?: string } };
     if (!response.ok || !payload.url?.startsWith("https://") || !payload.id) throw new Error(`Stripe checkout failed with HTTP ${response.status}${payload.error?.message ? `: ${payload.error.message}` : ""}`);
     return { id: payload.id, url: payload.url, expiresAt: new Date(expiresAt * 1_000).toISOString() };
+  }
+
+  /** A finished Checkout Session, read back when the owner returns, before the webhook may have landed. */
+  async retrieveCheckoutSession(sessionId: string): Promise<{ id: string; status: string; tenantId: string | null; subscriptionId: string | null }> {
+    const response = await withTimeout(this.fetcher(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}`, {
+      headers: { authorization: `Bearer ${this.secretKey}` },
+    }), 6_000);
+    const payload = await response.json().catch(() => ({})) as { id?: string; status?: string; client_reference_id?: string | null; subscription?: string | { id?: string } | null };
+    if (!response.ok || payload.id !== sessionId) throw new Error(`Stripe checkout lookup failed with HTTP ${response.status}`);
+    const subscription = typeof payload.subscription === "string" ? payload.subscription : payload.subscription?.id ?? null;
+    return { id: payload.id, status: payload.status ?? "open", tenantId: payload.client_reference_id ?? null, subscriptionId: subscription };
   }
 
   /** Expire an unpaid Checkout Session so it can no longer start a subscription. */

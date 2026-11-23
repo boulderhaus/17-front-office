@@ -482,7 +482,8 @@ function isWithinBookableHours(start: string, timeZone: string, hours: BusinessC
   const parts = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(start));
   const read = (type: Intl.DateTimeFormatPartTypes): string => parts.find((part) => part.type === type)?.value ?? "";
   const weekday = read("weekday");
-  if ((weekday === "Sat" || weekday === "Sun") && !hours.weekends) return false;
+  if (weekday === "Sun" && !hours.weekends) return false;
+  if (weekday === "Sat" && !hours.weekends && !hours.saturday) return false;
   const minute = Number(read("hour")) * 60 + Number(read("minute"));
   const toMinute = (value: string): number => {
     const [h = "0", m = "0"] = value.split(":");

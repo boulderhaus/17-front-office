@@ -1,5 +1,6 @@
 import type { BusinessConfig } from "./models.js";
 import { DEFAULT_USAGE_ALERT_PERCENT, isValidUsageAlertPercent } from "./usage.js";
+import { stateCode } from "./area-codes.js";
 
 export function createDemoConfig(tenantId = "demo"): BusinessConfig {
   return {
@@ -86,8 +87,18 @@ export function evaluateServiceArea(address: string | null, config: BusinessConf
   const firstIsStreet = /\d/.test(rawComponents[0] ?? "") && rawComponents.length > 1;
   const localityStart = firstIsStreet ? 1 : 0;
   const postalCodes = rawComponents.slice(localityStart).flatMap((component) => [...component.matchAll(/\b(\d{5})(?:-\d{4})?\b/g)].map((match) => match[1]!));
+  const localityText = addressComponents.slice(localityStart).join(" ").split(" ");
   for (const term of terms) {
     const normalizedTerm = normalizeCoverageText(term);
+    // A whole-state term ("FL") covers any address that names that state ("Sarasota, FL 34236", "Tampa Florida").
+    const wholeState = /^[A-Za-z]{2}$/.test(term) ? stateCode(term) : null;
+    if (wholeState) {
+      const lastWords = localityText.filter((word) => !/^\d{5}(?:-\d{4})?$/.test(word));
+      if ([1, 2, 3].some((size) => lastWords.length >= size && stateCode(lastWords.slice(-size).join(" ")) === wholeState)) {
+        return { status: "covered", matchedTerm: term };
+      }
+      continue;
+    }
     if (/^\d{5}$/.test(normalizedTerm)) {
       if (postalCodes.includes(normalizedTerm)) return { status: "covered", matchedTerm: term };
       continue;
@@ -124,7 +135,8 @@ export function isCoverageActive(config: BusinessConfig, at: Date, ownerBusy: bo
   const weekday = value("weekday");
   const date = `${value("year")}-${value("month")}-${value("day")}`;
   if (config.afterHours.holidayDates.includes(date)) return true;
-  if (config.afterHours.weekends && (weekday === "Sat" || weekday === "Sun")) return true;
+  // A shop that works Saturdays keeps weekday hours on Saturday; Sunday stays fully covered.
+  if (config.afterHours.weekends && (weekday === "Sun" || (weekday === "Sat" && !config.afterHours.workSaturday))) return true;
 
   const minuteOfDay = Number(value("hour")) * 60 + Number(value("minute"));
   const parseTime = (time: string): number => {
@@ -145,13 +157,18 @@ export function normalizeServiceAreaInput(raw: string): { terms: string[]; error
   const tokens = raw.split(/[,;\n]+/).map((token) => token.trim().replace(/\s+/g, " ")).filter(Boolean);
   const merged: string[] = [];
   for (const token of tokens) {
-    if (/^[A-Za-z]{2}$/.test(token) && merged.length > 0 && !/^\d{5}$/.test(merged.at(-1)!)) merged[merged.length - 1] = `${merged.at(-1)} ${token}`;
+    const previous = merged.at(-1);
+    if (/^[A-Za-z]{2}$/.test(token) && previous !== undefined && !/^\d{5}$/.test(previous) && !stateCode(previous)) merged[merged.length - 1] = `${previous} ${token}`;
+    // "34236, FL": the state only qualifies the ZIP; it must not widen coverage to the whole state.
+    else if (stateCode(token) && previous !== undefined && /^\d{5}$/.test(previous)) continue;
     else merged.push(token);
   }
   const terms: string[] = [];
   const errors: string[] = [];
   for (const term of merged) {
-    if (/^\d{5}$/.test(term)) terms.push(term);
+    const wholeState = stateCode(term);
+    if (wholeState) terms.push(wholeState);
+    else if (/^\d{5}$/.test(term)) terms.push(term);
     else if (/^[A-Za-z][A-Za-z .'-]* [A-Za-z]{2}$/.test(term)) terms.push(`${term.slice(0, -2).trimEnd()} ${term.slice(-2).toUpperCase()}`);
     else errors.push(term);
   }

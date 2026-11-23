@@ -153,7 +153,8 @@ function isWithinBookableHours(value: Date, timeZone: string, hours: BusinessCon
   }).formatToParts(value);
   const read = (type: Intl.DateTimeFormatPartTypes): string => parts.find((part) => part.type === type)?.value ?? "";
   const weekday = read("weekday");
-  if ((weekday === "Sat" || weekday === "Sun") && !hours.weekends) return false;
+  if (weekday === "Sun" && !hours.weekends) return false;
+  if (weekday === "Sat" && !hours.weekends && !hours.saturday) return false;
   const minute = Number(read("hour")) * 60 + Number(read("minute"));
   const toMinute = (time: string): number => {
     const [hour = "0", minuteValue = "0"] = time.split(":");

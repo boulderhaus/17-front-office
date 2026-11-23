@@ -1,5 +1,7 @@
 import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
 import { CARRIER_CHOICES, forwardingPlan, type CarrierInfo, type ForwardingPlan } from "../domain/forwarding.js";
+import { isPaidStatus } from "../domain/billing.js";
+import { describeHours } from "../domain/hours.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, OutboxNotification, OwnerAccount, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 
 /** What the owner app may see about a call. No tenant ids, provider ids or internal flags. */
@@ -41,7 +43,7 @@ export interface ApiDashboard {
     mode: BusinessConfig["operationMode"];
     forwarding: Array<{ carrier: string; on: string; off: string }>;
     /** The owner's own business number and how to forward it. */
-    business: { number: string | null; carrier: CarrierInfo | null; plan: ForwardingPlan | null; choices: typeof CARRIER_CHOICES };
+    business: { number: string | null; carrier: CarrierInfo | null; plan: ForwardingPlan | null; choices: typeof CARRIER_CHOICES; suggested: string | null };
     /** When a call last proved forwarding works. */
     confirmedAt: string | null;
     check: { status: "idle" | "calling" | "passed" | "not_reached"; method: "auto" | "manual" | null; startedAt: string | null };
@@ -58,13 +60,21 @@ export interface ApiDashboard {
     pausedForBilling: boolean;
     alertsOn: boolean;
     rulesSaved: boolean;
+    greeting: string;
+    hours: string;
     flatMonthlyPriceCents: number;
     includedMinutes: number;
     overageCentsPerMinute: number;
   };
   googleConnected: boolean;
+  /** Google sign-in is configured on this server, so Today can offer the optional calendar card. */
+  googleAvailable: boolean;
   paid: boolean;
   checkoutConfigured: boolean;
+  /** Card status in plain terms: a trial counts as paid; trialEndsAt is when the first charge happens. */
+  billing: { status: SubscriptionRecord["status"] | "none"; trialEndsAt: string | null; chargeNote: string | null };
+  /** The new-owner flow: sign up → card → forward calls → hours → done. */
+  onboarding: { hoursSet: boolean; completed: boolean };
   /** Spam and calls under 15 seconds are left out of billedMinutes; the counts say how many. */
   usage: { billedMinutes: number; billableCalls: number; excludedSpamCalls: number; excludedShortCalls: number };
   calls: ApiCall[];
@@ -130,11 +140,16 @@ export function apiDashboard(input: {
   preview: boolean;
   lineNumber?: string | null | undefined;
   forwarding?: ForwardingState | undefined;
+  /** The owner's mobile from signup: the first guess at the number customers call. */
+  ownerMobile?: string | null | undefined;
+  googleAvailable?: boolean | undefined;
+  chargeNote?: string | null | undefined;
+  onboarding?: { hoursSet: boolean; completed: boolean } | undefined;
 }): ApiDashboard {
   const c = input.config;
   const lineNumber = input.lineNumber ?? null;
   return {
-    line: lineModel(lineNumber, c.operationMode, input.forwarding, input.now),
+    line: lineModel(lineNumber, c.operationMode, input.forwarding, input.now, input.account.role === "member" ? null : input.ownerMobile ?? null),
     csrf: input.csrf,
     now: input.now,
     preview: input.preview,
@@ -146,13 +161,22 @@ export function apiDashboard(input: {
       pausedForBilling: c.pausedForBilling === true,
       alertsOn: c.ownerNotificationRefs.length > 0,
       rulesSaved: c.serviceAreaTerms.length > 0 && c.greeting.trim().length > 0,
+      greeting: c.greeting,
+      hours: describeHours(c.bookableHours),
       flatMonthlyPriceCents: c.flatMonthlyPriceCents,
       includedMinutes: c.includedMinutes,
       overageCentsPerMinute: c.overageCentsPerMinute,
     },
     googleConnected: input.googleConnected,
-    paid: input.subscription?.status === "active",
+    googleAvailable: input.googleAvailable ?? false,
+    paid: isPaidStatus(input.subscription?.status),
     checkoutConfigured: input.checkoutConfigured,
+    billing: {
+      status: input.subscription?.status ?? "none",
+      trialEndsAt: input.subscription?.status === "trialing" ? input.subscription.currentPeriodEnd : null,
+      chargeNote: input.chargeNote ?? null,
+    },
+    onboarding: input.onboarding ?? { hoursSet: false, completed: false },
     usage: {
       billedMinutes: input.usage.billedMinutes,
       billableCalls: input.usage.billableCalls,
@@ -175,7 +199,7 @@ export interface ForwardingState {
 /** How long a check waits for the forwarded call before saying it didn't reach us. */
 export const FORWARDING_CHECK_WINDOW_MS = 90_000;
 
-function lineModel(lineNumber: string | null, mode: BusinessConfig["operationMode"], state: ForwardingState | undefined, now: string): ApiDashboard["line"] {
+function lineModel(lineNumber: string | null, mode: BusinessConfig["operationMode"], state: ForwardingState | undefined, now: string, ownerMobile: string | null): ApiDashboard["line"] {
   const check = state?.check ?? null;
   const confirmedAt = state?.confirmedAt ?? null;
   const status: ApiDashboard["line"]["check"]["status"] = !check ? "idle"
@@ -191,6 +215,7 @@ function lineModel(lineNumber: string | null, mode: BusinessConfig["operationMod
       carrier: state?.carrier ?? null,
       plan: lineNumber && state?.carrier ? forwardingPlan(state.carrier.family, lineNumber, mode) : null,
       choices: CARRIER_CHOICES,
+      suggested: state?.businessNumber ? null : ownerMobile,
     },
     confirmedAt,
     check: { status, method: check?.method ?? null, startedAt: check?.startedAt ?? null },

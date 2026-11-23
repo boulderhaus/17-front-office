@@ -17,6 +17,7 @@ export type ServerEvent =
   | "call_finalized"
   | "checkout_started"
   | "checkout_completed"
+  | "onboarding_completed"
   | "subscription_status_changed";
 
 export type SafeValue = string | number | boolean | null;
