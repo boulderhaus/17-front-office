@@ -92,6 +92,25 @@ const messageReceivedSchema = z.object({
 
 export type TelnyxEnvelope = z.infer<typeof envelopeBaseSchema>;
 export type TelnyxInitializationEnvelope = z.infer<typeof initializationSchema>;
+
+/**
+ * Telnyx flag-mode call screening labels likely spam with call_screening_result ("spam_likely", or an
+ * object whose reputation is spam_likely) and a "SPAM LIKELY" caller name. Telnyx does not document these
+ * on assistant.initialization, so read them defensively: a hint for a faster intent check, never a hang-up.
+ */
+export function callerReputation(payload: Record<string, unknown>): "likely_spam" | "unknown" {
+  const spam = (value: unknown) => typeof value === "string" && /spam[\s_-]*likely/i.test(value);
+  const screening = payload.call_screening_result;
+  if (spam(screening)) return "likely_spam";
+  if (screening && typeof screening === "object" && !Array.isArray(screening)) {
+    const result = screening as Record<string, unknown>;
+    if (spam(result.reputation) || spam(result.result) || spam(result.status)) return "likely_spam";
+  }
+  for (const key of ["caller_id_name", "telnyx_end_user_target_name", "from_display_name", "caller_name"]) {
+    if (spam(payload[key])) return "likely_spam";
+  }
+  return "unknown";
+}
 export type TelnyxConversationEndedEnvelope = z.infer<typeof conversationEndedSchema>;
 export type TelnyxMessageFinalizedEnvelope = z.infer<typeof messageFinalizedSchema>;
 export type TelnyxMessageReceivedEnvelope = z.infer<typeof messageReceivedSchema>;

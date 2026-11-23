@@ -176,9 +176,12 @@ describe("owner one-tap go-live", () => {
     expect((await store.getProviderRoute("telnyx", "assistant-1"))?.tenantId).toBe(account.tenantId);
     expect(telnyx.owned.get("+19415550123")!.connection_id).toBe("texml-assistant-1");
     expect(telnyx.calls.some((call) => call.url.endsWith("/10dlc/phone_number_campaigns") && call.body?.phoneNumber === "+19415550123")).toBe(true);
-    // Spam is rejected at the carrier before the AI answers.
+    // Carrier screening flags spam by default (never drops a possible emergency caller).
     const screening = telnyx.calls.find((call) => call.method === "PATCH" && call.url.endsWith("/phone_numbers/num-1/voice"));
-    expect(screening?.body).toEqual({ inbound_call_screening: "reject_calls" });
+    expect(screening?.body).toEqual({ inbound_call_screening: "flag_calls" });
+    // The six-minute cap ships with every new shop assistant, not only via the prompt.
+    const created = telnyx.calls.find((call) => call.method === "POST" && call.url.endsWith("/ai/assistants"));
+    expect((created?.body?.telephony_settings as { time_limit_secs?: number } | undefined)?.time_limit_secs).toBe(360);
     const dashboard = await (await fetch(`${baseUrl}/app`, { headers: { cookie } })).text();
     expect(dashboard).toContain("(941) 555-0123");
     expect(dashboard).toContain("*719415550123");
@@ -209,6 +212,13 @@ describe("owner one-tap go-live", () => {
     expect((await goLive()).headers.get("location")).toBe("/app?line=live");
     expect(telnyx.calls.some((call) => call.url.endsWith("/ai/assistants") && call.method === "POST")).toBe(false);
     expect((await store.getProviderRoute("telnyx", "assistant-7"))?.tenantId).toBe(account.tenantId);
+  });
+
+  it("rejects spam at the carrier only when CALL_SCREENING_MODE=reject opts in", async () => {
+    const { goLive, telnyx } = await shop({ env: { CALL_SCREENING_MODE: "reject" } });
+    expect((await goLive()).headers.get("location")).toBe("/app?line=live");
+    const screening = telnyx.calls.find((call) => call.method === "PATCH" && call.url.endsWith("/phone_numbers/num-1/voice"));
+    expect(screening?.body).toEqual({ inbound_call_screening: "reject_calls" });
   });
 
   it("keeps the line off and explains why while carrier approval is pending", async () => {

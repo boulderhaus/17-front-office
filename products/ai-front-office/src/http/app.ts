@@ -36,7 +36,7 @@ import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignu
 import type { OwnerSession } from "../security/owner-auth.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
 import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
-import { ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
+import { callScreeningSetting, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import { TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
 import { carrierFamily, forwardingOffInstruction, type CarrierFamily, type CarrierInfo } from "../domain/forwarding.js";
 import { FORWARDING_CHECK_WINDOW_MS, type ForwardingState } from "./owner-api-model.js";
@@ -62,6 +62,7 @@ import type { CalendarPort, Clock, Store } from "../ports.js";
 import {
   asTelnyxConversationEnded,
   asTelnyxInitialization,
+  callerReputation,
   asTelnyxMessageFinalized,
   asTelnyxMessageReceived,
   parseTelnyxEnvelope,
@@ -671,7 +672,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       requireMatchingCallHeader(request, input.provider_call_id);
       const tenantId = await tenantForCall(input.provider_call_id);
       await requireOperational(tenantId);
-      return sendJson(response, 200, approvedAnswer(await dependencies.store.getConfig(tenantId), input.kind, input.key));
+      return sendJson(response, 200, { ...approvedAnswer(await dependencies.store.getConfig(tenantId), input.kind, input.key), wrap_up: await service.wrapUp(input.provider_call_id) });
     }
     if (method === "POST" && url.pathname === "/tools/check-service-area") return handleServiceArea(request, response);
     if (method === "POST" && url.pathname === "/tools/check-availability") return handleAvailability(request, response);
@@ -1652,9 +1653,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const existingRoute = await dependencies.store.getProviderRoute("telnyx", assistantId);
       if (existingRoute && existingRoute.tenantId !== account.tenantId) throw new HttpError(409, "That Telnyx assistant is already assigned to another tenant");
       const liveRoute = voiceRouting(inboundNumber, assistantId);
-      // Reject spam at the carrier before the AI answers, so robocalls never spend minutes. Idempotent on every
-      // activation; a failure is logged, never blocks the line (scripts/enable-call-screening.ts backfills).
-      await ensureInboundCallScreening({ apiKey: dependencies.env.TELNYX_API_KEY!, phoneNumber: inboundNumber, apply: true, fetcher: dependencies.fetcher })
+      // Carrier spam screening: flag by default (the assistant checks intent sooner), reject only with
+      // CALL_SCREENING_MODE=reject. Idempotent on every activation; a failure is logged and never blocks
+      // the line (scripts/enable-call-screening.ts backfills).
+      await ensureInboundCallScreening({ apiKey: dependencies.env.TELNYX_API_KEY!, phoneNumber: inboundNumber, setting: callScreeningSetting(dependencies.env.CALL_SCREENING_MODE), apply: true, fetcher: dependencies.fetcher })
         .catch((error) => log({ level: "error", event: "call_screening_enable_failed", tenantId: account.tenantId, error: safeError(error) }));
       const now = dependencies.clock.now().toISOString();
       // Map first: a call that arrives the instant the number connects must already resolve to this shop.
@@ -2017,6 +2019,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           current_local_time: localContext.time,
           business_timezone: config.timezone,
           call_access: callAccess,
+          caller_reputation: callerReputation(initialization.data.payload),
           owner_transfer_targets: [],
         },
         conversation: { metadata: { tenant_id: config.tenantId } },
@@ -2113,7 +2116,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       windowStart: input.window_start,
       windowEnd: input.window_end,
     });
-    sendJson(response, 200, result);
+    sendJson(response, 200, { ...result, wrap_up: await service.wrapUp(input.provider_call_id) });
   }
 
   async function handleServiceArea(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -2129,7 +2132,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       providerCallId: input.provider_call_id,
       address: input.address,
     });
-    sendJson(response, 200, result);
+    sendJson(response, 200, { ...result, wrap_up: await service.wrapUp(input.provider_call_id) });
   }
 
   async function handleTriage(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -2149,7 +2152,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       ...(input.llm_score === undefined ? {} : { llmScore: input.llm_score }),
       ...(input.llm_reason === undefined ? {} : { llmReason: input.llm_reason }),
     });
-    sendJson(response, 200, result);
+    sendJson(response, 200, { ...result, wrap_up: await service.wrapUp(input.provider_call_id) });
   }
 
   async function handleBooking(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -2172,7 +2175,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       explicitConfirmation: input.explicit_confirmation,
       diagnosticFeeAccepted: input.diagnostic_fee_accepted,
     });
-    sendJson(response, 200, result);
+    sendJson(response, 200, { ...result, wrap_up: await service.wrapUp(input.provider_call_id) });
   }
 
   async function handleHandoff(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -2209,7 +2212,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (approved.length) await dependencies.store.saveIntegrationSecret(tenantId, "transfer", key, "issued");
       return approved;
     });
-    sendJson(response, 200, { ...result, transferAvailable: targets.length > 0, transferTargets: targets, message: targets.length ? "Owner alert and callback are saved. Offer one warm transfer to the configured Owner target. If it fails, return to the caller; the callback remains open." : result.message });
+    sendJson(response, 200, { ...result, wrap_up: await service.wrapUp(input.provider_call_id), transferAvailable: targets.length > 0, transferTargets: targets, message: targets.length ? "Owner alert and callback are saved. Offer one warm transfer to the configured Owner target. If it fails, return to the caller; the callback remains open." : result.message });
   }
 
   async function handleAdmin(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {

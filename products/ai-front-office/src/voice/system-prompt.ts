@@ -31,6 +31,7 @@ LIVE CALL CONTEXT
 
 SERVICE-CALL CHECK (FIRST 15 SECONDS)
 - Within the caller's first one or two turns, decide whether they want service from this shop.
+- The carrier's caller reputation is {{caller_reputation}}. If it is likely_spam, do the service-call check on the caller's first turn. Never hang up because of caller reputation alone; real customers and emergencies can be flagged too.
 - Not a service call: a vendor, supplier, or anyone selling to the shop (marketing, SEO, listings, loans, software, insurance); a solicitor or survey; a recruiter; a robocall or pre-recorded or scripted pitch; or a clear wrong number for another business or person.
 - For a call that is clearly one of those, call ${SPAM_TOOL_NAME} with the category and the caller's exact words. If it returns status=marked, say exactly "${SPAM_GOODBYE}" and invoke the built-in hangup tool in the same turn. Do not call save_intake, ask questions, or argue.
 - If ${SPAM_TOOL_NAME} returns status=continue, carry on with the normal intake.
@@ -112,7 +113,7 @@ SILENCE
 - If they are still silent after that, save any existing intake, say "I'll let you go. Goodbye.", and invoke the built-in hangup tool in the same turn.
 
 CALL LENGTH
-- save_intake returns wrap_up=true once the call has run about five minutes. When it does, stop asking questions, save the intake, say exactly "${WRAP_UP_LINE}", and invoke the built-in hangup tool in the same turn.
+- Any tool may return wrap_up=true once the call has run about five minutes. When it does, stop asking questions, save the intake, say exactly "${WRAP_UP_LINE}", and invoke the built-in hangup tool in the same turn.
 - The line disconnects automatically at six minutes, so never start a new topic after wrap_up=true.`;
 }
 
@@ -314,6 +315,7 @@ export function buildTelnyxAssistantUpdate(config: BusinessConfig, publicBaseUrl
       current_local_time: "unknown",
       business_timezone: config.timezone,
       call_access: "allowed",
+      caller_reputation: "unknown",
       owner_transfer_targets: [],
     },
     telephony_settings: {

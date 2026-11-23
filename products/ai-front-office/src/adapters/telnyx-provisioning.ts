@@ -113,9 +113,9 @@ export class TelnyxProvisioner {
     return true;
   }
 
-  /** Reject spam at the carrier before the AI answers. Idempotent; safe on every activation. */
-  async enableCallScreening(phoneNumber: string): Promise<CallScreeningResult> {
-    return ensureInboundCallScreening({ apiKey: this.options.apiKey, phoneNumber, apply: true, fetcher: this.options.fetcher });
+  /** Set carrier spam screening on the number. Idempotent; safe on every activation. */
+  async enableCallScreening(phoneNumber: string, setting: CallScreeningSetting): Promise<CallScreeningResult> {
+    return ensureInboundCallScreening({ apiKey: this.options.apiKey, phoneNumber, setting, apply: true, fetcher: this.options.fetcher });
   }
 
   /** Give back a shop's number and assistant when the shop is deleted, so nothing keeps billing. */
@@ -152,11 +152,19 @@ export class TelnyxProvisioner {
 }
 
 /**
- * Telnyx Inbound Call Screening (PATCH /v2/phone_numbers/{id}/voice, field inbound_call_screening):
- * "reject_calls" blocks calls Telnyx scores as spam (Nomorobo/YouMail/CallerAPI reputation, invalid
- * numbers, invalid SHAKEN/STIR) at the network, before the AI answers, so they cost no AI minutes.
+ * Telnyx Inbound Call Screening (PATCH /v2/phone_numbers/{id}/voice, field inbound_call_screening,
+ * enum disabled | reject_calls | flag_calls). Telnyx scores calls by Nomorobo/YouMail/CallerAPI
+ * reputation, number validity and SHAKEN/STIR. flag_calls labels likely spam ("SPAM LIKELY" caller
+ * name, X-Telnyx-Call-Screening header, call_screening_result on call events) and still delivers it;
+ * reject_calls drops it at the network with no record. Default is flag: forwarded calls and new
+ * mobiles can false-positive, and a dropped emergency caller leaves no trace.
  */
-export const INBOUND_CALL_SCREENING = "reject_calls";
+export type CallScreeningMode = "flag" | "reject" | "off";
+export type CallScreeningSetting = "flag_calls" | "reject_calls" | "disabled";
+
+export function callScreeningSetting(mode: CallScreeningMode): CallScreeningSetting {
+  return mode === "reject" ? "reject_calls" : mode === "off" ? "disabled" : "flag_calls";
+}
 
 export interface CallScreeningResult {
   phoneNumber: string;
@@ -165,8 +173,8 @@ export interface CallScreeningResult {
   action: "already_set" | "set" | "would_set" | "not_found";
 }
 
-/** Idempotent: reads the number's voice settings and writes reject_calls only when apply is true and it is not already set. */
-export async function ensureInboundCallScreening(input: { apiKey: string; phoneNumber: string; apply: boolean; fetcher?: typeof fetch | undefined }): Promise<CallScreeningResult> {
+/** Idempotent: reads the number's voice settings and writes the setting only when apply is true and it differs. */
+export async function ensureInboundCallScreening(input: { apiKey: string; phoneNumber: string; setting: CallScreeningSetting; apply: boolean; fetcher?: typeof fetch | undefined }): Promise<CallScreeningResult> {
   const request = async (path: string, init?: RequestInit): Promise<Record<string, unknown>> => {
     const target = path.startsWith("https://") ? path : `https://api.telnyx.com/v2${path}`;
     const response = await withTimeout((input.fetcher ?? fetch)(target, {
@@ -184,13 +192,13 @@ export async function ensureInboundCallScreening(input: { apiKey: string; phoneN
   if (typeof id !== "string") return { phoneNumber: input.phoneNumber, numberId: null, current: null, action: "not_found" };
   const voice = objectData(await request(`/phone_numbers/${encodeURIComponent(id)}/voice`));
   const current = typeof voice.inbound_call_screening === "string" ? voice.inbound_call_screening : null;
-  if (current === INBOUND_CALL_SCREENING) return { phoneNumber: input.phoneNumber, numberId: id, current, action: "already_set" };
+  if (current === input.setting) return { phoneNumber: input.phoneNumber, numberId: id, current, action: "already_set" };
   if (!input.apply) return { phoneNumber: input.phoneNumber, numberId: id, current, action: "would_set" };
   const updated = objectData(await request(`/phone_numbers/${encodeURIComponent(id)}/voice`, {
     method: "PATCH",
-    body: JSON.stringify({ inbound_call_screening: INBOUND_CALL_SCREENING }),
+    body: JSON.stringify({ inbound_call_screening: input.setting }),
   }));
-  if (updated.inbound_call_screening !== undefined && updated.inbound_call_screening !== INBOUND_CALL_SCREENING) {
+  if (updated.inbound_call_screening !== undefined && updated.inbound_call_screening !== input.setting) {
     throw new Error("Telnyx did not persist inbound call screening");
   }
   return { phoneNumber: input.phoneNumber, numberId: id, current, action: "set" };

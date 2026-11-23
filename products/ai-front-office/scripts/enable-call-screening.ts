@@ -1,13 +1,15 @@
 /**
- * Turn on Telnyx Inbound Call Screening (inbound_call_screening: "reject_calls") for every Front Office
- * number, so spam is rejected at the carrier before the AI answers and never spends minutes.
+ * Set Telnyx Inbound Call Screening on every Front Office number. The mode comes from
+ * CALL_SCREENING_MODE: flag (default, inbound_call_screening="flag_calls": likely spam is labeled and
+ * still reaches the assistant, which checks intent sooner), reject ("reject_calls": dropped at the
+ * carrier with no record or alert), or off ("disabled").
  *
  * Numbers: every shop's telnyx/inbound_number (and any half-finished pending_number) in our database,
  * the demo line (TELNYX_FROM_NUMBER), and any number on the Telnyx account ordered by us
  * (customer_reference "front-office:…"). Numbers belonging to other products on the account are untouched.
  *
- * Dry run by default (prints the plan, writes nothing). --apply writes. Idempotent: numbers already on
- * reject_calls are skipped.
+ * Dry run by default (prints the mode and the plan, writes nothing). --apply writes. Idempotent:
+ * numbers already on the target setting are skipped.
  *
  *   npm run enable:call-screening            # dry run
  *   npm run enable:call-screening -- --apply # write
@@ -15,13 +17,14 @@
 import { pathToFileURL } from "node:url";
 import { withTimeout } from "../src/application/retry.js";
 import { loadEnvironment } from "../src/config/environment.js";
-import { ensureInboundCallScreening, INBOUND_CALL_SCREENING, type CallScreeningResult } from "../src/adapters/telnyx-provisioning.js";
+import { callScreeningSetting, ensureInboundCallScreening, type CallScreeningMode, type CallScreeningResult, type CallScreeningSetting } from "../src/adapters/telnyx-provisioning.js";
 import type { Store } from "../src/ports.js";
 
 type Source = "shop_line" | "pending_line" | "demo_line" | "telnyx_account";
 
 export interface EnableCallScreeningDeps {
   apply: boolean;
+  mode: CallScreeningMode;
   apiKey: string;
   store: Store;
   demoNumber?: string | undefined;
@@ -31,12 +34,15 @@ export interface EnableCallScreeningDeps {
 
 export interface EnableCallScreeningReport {
   mode: "dry_run" | "applied";
-  setting: { field: "inbound_call_screening"; value: typeof INBOUND_CALL_SCREENING };
+  setting: { mode: CallScreeningMode; field: "inbound_call_screening"; value: CallScreeningSetting };
   numbers: Array<CallScreeningResult & { sources: Source[]; error?: string }>;
   summary: { total: number; alreadySet: number; toChange: number; changed: number; notFound: number; failed: number };
 }
 
 export async function runEnableCallScreening(deps: EnableCallScreeningDeps): Promise<EnableCallScreeningReport> {
+  const setting = callScreeningSetting(deps.mode);
+  const print = deps.print ?? ((line: string) => console.log(line));
+  print(`Call screening mode: ${deps.mode} (inbound_call_screening=${setting}). ${deps.apply ? "Applying." : "Dry run."}`);
   const sources = new Map<string, Set<Source>>();
   const add = (phone: string | null | undefined, source: Source) => {
     if (!phone || !/^\+[1-9]\d{7,14}$/.test(phone)) return;
@@ -52,7 +58,7 @@ export async function runEnableCallScreening(deps: EnableCallScreeningDeps): Pro
   const numbers: EnableCallScreeningReport["numbers"] = [];
   for (const [phoneNumber, from] of [...sources].sort(([a], [b]) => a.localeCompare(b))) {
     try {
-      const result = await ensureInboundCallScreening({ apiKey: deps.apiKey, phoneNumber, apply: deps.apply, fetcher: deps.fetcher });
+      const result = await ensureInboundCallScreening({ apiKey: deps.apiKey, phoneNumber, setting, apply: deps.apply, fetcher: deps.fetcher });
       numbers.push({ ...result, sources: [...from] });
     } catch (error) {
       numbers.push({ phoneNumber, numberId: null, current: null, action: deps.apply ? "set" : "would_set", sources: [...from], error: error instanceof Error ? error.message : String(error) });
@@ -61,7 +67,7 @@ export async function runEnableCallScreening(deps: EnableCallScreeningDeps): Pro
   const ok = numbers.filter((entry) => !entry.error);
   const report: EnableCallScreeningReport = {
     mode: deps.apply ? "applied" : "dry_run",
-    setting: { field: "inbound_call_screening", value: INBOUND_CALL_SCREENING },
+    setting: { mode: deps.mode, field: "inbound_call_screening", value: setting },
     numbers,
     summary: {
       total: numbers.length,
@@ -72,12 +78,11 @@ export async function runEnableCallScreening(deps: EnableCallScreeningDeps): Pro
       failed: numbers.length - ok.length,
     },
   };
-  const print = deps.print ?? ((line: string) => console.log(line));
   for (const entry of numbers) {
     const verb = entry.error ? `FAILED: ${entry.error}`
-      : entry.action === "would_set" ? `would change ${entry.current ?? "unset"} -> ${INBOUND_CALL_SCREENING}`
-        : entry.action === "set" ? `changed ${entry.current ?? "unset"} -> ${INBOUND_CALL_SCREENING}`
-          : entry.action === "already_set" ? `already ${INBOUND_CALL_SCREENING}, no change`
+      : entry.action === "would_set" ? `would change ${entry.current ?? "unset"} -> ${setting}`
+        : entry.action === "set" ? `changed ${entry.current ?? "unset"} -> ${setting}`
+          : entry.action === "already_set" ? `already ${setting}, no change`
             : "not on this Telnyx account, skipped";
     print(`${entry.phoneNumber} (${entry.sources.join(", ")}): ${verb}`);
   }
@@ -111,7 +116,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const { createRuntime } = await import("../src/runtime.js");
   const runtime = await createRuntime(env);
   try {
-    const report = await runEnableCallScreening({ apply: process.argv.includes("--apply"), apiKey: env.TELNYX_API_KEY, store: runtime.store, demoNumber: env.TELNYX_FROM_NUMBER });
+    const report = await runEnableCallScreening({ apply: process.argv.includes("--apply"), mode: env.CALL_SCREENING_MODE, apiKey: env.TELNYX_API_KEY, store: runtime.store, demoNumber: env.TELNYX_FROM_NUMBER });
     if (report.summary.failed > 0) process.exitCode = 1;
   } finally {
     await runtime.close();
