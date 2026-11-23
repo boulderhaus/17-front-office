@@ -509,7 +509,8 @@ describe("HTTP boundary", () => {
       }),
     });
     expect(signup.status).toBe(303);
-    expect(signup.headers.get("location")).toBe("/app");
+    // No Stripe configured here: the next step of setup, where the card button lives.
+    expect(signup.headers.get("location")).toBe("/app/start");
     const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
     expect(signup.headers.get("set-cookie")).toContain("HttpOnly");
     const account = await store.getOwnerAccountByEmail("owner@synthetic.example");
@@ -851,24 +852,30 @@ describe("HTTP boundary", () => {
     expect(landingHtml).toContain("Five-person shop?");
     expect(landingText).toContain("One new paying customer can cover the month.");
     expect(landingHtml).toContain("$100 after job expenses");
-    expect(landingHtml).toContain("Get the $49 plan");
-    expect(landingHtml).toContain("EXAMPLE CALL SUMMARY");
-    expect(landingHtml).toContain("Example completed call checklist");
-    for (const item of ["Number confirmed", "Service area checked", "Details captured", "Owner alerted", "Recording + transcript"]) expect(landingHtml).toContain(item);
+    expect(landingHtml).toContain("Go live in 3 taps");
+    expect(landingHtml).toContain("EXAMPLE CALL");
+    for (const item of ["Phone rings", "Front Office picks up", "New job: no cooling, 41 Palm Ave", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
+    // The example loops with CSS only and holds still for people who turn motion off.
+    expect(landingHtml).toContain("@keyframes demoFrame");
+    expect(landingHtml).toMatch(/prefers-reduced-motion:reduce\)\{[^}]*\}[^@]*\.frame\{position:static;opacity:1;animation:none/);
+    for (const question of ["Will it sound like a robot?", "Do I keep my number?", "What if it’s an emergency?", "Can I cancel anytime?"]) expect(landingHtml).toContain(question);
+    expect(landingHtml).toContain('Front Office is a product of <a href="https://bydutchworks.com"');
+    expect(landingHtml).not.toMatch(/\s—\s/);
     expect(landingHtml).not.toContain("ServiceTitan’s contractor benchmarks");
-    expect(landingHtml).toContain("Optional: try a test call.");
-    expect(landingHtml).toContain("automated checks either way");
     expect(landingHtml).not.toContain("approve the setup before it ever answers a customer");
     expect((await fetch(`${baseUrl}/activationz`)).status).toBe(503);
     const signupPage = await (await fetch(`${baseUrl}/signup`)).text();
-    expect(signupPage).toContain("Message frequency varies");
-    expect(signupPage).toContain('name="ownerSmsConsent"');
-    expect(signupPage).toContain("Mobile number <span class=\"small\">(optional)</span>");
-    expect(signupPage).toContain("Consent is not a condition of purchase");
-    expect(signupPage).toContain("We do not share mobile information with third parties for marketing or promotional purposes");
+    // 10DLC opt-in: a separate, unchecked, optional box naming the brand and the message type.
+    expect(signupPage).toMatch(/<input name="ownerSmsConsent" type="checkbox" value="yes" >/);
     expect(signupPage).not.toContain('name="ownerSmsConsent" type="checkbox" value="yes" required');
-    expect(signupPage).toContain("hearing a test call yourself is optional");
-    expect(signupPage).not.toContain("stays off until you test and approve it");
+    for (const phrase of ["Front Office by Dutchworks LLC", "account notifications", "Message frequency varies", "Msg &amp; data rates may apply", "Reply STOP to opt out, HELP for help", "Consent is not a condition of purchase", "We will not share mobile information with third parties for promotional or marketing purposes", 'href="/terms"', 'href="/privacy"']) {
+      expect(signupPage).toContain(phrase);
+    }
+    expect(signupPage.slice(signupPage.indexOf('name="ownerSmsConsent"'), signupPage.indexOf("</label>", signupPage.indexOf('name="ownerSmsConsent"')))).not.toMatch(/\balerts?\b/i);
+    // The fewest fields: shop, mobile, email, password.
+    expect([...signupPage.matchAll(/<input name="(\w+)"/g)].map((match) => match[1]).filter((name) => !["ownerSmsConsent", "faxNumber"].includes(name!))).toEqual(["businessName", "phone", "email", "password"]);
+    expect(signupPage).toContain("Step 1 of 4");
+    expect(signupPage).toContain('Front Office is a product of <a href="https://bydutchworks.com"');
     const privacy = await fetch(`${baseUrl}/privacy`);
     expect(privacy.status).toBe(200);
     const privacyHtml = await privacy.text();

@@ -13,6 +13,10 @@ import { approvedTransferTargets } from "../application/transfer-policy.js";
 import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
 import { renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
+import { chargeSentence, isPaidStatus } from "../domain/billing.js";
+import { hoursFromChoice } from "../domain/hours.js";
+import { SMS_CONSENT_VERSION } from "../admin/footer.js";
+import { stateForPhone, timezoneForState } from "../domain/area-codes.js";
 import { MAX_USAGE_ALERT_PERCENT, MIN_USAGE_ALERT_PERCENT, currentBillingPeriod, isValidUsageAlertPercent } from "../domain/usage.js";
 
 export { currentBillingPeriod };
@@ -165,7 +169,7 @@ const ownerSignupSchema = z.object({
   email: z.string().trim().toLowerCase().email().max(254),
   password: z.string().min(12).max(200),
   phone: z.string().trim().max(30).optional(),
-  timezone: z.string().trim().min(3).max(100).default("America/New_York"),
+  timezone: z.string().trim().max(100).optional(),
   serviceAreaTerms: z.string().trim().max(800).default(""),
   operationMode: z.enum(["after_hours", "overflow", "always"]).default("overflow"),
   greeting: z.string().trim().min(5).max(500).default("Thanks for calling. How can I help?"),
@@ -178,7 +182,8 @@ const ownerSignupSchema = z.object({
   weekends: z.string().optional(),
   ownerSmsConsent: z.literal("yes").optional(),
   founderSmsConsent: z.literal("yes").optional(),
-  consent: z.literal("yes"),
+  // Agreement to the terms is the notice beside the button; an old form may still send the box.
+  consent: z.literal("yes").optional(),
 });
 const ownerLoginSchema = z.object({
   email: z.string().trim().toLowerCase().email().max(254),
@@ -331,7 +336,7 @@ function publicOwnerDemo(now: Date): {
   };
 }
 
-const OWNER_APP_PATH = /^\/app(?:\/(?:jobs|calendar|settings|calls\/[0-9a-f-]{36}))?\/?$/i;
+const OWNER_APP_PATH = /^\/app(?:\/(?:start|jobs|calendar|settings|calls\/[0-9a-f-]{36}))?\/?$/i;
 const DEMO_APP_PATH = /^\/demo(?:\/(?:jobs|calendar|calls\/[A-Za-z0-9-]{1,64}))?\/?$/;
 function isOwnerAppPath(pathname: string): boolean { return OWNER_APP_PATH.test(pathname); }
 function isDemoAppPath(pathname: string): boolean { return DEMO_APP_PATH.test(pathname); }
@@ -365,6 +370,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   let ownerWebIndex: Promise<string | null> | null = null;
   const WEB_TYPES: Record<string, string> = { js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", woff2: "font/woff2", woff: "font/woff", svg: "image/svg+xml", png: "image/png" };
   const recordingUrls = new Map<string, { url: string; expiresAt: number }>();
+  const trialDays = dependencies.env.STRIPE_TRIAL_DAYS;
+  const signupPage = (error = "", values: Record<string, string> = {}): string => renderOwnerSignup(error, values, {
+    supportEmail: dependencies.env.SUPPORT_EMAIL ?? null,
+    chargeNote: stripeClient ? chargeSentence({ now: dependencies.clock.now(), trialDays, priceCents: createDemoConfig().flatMonthlyPriceCents }) : null,
+  });
 
   return (request, response) => {
     void handle(request, response).catch((error: unknown) => {
@@ -430,7 +440,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     if (method === "GET" && url.pathname === "/") {
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
-      return sendHtml(response, 200, analyticsPage(renderLanding(config)));
+      return sendHtml(response, 200, analyticsPage(renderLanding(config, undefined, { supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, trialDays: stripeClient ? trialDays : 0 })));
     }
     if (method === "GET" && url.pathname.startsWith("/web/assets/")) return serveWebAsset(response, url.pathname.slice("/web/assets/".length));
     if (url.pathname.startsWith("/api/demo/")) return handleDemoApi(request, response, url);
@@ -454,24 +464,31 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (!limiter.allow(`${ip}:team-join`, 12, 60 * 60_000)) throw new HttpError(429, "Too many invitation attempts");
       return joinTeam(request, response, url, dependencies);
     }
-    if (method === "GET" && url.pathname === "/signup") return sendHtml(response, 200, analyticsPage(renderOwnerSignup()));
+    if (method === "GET" && url.pathname === "/signup") return sendHtml(response, 200, analyticsPage(signupPage()));
     if (method === "POST" && url.pathname === "/signup") {
       if (!limiter.allow(`${ip}:owner-signup`, 5, 60 * 60_000)) throw new HttpError(429, "Too many signup attempts from this connection");
       const form = parseForm(await readBody(request, 48_000));
-      if (form.get("faxNumber")?.trim()) return sendHtml(response, 200, renderOwnerSignup());
+      if (form.get("faxNumber")?.trim()) return sendHtml(response, 200, signupPage());
       const values = Object.fromEntries(form.entries());
       const parsed = ownerSignupSchema.safeParse(values);
-      if (!parsed.success) return sendHtml(response, 400, renderOwnerSignup("Check every required field and use a password with at least 12 characters.", values));
+      if (!parsed.success) return sendHtml(response, 400, signupPage("Check every required field and use a password with at least 12 characters.", values));
       const phoneInput = parsed.data.phone?.trim() ?? "";
       const phone = phoneInput ? normalizeUsPhone(phoneInput) : null;
-      if (phoneInput && !phone) return sendHtml(response, 400, renderOwnerSignup("Enter a valid US mobile number.", values));
+      if (phoneInput && !phone) return sendHtml(response, 400, signupPage("Enter a valid US mobile number.", values));
       if ((parsed.data.ownerSmsConsent === "yes" || parsed.data.founderSmsConsent === "yes") && !phone) {
-        return sendHtml(response, 400, renderOwnerSignup("Add a valid US mobile number to receive text messages.", values));
+        return sendHtml(response, 400, signupPage("Add a valid US mobile number to receive text messages.", values));
       }
-      try {
-        new Intl.DateTimeFormat("en-US", { timeZone: parsed.data.timezone }).format();
-      } catch {
-        return sendHtml(response, 400, renderOwnerSignup("Choose a valid timezone.", values));
+      // Defaults from the owner's mobile: their state is the starting service area and timezone.
+      // The browser's timezone wins when the page sent one. Both are refined later in Settings.
+      const homeState = stateForPhone(phone);
+      let timezone = timezoneForState(homeState);
+      if (parsed.data.timezone) {
+        try {
+          new Intl.DateTimeFormat("en-US", { timeZone: parsed.data.timezone }).format();
+          timezone = parsed.data.timezone;
+        } catch {
+          // An unknown browser zone falls back to the state's; the owner can change it in Settings.
+        }
       }
       const now = dependencies.clock.now().toISOString();
       const tenantId = `shop_${randomUUID()}`;
@@ -486,14 +503,14 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         updatedAt: now,
       };
       const splitList = (value: string): string[] => value.split(",").map((item) => item.trim()).filter(Boolean).slice(0, 100);
-      const serviceArea = normalizeServiceAreaInput(parsed.data.serviceAreaTerms);
-      if (serviceArea.errors.length > 0) return sendHtml(response, 400, renderOwnerSignup(serviceAreaMessage(serviceArea.errors), values));
+      const serviceArea = normalizeServiceAreaInput(parsed.data.serviceAreaTerms || homeState || "");
+      if (serviceArea.errors.length > 0) return sendHtml(response, 400, signupPage(serviceAreaMessage(serviceArea.errors), values));
       const config: BusinessConfig = {
         ...createDemoConfig(tenantId),
         paused: true,
         businessName: parsed.data.businessName,
         greeting: form.has("greeting") ? parsed.data.greeting : `Thanks for calling ${parsed.data.businessName}. How can I help?`,
-        timezone: parsed.data.timezone,
+        timezone,
         serviceAreaTerms: serviceArea.terms,
         emergencyKeywords: splitList(parsed.data.emergencyKeywords),
         serviceCategories: splitList(parsed.data.serviceCategories),
@@ -515,7 +532,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         },
       };
       const created = await dependencies.store.createOwnerWorkspace({ account, config, ownerPhone: phone });
-      if (!created) return sendHtml(response, 409, renderOwnerSignup("That email already has an account. Sign in instead.", values));
+      if (!created) return sendHtml(response, 409, signupPage("That email already has an account. Sign in instead.", values));
       if (parsed.data.founderSmsConsent === "yes") {
         const welcomeConfigured = dependencies.env.FOUNDER_WELCOME_ENABLED
           && dependencies.env.TELNYX_MESSAGING_APPROVED
@@ -538,11 +555,23 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           log({ level: "info", event: "founder_welcome_unconfigured", tenantId });
         }
       }
+      if (parsed.data.ownerSmsConsent === "yes") {
+        // Proof of opt-in for the carrier: when, from where, and the exact wording version shown.
+        await dependencies.store.saveIntegrationSecret(tenantId, "notifications", "owner_sms_consent", JSON.stringify({ at: now, source: "signup", wording: SMS_CONSENT_VERSION, ip }));
+      }
       const session = mintOwnerSession(account, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
       response.setHeader("set-cookie", ownerSessionCookie(session, dependencies.env.NODE_ENV === "production"));
       log({ level: "info", event: "owner_workspace_created", accountId: account.id, tenantId });
       telemetry.capture("owner_signed_up", account.id, tenantId, { operation_mode: config.operationMode });
-      return redirect(response, "/app");
+      // Straight to the card: one tap from "Continue" to Stripe. If Stripe is slow, the next screen has the button.
+      if (stripeClient) {
+        const target = await startCheckout(account, "start").catch((error) => {
+          log({ level: "warn", event: "signup_checkout_failed", tenantId, error: safeError(error) });
+          return null;
+        });
+        if (target) return redirect(response, target);
+      }
+      return redirect(response, "/app/start");
     }
     if (method === "GET" && url.pathname === "/login") return sendHtml(response, 200, renderOwnerLogin());
     if (method === "POST" && url.pathname === "/login") {
@@ -729,16 +758,22 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   }
   async function ownerDashboardModel(account: OwnerAccount, csrf: string) {
     const subscription = await dependencies.store.getSubscription(account.tenantId);
-    const [config, calls, tasks, usage, googleConnected, lineNumber] = await Promise.all([
+    const [config, calls, tasks, usage, googleConnected, lineNumber, ownerMobile, hoursSetAt, completedAt] = await Promise.all([
       dependencies.store.getConfig(account.tenantId),
       dependencies.store.listCalls(account.tenantId, 50),
       dependencies.store.listCallbackTasks(account.tenantId, 100),
       dependencies.store.getUsageSummary(account.tenantId, ...currentBillingPeriod(dependencies.clock.now(), subscription?.currentPeriodEnd)),
       isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
       dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
+      dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary"),
+      dependencies.store.getIntegrationSecret(account.tenantId, "onboarding", "hours_set_at"),
+      dependencies.store.getIntegrationSecret(account.tenantId, "onboarding", "completed_at"),
     ]);
     const model = apiDashboard({
-      account, config, calls, tasks, usage, googleConnected, subscription, csrf, lineNumber,
+      account, config, calls, tasks, usage, googleConnected, subscription, csrf, lineNumber, ownerMobile,
+      googleAvailable: anyGoogleClient(dependencies.env),
+      chargeNote: stripeClient ? chargeSentence({ now: dependencies.clock.now(), trialDays, priceCents: config.flatMonthlyPriceCents, timezone: config.timezone }) : null,
+      onboarding: { hoursSet: Boolean(hoursSetAt), completed: Boolean(completedAt) },
       forwarding: await readForwarding(account.tenantId),
       checkoutConfigured: Boolean(stripeClient || dependencies.env.FOUNDING_CHECKOUT_URL),
       now: dependencies.clock.now().toISOString(),
@@ -852,6 +887,38 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const refreshed = await dependencies.store.getOwnerAccountById(account.id) ?? account;
       return sendJson(response, 200, await ownerDashboardModel(refreshed, session.csrf));
     }
+    if (method === "POST" && url.pathname === "/api/app/onboarding/activate") {
+      if (!owner) throw new HttpError(403, "Only the owner can turn on the line");
+      const body = await readApiJson(request, session, 1_000) as { sessionId?: unknown };
+      const sessionId = typeof body.sessionId === "string" && /^cs_[A-Za-z0-9_]{6,200}$/.test(body.sessionId) ? body.sessionId : null;
+      if (sessionId) await confirmCheckout(account, sessionId);
+      const activation = await activateLine(account);
+      const refreshed = await dependencies.store.getOwnerAccountById(account.id) ?? account;
+      return sendJson(response, 200, { ...(await ownerDashboardModel(refreshed, session.csrf)), activation });
+    }
+    if (method === "POST" && url.pathname === "/api/app/onboarding/hours") {
+      if (!owner) throw new HttpError(403, "Only the owner can set the shop’s hours");
+      const body = await readApiJson(request, session, 1_000) as Record<string, unknown>;
+      let choice: ReturnType<typeof hoursFromChoice>;
+      try { choice = hoursFromChoice(body); } catch (error) { throw new HttpError(400, error instanceof Error ? error.message : "Pick when you take jobs"); }
+      await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
+        const current = await dependencies.store.getConfig(account.tenantId);
+        await saveAssistantConfig(dependencies.store, dependencies.env, {
+          ...current,
+          bookableHours: choice.bookableHours,
+          afterHours: { ...current.afterHours, ...choice.afterHours },
+        }, dependencies.fetcher ?? fetch);
+      });
+      await dependencies.store.saveIntegrationSecret(account.tenantId, "onboarding", "hours_set_at", dependencies.clock.now().toISOString());
+      return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    }
+    if (method === "POST" && url.pathname === "/api/app/onboarding/done") {
+      if (!owner) throw new HttpError(403, "Only the owner can finish setup");
+      await readApiJson(request, session, 1_000);
+      await dependencies.store.saveIntegrationSecret(account.tenantId, "onboarding", "completed_at", dependencies.clock.now().toISOString());
+      telemetry.capture("onboarding_completed", account.id, account.tenantId);
+      return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    }
     if (url.pathname === "/api/app/settings") {
       if (!owner) throw new HttpError(403, "Only the owner can change shop settings");
       if (method === "PUT") {
@@ -871,7 +938,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         values: apiSettings(config),
         status: account.status,
         businessName: config.businessName,
-        plan: { flatMonthlyPriceCents: config.flatMonthlyPriceCents, includedMinutes: config.includedMinutes, overageCentsPerMinute: config.overageCentsPerMinute, paid: subscription?.status === "active" },
+        plan: { flatMonthlyPriceCents: config.flatMonthlyPriceCents, includedMinutes: config.includedMinutes, overageCentsPerMinute: config.overageCentsPerMinute, paid: isPaidStatus(subscription?.status) },
         integrations: {
           googleAvailable: anyGoogleClient(dependencies.env),
           googleConnected,
@@ -961,7 +1028,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     let addOnSubscriptionId: string | null = null;
     if (addOnsChanged) {
       const subscription = await dependencies.store.getSubscription(account.tenantId);
-      if (subscription?.status === "active") {
+      if (subscription && isPaidStatus(subscription.status)) {
         if (!stripeClient || !subscription.providerSubscriptionId) throw new HttpError(503, "Subscription add-on billing is not available yet");
         addOnSubscriptionId = subscription.providerSubscriptionId;
       }
@@ -1060,8 +1127,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         const current = await dependencies.store.getConfig(account.tenantId);
         if (phone) await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner-primary", phone);
         if (form.get("ownerSmsConsent") === "yes" && !phone && !await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")) throw new HttpError(400, "Add a mobile number for text alerts");
-        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, businessName: data.businessName, timezone: data.timezone, serviceAreaTerms: serviceArea.terms, operationMode: data.operationMode, afterHours: { ...current.afterHours, weekdayStart: data.start, weekdayEnd: data.end }, bookableHours: { weekdayStart: data.bookStart, weekdayEnd: data.bookEnd, weekends: form.get("weekends") === "on" }, bookingMode: dependencies.env.DIRECT_BOOKING_BETA ? data.bookingMode : "confirm", greeting: data.greeting, recordingDisclosure: form.get("recordingNotice") === "on" ? RECORDING_NOTICE : "", priceSnippets: parseLines(data.prices, 30).map((text, index) => ({ label: `Approved price ${index + 1}`, text })), approvedKnowledge: parseLines(data.answers, 30).map((text, index) => ({ topic: `Approved answer ${index + 1}`, text })), ownerNotificationRefs: form.get("ownerSmsConsent") === "yes" ? ["owner-primary"] : [], ownerTransferNumberRef: "owner-primary", warmTransferEnabled: dependencies.env.WARM_TRANSFER_BETA && form.get("warmTransferEnabled") === "on" });
+        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, businessName: data.businessName, timezone: data.timezone, serviceAreaTerms: serviceArea.terms, operationMode: data.operationMode, afterHours: { ...current.afterHours, weekdayStart: data.start, weekdayEnd: data.end }, bookableHours: { ...current.bookableHours, weekdayStart: data.bookStart, weekdayEnd: data.bookEnd, weekends: form.get("weekends") === "on" }, bookingMode: dependencies.env.DIRECT_BOOKING_BETA ? data.bookingMode : "confirm", greeting: data.greeting, recordingDisclosure: form.get("recordingNotice") === "on" ? RECORDING_NOTICE : "", priceSnippets: parseLines(data.prices, 30).map((text, index) => ({ label: `Approved price ${index + 1}`, text })), approvedKnowledge: parseLines(data.answers, 30).map((text, index) => ({ topic: `Approved answer ${index + 1}`, text })), ownerNotificationRefs: form.get("ownerSmsConsent") === "yes" ? ["owner-primary"] : [], ownerTransferNumberRef: "owner-primary", warmTransferEnabled: dependencies.env.WARM_TRANSFER_BETA && form.get("warmTransferEnabled") === "on" });
       });
+      if (form.get("ownerSmsConsent") === "yes") {
+        await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner_sms_consent", JSON.stringify({ at: dependencies.clock.now().toISOString(), source: "setup", wording: SMS_CONSENT_VERSION, ip: requestIp(request) }));
+      }
       return redirect(response, "/app?setup=saved");
     }
     if (member && (url.pathname.startsWith("/app/billing") || url.pathname === "/app/config" || /\/delete$/.test(url.pathname))) throw new HttpError(403, "Only the owner can change billing, shop rules, or delete call records");
@@ -1071,6 +1141,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return teamRoutes(request, response, url, dependencies, account, session);
     }
     if (method === "GET" && isOwnerAppPath(url.pathname) && await sendOwnerWeb(response)) return;
+    // Setup steps live in the React app; without it, the server-rendered dashboard has the same buttons.
+    if (method === "GET" && /^\/app\/start\/?$/.test(url.pathname)) return redirect(response, "/app");
     if (method === "POST" && url.pathname === "/app/line/go-live") {
       if (member) throw new HttpError(403, "Only the owner can turn on the line");
       const form = parseForm(await readBody(request, 4_000));
@@ -1136,48 +1208,11 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         }
         throw new HttpError(503, "Checkout is not configured yet");
       }
-      // Same lock as the billing webhook, so a payment cannot land between this read and a new session.
-      const target = await dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
-        const subscription = await dependencies.store.getSubscription(account.tenantId);
-        const app = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`;
-        if (subscription?.status === "active" || subscription?.status === "trialing") return app;
-        if (subscription?.providerCustomerId && (subscription.status === "past_due" || subscription.status === "unpaid")) {
-          // Fix payment on the existing subscription instead of starting a second one.
-          return stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`)
-            .catch(() => { throw new HttpError(502, "Billing could not be opened. Please retry; your subscription has not changed."); });
-        }
-        // Any other live subscription (e.g. a first payment still processing) blocks a second one.
-        if (subscription?.providerSubscriptionId && subscription.status !== "canceled") return `${app}?checkout=processing`;
-        const config = await dependencies.store.getConfig(account.tenantId);
-        const addOns = `${config.ownerDailySmsEnabled ? 1 : 0}${config.ownerRealtimeSmsEnabled ? 1 : 0}`;
-        const now = dependencies.clock.now();
-        const savedOpen = await dependencies.store.getIntegrationSecret(account.tenantId, "stripe", "open_checkout");
-        const open = savedOpen ? JSON.parse(savedOpen) as { id: string; url: string; expiresAt: string; addOns: string } : null;
-        if (open && Date.parse(open.expiresAt) > now.getTime() + 60_000) {
-          // One payable Checkout Session per shop: reuse it, or expire it if the add-ons changed.
-          if (open.addOns === addOns) return open.url;
-          const expired = await stripeClient.expireCheckout(open.id).catch(() => { throw new HttpError(502, "Checkout could not be updated. Please retry."); });
-          if (expired === "complete") return `${app}?checkout=processing`;
-        }
-        const base = dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "");
-        const created = await stripeClient.createCheckout({
-          tenantId: account.tenantId,
-          email: account.email,
-          customerId: subscription?.providerCustomerId ?? null,
-          successUrl: `${base}/app?checkout=success`,
-          cancelUrl: `${base}/app?checkout=cancelled`,
-          // A retry after a timeout in the same half hour gets the same session back from Stripe.
-          idempotencyKey: `checkout:${account.tenantId}:${addOns}:${Math.floor(now.getTime() / 1_800_000)}`,
-          dailySms: config.ownerDailySmsEnabled,
-          realtimeSms: config.ownerRealtimeSmsEnabled,
-          now,
-        });
-        await dependencies.store.saveIntegrationSecret(account.tenantId, "stripe", "open_checkout", JSON.stringify({ ...created, addOns }));
-        return created.url;
-      });
+      const returnTo = form.get("from") === "start" ? "start" : "app";
+      const target = await startCheckout(account, returnTo);
       const appUrl = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`;
       telemetry.capture("checkout_started", account.id, account.tenantId, {
-        result: target === appUrl ? "already_active" : target.endsWith("checkout=processing") ? "processing" : target.startsWith("https://checkout.stripe.com") ? "stripe_session" : "billing_portal",
+        result: target === appUrl || target.endsWith("/app/start") ? "already_active" : target.endsWith("checkout=processing") ? "processing" : target.startsWith("https://checkout.stripe.com") ? "stripe_session" : "billing_portal",
       });
       return redirect(response, target);
     }
@@ -1361,6 +1396,117 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     throw new HttpError(404, "Not found");
   }
 
+  /** Stripe Checkout for this shop, or where to go instead (already paid, payment processing, fix billing). */
+  async function startCheckout(account: OwnerAccount, returnTo: "start" | "app"): Promise<string> {
+    if (!stripeClient) throw new HttpError(503, "Checkout is not configured yet");
+    // Same lock as the billing webhook, so a payment cannot land between this read and a new session.
+    return dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
+      const subscription = await dependencies.store.getSubscription(account.tenantId);
+      const app = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app${returnTo === "start" ? "/start" : ""}`;
+      if (isPaidStatus(subscription?.status)) return app;
+      if (subscription?.providerCustomerId && (subscription.status === "past_due" || subscription.status === "unpaid")) {
+        // Fix payment on the existing subscription instead of starting a second one.
+        return stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`)
+          .catch(() => { throw new HttpError(502, "Billing could not be opened. Please retry; your subscription has not changed."); });
+      }
+      // Any other live subscription (e.g. a first payment still processing) blocks a second one.
+      if (subscription?.providerSubscriptionId && subscription.status !== "canceled") return `${app}?checkout=processing`;
+      const config = await dependencies.store.getConfig(account.tenantId);
+      const addOns = `${config.ownerDailySmsEnabled ? 1 : 0}${config.ownerRealtimeSmsEnabled ? 1 : 0}`;
+      const now = dependencies.clock.now();
+      const savedOpen = await dependencies.store.getIntegrationSecret(account.tenantId, "stripe", "open_checkout");
+      const open = savedOpen ? JSON.parse(savedOpen) as { id: string; url: string; expiresAt: string; addOns: string } : null;
+      if (open && Date.parse(open.expiresAt) > now.getTime() + 60_000) {
+        // One payable Checkout Session per shop: reuse it, or expire it if the add-ons changed.
+        if (open.addOns === addOns) return open.url;
+        const expired = await stripeClient.expireCheckout(open.id).catch(() => { throw new HttpError(502, "Checkout could not be updated. Please retry."); });
+        if (expired === "complete") return `${app}?checkout=processing`;
+      }
+      const base = dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "");
+      const created = await stripeClient.createCheckout({
+        tenantId: account.tenantId,
+        email: account.email,
+        customerId: subscription?.providerCustomerId ?? null,
+        // Stripe fills in the session id, so the return page can confirm payment without waiting for the webhook.
+        successUrl: returnTo === "start" ? `${base}/app/start?checkout=success&session_id={CHECKOUT_SESSION_ID}` : `${base}/app?checkout=success`,
+        cancelUrl: returnTo === "start" ? `${base}/app/start?checkout=cancelled` : `${base}/app?checkout=cancelled`,
+        // A retry after a timeout in the same half hour gets the same session back from Stripe.
+        idempotencyKey: `checkout:${account.tenantId}:${addOns}:${Math.floor(now.getTime() / 1_800_000)}`,
+        dailySms: config.ownerDailySmsEnabled,
+        realtimeSms: config.ownerRealtimeSmsEnabled,
+        now,
+        trialDays,
+        submitMessage: chargeSentence({ now, trialDays, priceCents: config.flatMonthlyPriceCents, timezone: config.timezone }),
+      });
+      await dependencies.store.saveIntegrationSecret(account.tenantId, "stripe", "open_checkout", JSON.stringify({ ...created, addOns }));
+      return created.url;
+    });
+  }
+
+  /**
+   * The owner is back from Stripe: read the finished session and its subscription straight from
+   * the API, so the line can turn on now instead of waiting for the webhook. The webhook still
+   * lands later and reconciles the same record.
+   */
+  async function confirmCheckout(account: OwnerAccount, sessionId: string): Promise<void> {
+    if (!stripeClient) return;
+    if (isPaidStatus((await dependencies.store.getSubscription(account.tenantId))?.status)) return;
+    const checkout = await stripeClient.retrieveCheckoutSession(sessionId).catch((error) => {
+      log({ level: "warn", event: "checkout_return_lookup_failed", tenantId: account.tenantId, error: safeError(error) });
+      return null;
+    });
+    if (!checkout) return;
+    if (checkout.tenantId !== account.tenantId) throw new HttpError(400, "That checkout belongs to a different account");
+    if (checkout.status !== "complete" || !checkout.subscriptionId) return;
+    const subscriptionId = checkout.subscriptionId;
+    await dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
+      const existing = await dependencies.store.getSubscription(account.tenantId);
+      if (isPaidStatus(existing?.status)) return;
+      const live = await stripeClient.retrieveSubscription(subscriptionId)
+        .catch(() => { throw new HttpError(502, "We couldn’t confirm your card with Stripe just now. Try again in a moment."); });
+      if (live.tenantId && live.tenantId !== account.tenantId) throw new HttpError(400, "That subscription belongs to a different account");
+      if (!live.priceIds.includes(stripeClient.basePriceId)) return;
+      const now = dependencies.clock.now().toISOString();
+      await dependencies.store.saveSubscription({
+        tenantId: account.tenantId,
+        providerCustomerId: live.customer ?? existing?.providerCustomerId ?? null,
+        providerSubscriptionId: live.id,
+        status: live.status,
+        currentPeriodEnd: live.currentPeriodEnd ?? existing?.currentPeriodEnd ?? null,
+        providerEventCreatedAt: now,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      });
+      if (isPaidStatus(live.status)) {
+        await dependencies.store.deleteIntegrationSecret(account.tenantId, "stripe", "open_checkout");
+        telemetry.capture("checkout_completed", account.tenantId, account.tenantId, { source: "return" });
+      }
+    });
+  }
+
+  /** Turn the line on with no button, and say calmly what happens next if it can't be yet. */
+  async function activateLine(account: OwnerAccount): Promise<{ status: "live" | "waiting" | "blocked" | "failed"; message: string | null }> {
+    const lineNumber = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number");
+    if (account.status === "active" && lineNumber) return { status: "live", message: null };
+    if (!isPaidStatus((await dependencies.store.getSubscription(account.tenantId))?.status)) {
+      return { status: "blocked", message: "We haven’t seen your card yet. Add it to turn your line on." };
+    }
+    if (!limiter.allow(`go-live:${account.tenantId}`, 6, 60 * 60_000)) {
+      return { status: "failed", message: "That’s a lot of tries. Give it a few minutes, then reopen this page." };
+    }
+    try {
+      await goLive(account, null);
+      return { status: "live", message: null };
+    } catch (error) {
+      if (!(error instanceof HttpError)) throw error;
+      if (error.message.startsWith("Live provider prerequisites")) {
+        return { status: "waiting", message: "Your Front Office number is on its way. Phone carriers approve new business lines, which usually takes 1 to 3 business days. Everything else is saved, so keep going. We’ll turn it on the moment it clears." };
+      }
+      if (error.status === 409) return { status: "blocked", message: `${error.message.replace(/^This shop is missing: /, "Add your ")}. You can do that in Settings.` };
+      return { status: "failed", message: error.message };
+    }
+  }
+
   function liveProviderBlockers(): string[] {
     return [
       !dependencies.env.TELNYX_API_KEY && "Telnyx API key",
@@ -1392,12 +1538,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       ]);
       const shopBlockers = shopActivationBlockers({
         ownerPhoneConfigured: Boolean(ownerPhone),
-        urgentAlertsEnabled: config.ownerNotificationRefs.length > 0,
         googleConnected,
+        bookingMode: config.bookingMode,
         serviceAreaConfigured: config.serviceAreaTerms.length > 0,
       });
       if (shopBlockers.length > 0) throw new HttpError(409, `This shop is missing: ${shopBlockers.join(", ")}`);
-      if (!stripeClient || subscription?.status !== "active") throw new HttpError(409, "An active paid subscription is required before activation");
+      if (!stripeClient || !isPaidStatus(subscription?.status)) throw new HttpError(409, "An active paid subscription is required before activation");
 
       let assistantId = existing?.assistantId ?? null;
       let inboundNumber = existing?.inboundNumber ?? null;
@@ -1667,7 +1813,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           const otherSubscription = existing?.providerSubscriptionId && existing.providerSubscriptionId !== live.id;
           if (!live.priceIds.includes(stripeClient.basePriceId)) {
             log({ level: "warn", event: "stripe_subscription_ignored_wrong_price", tenantId });
-          } else if (otherSubscription && existing?.status === "active") {
+          } else if (otherSubscription && isPaidStatus(existing?.status)) {
             // Never let a second subscription cancel or replace the one that is paying.
             if (live.status !== "canceled") log({ level: "error", event: "stripe_duplicate_subscription_requires_refund", tenantId });
           } else {
@@ -1690,10 +1836,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           // Pause or resume first: if Telnyx fails, nothing is saved and Stripe's retry sees the same transition.
           // Reconcile the line with the current status on every event, not only on a status edge,
           // so a crash between steps cannot leave a paid shop paused or an unpaid shop live.
-          if (record.status !== "active") await handleBillingLapse(tenantId, record.status, event.id);
+          if (!isPaidStatus(record.status)) await handleBillingLapse(tenantId, record.status, event.id);
           else await handleBillingRestored(tenantId, event.id);
           await dependencies.store.saveSubscription(record);
-          if (record.status === "active") await dependencies.store.deleteIntegrationSecret(tenantId, "stripe", "open_checkout");
+          if (isPaidStatus(record.status)) await dependencies.store.deleteIntegrationSecret(tenantId, "stripe", "open_checkout");
         }
       });
     }
@@ -2358,7 +2504,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
       const subscription = await dependencies.store.getSubscription(tenantId);
       if (account?.status !== "active") throw new HttpError(503, "Shop activation is not complete");
-      if (subscription?.status !== "active") throw new HttpError(402, "An active paid subscription is required for customer traffic");
+      if (!isPaidStatus(subscription?.status)) throw new HttpError(402, "An active paid subscription is required for customer traffic");
       return;
     }
     const report = await getActivationReport();
@@ -2543,6 +2689,7 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams, surface:
       holidayDates,
     },
     bookableHours: {
+      ...current.bookableHours,
       weekdayStart: bookableWeekdayStart,
       weekdayEnd: bookableWeekdayEnd,
       weekends: form.has("bookableWeekends"),

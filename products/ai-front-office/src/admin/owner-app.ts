@@ -1,5 +1,6 @@
 import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
 import { USAGE_EXCLUSION_NOTE, usageAlertOptions } from "../domain/usage.js";
+import { isPaidStatus } from "../domain/billing.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, OutboxNotification, OwnerAccount, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import { escapeHtml as e } from "./render.js";
 
@@ -69,7 +70,7 @@ export function renderOwnerApp(input: {
   const nowMs = Date.parse(input.now);
   const base = preview ? "/demo" : "/app";
   const owner = input.account.role !== "member";
-  const paid = input.subscription?.status === "active";
+  const paid = isPaidStatus(input.subscription?.status);
   const callsById = new Map(input.calls.map((call) => [call.id, call]));
   const actionable = input.tasks
     .filter((task) => task.status === "open" || (task.status === "snoozed" && Date.parse(task.dueAt) <= nowMs))
@@ -281,7 +282,7 @@ export function renderOwnerSettings(input: {
   const calendar = i.googleConnected
     ? `<p class="fo-ok">${ownerIcon("check")}Google Calendar connected</p><a class="fo-ghost" href="/app/integrations/google/start">Reconnect</a>`
     : i.googleAvailable ? `<p>Connect the calendar your jobs live on so Front Office can offer real open times.</p><a class="fo-btn" href="/app/integrations/google/start">Connect Google Calendar</a>` : `<p class="fo-muted">Calendar connection isn’t available yet.</p>`;
-  const paid = input.subscription?.status === "active";
+  const paid = isPaidStatus(input.subscription?.status);
   const form = `<form class="fo-form" method="post" action="/app/config">${csrfField}<input type="hidden" name="flatMonthlyPrice" value="${Math.round(c.flatMonthlyPriceCents / 100)}">
 <section class="fo-card fo-group"><h2>Answering</h2>
 <label>Front Office is<select name="serviceState"><option value="active"${selected(!c.paused)}>On, answering calls</option><option value="paused"${selected(c.paused)}>Paused</option></select></label>${input.account.status === "active" ? "" : `<p class="fo-hint">Your line turns on after activation. Until then it stays paused.</p>`}

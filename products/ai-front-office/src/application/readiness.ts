@@ -69,14 +69,15 @@ function check(id: string, label: string, passed: boolean, detail: string): Read
 /** Shop-level prerequisites for turning on a customer line. Empty means ready. */
 export function shopActivationBlockers(input: {
   ownerPhoneConfigured: boolean;
-  urgentAlertsEnabled: boolean;
   googleConnected: boolean;
+  /** "confirm": the owner confirms each job by text, so no calendar is needed to go live. */
+  bookingMode: BusinessConfig["bookingMode"];
   serviceAreaConfigured: boolean;
 }): string[] {
+  // Text alerts are never required: consent to texts is not a condition of purchase (10DLC).
   return [
     !input.ownerPhoneConfigured && "owner mobile number",
-    !input.urgentAlertsEnabled && "urgent text alerts (the owner has not opted in)",
-    !input.googleConnected && "Google Calendar",
+    input.bookingMode === "direct" && !input.googleConnected && "Google Calendar",
     !input.serviceAreaConfigured && "service area",
   ].filter((value): value is string => typeof value === "string");
 }

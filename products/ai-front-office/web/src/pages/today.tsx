@@ -1,6 +1,6 @@
-import { lazy, Suspense, useState } from "react"
+import { lazy, Suspense } from "react"
 import { Link, Navigate, useSearchParams } from "react-router-dom"
-import { Check, ChevronRight, Clock, Phone } from "lucide-react"
+import { ArrowRight, CalendarDays, Check, ChevronRight, Clock, Phone } from "lucide-react"
 import { toast } from "sonner"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -15,7 +15,7 @@ import { compactDate, dayLabel, timeOnly } from "@/lib/format"
 import { useMode } from "@/lib/mode"
 import { ForwardingCard } from "@/components/app/forwarding-card"
 import type { ApiCall, ApiDashboard, ApiTask } from "@/lib/types"
-import { cn } from "@/lib/utils"
+import { cn, tapWidth } from "@/lib/utils"
 
 const CallsChart = lazy(() => import("@/components/app/calls-chart"))
 
@@ -54,7 +54,8 @@ export function TodayPage() {
       <div className={cn("grid min-w-0 gap-5", selected && "max-lg:hidden")}>
         <Banners dashboard={dashboard} />
         {!preview && dashboard.viewer.role === "owner" && <SetupCard dashboard={dashboard} />}
-        {!preview && dashboard.viewer.role === "owner" && dashboard.viewer.status === "active" && dashboard.line.number && <ForwardingCard dashboard={dashboard} />}
+        {!preview && dashboard.viewer.role === "owner" && dashboard.onboarding.completed && dashboard.viewer.status === "active" && dashboard.line.number && <ForwardingCard dashboard={dashboard} />}
+        {!preview && dashboard.viewer.role === "owner" && dashboard.onboarding.completed && <CalendarCard dashboard={dashboard} />}
         <StatCards dashboard={dashboard} />
         <section id="inbox" className="grid gap-2.5">
           <SectionTitle title="Needs your attention" count={d.actionable.length} />
@@ -108,11 +109,11 @@ function Banners({ dashboard }: { dashboard: ApiDashboard }) {
         </Alert>
       )}
       {!preview && !dashboard.shop.alertsOn && (
-        <Alert variant="destructive" className="border-red-200 bg-red-50" role="alert">
-          <AlertTitle>Urgent alerts are off.</AlertTitle>
+        <Alert className="border-amber-200 bg-amber-50 text-amber-950" role="status">
+          <AlertTitle>Text notifications are off.</AlertTitle>
           <AlertDescription className="grid gap-2.5">
-            <span>Emergencies will only appear here, and your line can’t be turned on until you add a mobile number for alerts.</span>
-            <Button size="sm" className="w-fit" asChild><a href="/app/setup">Turn on alerts</a></Button>
+            <span>Urgent calls still show up here first, but we can’t text you about them.</span>
+            <Button size="sm" className="w-fit" asChild><a href="/app/setup">Turn on text notifications</a></Button>
           </AlertDescription>
         </Alert>
       )}
@@ -120,34 +121,17 @@ function Banners({ dashboard }: { dashboard: ApiDashboard }) {
   )
 }
 
+/** Until the new-owner flow is finished, Today points back to the one next step. */
 function SetupCard({ dashboard }: { dashboard: ApiDashboard }) {
-  const { reload } = useMode()
-  const [busy, setBusy] = useState(false)
-  const [lineError, setLineError] = useState<string | null>(null)
+  if (dashboard.onboarding.completed) return null
   const steps = [
-    { done: dashboard.shop.rulesSaved, label: "Set your call rules", href: "/app/setup", cta: "Set rules" },
-    { done: dashboard.googleConnected, label: "Connect Google Calendar", href: "/app/integrations/google/start", cta: "Connect" },
-    { done: dashboard.paid, label: "Start your plan", href: "", cta: `Start $${(dashboard.shop.flatMonthlyPriceCents / 100).toFixed(0)}/mo plan` },
-    { done: dashboard.viewer.status === "active" && Boolean(dashboard.line.number), label: "Get your Front Office number", href: "#go-live", cta: "Turn on my line" },
+    { done: true, label: "Your shop" },
+    { done: dashboard.paid, label: "Add a card" },
+    { done: Boolean(dashboard.line.confirmedAt) || dashboard.onboarding.hoursSet, label: "Forward missed calls" },
+    { done: dashboard.onboarding.hoursSet, label: "Pick your hours" },
   ]
-  const goLive = async () => {
-    setBusy(true)
-    setLineError(null)
-    try {
-      await api("/api/app/line/go-live", { method: "POST", body: {} })
-    } catch (error) {
-      setLineError(error instanceof Error ? error.message : "That didn’t work. Please try again.")
-      setBusy(false)
-      return
-    }
-    // The line is on; a failed refresh is not a go-live failure.
-    toast.success("Your line is on. Forward your calls to finish.")
-    await reload().catch(() => undefined)
-    setBusy(false)
-  }
   const done = steps.filter((step) => step.done).length
-  if (done === steps.length) return null
-  const next = steps.find((step) => !step.done)!
+  const next = steps.find((step) => !step.done)
   const percent = Math.round((done / steps.length) * 100)
   return (
     <Card className="relative overflow-hidden border-brand-ink/15">
@@ -156,7 +140,7 @@ function SetupCard({ dashboard }: { dashboard: ApiDashboard }) {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold tracking-tight"><span className="marker">Finish setup</span></h2>
-            <p className="mt-1 text-sm text-muted-foreground">{done} of {steps.length} done. Calls stay off until setup is checked.</p>
+            <p className="mt-1 text-sm text-muted-foreground">{done} of {steps.length} done.{next ? ` Next: ${next.label.toLowerCase()}.` : " Just one tap left."}</p>
           </div>
           <div className="relative grid size-14 shrink-0 place-items-center rounded-full text-[13px] font-bold" style={{ background: `conic-gradient(var(--brand-ink) ${percent}%, #ece8da 0)` }}>
             <span className="absolute inset-1.5 rounded-full bg-card" />
@@ -171,21 +155,26 @@ function SetupCard({ dashboard }: { dashboard: ApiDashboard }) {
             </li>
           ))}
         </ol>
-        {lineError && <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">{lineError}</p>}
-        {next.href === "#go-live" ? (
-          <div className="grid gap-2">
-            <Button size="tap" variant="brand" className="w-full" disabled={busy} onClick={() => void goLive()}>{busy ? "Getting your number…" : next.cta}</Button>
-            <p className="text-[13px] text-muted-foreground">We pick a local number in your area code. You keep your business number and forward calls to it.</p>
+        <Button size="tap" variant="brand" className={tapWidth} asChild><Link to="/app/start">Continue setup<ArrowRight /></Link></Button>
+      </CardContent>
+    </Card>
+  )
+}
+
+/** Optional, after setup: booked jobs on Google Calendar. Going live never needs it. */
+function CalendarCard({ dashboard }: { dashboard: ApiDashboard }) {
+  if (!dashboard.googleAvailable || dashboard.googleConnected) return null
+  return (
+    <Card>
+      <CardContent className="grid gap-3 md:flex md:items-center md:justify-between">
+        <div className="flex gap-3">
+          <CalendarDays className="mt-0.5 size-5 shrink-0 text-brand-ink/70" />
+          <div className="grid gap-0.5">
+            <h2 className="text-base font-semibold">Optional: put jobs on Google Calendar</h2>
+            <p className="text-sm text-muted-foreground">Right now you confirm each job yourself. Connect your calendar so confirmed jobs land on it.</p>
           </div>
-        ) : next.href ? (
-          <Button size="tap" variant="brand" className="w-full" asChild><a href={next.href}>{next.cta}</a></Button>
-        ) : dashboard.checkoutConfigured ? (
-          <form method="post" action="/app/billing/checkout">
-            <input type="hidden" name="csrf" value={dashboard.csrf} />
-            <Button size="tap" variant="brand" className="w-full">{next.cta}</Button>
-          </form>
-        ) : null}
-        {dashboard.viewer.status !== "active" && <p className="text-[13px] text-muted-foreground">After payment we check your line and turn it on. Your dashboard shows when calls are being answered. A test call is optional.</p>}
+        </div>
+        <Button size="tap" variant="outline" className={cn(tapWidth, "md:min-w-44")} asChild><a href="/app/integrations/google/start">Connect calendar</a></Button>
       </CardContent>
     </Card>
   )
