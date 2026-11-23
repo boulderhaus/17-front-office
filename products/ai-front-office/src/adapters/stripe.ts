@@ -18,6 +18,8 @@ export interface StripePrices {
   fleet?: string;
   /** Older prices still on live subscriptions (e.g. STRIPE_PRICE_ID_PLUS once STRIPE_PRICE_ID_PRO is set): recognized, never sold. */
   legacy?: string[];
+  /** The Unlimited calls add-on, one price per plan: a second subscription item next to the plan's. */
+  unlimited?: Partial<Record<PlanId, string>>;
   dailySms?: string;
   realtimeSms?: string;
 }
@@ -31,6 +33,8 @@ export interface StripeSubscriptionSnapshot {
   customer: string | null;
   tenantId: string | null;
   priceIds: string[];
+  /** The Unlimited add-on items on the subscription right now (empty: the add-on is off). */
+  addOnItems: Array<{ id: string; createdAt: string | null }>;
   currentPeriodEnd: string | null;
 }
 
@@ -49,6 +53,15 @@ export class StripeBillingClient {
 
   private planPrices(): string[] {
     return [this.prices.base, this.prices.pro, this.prices.team, this.prices.fleet, ...(this.prices.legacy ?? [])].filter((value): value is string => Boolean(value));
+  }
+
+  /** The Unlimited add-on price for a plan, or undefined when that plan doesn't offer it here. */
+  unlimitedPrice(plan: PlanId): string | undefined {
+    return this.prices.unlimited?.[plan];
+  }
+
+  private unlimitedPrices(): string[] {
+    return Object.values(this.prices.unlimited ?? {}).filter((value): value is string => Boolean(value));
   }
 
   /** True when a subscription's prices include one of our plans (not just an add-on or a stranger's price). */
@@ -74,25 +87,55 @@ export class StripeBillingClient {
   }
 
   /**
-   * Move a paying subscription to another plan, prorated: the plan item's price is swapped and Stripe
-   * invoices the difference now (credit for a downgrade). Add-on items are left alone.
+   * Put a paying subscription on a plan, with or without the Unlimited add-on, prorated: the plan item's price
+   * is swapped, the add-on item is added, re-priced for the new plan, or removed, all in one update, and Stripe
+   * invoices the difference now (credit for a downgrade). Other add-on items (SMS) are left alone. No change, no write.
    */
-  async changePlan(subscriptionId: string, plan: PlanId): Promise<void> {
+  async changePlan(subscriptionId: string, plan: PlanId, options: { unlimited?: boolean } = {}): Promise<{ addOnItems: Array<{ id: string; createdAt: string | null }> | null }> {
     const price = requiredPrice(this.planPrice(plan), `${plan} plan`);
+    const unlimited = options.unlimited === true;
+    const addOnPrice = unlimited ? requiredPrice(this.unlimitedPrice(plan), `${plan} Unlimited add-on`) : null;
     const subscription = await this.get(`subscriptions/${encodeURIComponent(subscriptionId)}`) as { items?: { data?: Array<{ id?: string; price?: { id?: string } }> } };
+    const items = subscription.items?.data ?? [];
     const ours = this.planPrices();
-    const item = subscription.items?.data?.find((entry) => entry.price?.id && ours.includes(entry.price.id));
+    const addOns = this.unlimitedPrices();
+    const item = items.find((entry) => entry.price?.id && ours.includes(entry.price.id));
     if (!item?.id) throw new Error("Stripe subscription has no Front Office plan item");
-    if (item.price?.id === price) return;
-    const update = await this.post(`subscriptions/${encodeURIComponent(subscriptionId)}`, new URLSearchParams({
-      "items[0][id]": item.id,
-      "items[0][price]": price,
-      "items[0][quantity]": "1",
-      proration_behavior: "always_invoice",
-      payment_behavior: "error_if_incomplete",
-      "metadata[plan]": plan,
-    }));
+    const addOnItem = items.find((entry) => entry.price?.id && addOns.includes(entry.price.id));
+    const changes: Array<{ id?: string; price?: string; deleted?: boolean }> = [];
+    if (item.price?.id !== price) changes.push({ id: item.id, price });
+    if (addOnPrice && !addOnItem) changes.push({ price: addOnPrice });
+    else if (addOnPrice && addOnItem?.id && addOnItem.price?.id !== addOnPrice) changes.push({ id: addOnItem.id, price: addOnPrice });
+    else if (!addOnPrice && addOnItem?.id) changes.push({ id: addOnItem.id, deleted: true });
+    if (changes.length === 0) return { addOnItems: this.addOnItemsFrom(items) };
+    const body = new URLSearchParams();
+    changes.forEach((change, index) => {
+      if (change.id) body.set(`items[${index}][id]`, change.id);
+      if (change.price) {
+        body.set(`items[${index}][price]`, change.price);
+        body.set(`items[${index}][quantity]`, "1");
+      }
+      if (change.deleted) body.set(`items[${index}][deleted]`, "true");
+    });
+    body.set("proration_behavior", "always_invoice");
+    body.set("payment_behavior", "error_if_incomplete");
+    body.set("metadata[plan]", plan);
+    body.set("metadata[unlimited]", unlimited ? "yes" : "no");
+    const update = await this.post(`subscriptions/${encodeURIComponent(subscriptionId)}`, body);
     if (!update.ok || update.payload.id !== subscriptionId) throw new Error(`Stripe plan change failed with HTTP ${update.status}${update.payload.error?.message ? `: ${update.payload.error.message}` : ""}`);
+    // Stripe answers with the updated subscription: its add-on items (and their creation times) are the new truth.
+    const updated = update.payload.items as { data?: unknown } | undefined;
+    return { addOnItems: Array.isArray(updated?.data) ? this.addOnItemsFrom(updated.data as Array<Record<string, unknown>>) : null };
+  }
+
+  /** The Unlimited add-on items among a subscription's items (from the API or a webhook payload). */
+  addOnItemsFrom(items: Array<{ id?: unknown; created?: unknown; price?: unknown }>): Array<{ id: string; createdAt: string | null }> {
+    const addOns = this.unlimitedPrices();
+    return items.flatMap((item) => {
+      const price = typeof item.price === "string" ? item.price : (item.price as { id?: unknown } | undefined)?.id;
+      if (typeof item.id !== "string" || typeof price !== "string" || !addOns.includes(price)) return [];
+      return [{ id: item.id, createdAt: typeof item.created === "number" ? new Date(item.created * 1_000).toISOString() : null }];
+    });
   }
 
   /**
@@ -218,7 +261,7 @@ export class StripeBillingClient {
     return data.url;
   }
 
-  async createCheckout(input: { tenantId: string; email: string; customerId?: string | null; successUrl: string; cancelUrl: string; idempotencyKey: string; dailySms: boolean; realtimeSms: boolean; now?: Date; trialDays?: number; submitMessage?: string; plan?: PlanId; couponId?: string | null }): Promise<{ id: string; url: string; expiresAt: string }> {
+  async createCheckout(input: { tenantId: string; email: string; customerId?: string | null; successUrl: string; cancelUrl: string; idempotencyKey: string; dailySms: boolean; realtimeSms: boolean; now?: Date; trialDays?: number; submitMessage?: string; plan?: PlanId; unlimited?: boolean; couponId?: string | null }): Promise<{ id: string; url: string; expiresAt: string }> {
     // Sessions expire in ~31 minutes (Stripe's minimum is 30) so a stale one cannot be paid later.
     const expiresAt = Math.floor((input.now ?? new Date()).getTime() / 1_000) + 31 * 60;
     const body = new URLSearchParams({
@@ -237,11 +280,18 @@ export class StripeBillingClient {
       payment_method_collection: "always",
     });
     if (input.trialDays && input.trialDays > 0) body.set("subscription_data[trial_period_days]", String(Math.floor(input.trialDays)));
-    // First month half off: a once-only coupon on the first invoice. Never alongside a trial (it would land on the $0 invoice).
+    // First month half off: a once-only coupon on the first invoice (all of it, the Unlimited add-on included: the
+    // coupon has no product restriction). Never alongside a trial (it would land on the $0 invoice).
     else if (input.couponId) body.set("discounts[0][coupon]", input.couponId);
     // Said again on Stripe's page, right above the button, so nobody is surprised by the charge date.
     if (input.submitMessage) body.set("custom_text[submit][message]", input.submitMessage.slice(0, 1_000));
     let lineItem = 1;
+    if (input.unlimited) {
+      // The Unlimited add-on: its own item, so it can be turned off later without touching the plan.
+      body.set(`line_items[${lineItem}][price]`, requiredPrice(this.unlimitedPrice(input.plan ?? "solo"), `${input.plan ?? "solo"} Unlimited add-on`));
+      body.set(`line_items[${lineItem}][quantity]`, "1");
+      lineItem += 1;
+    }
     for (const [enabled, price, label] of [[input.dailySms, this.prices.dailySms, "daily SMS"], [input.realtimeSms, this.prices.realtimeSms, "instant lead SMS"]] as const) {
       if (!enabled) continue;
       body.set(`line_items[${lineItem}][price]`, requiredPrice(price, label));
@@ -301,7 +351,7 @@ export class StripeBillingClient {
     const payload = await response.json().catch(() => ({})) as {
       id?: string; status?: string; customer?: string | { id?: string }; current_period_end?: number;
       metadata?: Record<string, unknown>;
-      items?: { data?: Array<{ price?: { id?: string }; current_period_end?: number }> };
+      items?: { data?: Array<{ id?: string; created?: number; price?: { id?: string }; current_period_end?: number }> };
       error?: { message?: string };
     };
     if (!response.ok || payload.id !== subscriptionId) throw new Error(`Stripe subscription lookup failed with HTTP ${response.status}`);
@@ -315,6 +365,7 @@ export class StripeBillingClient {
       customer,
       tenantId: typeof payload.metadata?.tenant_id === "string" ? payload.metadata.tenant_id : null,
       priceIds: items.map((item) => item.price?.id).filter((value): value is string => typeof value === "string"),
+      addOnItems: this.addOnItemsFrom(items),
       currentPeriodEnd: periodEnds.length ? new Date(Math.max(...periodEnds) * 1_000).toISOString() : null,
     };
   }

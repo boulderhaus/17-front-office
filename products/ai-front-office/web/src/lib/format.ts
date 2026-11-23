@@ -46,3 +46,6 @@ export function perCall(cents: number): string {
 
 /** The lead guarantee, word for word (mirrors LEAD_GUARANTEE on the server). */
 export const LEAD_GUARANTEE = "If Front Office doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month."
+
+/** Shown right next to every Unlimited toggle, word for word (src/domain/plans.ts FAIR_USE_LINE). */
+export const FAIR_USE_LINE = "Fair use: up to 3× your plan’s calls."

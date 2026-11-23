@@ -1,4 +1,5 @@
 import type { CallRecord } from "./models.js";
+import { fairUseCalls } from "./plans.js";
 
 /**
  * Calls shorter than this (connected seconds) never count against the owner's
@@ -40,6 +41,16 @@ export function billedMinutesFor(call: Pick<CallRecord, "durationSeconds">): num
 /** Counted calls past the plan's included calls: each one is billed at the overage rate. */
 export function extraCalls(countedCalls: number, includedCalls: number): number {
   return Math.max(0, countedCalls - includedCalls);
+}
+
+/**
+ * Extra calls in a closed period when the Unlimited add-on may have been on for part of it. Calls made while it
+ * was off count against the plan's included calls as usual; while it was on, nothing extra is charged until the
+ * period's total passes fair use (3× included). Never on (callsWithoutUnlimited = countedCalls) is plain extraCalls.
+ */
+export function extraCallsWithUnlimited(input: { countedCalls: number; callsWithoutUnlimited: number; includedCalls: number }): number {
+  const withoutUnlimited = Math.min(input.countedCalls, Math.max(0, input.callsWithoutUnlimited));
+  return Math.max(0, withoutUnlimited - input.includedCalls, input.countedCalls - fairUseCalls(input.includedCalls));
 }
 
 /**

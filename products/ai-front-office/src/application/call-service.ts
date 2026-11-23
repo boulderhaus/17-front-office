@@ -17,7 +17,7 @@ import type { CalendarPort, Clock, Store } from "../ports.js";
 import { BookingCoordinator } from "./booking-coordinator.js";
 import { redactError, withRetry } from "./retry.js";
 import { UsageAlertService } from "./usage-alerts.js";
-import { callbackLinkToken, ownerCallSms, urgentReason } from "../domain/owner-sms.js";
+import { callbackLinkToken, ownerCallSms, shortWhen, urgentReason } from "../domain/owner-sms.js";
 
 /** Sticky quality flag: a spam mark was refused or undone, so this call always counts and reaches the owner. */
 const SPAM_REFUSED = "spam_refused";
@@ -541,7 +541,6 @@ export class CallService {
         channel: "sms",
         destinationRef,
         body: ownerCallSms({
-          shop: config.businessName,
           call,
           urgentReason: urgentReason(call, true),
           wants: this.wantsLine(call.fields.requestedStart, config.timezone),
@@ -849,11 +848,13 @@ export class CallService {
     if (!safetyAlert && !config.ownerRealtimeSmsEnabled) return;
     const now = this.clock.now().toISOString();
     const ownerPortal = await this.store.getOwnerAccountByTenant(call.tenantId) ? "/app" : "/admin";
+    const when = proposedTime ?? call.fields.requestedStart;
     const body = ownerCallSms({
-      shop: config.businessName,
       call,
       urgentReason: urgentReason(call, call.outcome === "handoff_queued" || call.fields.humanRequested),
-      wants: this.wantsLine(proposedTime ?? call.fields.requestedStart, config.timezone),
+      // A verified booking reads "Booked tomorrow 10a"; anything else says what the caller wants.
+      booked: call.outcome === "booked" && when && !Number.isNaN(Date.parse(when)) ? shortWhen(when, this.clock.now(), config.timezone) : null,
+      wants: this.wantsLine(when, config.timezone),
       link: this.ownerCallLink(call, ownerPortal),
     });
     for (const destinationRef of config.ownerNotificationRefs) {
@@ -895,7 +896,7 @@ export class CallService {
     if (!requested || Number.isNaN(Date.parse(requested))) return null;
     const day = (value: Date) => new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(value);
     if (day(new Date(requested)) === day(this.clock.now())) return "Wants someone today";
-    return `Wants ${new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(requested))}`;
+    return `Wants ${shortWhen(requested, this.clock.now(), timeZone)}`;
   }
 
   private async ensureCall(tenantId: string, providerCallId: string, fromNumber: string, startedAt: string): Promise<CallRecord> {

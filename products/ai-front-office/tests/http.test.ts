@@ -879,18 +879,21 @@ describe("HTTP boundary", () => {
     expect(landingHtml).toContain("$100 after job expenses");
     expect(landingHtml).toContain("3 steps to go live");
     expect(landingHtml).not.toContain("3 taps");
-    // Four plans in plain words, priced by answered calls, with the guarantee and free teammates.
-    for (const item of ["Solo", "Pro", "Team", "Fleet", "60 answered calls a month, about 2 a day", "125 answered calls a month, about 4 a day", "250 answered calls a month, about 8 a day", "500 answered calls a month, about 17 a day", "$49.99", "$99.99", "$179.99", "$349.99", "Lead guarantee", "Team members free", "Extra calls are 75¢ each"]) expect(landingHtml).toContain(item);
+    // Three plans in plain words, priced by answered calls, with the guarantee and free teammates. Pro is no longer sold.
+    for (const item of ["Solo", "Team", "Fleet", "60 answered calls a month, about 2 a day", "250 answered calls a month, about 8 a day", "500 answered calls a month, about 17 a day", "$49.99", "$179.99", "$349.99", "Lead guarantee", "Team members free", "Extra calls are 75¢ each"]) expect(landingHtml).toContain(item);
+    expect(landingHtml).not.toContain("125 answered calls a month");
     expect(landingHtml).toContain("If Front Office doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month.");
     expect(landingHtml).not.toMatch(/connected AI minutes|\/minute/);
     expect(landingHtml).toContain("EXAMPLE CALL");
-    for (const item of ["Phone rings", "Front Office picks up", "What you get by text", "Front Office - Suncoast Heating", "New call: Maria G.", "AC not cooling", "41 Palm Ave, Sarasota", "Wants someone today", "Call back", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
+    for (const item of ["Phone rings", "Front Office picks up", "What you get by text", "New call: Maria", "- AC not cooling", "41 Palm Ave, Sarasota", "Wants someone today", "Call back", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
     // The example loops with CSS only and holds still for people who turn motion off.
     expect(landingHtml).toContain("@keyframes demoFrame");
     expect(landingHtml).toMatch(/prefers-reduced-motion:reduce\)\{[^}]*\}[^@]*\.frame\{position:static;opacity:1;animation:none/);
     for (const question of ["Will it sound like a robot?", "Do I keep my number?", "What if it’s an emergency?", "Can I cancel anytime?", "What if I cancel?"]) expect(landingHtml).toContain(question);
     expect(landingHtml).toContain("Your Front Office number keeps taking messages for 30 days and texts them to you, so no customer hits a dead line. You can export your calls anytime.");
-    expect(landingHtml).not.toMatch(/unlimited/i);
+    // "Unlimited" only ever appears as the add-on, with its fair-use limit right next to the toggle.
+    expect(landingHtml).toContain("Fair use: up to 3× your plan’s calls.");
+    expect(landingHtml).not.toMatch(/unlimited (minutes|answering)/i);
     expect(landingHtml).toContain('Front Office is a product of <a href="https://bydutchworks.com"');
     expect(landingHtml).not.toMatch(/\s—\s/);
     expect(landingHtml).not.toContain("ServiceTitan’s contractor benchmarks");

@@ -89,12 +89,12 @@ export interface ApiDashboard {
   googleAvailable: boolean
   paid: boolean
   checkoutConfigured: boolean
-  billing: { status: string; trialEndsAt: string | null; chargeNote: string | null; planId: PlanId; plans: ApiPlan[] }
+  billing: { status: string; trialEndsAt: string | null; chargeNote: string | null; planId: PlanId; plans: ApiPlan[]; unlimited: boolean }
   /** The lead guarantee, decided by the server: the refund button shows only when state is "eligible". */
   guarantee: Guarantee
   onboarding: { hoursSet: boolean; completed: boolean }
   /** This billing period in answered calls (spam and calls under 15 seconds never count). Extra calls are billed after the period ends. */
-  usage: { countedCalls: number; includedCalls: number; extraCalls: number; extraCents: number; overageCentsPerCall: number; excludedSpamCalls: number; excludedShortCalls: number; periodEnd: string }
+  usage: { countedCalls: number; includedCalls: number; extraCalls: number; extraCents: number; overageCentsPerCall: number; excludedSpamCalls: number; excludedShortCalls: number; periodEnd: string; unlimited: boolean; fairUseCalls: number | null }
   /** Present only when analytics is on: opaque account and shop ids for PostHog. */
   analytics?: { distinctId: string; tenantId: string }
   calls: ApiCall[]
@@ -104,7 +104,11 @@ export interface ApiDashboard {
 export type PlanId = "solo" | "pro" | "team" | "fleet"
 
 /** A plan: Solo first and picked by default. chargeNote is the line under the card button. */
-export interface ApiPlan { id: PlanId; label: string; priceCents: number; firstMonthCents: number; includedCalls: number; overageCentsPerCall: number; blurb: string; who: string; chargeNote: string }
+export interface ApiPlan {
+  id: PlanId; label: string; priceCents: number; firstMonthCents: number; includedCalls: number; overageCentsPerCall: number; blurb: string; who: string; chargeNote: string
+  /** The Unlimited calls add-on on this plan (totals include the plan), or null where it isn't offered. */
+  unlimited: { addOnCents: number; priceCents: number; firstMonthCents: number; fairUseCalls: number; chargeNote: string } | null
+}
 
 export interface Guarantee {
   state: "none" | "watching" | "eligible" | "pending" | "refunded" | "closed"
@@ -140,7 +144,13 @@ export interface ApiSettings {
   businessName: string
   /** This shop's id, for its own calls export. */
   shopId: string
-  plan: { id: PlanId; label: string; flatMonthlyPriceCents: number; includedCalls: number; overageCentsPerCall: number; paid: boolean; plans: ApiPlan[] }
+  plan: {
+    id: PlanId; label: string; flatMonthlyPriceCents: number; includedCalls: number; overageCentsPerCall: number; paid: boolean; plans: ApiPlan[]
+    /** False for a legacy plan (Pro) the shop keeps but nobody can buy. */
+    sold: boolean
+    unlimited: boolean
+    unlimitedOffer: { addOnCents: number; priceCents: number; fairUseCalls: number } | null
+  }
   integrations: {
     googleAvailable: boolean
     googleConnected: boolean

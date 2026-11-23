@@ -2,32 +2,55 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type { CallRecord } from "./models.js";
 
 /**
- * The owner's new-call text. Short lines that wrap well on a phone, a blank line before the link,
- * GSM-7 only (no ¢, no curly quotes, no "·") so it stays cheap and renders everywhere, and never the
- * caller's phone number (carrier rule): the link opens a page with a big Call button instead.
+ * The owner's new-call text. Short "- " lines that wrap well on a phone, a blank line before the link,
+ * GSM-7 only (no ¢, no curly quotes, no "·") so it stays cheap and renders everywhere, the caller's first name
+ * only, and never the caller's phone number (carrier rule): the link opens a page with a big Call button instead.
  *
- *   Front Office - Suncoast Heating
- *   New call: Maria G.
- *   AC not cooling
- *   41 Palm Ave, Sarasota
- *   Wants someone today
+ *   New call: Maria
+ *   - AC not cooling
+ *   - 41 Palm Ave, Sarasota
+ *   - Wants someone today
  *
- *   Call back: https://…/c/…
+ *   Call back: https://.../c/...
  *
- * Urgent and emergency calls start with "URGENT: {reason}".
+ * When the AI booked a time, the last bullet is "- Booked tomorrow 10a" and the link reads "Confirmation:".
+ * Urgent and emergency calls start with an "URGENT: {reason}" line, then the same lines.
  */
-export function ownerCallSms(input: { shop: string; call: Pick<CallRecord, "fields" | "emergency">; urgentReason?: string | null; wants?: string | null; link: string }): string {
+export function ownerCallSms(input: { call: Pick<CallRecord, "fields" | "emergency">; urgentReason?: string | null; wants?: string | null; booked?: string | null; link: string }): string {
+  const place = streetAndCity(input.call.fields.address);
+  const next = input.booked ? `Booked ${gsm7(input.booked)}` : input.wants ? gsm7(input.wants) : null;
   const lines = [
     ...(input.urgentReason ? [`URGENT: ${clip(gsm7(input.urgentReason), 40)}`] : []),
-    `Front Office - ${clip(gsm7(input.shop), 40)}`,
-    `New call: ${callerShortName(input.call.fields.callerName)}`,
-    clip(gsm7(input.call.fields.problemDescription) || "Problem not captured", 40),
-    ...(streetAndCity(input.call.fields.address) ? [streetAndCity(input.call.fields.address)!] : []),
-    ...(input.wants ? [gsm7(input.wants)] : []),
+    `New call: ${callerFirstName(input.call.fields.callerName)}`,
+    `- ${clip(gsm7(input.call.fields.problemDescription) || "Problem not captured", 40)}`,
+    ...(place ? [`- ${place}`] : []),
+    ...(next ? [`- ${next}`] : []),
     "",
-    `Call back: ${input.link}`,
+    `${input.booked ? "Confirmation" : "Call back"}: ${input.link}`,
   ];
   return lines.join("\n");
+}
+
+/**
+ * A time the way a text says it, in the shop's timezone: "today 3p", "tomorrow 10a", "tomorrow 10:30a",
+ * "Wed 2p" within the week, "Dec 4 12p" after that.
+ */
+export function shortWhen(iso: string, now: Date, timeZone: string): string {
+  const at = new Date(iso);
+  const parts = (value: Date) => Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "numeric", minute: "2-digit", hourCycle: "h23", weekday: "short" })
+    .formatToParts(value).map((part) => [part.type, part.value])) as Record<string, string>;
+  const when = parts(at);
+  const today = parts(now);
+  const dayNumber = (p: Record<string, string>) => Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day)) / 86_400_000;
+  const days = dayNumber(when) - dayNumber(today);
+  const hour = Number(when.hour) % 24;
+  const minute = Number(when.minute);
+  const time = `${hour % 12 === 0 ? 12 : hour % 12}${minute ? `:${String(minute).padStart(2, "0")}` : ""}${hour < 12 ? "a" : "p"}`;
+  if (days === 0) return `today ${time}`;
+  if (days === 1) return `tomorrow ${time}`;
+  if (days > 1 && days < 7) return `${when.weekday} ${time}`;
+  const month = new Intl.DateTimeFormat("en-US", { timeZone, month: "short" }).format(at);
+  return `${month} ${Number(when.day)} ${time}`;
 }
 
 /** Why an urgent text is urgent, in a few words: the emergency evidence, or that the caller asked for the owner. */
@@ -41,13 +64,10 @@ export function urgentReason(call: Pick<CallRecord, "emergency" | "fields">, hum
   return humanRequested ? "caller asked for you" : null;
 }
 
-/** "Maria Gonzalez" → "Maria G."; one name stays as is; nothing → "Unknown caller". */
-export function callerShortName(name: string | null): string {
-  const parts = gsm7(name ?? "").split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "Unknown caller";
-  const first = clip(parts[0]!, 20);
-  const last = parts.length > 1 ? parts.at(-1)!.replace(/[^A-Za-z]/g, "").charAt(0).toUpperCase() : "";
-  return last ? `${first} ${last}.` : first;
+/** "Maria Gonzalez" → "Maria" (first name only); nothing → "Unknown caller". */
+export function callerFirstName(name: string | null): string {
+  const first = gsm7(name ?? "").split(/\s+/).filter(Boolean)[0];
+  return first ? clip(first, 20) : "Unknown caller";
 }
 
 /** "41 Palm Ave, Sarasota, FL 34236" → "41 Palm Ave, Sarasota". */

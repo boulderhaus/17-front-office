@@ -10,7 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { api, useApi } from "@/lib/api"
-import { money, perCall } from "@/lib/format"
+import { FAIR_USE_LINE, money, perCall } from "@/lib/format"
 import { useMode } from "@/lib/mode"
 import type { ApiSettings, PlanId, SettingsValues } from "@/lib/types"
 import { cn, tapWidth } from "@/lib/utils"
@@ -62,6 +62,19 @@ function PlanCard({ plan, csrf, onChanged }: { plan: ApiSettings["plan"]; csrf: 
   const [picked, setPicked] = useState<PlanId>(plan.id)
   const [busy, setBusy] = useState(false)
   const choice = plan.plans.find((item) => item.id === picked)
+  const [unlimitedBusy, setUnlimitedBusy] = useState(false)
+  const toggleUnlimited = async (on: boolean) => {
+    setUnlimitedBusy(true)
+    try {
+      await api("/api/app/billing/unlimited", { method: "POST", body: { on } })
+      await onChanged()
+      toast.success(on ? "Unlimited calls are on." : "Unlimited calls are off.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unlimited calls didn’t change. Please try again.")
+    } finally {
+      setUnlimitedBusy(false)
+    }
+  }
   const change = async () => {
     if (!choice) return
     setBusy(true)
@@ -80,7 +93,19 @@ function PlanCard({ plan, csrf, onChanged }: { plan: ApiSettings["plan"]; csrf: 
       <span aria-hidden className="absolute inset-x-0 top-0 h-1 bg-brand-yellow" />
       <CardHeader><CardTitle className="text-base">Plan</CardTitle></CardHeader>
       <CardContent className="grid gap-3">
-        <p className="text-sm"><span className="block text-[13px] font-semibold text-muted-foreground">{plan.label}</span><strong className="text-2xl font-semibold tracking-tight">{money(plan.flatMonthlyPriceCents)}</strong>/month · {plan.includedCalls} answered calls · {perCall(plan.overageCentsPerCall)} per extra call</p>
+        <p className="text-sm"><span className="block text-[13px] font-semibold text-muted-foreground">{plan.label}{plan.unlimited ? " + Unlimited calls" : ""}{plan.sold ? "" : " (no longer offered, yours to keep)"}</span><strong className="text-2xl font-semibold tracking-tight">{money(plan.unlimited && plan.unlimitedOffer ? plan.unlimitedOffer.priceCents : plan.flatMonthlyPriceCents)}</strong>/month · {plan.unlimited && plan.unlimitedOffer ? `unlimited calls, fair use up to ${plan.unlimitedOffer.fairUseCalls.toLocaleString("en-US")}` : `${plan.includedCalls} answered calls`} · {perCall(plan.overageCentsPerCall)} per extra call</p>
+        {plan.unlimitedOffer && (
+          <div className="grid gap-1 rounded-lg border-2 border-brand-ink/15 px-3 py-2.5">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <label htmlFor="settings-unlimited" className="flex min-h-11 cursor-pointer items-center gap-2.5 text-[15px] font-semibold">
+                <Switch id="settings-unlimited" checked={plan.unlimited} disabled={unlimitedBusy} onCheckedChange={(on) => void toggleUnlimited(on)} />
+                Unlimited calls
+              </label>
+              <span className="rounded border border-brand-ink/40 px-1.5 py-0.5 text-[13px] font-semibold">{FAIR_USE_LINE}</span>
+            </div>
+            <span className="text-[13px] text-muted-foreground">+{money(plan.unlimitedOffer.addOnCents)}/month. {plan.paid ? "You pay or get credit for the difference right away." : "Added when you start your plan."} Past fair use, extra calls are {perCall(plan.overageCentsPerCall)}.</span>
+          </div>
+        )}
         {plan.plans.length > 1 && (
           <div className="grid gap-2" role="radiogroup" aria-label="Change plan">
             {plan.plans.map((item) => (
@@ -212,7 +237,7 @@ export function SettingsPage() {
           </Field>
           <Toggle id="ownerRealtimeSmsEnabled" label={<>Instant lead texts <em className="ml-1 not-italic text-brand-ink/70">+$10/mo</em></>} hint="Every routine new lead the moment the call ends." checked={flag("ownerRealtimeSmsEnabled")} disabled={!i.realtimeSmsAvailable} onChange={(value) => set("ownerRealtimeSmsEnabled", value)} extra={i.realtimeSmsAvailable ? undefined : <span className="text-[13px] text-amber-700">Not available yet.</span>} />
           <Toggle id="ownerWeeklyEmailEnabled" label={<>Sunday week-ahead email <em className="ml-1 not-italic text-brand-ink/70">Included</em></>} hint="Open callbacks and the next seven days." checked={flag("ownerWeeklyEmailEnabled")} disabled={!i.weeklyEmailAvailable} onChange={(value) => set("ownerWeeklyEmailEnabled", value)} extra={i.weeklyEmailAvailable ? undefined : <span className="text-[13px] text-amber-700">Not available yet.</span>} />
-          <Field label="Calls alert" hint={`We’ll tell you once when you’ve answered this share of your ${plan.includedCalls} calls, and again if you use them all.`}>
+          <Field label="Calls alert" hint={plan.unlimited && plan.unlimitedOffer ? `We’ll tell you once when you’ve answered this share of your ${plan.unlimitedOffer.fairUseCalls.toLocaleString("en-US")} fair-use calls, and again if you reach them all.` : `We’ll tell you once when you’ve answered this share of your ${plan.includedCalls} calls, and again if you use them all.`}>
             <select className={selectClass} {...bind("usageAlertPercent")}>
               {EASY_ALERT_PERCENTS.map((percent) => <option key={percent} value={percent}>When I’ve used {percent}%</option>)}
               <optgroup label="Other">

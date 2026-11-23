@@ -2,7 +2,7 @@ import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
 import { CARRIER_CHOICES, forwardingPlan, type CarrierInfo, type ForwardingPlan } from "../domain/forwarding.js";
 import { isPaidStatus } from "../domain/billing.js";
 import { describeHours } from "../domain/hours.js";
-import type { PlanId } from "../domain/plans.js";
+import { fairUseCalls, type PlanId } from "../domain/plans.js";
 import { extraCalls } from "../domain/usage.js";
 import type { GuaranteeStatus } from "../application/billing-jobs.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, OutboxNotification, OwnerAccount, SubscriptionRecord, UsageSummary } from "../domain/models.js";
@@ -75,7 +75,7 @@ export interface ApiDashboard {
   paid: boolean;
   checkoutConfigured: boolean;
   /** Card status in plain terms: a trial counts as paid; trialEndsAt is when the first charge happens. */
-  billing: { status: SubscriptionRecord["status"] | "none"; trialEndsAt: string | null; chargeNote: string | null; planId: PlanId; plans: ApiPlan[] };
+  billing: { status: SubscriptionRecord["status"] | "none"; trialEndsAt: string | null; chargeNote: string | null; planId: PlanId; plans: ApiPlan[]; unlimited: boolean };
   /** The lead guarantee for this shop: watching the first 30 days, eligible for the refund (days 30–37), refunded, or closed. */
   guarantee: GuaranteeStatus;
   /** The new-owner flow: sign up → card → forward calls → hours → done. */
@@ -84,13 +84,17 @@ export interface ApiDashboard {
    * This billing period in answered calls: countedCalls (answered, not spam, 15 s or longer) against the
    * plan's includedCalls, and the extra calls so far (billed after the period ends). Minutes stay internal.
    */
-  usage: { countedCalls: number; includedCalls: number; extraCalls: number; extraCents: number; overageCentsPerCall: number; excludedSpamCalls: number; excludedShortCalls: number; periodEnd: string };
+  usage: { countedCalls: number; includedCalls: number; extraCalls: number; extraCents: number; overageCentsPerCall: number; excludedSpamCalls: number; excludedShortCalls: number; periodEnd: string; unlimited: boolean; fairUseCalls: number | null };
   calls: ApiCall[];
   tasks: ApiTask[];
 }
 
 /** A plan on the card step: cheapest first, picked by default. chargeNote is the line under the button. */
-export interface ApiPlan { id: PlanId; label: string; priceCents: number; firstMonthCents: number; includedCalls: number; overageCentsPerCall: number; blurb: string; who: string; chargeNote: string }
+export interface ApiPlan {
+  id: PlanId; label: string; priceCents: number; firstMonthCents: number; includedCalls: number; overageCentsPerCall: number; blurb: string; who: string; chargeNote: string;
+  /** The Unlimited add-on on this plan (totals include the plan), or null where it isn't offered. */
+  unlimited: { addOnCents: number; priceCents: number; firstMonthCents: number; fairUseCalls: number; chargeNote: string } | null;
+}
 
 export interface ApiCallDetail {
   call: ApiCall;
@@ -190,18 +194,22 @@ export function apiDashboard(input: {
       chargeNote: input.chargeNote ?? null,
       planId: c.planId ?? "solo",
       plans: input.plans ?? [],
+      unlimited: c.unlimitedCalls === true,
     },
     onboarding: input.onboarding ?? { hoursSet: false, completed: false },
     guarantee: input.guarantee ?? { state: "none", leads: 0, complete: true, windowEndsAt: null, claimUntil: null, refund: null },
     usage: {
       countedCalls: input.usage.billableCalls,
       includedCalls: c.includedCalls,
-      extraCalls: extraCalls(input.usage.billableCalls, c.includedCalls),
-      extraCents: extraCalls(input.usage.billableCalls, c.includedCalls) * c.overageCentsPerCall,
+      // With Unlimited, nothing is extra until fair use (3× the plan's calls).
+      extraCalls: extraCalls(input.usage.billableCalls, c.unlimitedCalls ? fairUseCalls(c.includedCalls) : c.includedCalls),
+      extraCents: extraCalls(input.usage.billableCalls, c.unlimitedCalls ? fairUseCalls(c.includedCalls) : c.includedCalls) * c.overageCentsPerCall,
       overageCentsPerCall: c.overageCentsPerCall,
       excludedSpamCalls: input.usage.excludedSpamCalls,
       excludedShortCalls: input.usage.excludedShortCalls,
       periodEnd: input.usage.periodEnd,
+      unlimited: c.unlimitedCalls === true,
+      fairUseCalls: c.unlimitedCalls ? fairUseCalls(c.includedCalls) : null,
     },
     calls: input.calls.map(apiCall),
     tasks: input.tasks.map(apiTask),

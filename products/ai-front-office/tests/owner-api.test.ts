@@ -210,8 +210,8 @@ describe("Owner JSON API and React app serving", () => {
     const extra = (id: string, overrides: Partial<CallRecord>): CallRecord => ({ ...base, id, providerCallId: `v3:${id}`, ...overrides });
     await store.saveCall(extra("33333333-3333-4333-8333-333333333333", { durationSeconds: 12 }));
     await store.saveCall(extra("44444444-4444-4444-8444-444444444444", { durationSeconds: 900, outcome: "ignored_spam", billingDisposition: "spam_excluded", emergency: null }));
-    const dashboard = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie: owner.cookie } })).json() as { usage: Record<string, number> };
-    expect(dashboard.usage).toEqual({ countedCalls: 1, includedCalls: 60, extraCalls: 0, extraCents: 0, overageCentsPerCall: 75, excludedSpamCalls: 1, excludedShortCalls: 1, periodEnd: "2026-02-01T00:00:00.000Z" });
+    const dashboard = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie: owner.cookie } })).json() as { usage: Record<string, unknown> };
+    expect(dashboard.usage).toEqual({ countedCalls: 1, includedCalls: 60, extraCalls: 0, extraCents: 0, overageCentsPerCall: 75, excludedSpamCalls: 1, excludedShortCalls: 1, periodEnd: "2026-02-01T00:00:00.000Z", unlimited: false, fairUseCalls: null });
     expect(JSON.stringify(dashboard)).not.toMatch(/minute/i);
   });
 
@@ -221,7 +221,7 @@ describe("Owner JSON API and React app serving", () => {
     await seedCall(owner.tenantId);
     const base = (await store.getCall(CALL_ID))!;
     for (const id of ["55555555-5555-4555-8555-555555555551", "55555555-5555-4555-8555-555555555552"]) await store.saveCall({ ...base, id, providerCallId: `v3:${id}`, durationSeconds: 15 });
-    const dashboard = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie: owner.cookie } })).json() as { usage: Record<string, number> };
+    const dashboard = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie: owner.cookie } })).json() as { usage: Record<string, unknown> };
     expect(dashboard.usage).toMatchObject({ countedCalls: 3, includedCalls: 1, extraCalls: 2, extraCents: 150 });
   });
 
