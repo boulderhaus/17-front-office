@@ -30,7 +30,7 @@ function storedCall(overrides: Partial<CallRecord>): CallRecord {
   };
 }
 
-describe("what counts against the owner's minutes", () => {
+describe("what counts against the owner's calls", () => {
   it("never counts spam or calls under 15 seconds, and counts 15 seconds exactly", () => {
     expect(MIN_BILLABLE_CALL_SECONDS).toBe(15);
     expect(usageClass(storedCall({ durationSeconds: 15 }))).toBe("billable");
@@ -67,7 +67,7 @@ describe("what counts against the owner's minutes", () => {
     });
   });
 
-  it("keeps a short call's record but leaves it out of billed minutes", async () => {
+  it("keeps a short call's record but never counts it", async () => {
     const { store, service, finish } = rig();
     const call = await finish("short-hangup", 9);
     expect(call.billingDisposition).toBe("billable");
@@ -80,13 +80,13 @@ describe("what counts against the owner's minutes", () => {
 
 describe("usage alerts", () => {
   it("picks the first threshold below 100% and only the 100% alert once the plan is used up", () => {
-    expect(dueUsageAlerts(149, 200, 75)).toEqual([]);
-    expect(dueUsageAlerts(150, 200, 75)).toEqual([75]);
-    expect(dueUsageAlerts(199, 200, 75)).toEqual([75]);
-    expect(dueUsageAlerts(200, 200, 75)).toEqual([100]);
-    expect(dueUsageAlerts(260, 200, 90)).toEqual([100]);
-    expect(dueUsageAlerts(179, 200, 90)).toEqual([]);
-    expect(dueUsageAlerts(180, 200, 90)).toEqual([90]);
+    expect(dueUsageAlerts(44, 60, 75)).toEqual([]);
+    expect(dueUsageAlerts(45, 60, 75)).toEqual([75]);
+    expect(dueUsageAlerts(59, 60, 75)).toEqual([75]);
+    expect(dueUsageAlerts(60, 60, 75)).toEqual([100]);
+    expect(dueUsageAlerts(80, 60, 90)).toEqual([100]);
+    expect(dueUsageAlerts(53, 60, 90)).toEqual([]);
+    expect(dueUsageAlerts(54, 60, 90)).toEqual([90]);
     expect(dueUsageAlerts(50, 0, 75)).toEqual([]);
   });
 
@@ -99,13 +99,16 @@ describe("usage alerts", () => {
 
   let ctx: ReturnType<typeof rig>;
   beforeEach(() => { ctx = rig(); });
+  const calls = async (prefix: string, count: number, seconds = 60) => {
+    for (let index = 0; index < count; index += 1) await ctx.finish(`${prefix}${index}`, seconds);
+  };
 
-  it("texts the owner once at 75% and once at 100%, never twice, as calls finalize", async () => {
+  it("texts the owner once at 75% and once at 100% of their answered calls, never twice", async () => {
     const { finish, usageAlerts } = ctx;
-    // 149 billed minutes: no alert yet.
-    for (let index = 0; index < 149; index += 1) await finish(`c${index}`, 60);
+    // Solo: 60 answered calls. 44 answered: no alert yet.
+    await calls("c", 44);
     expect(await usageAlerts()).toHaveLength(0);
-    await finish("c149", 45); // 150 minutes
+    await finish("c44", 20); // 45 of 60: a 20-second call counts like a long one
     let alerts = await usageAlerts();
     expect(alerts).toHaveLength(1);
     const [periodStart] = currentBillingPeriod(new Date("2026-01-15T08:00:00.000Z"));
@@ -114,104 +117,109 @@ describe("usage alerts", () => {
       destinationRef: "owner-primary",
       callId: null,
       idempotencyKey: `usage-alert:demo:${periodStart}:75`,
-      body: "Front Office: you've used 75% of your 200 minutes this month (150). Change this alert in Settings.",
+      body: "Front Office: you've answered 45 of your 60 calls this month. Extra calls are $0.75 each. Change plans in Settings.",
     });
-    await finish("c150", 60); // 151 minutes, already alerted
+    // GSM-7 only (no ¢, no curly quotes), so the text stays one SMS segment.
+    expect(alerts[0]!.body).toMatch(/^[A-Za-z0-9 .,:'$]+$/);
+    expect(alerts[0]!.body.length).toBeLessThanOrEqual(160);
+    await finish("c45", 60); // 46, already alerted
     expect(await usageAlerts()).toHaveLength(1);
-    for (let index = 151; index < 200; index += 1) await finish(`c${index}`, 60);
+    await calls("d", 14);
     alerts = await usageAlerts();
     expect(alerts).toHaveLength(2);
     expect(alerts[1]).toMatchObject({ idempotencyKey: `usage-alert:demo:${periodStart}:100` });
-    expect(alerts[1]!.body).toBe("Front Office: you've used all 200 of your minutes this month. Extra minutes are $0.20 each until they reset on Feb 1.");
-    await finish("c200", 600);
+    expect(alerts[1]!.body).toBe("Front Office: you've answered 60 of your 60 calls this month. Extra calls are $0.75 each. Change plans in Settings.");
+    await finish("over", 600);
     expect(await usageAlerts()).toHaveLength(2);
   });
 
   it("does not let spam or short calls push a shop over a threshold", async () => {
     const { store, finish, usageAlerts } = ctx;
-    await store.saveConfig({ ...await store.getConfig("demo"), includedMinutes: 10 });
-    await finish("real", 7 * 60); // 7 of 10 minutes
+    await store.saveConfig({ ...await store.getConfig("demo"), includedCalls: 10 });
+    await calls("real", 7); // 7 of 10
     await finish("spam", 30 * 60, { isSpam: true });
     for (let index = 0; index < 20; index += 1) await finish(`short${index}`, 14);
     expect(await usageAlerts()).toHaveLength(0);
-    await finish("real-2", 60); // 8 of 10 = 80%
+    await finish("real-8", 60); // 8 of 10 = 80%
     expect((await usageAlerts()).map((item) => item.idempotencyKey.split(":").at(-1))).toEqual(["75"]);
   });
 
-  it("sends only the 100% alert when one call jumps past both thresholds", async () => {
+  it("sends only the 100% alert when the same call reaches the threshold and the plan's last call", async () => {
     const { store, finish, usageAlerts } = ctx;
-    await store.saveConfig({ ...await store.getConfig("demo"), includedMinutes: 10 });
-    await finish("long", 12 * 60);
-    const alerts = await usageAlerts();
-    expect(alerts.map((item) => item.idempotencyKey.split(":").at(-1))).toEqual(["100"]);
+    await store.saveConfig({ ...await store.getConfig("demo"), includedCalls: 4, usageAlertPercent: 90 });
+    await calls("a", 3); // 75%, under the 90% alert
+    expect(await usageAlerts()).toHaveLength(0);
+    await finish("last", 60);
+    expect((await usageAlerts()).map((item) => item.idempotencyKey.split(":").at(-1))).toEqual(["100"]);
     await finish("after", 60);
     expect(await usageAlerts()).toHaveLength(1);
   });
 
   it("uses the owner's chosen threshold", async () => {
     const { store, finish, usageAlerts } = ctx;
-    await store.saveConfig({ ...await store.getConfig("demo"), includedMinutes: 10, usageAlertPercent: 90 });
-    await finish("a", 8 * 60);
+    await store.saveConfig({ ...await store.getConfig("demo"), includedCalls: 10, usageAlertPercent: 90 });
+    await calls("a", 8);
     expect(await usageAlerts()).toHaveLength(0);
     await finish("b", 60);
     const alerts = await usageAlerts();
     expect(alerts.map((item) => item.idempotencyKey.split(":").at(-1))).toEqual(["90"]);
-    expect(alerts[0]!.body).toBe("Front Office: you've used 90% of your 10 minutes this month (9). Change this alert in Settings.");
+    expect(alerts[0]!.body).toBe("Front Office: you've answered 9 of your 10 calls this month. Extra calls are $0.75 each. Change plans in Settings.");
   });
 
   it("does not double-send when the final webhook is replayed or another replica checks too", async () => {
     const { store, service, finish, usageAlerts, summary } = ctx;
-    await store.saveConfig({ ...await store.getConfig("demo"), includedMinutes: 20 });
-    await finish("over", 16 * 60); // 80%
-    await service.finalize(summary("over", 16 * 60));
-    // Two replicas finalizing different calls at the same moment (18 of 20 minutes, still under 100%).
+    await store.saveConfig({ ...await store.getConfig("demo"), includedCalls: 20 });
+    await calls("a", 15);
+    await finish("over", 60); // 16 of 20 = 80%
+    await service.finalize(summary("over", 60));
+    // Two replicas finalizing different calls at the same moment (18 of 20, still under 100%).
     await Promise.all([finish("x", 30), finish("y", 30)]);
     expect((await usageAlerts()).map((item) => item.idempotencyKey.split(":").at(-1))).toEqual(["75"]);
   });
 
   it("alerts again in the next billing period", async () => {
     const { store, clock, finish, usageAlerts } = ctx;
-    await store.saveConfig({ ...await store.getConfig("demo"), includedMinutes: 10 });
-    await finish("jan", 8 * 60);
+    await store.saveConfig({ ...await store.getConfig("demo"), includedCalls: 4 });
+    await calls("jan", 3);
     clock.set("2026-02-03T08:00:00.000Z");
-    await finish("feb", 8 * 60, { startedAt: "2026-02-03T07:50:00.000Z" });
+    for (let index = 0; index < 3; index += 1) await finish(`feb${index}`, 60, { startedAt: "2026-02-03T07:50:00.000Z" });
     const keys = (await usageAlerts()).map((item) => item.idempotencyKey);
     expect(keys).toEqual(["usage-alert:demo:2026-01-01T00:00:00.000Z:75", "usage-alert:demo:2026-02-01T00:00:00.000Z:75"]);
   });
 
   it("follows the Stripe billing cycle when the shop has a subscription", async () => {
-    const { store, finish, usageAlerts } = ctx;
-    await store.saveConfig({ ...await store.getConfig("demo"), includedMinutes: 10 });
+    const { store, usageAlerts } = ctx;
+    await store.saveConfig({ ...await store.getConfig("demo"), includedCalls: 4 });
     await store.saveSubscription({
       tenantId: "demo", providerCustomerId: "cus_synthetic", providerSubscriptionId: "sub_synthetic", status: "active",
       currentPeriodEnd: "2026-01-20T15:00:00.000Z", providerEventCreatedAt: "2026-01-01T00:00:00.000Z",
       createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
     });
-    await finish("a", 8 * 60);
+    await calls("a", 3);
     expect((await usageAlerts()).map((item) => item.idempotencyKey)).toEqual(["usage-alert:demo:2025-12-20T15:00:00.000Z:75"]);
   });
 
   it("emails the owner when text alerts are off and email is set up", async () => {
     const { store, clock } = ctx;
     const service = new CallService(store, new InMemoryCalendar(), clock, "https://front-office.example", { ownerEmailAvailable: true });
-    await store.saveConfig({ ...await store.getConfig("demo"), includedMinutes: 10, ownerNotificationRefs: [] });
+    await store.saveConfig({ ...await store.getConfig("demo"), includedCalls: 10, ownerNotificationRefs: [] });
     await store.createOwnerWorkspace({
       account: { id: randomUUID(), tenantId: "demo", email: "owner@synthetic.example", displayName: "Synthetic Owner", passwordHash: "synthetic", role: "owner", status: "active", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" },
       config: { ...await store.getConfig("demo") },
       ownerPhone: null,
     });
-    await finishWith(service, ctx, "a", 8 * 60);
+    for (let index = 0; index < 8; index += 1) await finishWith(service, ctx, `a${index}`, 60);
     const alerts = await ctx.usageAlerts();
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toMatchObject({ channel: "email", destinationRef: "email:owner@synthetic.example" });
-    expect(alerts[0]!.body).toContain("Subject: Front Office: you've used 80% of your minutes");
+    expect(alerts[0]!.body).toContain("Subject: Front Office: you've answered 8 of your 10 calls");
     expect(alerts[0]!.body).toContain("https://front-office.example/app/settings");
   });
 
   it("queues nothing it cannot deliver", async () => {
-    const { store, finish, usageAlerts } = ctx;
-    await store.saveConfig({ ...await store.getConfig("demo"), includedMinutes: 10, ownerNotificationRefs: [] });
-    await finish("a", 8 * 60);
+    const { store, usageAlerts } = ctx;
+    await store.saveConfig({ ...await store.getConfig("demo"), includedCalls: 10, ownerNotificationRefs: [] });
+    await calls("a", 8);
     expect(await usageAlerts()).toHaveLength(0);
   });
 });

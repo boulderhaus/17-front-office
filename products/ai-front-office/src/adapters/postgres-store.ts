@@ -223,6 +223,21 @@ export class PostgresStore implements Store {
     return result.rows.map((row) => this.mapCall(row as Row));
   }
 
+  async listCallsStartedBetween(tenantId: string, from: string, to: string, limit: number): Promise<CallRecord[]> {
+    // Uses calls_tenant_started_idx; the window bounds the scan, the limit only guards memory.
+    const result = await this.#pool.query(
+      "SELECT * FROM calls WHERE tenant_id = $1 AND started_at >= $2 AND started_at < $3 ORDER BY started_at ASC LIMIT $4",
+      [tenantId, from, to, limit],
+    );
+    return result.rows.map((row) => this.mapCall(row as Row));
+  }
+
+  async listCallbackTasksForCalls(tenantId: string, callIds: string[]): Promise<CallbackTask[]> {
+    if (callIds.length === 0) return [];
+    const result = await this.#pool.query("SELECT * FROM callback_tasks WHERE tenant_id = $1 AND call_id = ANY($2::uuid[])", [tenantId, callIds]);
+    return result.rows.map((row) => mapCallbackTask(row as Row));
+  }
+
   async countCallsFromNumberSince(tenantId: string, phone: string, since: string): Promise<number> {
     const result = await this.#pool.query(
       "SELECT count(*)::int AS count FROM calls WHERE tenant_id=$1 AND from_number_hash=$2 AND started_at >= $3",

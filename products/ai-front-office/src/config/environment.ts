@@ -80,21 +80,36 @@ const schema = z.object({
   STRIPE_SECRET_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().min(20).optional()),
   STRIPE_WEBHOOK_SECRET: z.preprocess((value) => value === "" ? undefined : value, z.string().min(20).optional()),
   STRIPE_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
-  /** Second plan ("Busy season"). Optional: without it only the standard plan is offered. */
+  /** Pro plan, old name. Used when STRIPE_PRICE_ID_PRO is unset. */
   STRIPE_PRICE_ID_PLUS: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
-  /** Coupon applied once at checkout (50% off, duration once): "first month half off". Created by scripts/create-first-month-coupon.ts. */
+  /** The four monthly plan prices (scripts/create-stripe-plans.ts). Solo falls back to STRIPE_PRICE_ID, Pro to STRIPE_PRICE_ID_PLUS. A plan without a price isn't sold. */
+  STRIPE_PRICE_ID_SOLO: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
+  STRIPE_PRICE_ID_PRO: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
+  STRIPE_PRICE_ID_TEAM: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
+  STRIPE_PRICE_ID_FLEET: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
+  /** Coupon applied once at checkout (50% off, duration once): "first month half off". Created by scripts/create-stripe-plans.ts. */
   STRIPE_FIRST_MONTH_COUPON_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().regex(/^[A-Za-z0-9_-]{1,200}$/).optional()),
+  /** Limited-time switch for the first-month offer. false: no coupon at checkout and no "half off" copy anywhere. */
+  FIRST_MONTH_OFFER_ENABLED: z.preprocess((value) => value === "" ? undefined : value, z.enum(["true", "false"]).default("true").transform((value) => value === "true")),
   /** Percent the first-month coupon takes off, for the prices shown on our pages. Must match the coupon. */
   STRIPE_FIRST_MONTH_PERCENT_OFF: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(1).max(100).default(50)),
   /** Free days before the first charge. Hard paywall by default (0): the card is charged at checkout. */
   STRIPE_TRIAL_DAYS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(0).max(90).default(0)),
-  /** What the two plans are called and cost, shown on the homepage and card step. Must match the Stripe prices. */
-  PLAN_STANDARD_LABEL: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(40).default("Standard")),
-  PLAN_STANDARD_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(100_000).default(4_999)),
-  PLAN_STANDARD_BLURB: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(120).default("Up to 60 answered calls a month")),
-  PLAN_PLUS_LABEL: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(40).default("Busy season")),
-  PLAN_PLUS_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(100_000).default(9_999)),
-  PLAN_PLUS_BLURB: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(120).default("Up to 200 answered calls a month, for summer rush")),
+  /** What each plan is called, costs and includes, shown on the homepage, card step and Settings. Must match the Stripe prices. */
+  PLAN_SOLO_LABEL: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(40).default("Solo")),
+  PLAN_SOLO_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(4_999)),
+  PLAN_SOLO_CALLS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(1).max(100_000).default(60)),
+  PLAN_PRO_LABEL: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(40).default("Pro")),
+  PLAN_PRO_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(9_999)),
+  PLAN_PRO_CALLS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(1).max(100_000).default(125)),
+  PLAN_TEAM_LABEL: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(40).default("Team")),
+  PLAN_TEAM_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(17_999)),
+  PLAN_TEAM_CALLS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(1).max(100_000).default(250)),
+  PLAN_FLEET_LABEL: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(40).default("Fleet")),
+  PLAN_FLEET_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(34_999)),
+  PLAN_FLEET_CALLS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(1).max(100_000).default(500)),
+  /** Each answered call past the plan's included calls, billed at the end of the billing period. */
+  OVERAGE_CENTS_PER_CALL: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(0).max(1_000).default(75)),
   STRIPE_DAILY_SMS_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   STRIPE_REALTIME_SMS_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   RESEND_API_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("re_").optional()),
@@ -118,10 +133,10 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
   if (parsed.SESSION_SIGNING_KEY && (parsed.SESSION_SIGNING_KEY === parsed.ADMIN_TOKEN || parsed.SESSION_SIGNING_KEY === parsed.TOOL_TOKEN)) {
     throw new Error("SESSION_SIGNING_KEY must be distinct from ADMIN_TOKEN and TOOL_TOKEN");
   }
-  const stripeValues = [parsed.STRIPE_SECRET_KEY, parsed.STRIPE_WEBHOOK_SECRET, parsed.STRIPE_PRICE_ID].filter(Boolean).length;
-  if (stripeValues !== 0 && stripeValues !== 3) throw new Error("STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and STRIPE_PRICE_ID must be configured together");
-  if ((parsed.STRIPE_DAILY_SMS_PRICE_ID || parsed.STRIPE_REALTIME_SMS_PRICE_ID || parsed.STRIPE_PRICE_ID_PLUS || parsed.STRIPE_FIRST_MONTH_COUPON_ID) && stripeValues !== 3) {
-    throw new Error("Stripe add-on prices, the second plan and the first-month coupon require the base Stripe configuration");
+  const stripeValues = [parsed.STRIPE_SECRET_KEY, parsed.STRIPE_WEBHOOK_SECRET, parsed.STRIPE_PRICE_ID_SOLO ?? parsed.STRIPE_PRICE_ID].filter(Boolean).length;
+  if (stripeValues !== 0 && stripeValues !== 3) throw new Error("STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and STRIPE_PRICE_ID_SOLO (or STRIPE_PRICE_ID) must be configured together");
+  if ((parsed.STRIPE_DAILY_SMS_PRICE_ID || parsed.STRIPE_REALTIME_SMS_PRICE_ID || parsed.STRIPE_PRICE_ID_PLUS || parsed.STRIPE_PRICE_ID_PRO || parsed.STRIPE_PRICE_ID_TEAM || parsed.STRIPE_PRICE_ID_FLEET || parsed.STRIPE_FIRST_MONTH_COUPON_ID) && stripeValues !== 3) {
+    throw new Error("Stripe add-on prices, the bigger plans and the first-month coupon require the base Stripe configuration");
   }
   if (Boolean(parsed.RESEND_API_KEY) !== Boolean(parsed.RESEND_FROM_EMAIL)) {
     throw new Error("RESEND_API_KEY and RESEND_FROM_EMAIL must be configured together");

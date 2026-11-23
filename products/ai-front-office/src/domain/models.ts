@@ -1,3 +1,5 @@
+import type { PlanId } from "./plans.js";
+
 export type CallOutcome =
   | "in_progress"
   | "booked"
@@ -188,11 +190,13 @@ export interface BusinessConfig {
   dataRetentionDays: number;
   supportEmail: string | null;
   flatMonthlyPriceCents: number;
-  /** The plan the owner picked on the card step ("standard" when unset). */
-  planId?: "standard" | "plus";
-  includedMinutes: number;
-  overageCentsPerMinute: number;
-  /** Percent of included minutes (50–95) that triggers the first usage alert each billing period; 100% always alerts. */
+  /** The plan the owner picked ("solo" when unset). Old configs may still say "standard"/"plus"; normalizeBusinessConfig maps them. */
+  planId?: PlanId;
+  /** Answered calls (non-spam, 15 s or longer) included each billing period. */
+  includedCalls: number;
+  /** Each counted call past includedCalls, billed at period end. */
+  overageCentsPerCall: number;
+  /** Percent of included calls (50–95) that triggers the first usage alert each billing period; 100% always alerts. */
   usageAlertPercent: number;
   customerSmsEnabled: boolean;
   ownerWeeklyEmailEnabled: boolean;
@@ -225,11 +229,12 @@ export interface OwnerWorkspaceInput {
 export interface UsageSummary {
   periodStart: string;
   periodEnd: string;
-  /** Calls that count against the plan: not spam and connected at least 15 seconds. */
+  /** Calls that count against the plan: answered, not spam and connected at least 15 seconds. */
   billableCalls: number;
   excludedSpamCalls: number;
   /** Calls under 15 seconds, which never count. */
   excludedShortCalls: number;
+  /** Minutes of the counted calls (every started minute): kept for our provider cost, never shown to owners. */
   billedMinutes: number;
 }
 

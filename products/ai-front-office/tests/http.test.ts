@@ -536,7 +536,7 @@ describe("HTTP boundary", () => {
     const account = await store.getOwnerAccountByEmail("owner@synthetic.example");
     expect(account?.tenantId).not.toBe("demo");
     const config = await store.getConfig(account!.tenantId);
-    expect(config).toMatchObject({ paused: true, operationMode: "overflow", includedMinutes: 200, customerSmsEnabled: false });
+    expect(config).toMatchObject({ paused: true, operationMode: "overflow", includedCalls: 60, customerSmsEnabled: false });
     expect(config.afterHours).toMatchObject({ weekdayStart: "18:00", weekdayEnd: "07:00", weekends: true });
     expect(await store.getIntegrationSecret(account!.tenantId, "notifications", "owner-primary")).toBe("+12125550198");
     const welcome = [...store.notifications.values()].find((item) => item.tenantId === account!.tenantId && item.senderRef === "founder");
@@ -588,8 +588,9 @@ describe("HTTP boundary", () => {
     const dashboard = await fetch(`${baseUrl}/app`, { headers: { cookie } });
     expect(dashboard.status).toBe(200);
     const dashboardHtml = await dashboard.text();
-    expect(dashboardHtml).toContain("196");
-    expect(dashboardHtml).toContain("Minutes left");
+    expect(dashboardHtml).toMatch(/<h2>Calls left<\/h2><strong>59<\/strong>/);
+    expect(dashboardHtml).toContain("1 of 60 calls answered this period");
+    expect(dashboardHtml).not.toMatch(/minutes? left|minutes? used/i);
     expect(dashboardHtml).not.toMatch(/\bAI\b/);
     expect(dashboardHtml).toContain("Needs your attention");
     expect(dashboardHtml).toContain("Urgent callback requested");
@@ -645,8 +646,8 @@ describe("HTTP boundary", () => {
     expect(updated.afterHours.weekdayStart).toBe("17:30");
     expect(updated.bookableHours.weekdayEnd).toBe("16:30");
     expect(updated.paused).toBe(true);
-    expect(updated.includedMinutes).toBe(200);
-    expect(updated.overageCentsPerMinute).toBe(20);
+    expect(updated.includedCalls).toBe(60);
+    expect(updated.overageCentsPerCall).toBe(75);
     expect(updated.customerSmsEnabled).toBe(false);
   });
 
@@ -872,9 +873,14 @@ describe("HTTP boundary", () => {
     expect(landingHtml).toContain("Five-person shop?");
     expect(landingText).toContain("One new paying customer can cover the month.");
     expect(landingHtml).toContain("$100 after job expenses");
-    expect(landingHtml).toContain("Go live in 3 taps");
+    expect(landingHtml).toContain("3 steps to go live");
+    expect(landingHtml).not.toContain("3 taps");
+    // Four plans in plain words, priced by answered calls, with the guarantee and free teammates.
+    for (const item of ["Solo", "Pro", "Team", "Fleet", "60 answered calls a month, about 2 a day", "125 answered calls a month, about 4 a day", "250 answered calls a month, about 8 a day", "500 answered calls a month, about 17 a day", "$49.99", "$99.99", "$179.99", "$349.99", "Lead guarantee", "Team members free", "Extra calls are 75¢ each"]) expect(landingHtml).toContain(item);
+    expect(landingHtml).toContain("If Front Office doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month.");
+    expect(landingHtml).not.toMatch(/connected AI minutes|\/minute/);
     expect(landingHtml).toContain("EXAMPLE CALL");
-    for (const item of ["Phone rings", "Front Office picks up", "What you get by text", "New job from Maria G.", "AC not cooling · 41 Palm Ave, Sarasota", "Wants someone today", "Tap to call back", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
+    for (const item of ["Phone rings", "Front Office picks up", "What you get by text", "Front Office - Suncoast Heating", "New call: Maria G.", "AC not cooling", "41 Palm Ave, Sarasota", "Wants someone today", "Call back", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
     // The example loops with CSS only and holds still for people who turn motion off.
     expect(landingHtml).toContain("@keyframes demoFrame");
     expect(landingHtml).toMatch(/prefers-reduced-motion:reduce\)\{[^}]*\}[^@]*\.frame\{position:static;opacity:1;animation:none/);
@@ -896,7 +902,10 @@ describe("HTTP boundary", () => {
     expect(signupPage.slice(signupPage.indexOf('name="ownerSmsConsent"'), signupPage.indexOf("</label>", signupPage.indexOf('name="ownerSmsConsent"')))).not.toMatch(/\balerts?\b/i);
     // The fewest fields: shop, mobile, email, password.
     expect([...signupPage.matchAll(/<input name="(\w+)"/g)].map((match) => match[1]).filter((name) => !["ownerSmsConsent", "faxNumber"].includes(name!))).toEqual(["businessName", "phone", "email", "password"]);
-    expect(signupPage).toContain("Step 1 of 4");
+    // Three steps now: Your shop, Your card, Forward your calls. No hours step.
+    expect(signupPage).toContain("Step 1 of 3 · Your shop");
+    expect(signupPage).toContain("<li>Forward your calls</li></ol>");
+    expect(signupPage).not.toMatch(/<li>Hours<\/li>|of 4/);
     expect(signupPage).toContain('Front Office is a product of <a href="https://bydutchworks.com"');
     const privacy = await fetch(`${baseUrl}/privacy`);
     expect(privacy.status).toBe(200);

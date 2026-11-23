@@ -2,6 +2,9 @@ import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
 import { CARRIER_CHOICES, forwardingPlan, type CarrierInfo, type ForwardingPlan } from "../domain/forwarding.js";
 import { isPaidStatus } from "../domain/billing.js";
 import { describeHours } from "../domain/hours.js";
+import type { PlanId } from "../domain/plans.js";
+import { extraCalls } from "../domain/usage.js";
+import type { GuaranteeStatus } from "../application/billing-jobs.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, OutboxNotification, OwnerAccount, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 
 /** What the owner app may see about a call. No tenant ids, provider ids or internal flags. */
@@ -63,8 +66,8 @@ export interface ApiDashboard {
     greeting: string;
     hours: string;
     flatMonthlyPriceCents: number;
-    includedMinutes: number;
-    overageCentsPerMinute: number;
+    includedCalls: number;
+    overageCentsPerCall: number;
   };
   googleConnected: boolean;
   /** Google sign-in is configured on this server, so Today can offer the optional calendar card. */
@@ -72,17 +75,22 @@ export interface ApiDashboard {
   paid: boolean;
   checkoutConfigured: boolean;
   /** Card status in plain terms: a trial counts as paid; trialEndsAt is when the first charge happens. */
-  billing: { status: SubscriptionRecord["status"] | "none"; trialEndsAt: string | null; chargeNote: string | null; planId: "standard" | "plus"; plans: ApiPlan[] };
+  billing: { status: SubscriptionRecord["status"] | "none"; trialEndsAt: string | null; chargeNote: string | null; planId: PlanId; plans: ApiPlan[] };
+  /** The lead guarantee for this shop: watching the first 30 days, eligible for the refund (days 30–37), refunded, or closed. */
+  guarantee: GuaranteeStatus;
   /** The new-owner flow: sign up → card → forward calls → hours → done. */
   onboarding: { hoursSet: boolean; completed: boolean };
-  /** Spam and calls under 15 seconds are left out of billedMinutes; the counts say how many. */
-  usage: { billedMinutes: number; billableCalls: number; excludedSpamCalls: number; excludedShortCalls: number };
+  /**
+   * This billing period in answered calls: countedCalls (answered, not spam, 15 s or longer) against the
+   * plan's includedCalls, and the extra calls so far (billed after the period ends). Minutes stay internal.
+   */
+  usage: { countedCalls: number; includedCalls: number; extraCalls: number; extraCents: number; overageCentsPerCall: number; excludedSpamCalls: number; excludedShortCalls: number; periodEnd: string };
   calls: ApiCall[];
   tasks: ApiTask[];
 }
 
 /** A plan on the card step: cheapest first, picked by default. chargeNote is the line under the button. */
-export interface ApiPlan { id: "standard" | "plus"; label: string; priceCents: number; firstMonthCents: number; blurb: string; chargeNote: string }
+export interface ApiPlan { id: PlanId; label: string; priceCents: number; firstMonthCents: number; includedCalls: number; overageCentsPerCall: number; blurb: string; who: string; chargeNote: string }
 
 export interface ApiCallDetail {
   call: ApiCall;
@@ -148,6 +156,7 @@ export function apiDashboard(input: {
   googleAvailable?: boolean | undefined;
   chargeNote?: string | null | undefined;
   plans?: ApiPlan[] | undefined;
+  guarantee?: GuaranteeStatus | undefined;
   onboarding?: { hoursSet: boolean; completed: boolean } | undefined;
 }): ApiDashboard {
   const c = input.config;
@@ -168,8 +177,8 @@ export function apiDashboard(input: {
       greeting: c.greeting,
       hours: describeHours(c.bookableHours),
       flatMonthlyPriceCents: c.flatMonthlyPriceCents,
-      includedMinutes: c.includedMinutes,
-      overageCentsPerMinute: c.overageCentsPerMinute,
+      includedCalls: c.includedCalls,
+      overageCentsPerCall: c.overageCentsPerCall,
     },
     googleConnected: input.googleConnected,
     googleAvailable: input.googleAvailable ?? false,
@@ -179,15 +188,20 @@ export function apiDashboard(input: {
       status: input.subscription?.status ?? "none",
       trialEndsAt: input.subscription?.status === "trialing" ? input.subscription.currentPeriodEnd : null,
       chargeNote: input.chargeNote ?? null,
-      planId: c.planId ?? "standard",
+      planId: c.planId ?? "solo",
       plans: input.plans ?? [],
     },
     onboarding: input.onboarding ?? { hoursSet: false, completed: false },
+    guarantee: input.guarantee ?? { state: "none", leads: 0, complete: true, windowEndsAt: null, claimUntil: null, refund: null },
     usage: {
-      billedMinutes: input.usage.billedMinutes,
-      billableCalls: input.usage.billableCalls,
+      countedCalls: input.usage.billableCalls,
+      includedCalls: c.includedCalls,
+      extraCalls: extraCalls(input.usage.billableCalls, c.includedCalls),
+      extraCents: extraCalls(input.usage.billableCalls, c.includedCalls) * c.overageCentsPerCall,
+      overageCentsPerCall: c.overageCentsPerCall,
       excludedSpamCalls: input.usage.excludedSpamCalls,
       excludedShortCalls: input.usage.excludedShortCalls,
+      periodEnd: input.usage.periodEnd,
     },
     calls: input.calls.map(apiCall),
     tasks: input.tasks.map(apiTask),

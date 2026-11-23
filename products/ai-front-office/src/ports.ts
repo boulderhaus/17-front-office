@@ -35,6 +35,10 @@ export interface Store {
   getCall(callId: string): Promise<CallRecord | null>;
   saveCall(call: CallRecord): Promise<void>;
   listCalls(tenantId: string, limit: number): Promise<CallRecord[]>;
+  /** Calls that started in [from, to), oldest first, at most `limit` (callers treat a full page as incomplete). */
+  listCallsStartedBetween(tenantId: string, from: string, to: string, limit: number): Promise<CallRecord[]>;
+  /** The callback tasks of exactly these calls. */
+  listCallbackTasksForCalls(tenantId: string, callIds: string[]): Promise<CallbackTask[]>;
   countCallsFromNumberSince(tenantId: string, phone: string, since: string): Promise<number>;
   /** Expired calls, skipping any whose deletion failed within the last 24 hours before `now`. */
   listExpiredCalls(tenantId: string, endedBefore: string, limit: number, now: string): Promise<CallRecord[]>;

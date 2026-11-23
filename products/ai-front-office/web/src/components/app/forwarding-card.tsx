@@ -162,9 +162,10 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
                   ) : (
                     <>
                       {line.check.status === "not_reached" && (
-                        <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">That call didn’t reach us. Dial the code again, then check again. Or tap “Set it up with me.”</p>
+                        <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">That call didn’t reach us. Dial the code again, then test again. Or tap “Set it up with me.”</p>
                       )}
-                      <Button size="tap" variant="brand" className={tapWidth} disabled={busy === "check"} onClick={() => void post("check", "/api/app/line/check")}>{busy === "check" ? <><Loader2 className="animate-spin" />Starting…</> : "Check it for me"}</Button>
+                      <Button size="tap" variant="brand" className={tapWidth} disabled={busy === "check"} onClick={() => void post("check", "/api/app/line/check")}>{busy === "check" ? <><Loader2 className="animate-spin" />Starting…</> : "Test my forwarding"}</Button>
+                      <p className="text-[13px] text-muted-foreground">We’ll call your business phone. Don’t answer. When it reaches Front Office, you’ll see a green check.</p>
                     </>
                   )}
                 </li>

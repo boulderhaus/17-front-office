@@ -27,17 +27,17 @@ export function derive(data: ApiDashboard) {
     .filter((call) => call.fields.requestedStart && Date.parse(call.fields.requestedStart) >= nowMs && Date.parse(call.fields.requestedStart) < nowMs + 7 * 86_400_000)
     .sort((left, right) => left.fields.requestedStart!.localeCompare(right.fields.requestedStart!))
   const booked = upcoming.filter((call) => call.outcome === "booked")
-  const used = data.usage.billedMinutes
-  const included = data.shop.includedMinutes
+  const used = data.usage.countedCalls
+  const included = data.usage.includedCalls
   const remaining = Math.max(0, included - used)
-  const overageCents = Math.max(0, used - included) * data.shop.overageCentsPerMinute
+  const extraCalls = data.usage.extraCalls
   const due = (task: ApiTask) => (Date.parse(task.dueAt) <= nowMs ? "Due now" : `Due ${compactDate(task.dueAt, tz)}`)
   const taskFor = (callId: string) => data.tasks.find((task) => task.callId === callId)
   const activity = [
     ...data.calls.filter((call) => call.endedAt).map((call) => ({ at: call.endedAt!, text: call.outcome === "booked" ? `Booked ${call.fields.callerName ?? "a caller"}` : `Answered ${call.fields.callerName ?? "a caller"}` })),
     ...completed.map((task) => ({ at: task.completedAt ?? task.updatedAt, text: task.completionSource === "verified_booking" ? "Closed after a verified booking" : `Marked ${callsById.get(task.callId)?.fields.callerName ?? "a call"} handled` })),
   ].sort((left, right) => right.at.localeCompare(left.at)).slice(0, 5)
-  return { nowMs, tz, callsById, actionable, snoozed, completed, handled, urgentCount, upcoming, booked, used, included, remaining, overageCents, due, taskFor, activity }
+  return { nowMs, tz, callsById, actionable, snoozed, completed, handled, urgentCount, upcoming, booked, used, included, remaining, extraCalls, due, taskFor, activity }
 }
 
 export function coverageStatus(data: Pick<ApiDashboard, "viewer" | "shop" | "preview">): { tone: "on" | "pending" | "paused" | "warning"; label: string } {

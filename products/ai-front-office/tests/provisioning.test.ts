@@ -314,7 +314,7 @@ describe("owner one-tap go-live", () => {
       expect((await api("/api/app/line/business-number", { number: "555" })).status).toBe(400);
     });
 
-    it("Check it for me rings the business phone, confirms when it reaches the shop, and leaves no call record", async () => {
+    it("Test my forwarding rings the business phone, confirms when it reaches the shop, and leaves no call record", async () => {
       const { api, dashboard, telnyx, store, account, baseUrl, privateKey, clock } = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection" } });
       await api("/api/app/line/business-number", { number: "9415550177" });
       await api("/api/app/line/check");

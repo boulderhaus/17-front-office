@@ -1,6 +1,6 @@
-import { lazy, Suspense } from "react"
+import { lazy, Suspense, useState } from "react"
 import { Link, Navigate, useSearchParams } from "react-router-dom"
-import { ArrowRight, CalendarDays, Check, ChevronRight, Clock, Phone } from "lucide-react"
+import { ArrowRight, CalendarDays, Check, ChevronRight, Clock, Loader2, Phone } from "lucide-react"
 import { toast } from "sonner"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -11,7 +11,7 @@ import { CallLink, Empty, Muted, SectionTitle, ToneBadge, ToneDot } from "@/comp
 import { CallHeader, ContactActions, Facts, phoneFact, SafetyNote } from "@/components/app/call-parts"
 import { api } from "@/lib/api"
 import { derive, shortAddress, urgency } from "@/lib/derive"
-import { compactDate, dayLabel, timeOnly } from "@/lib/format"
+import { compactDate, dayLabel, money, perCall, timeOnly } from "@/lib/format"
 import { useMode } from "@/lib/mode"
 import { ForwardingCard } from "@/components/app/forwarding-card"
 import type { ApiCall, ApiDashboard, ApiTask } from "@/lib/types"
@@ -53,6 +53,7 @@ export function TodayPage() {
       {/* On a phone, a selected call replaces the list (legacy ?call links). */}
       <div className={cn("grid min-w-0 gap-5", selected && "max-lg:hidden")}>
         <Banners dashboard={dashboard} />
+        {!preview && dashboard.viewer.role === "owner" && <GuaranteeCard dashboard={dashboard} />}
         {!preview && dashboard.viewer.role === "owner" && <SetupCard dashboard={dashboard} />}
         {!preview && dashboard.viewer.role === "owner" && dashboard.onboarding.completed && dashboard.viewer.status === "active" && dashboard.line.number && <ForwardingCard dashboard={dashboard} />}
         {!preview && dashboard.viewer.role === "owner" && dashboard.onboarding.completed && <CalendarCard dashboard={dashboard} />}
@@ -126,9 +127,8 @@ function SetupCard({ dashboard }: { dashboard: ApiDashboard }) {
   if (dashboard.onboarding.completed) return null
   const steps = [
     { done: true, label: "Your shop" },
-    { done: dashboard.paid, label: "Add a card" },
-    { done: Boolean(dashboard.line.confirmedAt) || dashboard.onboarding.hoursSet, label: "Forward missed calls" },
-    { done: dashboard.onboarding.hoursSet, label: "Pick your hours" },
+    { done: dashboard.paid, label: "Your card" },
+    { done: Boolean(dashboard.line.confirmedAt), label: "Forward your calls" },
   ]
   const done = steps.filter((step) => step.done).length
   const next = steps.find((step) => !step.done)
@@ -197,9 +197,9 @@ export function StatCards({ dashboard }: { dashboard: ApiDashboard }) {
         <small className="hidden text-[13px] text-muted-foreground md:block">Next 7 days</small>
       </div>
       <div className={card}>
-        <span className="text-[13px] font-medium text-muted-foreground">Minutes left</span>
+        <span className="text-[13px] font-medium text-muted-foreground">Calls left</span>
         <strong className="tabular text-3xl leading-none font-semibold tracking-tight md:text-4xl">{d.remaining}</strong>
-        <small className="hidden text-[13px] text-muted-foreground md:block">{d.used} of {d.included} used</small>
+        <small className="hidden text-[13px] text-muted-foreground md:block">{d.used} of {d.included} answered</small>
       </div>
     </div>
   )
@@ -278,19 +278,72 @@ function CallRow({ call, task, tz, selected }: { call: ApiCall; task: ApiTask | 
   )
 }
 
+/**
+ * The lead guarantee, only when the server has counted zero real leads in the first 30 days (days 30–37).
+ * The tap is re-checked on the server, so this card is a shortcut, never the decision.
+ */
+function GuaranteeCard({ dashboard }: { dashboard: ApiDashboard }) {
+  const { reload } = useMode()
+  const [busy, setBusy] = useState(false)
+  const g = dashboard.guarantee
+  if (g.state === "refunded" && g.refund) {
+    return (
+      <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-[15px] text-emerald-950">
+        <strong className="block">Your first month is refunded.</strong>{money(g.refund.amountCents)} goes back to your card in 5 to 10 business days.
+      </p>
+    )
+  }
+  if (g.state !== "eligible") return null
+  const until = g.claimUntil ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: dashboard.shop.timezone }).format(new Date(g.claimUntil)) : null
+  const refund = async () => {
+    setBusy(true)
+    try {
+      await api("/api/app/billing/lead-refund", { method: "POST", body: {} })
+      toast.success("Refund on its way.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "That didn’t work. Reply to your receipt and we’ll refund you.")
+    } finally {
+      await reload().catch(() => undefined)
+      setBusy(false)
+    }
+  }
+  return (
+    <Card className="relative overflow-hidden border-brand-ink/15">
+      <span aria-hidden className="absolute inset-x-0 top-0 h-1.5 bg-brand-yellow" />
+      <CardContent className="grid gap-3">
+        <div className="grid gap-1">
+          <h2 className="text-lg font-semibold">Request refund</h2>
+          <p className="text-[15px]">No real customer leads came in during your first 30 days. That’s on us: your first month is refundable{until ? ` until ${until}` : ""}.</p>
+        </div>
+        <Button size="tap" variant="brand" className={tapWidth} disabled={busy} onClick={() => void refund()}>{busy ? <Loader2 className="animate-spin" /> : null}Refund my first month</Button>
+        <p className="text-[13px] text-muted-foreground">Your line keeps working. Cancel anytime from Manage billing.</p>
+      </CardContent>
+    </Card>
+  )
+}
+
 function UsageCard({ dashboard }: { dashboard: ApiDashboard }) {
-  const { preview } = useMode()
+  const { preview, base } = useMode()
   const d = derive(dashboard)
-  const skipped = dashboard.usage.excludedSpamCalls + dashboard.usage.excludedShortCalls
+  const usage = dashboard.usage
+  const skipped = usage.excludedSpamCalls + usage.excludedShortCalls
+  const leads = dashboard.guarantee.state === "watching" ? dashboard.guarantee.leads : 0
   return (
     <Card>
       <CardContent className="grid gap-2.5">
         <div className="flex items-baseline justify-between">
-          <h2 className="text-base font-semibold">Minutes left</h2>
+          <h2 className="text-base font-semibold">Calls left</h2>
           <strong className="tabular text-3xl font-semibold tracking-tight">{d.remaining}</strong>
         </div>
-        <Progress value={Math.min(100, Math.round((d.used / Math.max(1, d.included)) * 100))} aria-label={`${d.used} of ${d.included} included minutes used`} className="h-2 [&>div]:bg-brand-ink" />
-        <p className="text-[13px] text-muted-foreground">{d.used} of {d.included} used · {dashboard.usage.billableCalls} calls this period{d.overageCents ? ` · $${(d.overageCents / 100).toFixed(2)} over` : ""}</p>
+        <Progress value={Math.min(100, Math.round((d.used / Math.max(1, d.included)) * 100))} aria-label={`${d.used} of ${d.included} included calls answered`} className="h-2 [&>div]:bg-brand-ink" />
+        <p className="text-[13px] text-muted-foreground">{d.used} of {d.included} calls answered this period</p>
+        {usage.extraCalls > 0 && (
+          <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">
+            <strong className="font-semibold">Extra calls this month: {usage.extraCalls} × {perCall(usage.overageCentsPerCall)}</strong>
+            <span className="block text-[13px]">{money(usage.extraCents)} so far, billed after the month ends. A bigger plan may cost less: <Link className="font-semibold underline underline-offset-4" to={`${base}/settings`}>change plans</Link>.</span>
+          </p>
+        )}
+        {leads > 0 && <p className="text-[13px] text-muted-foreground">You’ve had {leads} real {leads === 1 ? "lead" : "leads"} this month.</p>}
         <p className="text-[13px] text-muted-foreground">Spam and calls under 15 seconds aren’t counted.{skipped > 0 ? ` ${skipped} skipped this period.` : ""}</p>
         {!preview && dashboard.viewer.role === "owner" && dashboard.paid && (
           <form method="post" action="/app/billing/portal">

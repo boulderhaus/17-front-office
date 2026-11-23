@@ -109,9 +109,10 @@ describe("three taps to a live line", () => {
     return fetch(`${baseUrl}${path}`, { method: "POST", headers: { cookie, "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify(body) });
   }
 
-  const PLANS = { STRIPE_PRICE_ID_PLUS: "price_plus_synthetic", STRIPE_FIRST_MONTH_COUPON_ID: "first_month_half_off" };
+  // Pro on the old STRIPE_PRICE_ID_PLUS name (the fallback), Team and Fleet on their own.
+  const PLANS = { STRIPE_PRICE_ID_PLUS: "price_plus_synthetic", STRIPE_PRICE_ID_TEAM: "price_team_synthetic", STRIPE_PRICE_ID_FLEET: "price_fleet_synthetic", STRIPE_FIRST_MONTH_COUPON_ID: "first_month_half_off" };
 
-  it("goes from the signup form straight to Stripe: no trial, the cheaper plan, first month half off", async () => {
+  it("goes from the signup form straight to Stripe: no trial, Solo, limited-time first month half off", async () => {
     const { baseUrl, store, providers } = await start({ env: PLANS });
     const { response } = await signUp(baseUrl);
     expect(response.status).toBe(303);
@@ -125,7 +126,7 @@ describe("three taps to a live line", () => {
     expect(checkout.get("discounts[0][coupon]")).toBe("first_month_half_off");
     expect(checkout.get("success_url")).toBe("https://front-office.example/app/start?checkout=success&session_id={CHECKOUT_SESSION_ID}");
     expect(checkout.get("cancel_url")).toBe("https://front-office.example/app/start?checkout=cancelled");
-    expect(checkout.get("custom_text[submit][message]")).toBe("Today: $24.99. Then $49.99/month. Cancel anytime.");
+    expect(checkout.get("custom_text[submit][message]")).toBe("Today: $24.99 (limited-time half off). Then $49.99/month. Cancel anytime.");
 
     // Defaults come from the mobile number: Florida, Eastern time, the automatic greeting, owner confirms jobs.
     const account = (await store.getOwnerAccountByEmail("owner@example.test"))!;
@@ -135,39 +136,72 @@ describe("three taps to a live line", () => {
     expect(config.ownerNotificationRefs).toEqual([]);
     expect(await store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")).toBe("+19415550199");
     expect(await store.getIntegrationSecret(account.tenantId, "notifications", "owner_sms_consent")).toBeNull();
-    expect(config).toMatchObject({ planId: "standard", flatMonthlyPriceCents: 4_999 });
+    expect(config).toMatchObject({ planId: "solo", flatMonthlyPriceCents: 4_999, includedCalls: 60, overageCentsPerCall: 75 });
+    // No hours step: every new shop starts Mon–Fri 9 AM–5 PM; evenings and weekends are after hours.
+    expect(config.bookableHours).toMatchObject({ weekdayStart: "09:00", weekdayEnd: "17:00", weekends: false });
+    expect(config.afterHours).toMatchObject({ weekdayStart: "17:00", weekdayEnd: "09:00", weekends: true });
+    expect(describeHours(config.bookableHours)).toBe("Mon–Fri 9 AM–5 PM");
   });
 
-  it("shows both plans on the form with the cheaper one already picked, and charges the one picked", async () => {
+  it("shows Solo already picked and the bigger plans behind one compact line, and charges the one picked", async () => {
     const { baseUrl, store, providers } = await start({ env: PLANS });
     const page = await (await fetch(`${baseUrl}/signup`)).text();
-    expect(page).toMatch(/<input type="radio" name="plan" id="plan-standard" value="standard" checked>/);
-    expect(page).toMatch(/<input type="radio" name="plan" id="plan-plus" value="plus" >/);
-    for (const text of ["Standard", "$49.99", "First month $24.99", "Busy season", "$99.99", "First month $49.99", "Today: $24.99. Then $49.99/month. Cancel anytime.", "Today: $49.99. Then $99.99/month. Cancel anytime."]) expect(page).toContain(text);
+    expect(page).toMatch(/<input type="radio" name="plan" id="plan-solo" value="solo" checked>/);
+    for (const id of ["pro", "team", "fleet"]) expect(page).toMatch(new RegExp(`<input type="radio" name="plan" id="plan-${id}" value="${id}" >`));
+    // Bigger plans sit in a closed <details>: no extra tap for Solo.
+    expect(page).toMatch(/<details class="bigger"><summary>Bigger shop\? Pro, Team, Fleet<\/summary>/);
+    for (const text of ["Solo", "$49.99", "Limited time: first month half off", "60 answered calls a month, about 2 a day", "Pro", "$99.99", "125 calls a month · A busy owner", "Team", "$179.99", "About 5 people", "Fleet", "$349.99", "About 10 people", "Today: $24.99 (limited-time half off). Then $49.99/month. Cancel anytime.", "Today: $89.99 (limited-time half off). Then $179.99/month. Cancel anytime.", "Lead guarantee"]) expect(page).toContain(text);
     expect(page).not.toMatch(/unlimited/i);
     // Terms are one line under the button, never a box to tick.
     expect(page).toContain("By continuing you agree to the");
     expect(page).not.toMatch(/name="(consent|terms)"/);
     expect(page.match(/By continuing you agree/g)).toHaveLength(1);
 
+    await signUp(baseUrl, { plan: "team" });
+    const checkout = new URLSearchParams(providers.calls.find((call) => call.url.endsWith("/v1/checkout/sessions"))!.body!);
+    expect(checkout.get("line_items[0][price]")).toBe("price_team_synthetic");
+    expect(checkout.get("discounts[0][coupon]")).toBe("first_month_half_off");
+    expect(checkout.get("custom_text[submit][message]")).toBe("Today: $89.99 (limited-time half off). Then $179.99/month. Cancel anytime.");
+    const account = (await store.getOwnerAccountByEmail("owner@example.test"))!;
+    expect(await store.getConfig(account.tenantId)).toMatchObject({ planId: "team", flatMonthlyPriceCents: 17_999, includedCalls: 250 });
+  });
+
+  it("maps the old plan names: a form still sending plus buys Pro", async () => {
+    const { baseUrl, providers } = await start({ env: PLANS });
     await signUp(baseUrl, { plan: "plus" });
     const checkout = new URLSearchParams(providers.calls.find((call) => call.url.endsWith("/v1/checkout/sessions"))!.body!);
     expect(checkout.get("line_items[0][price]")).toBe("price_plus_synthetic");
-    expect(checkout.get("custom_text[submit][message]")).toBe("Today: $49.99. Then $99.99/month. Cancel anytime.");
-    const account = (await store.getOwnerAccountByEmail("owner@example.test"))!;
-    expect(await store.getConfig(account.tenantId)).toMatchObject({ planId: "plus", flatMonthlyPriceCents: 9_999 });
   });
 
-  it("turns the line on for the second plan too, and offers both plans again on the card screen", async () => {
+  it("turns the line on for a bigger plan too, and offers every plan again on the card screen", async () => {
     const { baseUrl } = await start({ env: PLANS, subscriptionPrice: "price_plus_synthetic" });
-    const { cookie } = await signUp(baseUrl, { plan: "plus" });
-    const before = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie } })).json() as { billing: { planId: string; chargeNote: string; plans: Array<{ id: string; label: string; priceCents: number; firstMonthCents: number }> } };
-    expect(before.billing.planId).toBe("plus");
-    expect(before.billing.chargeNote).toBe("Today: $49.99. Then $99.99/month. Cancel anytime.");
-    expect(before.billing.plans.map((plan) => [plan.id, plan.priceCents, plan.firstMonthCents])).toEqual([["standard", 4_999, 2_499], ["plus", 9_999, 4_999]]);
+    const { cookie } = await signUp(baseUrl, { plan: "pro" });
+    const before = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie } })).json() as { billing: { planId: string; chargeNote: string; plans: Array<{ id: string; label: string; priceCents: number; firstMonthCents: number; includedCalls: number }> } };
+    expect(before.billing.planId).toBe("pro");
+    expect(before.billing.chargeNote).toBe("Today: $49.99 (limited-time half off). Then $99.99/month. Cancel anytime.");
+    expect(before.billing.plans.map((plan) => [plan.id, plan.priceCents, plan.firstMonthCents, plan.includedCalls])).toEqual([["solo", 4_999, 2_499, 60], ["pro", 9_999, 4_999, 125], ["team", 17_999, 8_999, 250], ["fleet", 34_999, 17_499, 500]]);
     const model = await (await api(baseUrl, cookie, "/api/app/onboarding/activate", { sessionId: "cs_test_synthetic1" })).json() as { activation: { status: string }; paid: boolean };
     expect(model.paid).toBe(true);
     expect(model.activation.status).toBe("live");
+  });
+
+  it("switches the limited-time offer off everywhere with FIRST_MONTH_OFFER_ENABLED=false", async () => {
+    const { baseUrl, providers } = await start({ env: { ...PLANS, FIRST_MONTH_OFFER_ENABLED: "false" } });
+    const [signup, home] = await Promise.all([fetch(`${baseUrl}/signup`).then((r) => r.text()), fetch(`${baseUrl}/`).then((r) => r.text())]);
+    for (const page of [signup, home]) expect(page).not.toMatch(/half off|limited time|First month \$/i);
+    expect(signup).toContain("Today: $49.99. Then $49.99/month. Cancel anytime.");
+    await signUp(baseUrl);
+    const checkout = new URLSearchParams(providers.calls.find((call) => call.url.endsWith("/v1/checkout/sessions"))!.body!);
+    expect(checkout.has("discounts[0][coupon]")).toBe(false);
+    expect(checkout.get("custom_text[submit][message]")).toBe("Today: $49.99. Then $49.99/month. Cancel anytime.");
+  });
+
+  it("only sells plans that have a Stripe price", async () => {
+    const { baseUrl } = await start({ env: { STRIPE_PRICE_ID_PRO: "price_pro_synthetic" } });
+    const page = await (await fetch(`${baseUrl}/signup`)).text();
+    expect(page).toContain('id="plan-pro"');
+    expect(page).not.toContain('id="plan-team"');
+    expect(page).toContain("Bigger shop? Pro</summary>");
   });
 
   it("keeps a free trial only when STRIPE_TRIAL_DAYS asks for one, and never spends the coupon on it", async () => {
@@ -302,17 +336,19 @@ describe("hours and charge wording", () => {
   it("says plainly when the card is charged", () => {
     const now = new Date("2026-11-23T15:00:00Z");
     expect(chargeSentence({ now, trialDays: 7, priceCents: 4_999 })).toContain("first charged $49.99 on Nov 30");
-    expect(chargeSentence({ now, trialDays: 0, priceCents: 4_999, firstMonthCents: 2_499 })).toBe("Today: $24.99. Then $49.99/month. Cancel anytime.");
+    expect(chargeSentence({ now, trialDays: 0, priceCents: 4_999, firstMonthCents: 2_499 })).toBe("Today: $24.99 (limited-time half off). Then $49.99/month. Cancel anytime.");
     expect(chargeSentence({ now, trialDays: 0, priceCents: 9_999 })).toBe("Today: $99.99. Then $99.99/month. Cancel anytime.");
   });
 
-  it("works out the first month from the coupon percent and lists the cheaper plan first", () => {
+  it("works out the first month from the coupon percent and lists Solo first", () => {
     expect(firstMonthCents(4_999, 50)).toBe(2_499);
     expect(firstMonthCents(9_999, 50)).toBe(4_999);
     expect(firstMonthCents(4_999, 0)).toBe(4_999);
-    const env = demoEnvironment({ PLAN_PLUS_PRICE_CENTS: "3000" });
-    // Without Stripe both plans show for display, cheapest first, and no intro price is promised.
-    expect(planCatalog(env).map((plan) => [plan.id, plan.firstMonthCents])).toEqual([["plus", 3_000], ["standard", 4_999]]);
+    const env = demoEnvironment({ PLAN_PRO_PRICE_CENTS: "12000", PLAN_TEAM_CALLS: "300" });
+    // Without Stripe all four show for display, Solo first, and no intro price is promised. Prices and calls come from env.
+    expect(planCatalog(env).map((plan) => [plan.id, plan.label, plan.priceCents, plan.firstMonthCents, plan.includedCalls, plan.overageCentsPerCall])).toEqual([
+      ["solo", "Solo", 4_999, 4_999, 60, 75], ["pro", "Pro", 12_000, 12_000, 125, 75], ["team", "Team", 17_999, 17_999, 300, 75], ["fleet", "Fleet", 34_999, 34_999, 500, 75],
+    ]);
     expect(money(4_999)).toBe("$49.99");
     expect(money(5_000)).toBe("$50");
   });

@@ -17,6 +17,7 @@ import type { CalendarPort, Clock, Store } from "../ports.js";
 import { BookingCoordinator } from "./booking-coordinator.js";
 import { redactError, withRetry } from "./retry.js";
 import { UsageAlertService } from "./usage-alerts.js";
+import { callbackLinkToken, ownerCallSms, urgentReason } from "../domain/owner-sms.js";
 
 /** Sticky quality flag: a spam mark was refused or undone, so this call always counts and reaches the owner. */
 const SPAM_REFUSED = "spam_refused";
@@ -56,6 +57,7 @@ const EMPTY_FIELDS: CollectedCallFields = {
 export class CallService {
   readonly #booking: BookingCoordinator;
   readonly #usageAlerts: UsageAlertService;
+  readonly #callbackLinkKey: string | null;
 
   constructor(
     private readonly store: Store,
@@ -63,8 +65,9 @@ export class CallService {
     private readonly clock: Clock,
     private readonly publicBaseUrl: string,
     /** ownerEmailAvailable: email delivery is configured, so owners without text alerts can be emailed. */
-    options: { ownerEmailAvailable?: boolean } = {},
+    options: { ownerEmailAvailable?: boolean; callbackLinkKey?: string | null } = {},
   ) {
+    this.#callbackLinkKey = options.callbackLinkKey ?? null;
     this.#booking = new BookingCoordinator(store, calendar, clock);
     this.#usageAlerts = new UsageAlertService(store, clock, publicBaseUrl, options.ownerEmailAvailable === true);
   }
@@ -440,13 +443,13 @@ export class CallService {
         callId: call.id,
         channel: "sms",
         destinationRef,
-        body: [
-          input.urgent?.severity === "life_safety" ? "LIFE-SAFETY CALL" : input.urgent?.emergency ? "URGENT CALL" : "CALLER REQUESTED A HUMAN",
-          `${call.fields.callerName ?? "Unknown caller"} · ${call.fields.callbackNumber ?? call.fromNumber}`,
-          `Problem: ${call.fields.problemDescription || "not captured"}`,
-          ...(input.urgent?.immediateInstruction ? [`Safety: ${input.urgent.immediateInstruction}`] : []),
-          `Review: ${this.publicBaseUrl.replace(/\/$/, "")}${ownerPortal}/calls/${encodeURIComponent(call.id)}`,
-        ].join("\n"),
+        body: ownerCallSms({
+          shop: config.businessName,
+          call,
+          urgentReason: urgentReason(call, true),
+          wants: this.wantsLine(call.fields.requestedStart, config.timezone),
+          link: this.ownerCallLink(call, ownerPortal),
+        }),
         priority: "high",
         state: "pending",
         attempts: 0,
@@ -749,18 +752,13 @@ export class CallService {
     if (!safetyAlert && !config.ownerRealtimeSmsEnabled) return;
     const now = this.clock.now().toISOString();
     const ownerPortal = await this.store.getOwnerAccountByTenant(call.tenantId) ? "/app" : "/admin";
-    const link = `${this.publicBaseUrl.replace(/\/$/, "")}${ownerPortal}/calls/${encodeURIComponent(call.id)}`;
-    const summary = call.fields.problemDescription.trim() || "Problem details were not captured; review the call.";
-    const lines = [
-      call.emergency?.emergency ? "URGENT CALL" : "New call",
-      `${call.fields.callerName ?? "Unknown caller"} · ${call.fields.callbackNumber ?? call.fromNumber}`,
-      `Address: ${call.fields.address ?? "not confirmed"}`,
-      `Problem: ${summary}`,
-      `Emergency: ${call.emergency?.severity ?? "unknown"}`,
-      `Outcome: ${call.outcome}${proposedTime ? ` · ${formatLocalDateTime(proposedTime, config.timezone)}` : ""}`,
-      ...(call.qualityFlags.length > 0 ? [`Needs attention: ${call.qualityFlags.join(", ")}`] : []),
-      `Review: ${link}`,
-    ];
+    const body = ownerCallSms({
+      shop: config.businessName,
+      call,
+      urgentReason: urgentReason(call, call.outcome === "handoff_queued" || call.fields.humanRequested),
+      wants: this.wantsLine(proposedTime ?? call.fields.requestedStart, config.timezone),
+      link: this.ownerCallLink(call, ownerPortal),
+    });
     for (const destinationRef of config.ownerNotificationRefs) {
       const notification: OutboxNotification = {
         id: randomUUID(),
@@ -768,7 +766,7 @@ export class CallService {
         callId: call.id,
         channel: "sms",
         destinationRef,
-        body: lines.join("\n"),
+        body,
         priority: call.emergency?.emergency ? "high" : "normal",
         state: "pending",
         attempts: 0,
@@ -781,6 +779,26 @@ export class CallService {
       };
       await this.store.enqueueNotification(notification);
     }
+  }
+
+  /**
+   * The link in an owner text. For an owner app shop it is a signed /c/ link (no sign-in, this shop only,
+   * 7 days) to a page with a big Call button, because the caller's number never goes in the text itself.
+   */
+  private ownerCallLink(call: Pick<CallRecord, "id" | "tenantId">, ownerPortal: string): string {
+    const base = this.publicBaseUrl.replace(/\/$/, "");
+    if (this.#callbackLinkKey && ownerPortal === "/app" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(call.id)) {
+      return `${base}/c/${callbackLinkToken({ tenantId: call.tenantId, callId: call.id, now: this.clock.now(), key: this.#callbackLinkKey })}`;
+    }
+    return `${base}${ownerPortal}/calls/${encodeURIComponent(call.id)}`;
+  }
+
+  /** "Wants someone today", or the time the caller asked for: "Wants Tue, Nov 24, 9:00 AM". */
+  private wantsLine(requested: string | null, timeZone: string): string | null {
+    if (!requested || Number.isNaN(Date.parse(requested))) return null;
+    const day = (value: Date) => new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(value);
+    if (day(new Date(requested)) === day(this.clock.now())) return "Wants someone today";
+    return `Wants ${new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(requested))}`;
   }
 
   private async ensureCall(tenantId: string, providerCallId: string, fromNumber: string, startedAt: string): Promise<CallRecord> {

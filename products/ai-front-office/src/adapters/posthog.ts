@@ -18,7 +18,9 @@ export type ServerEvent =
   | "checkout_started"
   | "checkout_completed"
   | "onboarding_completed"
-  | "subscription_status_changed";
+  | "subscription_status_changed"
+  | "plan_changed"
+  | "lead_guarantee_refunded";
 
 export type SafeValue = string | number | boolean | null;
 

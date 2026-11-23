@@ -138,6 +138,21 @@ export class InMemoryStore implements Store {
       .map((call) => structuredClone(call));
   }
 
+  async listCallsStartedBetween(tenantId: string, from: string, to: string, limit: number): Promise<CallRecord[]> {
+    const fromMs = Date.parse(from);
+    const toMs = Date.parse(to);
+    return [...this.calls.values()]
+      .filter((call) => call.tenantId === tenantId && Date.parse(call.startedAt) >= fromMs && Date.parse(call.startedAt) < toMs)
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+      .slice(0, limit)
+      .map((call) => structuredClone(call));
+  }
+
+  async listCallbackTasksForCalls(tenantId: string, callIds: string[]): Promise<CallbackTask[]> {
+    const wanted = new Set(callIds);
+    return structuredClone([...this.callbackTasks.values()].filter((task) => task.tenantId === tenantId && wanted.has(task.callId)));
+  }
+
   async countCallsFromNumberSince(tenantId: string, phone: string, since: string): Promise<number> {
     return [...this.calls.values()].filter((call) => call.tenantId === tenantId && call.fromNumber === phone && call.startedAt >= since).length;
   }

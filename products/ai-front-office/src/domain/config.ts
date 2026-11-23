@@ -1,6 +1,7 @@
 import type { BusinessConfig } from "./models.js";
 import { DEFAULT_USAGE_ALERT_PERCENT, isValidUsageAlertPercent } from "./usage.js";
 import { stateCode } from "./area-codes.js";
+import { DEFAULT_OVERAGE_CENTS_PER_CALL, DEFAULT_PLANS, normalizePlanId } from "./plans.js";
 
 export function createDemoConfig(tenantId = "demo"): BusinessConfig {
   return {
@@ -41,9 +42,10 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     recordingDisclosure: "",
     dataRetentionDays: 30,
     supportEmail: null,
-    flatMonthlyPriceCents: 4900,
-    includedMinutes: 200,
-    overageCentsPerMinute: 20,
+    planId: "solo",
+    flatMonthlyPriceCents: DEFAULT_PLANS.solo.priceCents,
+    includedCalls: DEFAULT_PLANS.solo.includedCalls,
+    overageCentsPerCall: DEFAULT_OVERAGE_CENTS_PER_CALL,
     usageAlertPercent: DEFAULT_USAGE_ALERT_PERCENT,
     customerSmsEnabled: false,
     ownerWeeklyEmailEnabled: false,
@@ -56,9 +58,17 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
 
 export function normalizeBusinessConfig(value: Partial<BusinessConfig> & Pick<BusinessConfig, "tenantId">): BusinessConfig {
   const defaults = createDemoConfig(value.tenantId);
+  // Configs saved before calls-based plans: "standard"/"plus" become Solo/Pro, and minutes give way to calls.
+  const { includedMinutes: _minutes, overageCentsPerMinute: _perMinute, ...rest } = value as typeof value & { includedMinutes?: unknown; overageCentsPerMinute?: unknown };
+  const planId = normalizePlanId(value.planId) ?? "solo";
+  const includedCalls = Number.isInteger(value.includedCalls) && Number(value.includedCalls) > 0 ? Number(value.includedCalls) : DEFAULT_PLANS[planId].includedCalls;
+  const overageCentsPerCall = Number.isInteger(value.overageCentsPerCall) && Number(value.overageCentsPerCall) >= 0 ? Number(value.overageCentsPerCall) : defaults.overageCentsPerCall;
   return {
     ...defaults,
-    ...value,
+    ...rest,
+    planId,
+    includedCalls,
+    overageCentsPerCall,
     afterHours: { ...defaults.afterHours, ...value.afterHours },
     bookableHours: { ...defaults.bookableHours, ...value.bookableHours },
     usageAlertPercent: isValidUsageAlertPercent(Number(value.usageAlertPercent)) ? Number(value.usageAlertPercent) : defaults.usageAlertPercent,

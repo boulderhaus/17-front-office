@@ -1,6 +1,6 @@
 import { withTimeout } from "../application/retry.js";
 
-/** Carrier lookup and the "Check it for me" call, so owners never have to know their carrier or test by hand. */
+/** Carrier lookup and the "Test my forwarding" call, so owners never have to know their carrier or test by hand. */
 export class TelnyxForwardingClient {
   constructor(private readonly options: { apiKey: string; fetcher?: typeof fetch }) {}
 
