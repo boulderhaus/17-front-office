@@ -28,6 +28,8 @@ const schema = z.object({
   TELNYX_FROM_NUMBER: z.string().optional(),
   TELNYX_MESSAGING_PROFILE_ID: z.string().uuid().optional(),
   TELNYX_ASSISTANT_ID: z.string().min(1).optional(),
+  TELNYX_TEMPLATE_ASSISTANT_ID: z.string().min(1).optional(),
+  TELNYX_CAMPAIGN_ID: z.string().min(1).optional(),
   TELNYX_MESSAGING_APPROVED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   FOUNDER_WELCOME_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   SUPPORT_EMAIL: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),

@@ -1,3 +1,4 @@
+import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, OutboxNotification, OwnerAccount, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 
 /** What the owner app may see about a call. No tenant ids, provider ids or internal flags. */
@@ -33,6 +34,8 @@ export interface ApiTask {
 }
 
 export interface ApiDashboard {
+  /** The shop's Front Office number and the carrier codes that forward the owner's business line to it. */
+  line: { number: string | null; mode: BusinessConfig["operationMode"]; forwarding: Array<{ carrier: string; on: string; off: string }> };
   csrf: string;
   now: string;
   preview: boolean;
@@ -113,9 +116,12 @@ export function apiDashboard(input: {
   checkoutConfigured: boolean;
   now: string;
   preview: boolean;
+  lineNumber?: string | null | undefined;
 }): ApiDashboard {
   const c = input.config;
+  const lineNumber = input.lineNumber ?? null;
   return {
+    line: { number: lineNumber, mode: c.operationMode, forwarding: lineNumber ? forwardingInstructions(lineNumber, c.operationMode) : [] },
     csrf: input.csrf,
     now: input.now,
     preview: input.preview,
