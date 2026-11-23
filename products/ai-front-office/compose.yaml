@@ -1,0 +1,66 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: front_office
+      POSTGRES_USER: front_office
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - front_office_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U front_office -d front_office"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: .
+    command: ["node", "dist/scripts/migrate.js"]
+    environment: &app_environment
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 8787
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-default}
+      DEFAULT_BUSINESS_NAME: ${DEFAULT_BUSINESS_NAME:-Your Service Business}
+      DEFAULT_TIMEZONE: ${DEFAULT_TIMEZONE:-America/Chicago}
+      PROVIDER_TEST_MODE: ${PROVIDER_TEST_MODE:-false}
+      LIVE_PROVIDER_PROOF_AT: ${LIVE_PROVIDER_PROOF_AT:-}
+      DATABASE_URL: postgresql://front_office:${POSTGRES_PASSWORD}@postgres:5432/front_office
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?set DATA_ENCRYPTION_KEY}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN}
+      TOOL_TOKEN: ${TOOL_TOKEN:?set TOOL_TOKEN}
+      TELNYX_API_KEY: ${TELNYX_API_KEY:?set TELNYX_API_KEY}
+      TELNYX_PUBLIC_KEY: ${TELNYX_PUBLIC_KEY:?set TELNYX_PUBLIC_KEY}
+      TELNYX_FROM_NUMBER: ${TELNYX_FROM_NUMBER:?set TELNYX_FROM_NUMBER}
+      TELNYX_MESSAGING_PROFILE_ID: ${TELNYX_MESSAGING_PROFILE_ID:?set TELNYX_MESSAGING_PROFILE_ID}
+      TELNYX_ASSISTANT_ID: ${TELNYX_ASSISTANT_ID:?set TELNYX_ASSISTANT_ID}
+      TELNYX_MESSAGING_APPROVED: ${TELNYX_MESSAGING_APPROVED:-false}
+      RECORDING_CONSENT_APPROVED: ${RECORDING_CONSENT_APPROVED:-false}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?set GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?set GOOGLE_CLIENT_SECRET}
+      GOOGLE_REFRESH_TOKEN: ${GOOGLE_REFRESH_TOKEN:-}
+      GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID:-primary}
+      OWNER_DESTINATIONS_JSON: ${OWNER_DESTINATIONS_JSON:?set OWNER_DESTINATIONS_JSON}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build: .
+    environment: *app_environment
+    ports:
+      - "8787:8787"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8787/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  front_office_pg:
