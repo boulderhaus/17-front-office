@@ -2,6 +2,33 @@
 
 Source: Brock-supplied `AI-Front-Office-Codex-Handoff.md`, read in full on 2026-11-22. This checklist distinguishes implemented code from live proof. No checkbox below substitutes for a real call or payment.
 
+## 2026-11-23: ownership moved to Claude; audit fixes
+
+Codex handed off at `ed887011`. Claude owns execution from here. Each fix below has a regression test that failed before the change. None of this is live proof: no call, SMS, Stripe purchase or Google write was made.
+
+| Fix | Test |
+|---|---|
+| CSP `form-action` allowed only `'self'`, so Chromium blocked the 303 to Stripe Checkout and the billing portal (reproduced in Chromium). | `http.test.ts` CSP header |
+| Retention and "delete call data" deleted the booking's Google Calendar event, removing real future jobs. Deletion now keeps calendar appointments; copy updated. | `data-deletion.test.ts` |
+| One undeletable recording blocked retention forever. Failed calls back off 24 h (`010_retention_failures.sql`). | `data-deletion.test.ts`, `postgres-locks.test.ts` |
+| Urgent alerts were opt-in and activation did not check them. Activation now refuses without them; dashboard warns. | `domain.test.ts`, `http.test.ts` |
+| Bare `smoke`/`fire` and the assistant's own screening questions caused false life-safety alerts; "smelled gas", "odor of gas", fumes plus headache were missed. Triage now reads caller speech only. | `domain.test.ts`, `call-service.test.ts` |
+| "I need a technician…" passed the explicit-human gate and blocked booking. | `domain.test.ts` |
+| Subscription state came from webhook payload order. It is now re-read from the Stripe API, bound to the base price and workspace, and a second subscription can never replace the paying one. Period end is read from items. | `stripe.test.ts` |
+| Repeat checkout taps opened separate sessions; unpaid shops could start a second subscription. | `stripe.test.ts` |
+| A lapsed or cancelled shop kept its number on the assistant. The line is now detached before the state is saved, and the owner is texted. | `stripe.test.ts` |
+| Sign-in had no per-account limit and a full limiter refused all new clients. A live probe confirmed Railway overwrites spoofed forwarding headers, so per-IP limits already held. | `http.test.ts`, `domain.test.ts` |
+| Nested advisory locks each took a connection; five overlapping bookings across five shops on one replica all failed (measured). Nested locks now share a session; waits are capped at 3 s. | `postgres-locks.test.ts` |
+| City terms without a state silently never matched. Setup now parses and rejects them. | `domain.test.ts`, `http.test.ts` |
+| "Spam minutes don't count" was advertised but no provider path sets the spam flag. Claims removed; emergencies can never be dropped as spam. | `http.test.ts`, `call-service.test.ts` |
+| Direct booking and warm transfer were owner-selectable on day one. Hidden and forced off unless `DIRECT_BOOKING_BETA` / `WARM_TRANSFER_BETA`. | `http.test.ts`, `domain.test.ts` |
+| `recording_disclosure_given: true` was preset on every intake. Consent is now recorded from the served greeting; the model can only report an objection. | `domain.test.ts`, `http.test.ts` |
+| No CI for this product. Added `.github/workflows/front-office.yml`. | CI |
+
+Still open and needing confirmation:
+- Consent wording now that urgent alerts gate activation ("Consent is not a condition of purchase") needs owner/counsel review, together with the Florida all-party recording disclosure.
+- Codex's documented rollback target `1f769114` shows REMOVED in Railway; use the immediately previous SUCCESS deployment instead.
+
 ## Scope decisions
 
 - Solo receptionist remains first: answer overflow, collect details, verify one calendar, notify owner.
