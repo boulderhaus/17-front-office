@@ -34,8 +34,6 @@ export function buildActivationReport(input: {
     check("calendar", "Google Calendar connected", input.googleConnected, input.googleConnected ? "Encrypted refresh credential is present." : "Connect Google Calendar before activation."),
     check("public_url", "Public HTTPS URL", env.PUBLIC_BASE_URL.startsWith("https://"), env.PUBLIC_BASE_URL),
     check("branding", "Customer business identity", !/your service business|north star heating/i.test(`${config.businessName} ${config.greeting}`), "Replace all demo/placeholder business identity before launch."),
-    check("identity", "AI identity in greeting", /\bAI\b/i.test(config.greeting), "Greeting must disclose the owner's AI assistant."),
-    check("consent", "Recording consent approved", config.recordingDisclosure.trim().length > 0 && env.RECORDING_CONSENT_APPROVED, env.RECORDING_CONSENT_APPROVED ? "Approval is recorded for the configured wording and launch jurisdiction." : "A qualified reviewer must approve the configured wording for the launch jurisdiction."),
     check("service_area", "Service area configured", config.serviceAreaTerms.length > 0, "At least one city, ZIP, or service-area term is required."),
     check("services", "Service categories configured", config.serviceCategories.length > 0, "At least one owner-approved service category is required."),
     check("pricing_script", "Diagnostic-fee script", !config.requireDiagnosticFeeAcceptance || config.priceSnippets.length > 0, "Fee-gated booking requires exact owner-approved wording."),

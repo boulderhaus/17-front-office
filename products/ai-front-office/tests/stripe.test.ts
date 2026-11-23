@@ -274,7 +274,7 @@ describe("Stripe webhook state is read from the Stripe API", () => {
   it("never opens a second checkout while a first payment is processing or a session was already paid", async () => {
     const h = await harness();
     try {
-      const page = await (await fetch(`${h.baseUrl}/app`, { headers: { cookie: h.cookie } })).text();
+      const page = await (await fetch(`${h.baseUrl}/app/settings`, { headers: { cookie: h.cookie } })).text();
       const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
       const tap = () => fetch(`${h.baseUrl}/app/billing/checkout`, { method: "POST", redirect: "manual", headers: { cookie: h.cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }) });
       expect((await tap()).headers.get("location")).toContain("checkout.stripe.com");
@@ -301,7 +301,7 @@ describe("Stripe webhook state is read from the Stripe API", () => {
   it("keeps one payable Checkout Session per shop, reuses the customer, and sends unpaid shops to the portal", async () => {
     const h = await harness();
     try {
-      const page = await (await fetch(`${h.baseUrl}/app`, { headers: { cookie: h.cookie } })).text();
+      const page = await (await fetch(`${h.baseUrl}/app/settings`, { headers: { cookie: h.cookie } })).text();
       const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
       const tap = () => fetch(`${h.baseUrl}/app/billing/checkout`, { method: "POST", redirect: "manual", headers: { cookie: h.cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }) });
       const first = (await tap()).headers.get("location");

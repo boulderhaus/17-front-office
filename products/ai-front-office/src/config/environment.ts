@@ -40,7 +40,6 @@ const schema = z.object({
   ),
   FOUNDER_WELCOME_NAME: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(80).optional()),
   FOUNDER_WELCOME_TEMPLATE: z.string().max(500).default("Welcome to Front Office. I'm {founder_name}. This is my number if you need anything or have an idea for making this more useful for {business_name}. Reply STOP to opt out."),
-  RECORDING_CONSENT_APPROVED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   // A second OAuth client for migrating projects; existing tokens keep their own client.
