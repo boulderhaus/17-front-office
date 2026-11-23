@@ -399,7 +399,8 @@ export class CallService {
     const config = await this.store.getConfig(input.tenantId);
     let call = existing ?? await this.createCall(input.tenantId, input.providerCallId, input.fromNumber, input.startedAt, false);
     const fields = mergeCollectedFields(call.fields, input.fields);
-    const rawSafetyText = [fields.problemDescription, input.transcript ?? call.transcript ?? ""].filter(Boolean).join("\n");
+    // Triage what the caller said, never the assistant's own screening questions.
+    const rawSafetyText = [fields.problemDescription, callerSpeech(input.transcript ?? call.transcript)].filter(Boolean).join("\n");
     const emergency = mergeEmergencyDecision(
       call.emergency,
       triageEmergency(rawSafetyText, config, input.llmEmergencyScore, input.llmEmergencyReason),
@@ -869,4 +870,16 @@ function formatSpokenSlots(slots: AvailabilitySlot[], timeZone: string, now: Dat
   return [...groups.values()]
     .map((group) => `${group.label}: ${new Intl.ListFormat("en-US", { style: "long", type: "disjunction" }).format(group.times)} ${group.zone}`)
     .join("; ");
+}
+
+/** Caller lines from a readable transcript ("Caller: …" / "AI assistant: …"), including wrapped continuation lines. */
+export function callerSpeech(transcript: string | null): string {
+  let speaker: "caller" | "assistant" | null = null;
+  const lines: string[] = [];
+  for (const line of (transcript ?? "").split("\n")) {
+    if (line.startsWith("Caller:")) { speaker = "caller"; lines.push(line.slice("Caller:".length).trim()); continue; }
+    if (line.startsWith("AI assistant:")) { speaker = "assistant"; continue; }
+    if (speaker === "caller") lines.push(line.trim());
+  }
+  return lines.filter(Boolean).join("\n");
 }

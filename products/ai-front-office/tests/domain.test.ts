@@ -170,3 +170,20 @@ describe("shop activation prerequisites", () => {
     expect(shopActivationBlockers({ ownerPhoneConfigured: true, urgentAlertsEnabled: true, googleConnected: true, serviceAreaConfigured: true })).toEqual([]);
   });
 });
+
+describe("life-safety phrasing", () => {
+  const config = { emergencyKeywords: [] as string[], emergencyThreshold: 0.7 };
+  it.each([
+    "I smelled gas near the water heater", "there's an odor of gas in the kitchen", "it smells kind of like gas",
+    "I'm getting fumes from the furnace and a headache", "smoke is coming out of the vent", "There is smoke in the house",
+    "the outlet is on fire", "I see flames", "CO detector is going off", "carbon-monoxide alarm", "I cannot breathe",
+    "smells like rotten eggs", "gas smell in the hallway",
+  ])("escalates: %s", (text) => {
+    expect(triageEmergency(text, config).severity).toBe("life_safety");
+  });
+  it.each([
+    "my furnace won't fire", "the pilot won't fire up", "smoke detector is chirping, low battery", "I want to schedule a fireplace inspection",
+  ])("does not escalate: %s", (text) => {
+    expect(triageEmergency(text, config).severity).not.toBe("life_safety");
+  });
+});

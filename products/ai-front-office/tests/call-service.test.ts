@@ -296,6 +296,19 @@ describe("call outcomes", () => {
     expect(call.outcome).toBe("handoff_queued");
   });
 
+  it("does not escalate a routine call because the assistant asked a safety screening question", async () => {
+    await start("screening");
+    const call = await service.finalize({ ...summary("screening", { problemDescription: "Annual AC tune-up" }), transcript: "AI assistant: Any smoke, gas smell, or burning odor?\nCaller: No, just a tune-up." });
+    expect(call.emergency?.severity).toBe("routine");
+    expect(call.outcome).not.toBe("handoff_queued");
+  });
+
+  it("escalates at call end when the caller said something dangerous that the summary left out", async () => {
+    await start("caller-gas");
+    const call = await service.finalize({ ...summary("caller-gas", { problemDescription: "Furnace issue" }), transcript: "AI assistant: How can I help?\nCaller: I smelled gas by the furnace" });
+    expect(call.emergency?.severity).toBe("life_safety");
+  });
+
   it("deletes expired call data and dependent records", async () => {
     await start("retention");
     const call = await service.finalize(summary("retention"));
