@@ -60,6 +60,8 @@ const schema = z.object({
   STRIPE_SECRET_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().min(20).optional()),
   STRIPE_WEBHOOK_SECRET: z.preprocess((value) => value === "" ? undefined : value, z.string().min(20).optional()),
   STRIPE_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
+  /** Free days before the first charge. The card is always collected upfront; 0 charges at checkout. */
+  STRIPE_TRIAL_DAYS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(0).max(90).default(7)),
   STRIPE_DAILY_SMS_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   STRIPE_REALTIME_SMS_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   RESEND_API_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("re_").optional()),

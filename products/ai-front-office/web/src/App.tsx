@@ -8,6 +8,7 @@ import { CalendarPage } from "@/pages/calendar"
 import { CallPage } from "@/pages/call"
 import { JobsPage } from "@/pages/jobs"
 import { SettingsPage } from "@/pages/settings"
+import { StartPage } from "@/pages/start"
 import { TodayPage } from "@/pages/today"
 import { useApi } from "@/lib/api"
 import { identifyOwner } from "@/lib/analytics"
@@ -41,6 +42,7 @@ function Workspace({ base }: { base: "/app" | "/demo" }) {
     <ModeContext.Provider value={mode}>
       <Routes>
         <Route index element={<Screen title="Today">{ready(<TodayPage />)}</Screen>} />
+        {!preview && <Route path="start" element={dashboard.data ? <StartPage /> : <div className="mx-auto max-w-xl p-4">{ready(null)}</div>} />}
         <Route path="jobs" element={<Screen title="Jobs">{ready(<JobsPage />)}</Screen>} />
         <Route path="calendar" element={<Screen title="Calendar">{ready(<CalendarPage />)}</Screen>} />
         <Route path="calls/:id" element={<Screen title="Call"><CallPage /></Screen>} />

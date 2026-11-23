@@ -6,6 +6,7 @@ import { currentBillingPeriod } from "../src/http/app.js";
 import { describe, expect, it } from "vitest";
 import { createDemoConfig, evaluateServiceArea, isCoverageActive, normalizeServiceAreaInput } from "../src/domain/config.js";
 import { triageEmergency } from "../src/domain/triage.js";
+import { stateForPhone, timezoneForState } from "../src/domain/area-codes.js";
 import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, buildTelnyxOutboundTestCall, buildTelnyxTools, buildVoiceSystemPrompt } from "../src/voice/system-prompt.js";
 import { redactError } from "../src/application/retry.js";
 import { buildActivationReport } from "../src/application/readiness.js";
@@ -182,10 +183,52 @@ describe("operational safety", () => {
 });
 
 describe("shop activation prerequisites", () => {
-  it("refuses activation when the owner has not opted into urgent alerts", () => {
-    expect(shopActivationBlockers({ ownerPhoneConfigured: true, urgentAlertsEnabled: false, googleConnected: true, serviceAreaConfigured: true }))
-      .toEqual(["urgent text alerts (the owner has not opted in)"]);
-    expect(shopActivationBlockers({ ownerPhoneConfigured: true, urgentAlertsEnabled: true, googleConnected: true, serviceAreaConfigured: true })).toEqual([]);
+  it("never makes text consent a condition of going live", () => {
+    // 10DLC: consent is not a condition of purchase, so a shop without text alerts can still turn its line on.
+    expect(shopActivationBlockers({ ownerPhoneConfigured: true, googleConnected: false, bookingMode: "confirm", serviceAreaConfigured: true })).toEqual([]);
+  });
+
+  it("needs Google Calendar only when the assistant books directly", () => {
+    expect(shopActivationBlockers({ ownerPhoneConfigured: true, googleConnected: false, bookingMode: "direct", serviceAreaConfigured: true })).toEqual(["Google Calendar"]);
+    expect(shopActivationBlockers({ ownerPhoneConfigured: false, googleConnected: true, bookingMode: "confirm", serviceAreaConfigured: false })).toEqual(["owner mobile number", "service area"]);
+  });
+});
+
+describe("defaults derived from the owner's mobile", () => {
+  it("maps area codes to a state and a timezone", () => {
+    expect(stateForPhone("+19415550123")).toBe("FL");
+    expect(stateForPhone("+15125550123")).toBe("TX");
+    expect(stateForPhone("+15555550123")).toBeNull();
+    expect(timezoneForState("FL")).toBe("America/New_York");
+    expect(timezoneForState("TX")).toBe("America/Chicago");
+    expect(timezoneForState(null)).toBe("America/New_York");
+  });
+
+  it("covers a whole state when the service area is just the state", () => {
+    const config = { ...createDemoConfig("t"), serviceAreaTerms: ["FL"] };
+    expect(evaluateServiceArea("41 Palm Ave, Sarasota, FL 34236", config).status).toBe("covered");
+    expect(evaluateServiceArea("41 Palm Ave, Sarasota FL", config).status).toBe("covered");
+    expect(evaluateServiceArea("12 Oak St, Tampa, Florida", config).status).toBe("covered");
+    expect(evaluateServiceArea("12 Peach St, Atlanta, GA 30301", config).status).toBe("outside");
+    expect(evaluateServiceArea("12 Flagler St, Atlanta, GA", config).status).toBe("outside");
+  });
+
+  it("reads a typed state as statewide but never widens a ZIP", () => {
+    expect(normalizeServiceAreaInput("FL")).toEqual({ terms: ["FL"], errors: [] });
+    expect(normalizeServiceAreaInput("Florida")).toEqual({ terms: ["FL"], errors: [] });
+    expect(normalizeServiceAreaInput("34236, FL")).toEqual({ terms: ["34236"], errors: [] });
+    expect(normalizeServiceAreaInput("Sarasota, FL, 34236")).toEqual({ terms: ["Sarasota FL", "34236"], errors: [] });
+  });
+
+  it("keeps weekday hours on Saturday for a shop that works Saturdays", () => {
+    const base = { ...createDemoConfig("t"), operationMode: "after_hours" as const, timezone: "America/New_York" };
+    const saturdayNoon = new Date("2026-11-28T17:00:00Z");
+    const sundayNoon = new Date("2026-11-29T17:00:00Z");
+    const monSat = { ...base, afterHours: { weekdayStart: "18:00", weekdayEnd: "08:00", weekends: true, workSaturday: true, holidayDates: [] } };
+    expect(isCoverageActive(monSat, saturdayNoon, false)).toBe(false);
+    expect(isCoverageActive(monSat, sundayNoon, false)).toBe(true);
+    const weekdays = { ...monSat, afterHours: { ...monSat.afterHours, workSaturday: false } };
+    expect(isCoverageActive(weekdays, saturdayNoon, false)).toBe(true);
   });
 });
 

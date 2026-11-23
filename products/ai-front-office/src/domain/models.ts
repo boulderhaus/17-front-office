@@ -161,12 +161,16 @@ export interface BusinessConfig {
     weekdayStart: string;
     weekdayEnd: string;
     weekends: boolean;
+    /** With weekends on: Saturday keeps weekday hours instead of being covered all day. */
+    workSaturday?: boolean;
     holidayDates: string[];
   };
   bookableHours: {
     weekdayStart: string;
     weekdayEnd: string;
     weekends: boolean;
+    /** Saturday is bookable even when weekends are off (a Mon–Sat shop). */
+    saturday?: boolean;
   };
   minimumLeadTimeMinutes: number;
   priceSnippets: Array<{ label: string; text: string }>;

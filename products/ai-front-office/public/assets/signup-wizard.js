@@ -1,4 +1,9 @@
 (() => {
+  // Signup: send the browser's timezone so the shop's hours start out right.
+  const timezone = document.querySelector('.publicform input[name="timezone"]');
+  if (timezone && !timezone.value) {
+    try { timezone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { /* the server falls back to the state's zone */ }
+  }
   const form = document.querySelector(".publicform");
   const steps = form?.querySelectorAll("fieldset");
   if (!form || !steps || steps.length < 2) return;

@@ -12,7 +12,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { api, useApi } from "@/lib/api"
 import { useMode } from "@/lib/mode"
 import type { ApiSettings, SettingsValues } from "@/lib/types"
-import { cn } from "@/lib/utils"
+import { cn, tapWidth } from "@/lib/utils"
 
 const ZONES: Array<[string, string]> = [["America/New_York", "Eastern"], ["America/Chicago", "Central"], ["America/Denver", "Mountain"], ["America/Phoenix", "Arizona"], ["America/Los_Angeles", "Pacific"], ["America/Anchorage", "Alaska"], ["Pacific/Honolulu", "Hawaii"]]
 const selectClass = "h-12 w-full rounded-lg border border-input bg-card px-3 text-[16px] shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 lg:h-10 lg:text-sm"
@@ -200,7 +200,7 @@ export function SettingsPage() {
         </Card>
 
         <div className="sticky bottom-[calc(76px+env(safe-area-inset-bottom))] z-10 -mx-1 bg-gradient-to-t from-background via-background/95 to-transparent px-1 pt-4 pb-2 lg:bottom-0">
-          <Button size="tap" type="submit" className="w-full shadow-md" disabled={saving}>{saving ? "Saving…" : "Save changes"}</Button>
+          <Button size="tap" type="submit" className={cn(tapWidth, "shadow-md")} disabled={saving}>{saving ? "Saving…" : "Save changes"}</Button>
         </div>
       </form>
 
@@ -228,13 +228,13 @@ export function SettingsPage() {
             <p className="text-sm"><strong className="text-2xl font-semibold tracking-tight">${Math.round(plan.flatMonthlyPriceCents / 100)}</strong>/month · {plan.includedMinutes} minutes · ${(plan.overageCentsPerMinute / 100).toFixed(2)}/min after</p>
             <form method="post" action={plan.paid ? "/app/billing/portal" : "/app/billing/checkout"}>
               <input type="hidden" name="csrf" value={csrf} />
-              <Button size="tap" variant={plan.paid ? "outline" : "brand"} className="w-full">{plan.paid ? "Manage billing or cancel" : "Start your plan"}</Button>
+              <Button size="tap" variant={plan.paid ? "outline" : "brand"} className={tapWidth}>{plan.paid ? "Manage billing or cancel" : "Start your plan"}</Button>
             </form>
           </CardContent>
         </Card>
         <Card>
           <CardHeader><CardTitle className="text-base">Team</CardTitle></CardHeader>
-          <CardContent><Button size="tap" variant="outline" className="w-full" asChild><a href="/app/team"><Users />Teammates &amp; calendars</a></Button></CardContent>
+          <CardContent><Button size="tap" variant="outline" className={tapWidth} asChild><a href="/app/team"><Users />Teammates &amp; calendars</a></Button></CardContent>
         </Card>
         <Card>
           <CardHeader><CardTitle className="text-base">Your data</CardTitle></CardHeader>
@@ -242,7 +242,7 @@ export function SettingsPage() {
             <Button size="tap" variant="outline" asChild><a href="/app/account/export"><Download />Download everything</a></Button>
             <form method="post" action="/app/account/sign-out-everywhere">
               <input type="hidden" name="csrf" value={csrf} />
-              <Button size="tap" variant="outline" className="w-full">Sign out on every device</Button>
+              <Button size="tap" variant="outline" className={tapWidth}>Sign out on every device</Button>
             </form>
             <Button variant="link" className="h-10 w-fit px-0" asChild><a href="/logout"><LogOut />Sign out</a></Button>
             <details>

@@ -61,6 +61,8 @@ export interface ApiDashboard {
       carrier: { name: string | null; lineType: string | null; family: CarrierFamily; chosen: boolean } | null
       plan: ForwardingPlan | null
       choices: Array<{ family: Exclude<CarrierFamily, "unknown">; label: string }>
+      /** The owner's mobile from signup, offered as the number customers call. */
+      suggested: string | null
     }
     confirmedAt: string | null
     check: { status: "idle" | "calling" | "passed" | "not_reached"; method: "auto" | "manual" | null; startedAt: string | null }
@@ -77,19 +79,29 @@ export interface ApiDashboard {
     pausedForBilling: boolean
     alertsOn: boolean
     rulesSaved: boolean
+    greeting: string
+    hours: string
     flatMonthlyPriceCents: number
     includedMinutes: number
     overageCentsPerMinute: number
   }
   googleConnected: boolean
+  googleAvailable: boolean
   paid: boolean
   checkoutConfigured: boolean
+  billing: { status: string; trialEndsAt: string | null; chargeNote: string | null }
+  onboarding: { hoursSet: boolean; completed: boolean }
   /** Spam and calls under 15 seconds are left out of billedMinutes; the counts say how many. */
   usage: { billedMinutes: number; billableCalls: number; excludedSpamCalls: number; excludedShortCalls: number }
   /** Present only when analytics is on: opaque account and shop ids for PostHog. */
   analytics?: { distinctId: string; tenantId: string }
   calls: ApiCall[]
   tasks: ApiTask[]
+}
+
+export interface Activation {
+  status: "live" | "waiting" | "blocked" | "failed"
+  message: string | null
 }
 
 export interface ApiCallDetail {
