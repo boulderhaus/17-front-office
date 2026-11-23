@@ -36,23 +36,7 @@ export function renderAdminResetLink(email: string, link: string): string {
   return layout("Reset link", `<header><div><p class="eyebrow">Customer operations</p><h1>One-time reset link</h1></div><nav><a href="/admin/owners">Owner accounts</a></nav></header><main><section><p>Send this to <strong>${escapeHtml(email)}</strong> only, from the address on file. It works once and expires in 30 minutes.</p><pre>${escapeHtml(link)}</pre></section></main>`);
 }
 
-export function renderOwnerDashboard(input: {
-  account: OwnerAccount;
-  config: BusinessConfig;
-  calls: CallRecord[];
-  tasks: CallbackTask[];
-  usage: UsageSummary;
-  googleConnected: boolean;
-  subscription: SubscriptionRecord | null;
-  csrf: string;
-  checkoutConfigured: boolean;
-  checkoutUrl: string | null;
-  now: string;
-  selectedCallId?: string | null;
-  recentlyCompletedCallId?: string | null;
-  view?: OwnerDashboardView;
-  preview?: boolean;
-}): string {
+export function renderOwnerDashboard(input: Parameters<typeof renderOwnerApp>[0]): string {
   return renderOwnerApp(input);
 }
 

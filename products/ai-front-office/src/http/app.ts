@@ -22,7 +22,8 @@ import type { Environment } from "../config/environment.js";
 import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
-import { buildTelnyxGreeting, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
+import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
+import { NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import {
   asTelnyxConversationEnded,
@@ -609,16 +610,36 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (method === "POST" && url.pathname === "/app/team/invite" && !limiter.allow(`invite:${account.id}`, 10, 60 * 60_000)) throw new HttpError(429, "Too many invitations. Please try again later.");
       return teamRoutes(request, response, url, dependencies, account, session);
     }
+    if (method === "POST" && url.pathname === "/app/line/go-live") {
+      if (member) throw new HttpError(403, "Only the owner can turn on the line");
+      const form = parseForm(await readBody(request, 4_000));
+      if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      if (!limiter.allow(`go-live:${account.tenantId}`, 6, 60 * 60_000)) throw new HttpError(429, "Too many attempts. Please try again later.");
+      try {
+        await goLive(account, null);
+      } catch (error) {
+        if (!(error instanceof HttpError) || error.status >= 500 && error.status !== 502) throw error;
+        // Show the reason on the dashboard instead of a bare error page.
+        const reason = error.message.startsWith("Live provider prerequisites")
+          ? "New lines are waiting on carrier approval. Your setup is saved; turn your line on here once it clears."
+          : error.message;
+        return redirect(response, `/app?line_error=${encodeURIComponent(reason.slice(0, 200))}`);
+      }
+      return redirect(response, "/app?line=live");
+    }
     if (method === "GET" && url.pathname === "/app") {
       const subscription = await dependencies.store.getSubscription(account.tenantId);
-      const [config, calls, tasks, usage, googleConnected] = await Promise.all([
+      const [config, calls, tasks, usage, googleConnected, lineNumber] = await Promise.all([
         dependencies.store.getConfig(account.tenantId),
         dependencies.store.listCalls(account.tenantId, 50),
         dependencies.store.listCallbackTasks(account.tenantId, 100),
         dependencies.store.getUsageSummary(account.tenantId, ...currentBillingPeriod(dependencies.clock.now(), subscription?.currentPeriodEnd)),
         isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
+        dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
       ]);
       return sendHtml(response, 200, renderOwnerDashboard({
+        lineNumber,
+        lineError: url.searchParams.get("line_error"),
         account,
         config,
         calls,
@@ -831,6 +852,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       }
       await pauseLiveRoute(account.tenantId)
         .catch(() => { throw new HttpError(502, "We couldn't disconnect your Front Office line. Nothing was deleted; please retry."); });
+      await releaseProvisionedLine(account.tenantId);
       await deletionService.deleteWorkspace(account.tenantId)
         .catch(() => { throw new HttpError(502, "A call recording couldn't be deleted. Nothing else was removed; please retry."); });
       log({ level: "warn", event: "owner_workspace_deleted", tenantId: account.tenantId });
@@ -962,6 +984,116 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return sendHtml(response, 200, renderOwnerCallRecord({ account, config, call, booking, callbackTask, notifications, recordingUrl, csrf: session.csrf, canDelete: !member }));
     }
     throw new HttpError(404, "Not found");
+  }
+
+  function liveProviderBlockers(): string[] {
+    return [
+      !dependencies.env.TELNYX_API_KEY && "Telnyx API key",
+      !dependencies.env.TELNYX_PUBLIC_KEY && "Telnyx webhook verification",
+      !dependencies.env.TELNYX_FROM_NUMBER && "Telnyx SMS sender",
+      !dependencies.env.TELNYX_MESSAGING_PROFILE_ID && "Telnyx messaging profile",
+      !dependencies.env.TELNYX_MESSAGING_APPROVED && "approved owner-alert messaging",
+      !dependencies.env.LIVE_PROVIDER_PROOF_AT && "recorded live-provider proof",
+      dependencies.env.PROVIDER_TEST_MODE && "provider test mode must be disabled",
+    ].filter(Boolean) as string[];
+  }
+
+  /**
+   * Turn a paid, set-up shop on. Without explicit ids it provisions the shop's own number and
+   * assistant (Rosie/Goodcall model). Each provider id is saved the moment it exists, so a retry
+   * after a crash reuses it instead of buying a second number.
+   */
+  async function goLive(account: OwnerAccount, existing: { assistantId: string; inboundNumber: string } | null): Promise<string> {
+    return dependencies.store.withLock(`go-live:${account.tenantId}`, async () => {
+      const providerBlockers = liveProviderBlockers();
+      if (providerBlockers.length > 0) throw new HttpError(409, `Live provider prerequisites are missing: ${providerBlockers.join(", ")}`);
+      const config = await dependencies.store.getConfig(account.tenantId);
+      const [ownerPhone, googleConnected, subscription] = await Promise.all([
+        dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary"),
+        isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
+        dependencies.store.getSubscription(account.tenantId),
+      ]);
+      const shopBlockers = shopActivationBlockers({
+        ownerPhoneConfigured: Boolean(ownerPhone),
+        urgentAlertsEnabled: config.ownerNotificationRefs.length > 0,
+        googleConnected,
+        serviceAreaConfigured: config.serviceAreaTerms.length > 0,
+      });
+      if (shopBlockers.length > 0) throw new HttpError(409, `This shop is missing: ${shopBlockers.join(", ")}`);
+      if (!stripeClient || subscription?.status !== "active") throw new HttpError(409, "An active paid subscription is required before activation");
+
+      let assistantId = existing?.assistantId ?? null;
+      let inboundNumber = existing?.inboundNumber ?? null;
+      if (!assistantId || !inboundNumber) {
+        const templateAssistantId = dependencies.env.TELNYX_TEMPLATE_ASSISTANT_ID ?? dependencies.env.TELNYX_ASSISTANT_ID;
+        if (!templateAssistantId) throw new HttpError(409, "Live provider prerequisites are missing: Telnyx template assistant");
+        const provisioner = new TelnyxProvisioner({
+          apiKey: dependencies.env.TELNYX_API_KEY!, templateAssistantId,
+          messagingProfileId: dependencies.env.TELNYX_MESSAGING_PROFILE_ID!, campaignId: dependencies.env.TELNYX_CAMPAIGN_ID,
+          ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}),
+        });
+        try {
+          assistantId = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "provisioned_assistant_id");
+          if (!assistantId) {
+            assistantId = await provisioner.createAssistant({ tenantId: account.tenantId, businessName: config.businessName, assistantUpdate: buildTelnyxAssistantUpdate(config, dependencies.env.PUBLIC_BASE_URL) });
+            await dependencies.store.saveIntegrationSecret(account.tenantId, "telnyx", "provisioned_assistant_id", assistantId);
+          }
+          inboundNumber = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number");
+          if (!inboundNumber) {
+            const pending = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "pending_number");
+            const candidate = pending ?? await provisioner.findNumber({ areaCodes: [areaCode(ownerPhone)].filter((code): code is string => Boolean(code)), state: serviceAreaState(config.serviceAreaTerms) });
+            if (!pending) await dependencies.store.saveIntegrationSecret(account.tenantId, "telnyx", "pending_number", candidate);
+            await provisioner.orderNumber({ tenantId: account.tenantId, phoneNumber: candidate }).catch(async (error) => {
+              if (error instanceof NumberUnavailableError) await dependencies.store.deleteIntegrationSecret(account.tenantId, "telnyx", "pending_number");
+              throw error;
+            });
+            inboundNumber = candidate;
+            await dependencies.store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", inboundNumber);
+            await provisioner.attachCampaign(inboundNumber).catch((error) => log({ level: "error", event: "number_campaign_attach_failed", tenantId: account.tenantId, error: safeError(error) }));
+          }
+        } catch (error) {
+          if (error instanceof HttpError) throw error;
+          log({ level: "error", event: "line_provisioning_failed", tenantId: account.tenantId, error: safeError(error) });
+          throw new HttpError(502, "We couldn't set up your Front Office number just now. Try again in a minute.");
+        }
+      }
+
+      const existingRoute = await dependencies.store.getProviderRoute("telnyx", assistantId);
+      if (existingRoute && existingRoute.tenantId !== account.tenantId) throw new HttpError(409, "That Telnyx assistant is already assigned to another tenant");
+      const liveRoute = new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY!, phoneNumber: inboundNumber, assistantId, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) });
+      const now = dependencies.clock.now().toISOString();
+      // Map first: a call that arrives the instant the number connects must already resolve to this shop.
+      await dependencies.store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", inboundNumber);
+      await dependencies.store.saveProviderRoute({ provider: "telnyx", externalId: assistantId, tenantId: account.tenantId, createdAt: existingRoute?.createdAt ?? now, updatedAt: now });
+      try {
+        await liveRoute.setPaused(false)
+          .catch(() => { throw new HttpError(502, "Telnyx could not verify and connect that assistant and phone number"); });
+        await dependencies.store.saveConfig({ ...config, paused: false });
+        await dependencies.store.updateOwnerAccountStatus(account.id, "active", now);
+      } catch (error) {
+        await liveRoute.setPaused(true).catch((rollbackError) => log({ level: "error", event: "owner_activation_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
+        throw error;
+      }
+      return inboundNumber;
+    });
+  }
+
+  /** Numbers and assistants we bought for a shop go back to Telnyx when the shop is deleted. Best effort: logged, never blocks deletion. */
+  async function releaseProvisionedLine(tenantId: string): Promise<void> {
+    const [assistantId, inbound, pending] = await Promise.all([
+      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "provisioned_assistant_id"),
+      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
+      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "pending_number"),
+    ]);
+    if (!assistantId || !dependencies.env.TELNYX_API_KEY) return; // not a line we provisioned
+    const phoneNumber = inbound ?? pending;
+    await new TelnyxProvisioner({
+      apiKey: dependencies.env.TELNYX_API_KEY,
+      templateAssistantId: dependencies.env.TELNYX_TEMPLATE_ASSISTANT_ID ?? dependencies.env.TELNYX_ASSISTANT_ID ?? "",
+      messagingProfileId: dependencies.env.TELNYX_MESSAGING_PROFILE_ID ?? "",
+      ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}),
+      campaignId: dependencies.env.TELNYX_CAMPAIGN_ID,
+    }).release({ phoneNumber, assistantId }).catch((error) => log({ level: "error", event: "line_release_failed", tenantId, phoneNumber, assistantId, error: safeError(error) }));
   }
 
   /** Detach the shop's number from the assistant so callers do not reach an AI that can save nothing. */
@@ -1479,51 +1611,15 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (status !== "pending_activation" && status !== "active" && status !== "suspended") throw new HttpError(400, "Invalid owner status");
       const account = await dependencies.store.getOwnerAccountById(ownerStatusMatch[1]);
       if (!account) throw new HttpError(404, "Owner account not found");
-      const config = await dependencies.store.getConfig(account.tenantId);
       if (status === "active") {
-        const assistantId = form.get("assistantId")?.trim();
-        const inboundNumber = form.get("inboundNumber")?.trim();
-        if (!assistantId) throw new HttpError(400, "An existing Telnyx assistant ID is required for activation");
-        if (!inboundNumber || !/^\+[1-9]\d{7,14}$/.test(inboundNumber)) throw new HttpError(400, "A dedicated Telnyx number in E.164 format is required for activation");
-        const providerBlockers = [
-          !dependencies.env.TELNYX_API_KEY && "Telnyx API key",
-          !dependencies.env.TELNYX_PUBLIC_KEY && "Telnyx webhook verification",
-          !dependencies.env.TELNYX_FROM_NUMBER && "Telnyx SMS sender",
-          !dependencies.env.TELNYX_MESSAGING_PROFILE_ID && "Telnyx messaging profile",
-          !dependencies.env.TELNYX_MESSAGING_APPROVED && "approved owner-alert messaging",
-          !dependencies.env.LIVE_PROVIDER_PROOF_AT && "recorded live-provider proof",
-          dependencies.env.PROVIDER_TEST_MODE && "provider test mode must be disabled",
-        ].filter(Boolean) as string[];
-        if (providerBlockers.length > 0) throw new HttpError(409, `Live provider prerequisites are missing: ${providerBlockers.join(", ")}`);
-        const [ownerPhone, googleConnected, subscription] = await Promise.all([
-          dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary"),
-          isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
-          dependencies.store.getSubscription(account.tenantId),
-        ]);
-        const shopBlockers = shopActivationBlockers({
-          ownerPhoneConfigured: Boolean(ownerPhone),
-          urgentAlertsEnabled: config.ownerNotificationRefs.length > 0,
-          googleConnected,
-          serviceAreaConfigured: config.serviceAreaTerms.length > 0,
-        });
-        if (shopBlockers.length > 0) throw new HttpError(409, `This shop is missing: ${shopBlockers.join(", ")}`);
-        if (!stripeClient || subscription?.status !== "active") throw new HttpError(409, "An active paid subscription is required before activation");
-        const existingRoute = await dependencies.store.getProviderRoute("telnyx", assistantId);
-        if (existingRoute && existingRoute.tenantId !== account.tenantId) throw new HttpError(409, "That Telnyx assistant is already assigned to another tenant");
-        const liveRoute = new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY!, phoneNumber: inboundNumber, assistantId });
-        await liveRoute.setPaused(false)
-          .catch(() => { throw new HttpError(502, "Telnyx could not verify and connect that assistant and phone number"); });
-        const now = dependencies.clock.now().toISOString();
-        try {
-          await dependencies.store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", inboundNumber);
-          await dependencies.store.saveProviderRoute({ provider: "telnyx", externalId: assistantId, tenantId: account.tenantId, createdAt: existingRoute?.createdAt ?? now, updatedAt: now });
-          await dependencies.store.saveConfig({ ...config, paused: false });
-          await dependencies.store.updateOwnerAccountStatus(account.id, status, now);
-        } catch (error) {
-          await liveRoute.setPaused(true).catch((rollbackError) => log({ level: "error", event: "owner_activation_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
-          throw error;
-        }
+        // Blank ids provision a fresh number and assistant, exactly like the owner's own button.
+        const assistantId = form.get("assistantId")?.trim() || null;
+        const inboundNumber = form.get("inboundNumber")?.trim() || null;
+        if (Boolean(assistantId) !== Boolean(inboundNumber)) throw new HttpError(400, "Enter both an assistant ID and a number, or leave both blank to provision new ones");
+        if (inboundNumber && !/^\+[1-9]\d{7,14}$/.test(inboundNumber)) throw new HttpError(400, "A dedicated Telnyx number in E.164 format is required for activation");
+        await goLive(account, assistantId && inboundNumber ? { assistantId, inboundNumber } : null);
       } else {
+        const config = await dependencies.store.getConfig(account.tenantId);
         await pauseLiveRoute(account.tenantId)
           .catch(() => { throw new HttpError(502, "Telnyx could not disconnect the live phone route; account status was not changed"); });
         await dependencies.store.saveConfig({ ...config, paused: true });
@@ -1929,4 +2025,18 @@ async function exchangeGoogleCode(env: Environment, client: GoogleOAuthClient, c
   const payload = await response.json().catch(() => ({})) as { refresh_token?: string };
   if (!response.ok || !payload.refresh_token) throw new HttpError(502, "Google did not return a refresh token; reconnect with consent enabled");
   return payload.refresh_token;
+}
+
+function areaCode(phone: string | null): string | null {
+  const match = /^\+1([2-9]\d{2})\d{7}$/.exec(phone ?? "");
+  return match?.[1] ?? null;
+}
+
+/** "Sarasota FL" or "Sarasota, FL" → "FL"; ZIP-only areas give no state. */
+function serviceAreaState(terms: string[]): string | null {
+  for (const term of terms) {
+    const match = /(?:^|[\s,])([A-Z]{2})$/.exec(term.trim());
+    if (match) return match[1]!;
+  }
+  return null;
 }
