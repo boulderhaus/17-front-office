@@ -134,13 +134,15 @@ function SetupCard({ dashboard }: { dashboard: ApiDashboard }) {
     setLineError(null)
     try {
       await api("/api/app/line/go-live", { method: "POST", body: {} })
-      await reload()
-      toast.success("Your line is on. Forward your calls to finish.")
     } catch (error) {
       setLineError(error instanceof Error ? error.message : "That didn’t work. Please try again.")
-    } finally {
       setBusy(false)
+      return
     }
+    // The line is on; a failed refresh is not a go-live failure.
+    toast.success("Your line is on. Forward your calls to finish.")
+    await reload().catch(() => undefined)
+    setBusy(false)
   }
   const done = steps.filter((step) => step.done).length
   if (done === steps.length) return null
