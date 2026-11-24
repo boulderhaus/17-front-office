@@ -1419,6 +1419,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const now = dependencies.clock.now();
     let next: CallbackTask;
     if (action === "complete") {
+      // A second Done for the same call (a double-click, a second tab) changes nothing: the first completion stands.
+      if (task.status === "completed") return task;
       next = { ...task, status: "completed", completedAt: now.toISOString(), completionSource: "owner", updatedAt: now.toISOString() };
     } else if (action === "reopen") {
       if (task.status !== "completed") throw new HttpError(404, "Completed task not found");

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react"
+import { useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import { Play } from "lucide-react"
 import { toast } from "sonner"
@@ -7,7 +7,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
-import { ActionBar, addressFact, CallBackNote, CallHeader, Facts, phoneFact, SafetyNote, SpamNote, Transcript } from "@/components/app/call-parts"
+import { ActionBar, CallBackNote, CallHeader, Facts, phoneFact, SafetyNote, SpamNote, Transcript } from "@/components/app/call-parts"
 import { useTaskTiles } from "./today"
 import { api, useApi } from "@/lib/api"
 import { urgency } from "@/lib/derive"
@@ -40,9 +40,9 @@ export function CallPage() {
     : urgency(task ?? undefined, call)
   const when = booking?.requestedStart ?? call.fields.requestedStart
   const bookedFor = booking?.requestedStart ? booking.status === "confirmed" : call.outcome === "booked"
-  const facts: Array<[string, ReactNode]> = [
+  const facts: Array<[string, string]> = [
     phoneFact(call),
-    addressFact(call),
+    ["Address", call.fields.address?.trim() || "Not confirmed"],
     ["Called", compactDate(call.startedAt, tz)],
     ["Length", minutes(call.durationSeconds)],
     ...(spam ? [] : [["Category", call.fields.serviceCategory ?? "Not classified"] as [string, string]]),
@@ -70,8 +70,7 @@ export function CallPage() {
       <CallHeader call={call} tone={badge.tone} label={badge.label} />
       <SafetyNote call={call} />
       {spam && <SpamNote />}
-      <ActionBar call={call} extra={spam ? [] : tiles(task, () => detail.reload())} />
-      <CallBackNote call={call} />
+      <ActionBar call={call} extra={spam ? [] : tiles(task, () => detail.reload())} reachNote={<CallBackNote call={call} />} />
       <Facts rows={facts} />
       {detail.data.recordingUrl && (
         <section className="ph-no-capture grid gap-2">

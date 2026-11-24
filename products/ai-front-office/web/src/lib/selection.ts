@@ -6,7 +6,7 @@
 /** The lit row: the yellow tint plus an ink bar on the edge facing the panel. Hover never changes it. */
 export const SELECTED_ROW = "bg-accent shadow-[inset_-4px_0_0_var(--brand-ink)] hover:bg-accent"
 
-/** The panel's matching ink edge, facing the lit row across the gap. */
+/** The panel's matching ink edge, facing the lit row across the gap (Calls only: `linked`). */
 export const PANEL_EDGE = "border-l-4 border-l-brand-ink"
 
 /** A visible ink focus ring drawn inside a list row. */
@@ -22,16 +22,32 @@ export function allCallsRowSelected(input: { panelId: string | null | undefined;
   return input.panelId === input.callId && (input.from === "all" || !input.actionable.has(input.callId))
 }
 
-/** A wide attention row carries one quiet Done, except the lit row: its Done lives once, in the panel. */
-export function rowShowsDone(input: { wide: boolean; selected: boolean; preview: boolean }): boolean {
-  return input.wide && !input.selected && !input.preview
+/**
+ * A wide attention row carries one quiet Done, except the row whose call is open in the panel (lit or not, whichever
+ * list it was opened from): that call's Done lives once, in the panel.
+ */
+export function rowShowsDone(input: { wide: boolean; open: boolean; preview: boolean }): boolean {
+  return input.wide && !input.open && !input.preview
 }
 
 /**
- * After Done or Later in the panel: the next caller waiting (below, else above), else the first other call.
- * The panel never stays on a call that just left the list.
+ * Where the panel may land when nobody is left waiting: newest first, never likely spam and never a call whose
+ * follow-up is already finished.
  */
-export function nextOpenCall(actionable: readonly string[], calls: readonly string[], doneId: string): string | null {
+export function stillOpenCalls(calls: ReadonlyArray<{ id: string; outcome: string }>, statusOf: (callId: string) => string | undefined): string[] {
+  return calls.filter((call) => {
+    if (call.outcome === "ignored_spam") return false
+    const status = statusOf(call.id)
+    return status !== "completed" && status !== "cancelled"
+  }).map((call) => call.id)
+}
+
+/**
+ * After Done or Later in the panel: the next caller waiting (below, else above), else the newest call still open
+ * (`open`, from stillOpenCalls). Null when nothing is left: the panel says "You’re all caught up." instead of
+ * showing a finished call or a robocall.
+ */
+export function nextOpenCall(actionable: readonly string[], open: readonly string[], doneId: string): string | null {
   const index = actionable.indexOf(doneId)
   if (index >= 0) {
     const below = actionable[index + 1]
@@ -42,5 +58,31 @@ export function nextOpenCall(actionable: readonly string[], calls: readonly stri
     const waiting = actionable.find((id) => id !== doneId)
     if (waiting) return waiting
   }
-  return calls.find((id) => id !== doneId) ?? null
+  return open.find((id) => id !== doneId) ?? null
+}
+
+/**
+ * The Calls URL with another call open. `from` stays as it was, so someone working down "All calls" keeps seeing
+ * "All calls" rows lit as the panel moves on. No call (`null`) clears `?call=`.
+ */
+export function panelSearch(search: string, callId: string | null): string {
+  const params = new URLSearchParams(search)
+  if (callId) {
+    params.set("call", callId)
+  } else {
+    params.delete("call")
+    params.delete("from")
+  }
+  const next = params.toString()
+  return next ? `?${next}` : ""
+}
+
+/**
+ * How far to scroll so a lit row sits fully between the sticky top bar and the bottom of the window.
+ * Zero when it is already in view: the page only moves when the lit row would otherwise be out of sight.
+ */
+export function revealDelta(row: { top: number; bottom: number }, view: { top: number; bottom: number }, margin = 8): number {
+  if (row.top >= view.top && row.bottom <= view.bottom) return 0
+  if (row.top < view.top || row.bottom - row.top > view.bottom - view.top) return row.top - view.top - margin
+  return row.bottom - view.bottom + margin
 }

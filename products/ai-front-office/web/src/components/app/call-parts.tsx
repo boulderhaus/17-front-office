@@ -66,59 +66,70 @@ export function CallBackNote({ call }: { call: ApiCall }) {
 
 export interface Action {
   key: string; label: string; icon: ReactNode; href?: string; external?: boolean; onClick?: () => void; primary?: boolean; disabled?: boolean
-  /** Reach out (Call, Text) sits on top; status (Done, Later, Reopen) sits below a divider, "After the call". */
-  group: "reach" | "status"
+  /**
+   * Reach out (Call, Text) and look up (Map) share the top row, each in its own color; status (Done, Later, Reopen)
+   * sits below a divider, "After the call".
+   */
+  group: "reach" | "look" | "status"
+  /** A save is in flight for this call (with `disabled`). */
+  busy?: boolean
   /** A tile that opens a short menu (Later: 1 hour, 4 hours, tomorrow). */
   menu?: Array<{ label: string; onSelect: () => void }>
 }
 
 /**
- * Every call action, in two groups. Reach out on top: one filled primary (Call Linda) with a navy-outline Text
- * beside it. Status below a divider: a gray-outline Done (or Reopen) and a quiet Later. Seeing where the caller
- * is lives in Address (the Map link), not here. Call back and Text never show for likely spam.
+ * Every call action, by kind. Top row: reach out (one filled Call Linda, a navy-outline Text) and look up (Map, a
+ * beige tonal button). `reachNote` (what Call does) sits right under that row. Status below a divider, "After the
+ * call": a gray-outline Done (or Reopen) and a quiet Later. Call back, Text and Map never show for likely spam.
  */
-export function ActionBar({ call, extra = [] }: { call: ApiCall; extra?: Action[] }) {
+export function ActionBar({ call, extra = [], reachNote }: { call: ApiCall; extra?: Action[]; reachNote?: ReactNode }) {
+  const address = call.fields.address?.trim() || null
   const spam = call.outcome === "ignored_spam"
   const actions: Action[] = []
   if (call.phone && !spam) {
     actions.push({ key: "call", label: callLabel(call), icon: <Phone />, href: `tel:${call.phone}`, primary: true, group: "reach" })
     actions.push({ key: "text", label: "Text", icon: <MessageSquare />, href: `sms:${call.phone}`, group: "reach" })
   }
+  if (address && !spam) actions.push({ key: "map", label: "Map", icon: <MapPin />, href: mapsUrl(address), external: true, group: "look" })
   actions.push(...extra)
   if (!actions.length) return null
   const focus = "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-ink"
+  // Status buttons: the tap size (48px) on a phone, 40px with a mouse.
   const tile = (action: Action) => action.group === "status" ? cn(
     "inline-flex items-center justify-center transition-colors [&_svg]:size-4",
     action.menu
-      ? "h-10 gap-1.5 rounded-lg px-3 text-[15px] font-semibold text-muted-foreground hover:bg-muted hover:text-foreground"
-      : "h-10 gap-2 rounded-lg border border-muted-foreground bg-card px-4 text-[15px] font-semibold hover:bg-muted",
+      ? "h-12 gap-1.5 rounded-lg px-3 text-[15px] font-semibold text-muted-foreground hover:bg-muted hover:text-foreground lg:h-10"
+      : "h-12 gap-2 rounded-lg border border-muted-foreground bg-card px-4 text-[15px] font-semibold hover:bg-muted lg:h-10",
     focus,
     action.disabled && "pointer-events-none opacity-50",
   ) : cn(
     "flex min-h-14 flex-col items-center justify-center gap-1 rounded-xl px-1 text-[14px] font-semibold transition-colors [&_svg]:size-5",
     action.primary
-      ? "min-h-13 flex-row gap-2 bg-primary text-[17px] text-primary-foreground hover:bg-primary/90"
-      : "min-h-13 flex-row gap-2 rounded-xl border-2 border-primary bg-card px-5 text-[15px] font-semibold text-primary hover:bg-primary/5",
+      ? "min-h-13 min-w-0 flex-1 flex-row gap-2 bg-primary text-[17px] text-primary-foreground hover:bg-primary/90"
+      : action.group === "look"
+        ? "min-h-13 shrink-0 flex-row gap-2 rounded-xl bg-secondary px-4 text-[15px] font-semibold text-foreground hover:bg-border"
+        : "min-h-13 shrink-0 flex-row gap-2 rounded-xl border-2 border-primary bg-card px-4 text-[15px] font-semibold text-primary hover:bg-primary/5",
     focus,
     action.disabled && "pointer-events-none opacity-50",
   )
   const render = (action: Action) => action.menu ? (
     <DropdownMenu key={action.key}>
-      <DropdownMenuTrigger asChild><button type="button" className={tile(action)} disabled={action.disabled}>{action.icon}{action.label}{action.group === "status" && <ChevronDown />}</button></DropdownMenuTrigger>
+      <DropdownMenuTrigger asChild><button type="button" className={tile(action)} disabled={action.disabled} aria-busy={action.busy || undefined}>{action.icon}{action.label}{action.group === "status" && <ChevronDown />}</button></DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-44">
         {action.menu.map((item) => <DropdownMenuItem key={item.label} className="min-h-11 text-[15px]" onSelect={item.onSelect}>{item.label}</DropdownMenuItem>)}
       </DropdownMenuContent>
     </DropdownMenu>
   ) : action.href
     ? <a key={action.key} href={action.href} className={tile(action)} {...(action.external ? { target: "_blank", rel: "noreferrer" } : {})}>{action.icon}{action.label}</a>
-    : <button key={action.key} type="button" className={tile(action)} disabled={action.disabled} onClick={action.onClick}>{action.icon}{action.label}</button>
-  const reach = actions.filter((action) => action.group === "reach").sort((left, right) => Number(Boolean(right.primary)) - Number(Boolean(left.primary)))
+    : <button key={action.key} type="button" className={tile(action)} disabled={action.disabled} aria-busy={action.busy || undefined} onClick={action.onClick}>{action.icon}{action.label}</button>
+  const top = actions.filter((action) => action.group !== "status").sort((left, right) => Number(Boolean(right.primary)) - Number(Boolean(left.primary)))
   const status = actions.filter((action) => action.group === "status")
   return (
     <div className="ph-no-capture grid gap-3">
-      {reach.length > 0 && <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">{reach.map(render)}</div>}
+      {top.length > 0 && <div className="flex gap-2">{top.map(render)}</div>}
+      {reachNote}
       {status.length > 0 && (
-        <div className={cn("grid gap-2", reach.length > 0 && "border-t pt-3")}>
+        <div className={cn("grid gap-2", top.length > 0 && "border-t pt-3")}>
           <p className="text-xs font-medium text-muted-foreground">After the call</p>
           <div className="flex gap-2">{status.map(render)}</div>
         </div>
@@ -143,19 +154,6 @@ export function Facts({ rows }: { rows: Array<[string, ReactNode]> }) {
 
 export function phoneFact(call: ApiCall): [string, string] {
   return ["Phone", call.phone ? formatPhone(call.phone) : "Not confirmed"]
-}
-
-/** The address, then a Map link: looking up where the caller is sits with the address, not with the call buttons. */
-export function addressFact(call: ApiCall): [string, ReactNode] {
-  const address = call.fields.address?.trim() || null
-  if (!address) return ["Address", "Not confirmed"]
-  if (call.outcome === "ignored_spam") return ["Address", address]
-  return ["Address", (
-    <>
-      {address}{" "}
-      <a href={mapsUrl(address)} target="_blank" rel="noreferrer" className="-my-2.5 ml-1 inline-flex items-center gap-1 py-2.5 font-semibold text-brand-ink underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-ink [&_svg]:size-4"><MapPin />Map</a>
-    </>
-  )]
 }
 
 interface Turn { speaker: "assistant" | "caller" | "other"; label: string; text: string }

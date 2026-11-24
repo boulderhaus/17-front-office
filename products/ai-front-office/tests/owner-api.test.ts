@@ -160,6 +160,17 @@ describe("Owner JSON API and React app serving", () => {
     const before = await store.getCallbackTaskForCall(CALL_ID);
     const done = await fetch(url, json(owner, "POST", { action: "complete" }));
     expect(await done.json()).toMatchObject({ task: { status: "completed", completionSource: "owner", dueAt: before!.dueAt } });
+    // A second Done (a double-click, a second tab) changes nothing: the first completion time stands.
+    const first = await store.getCallbackTaskForCall(CALL_ID);
+    const realNow = clock.now;
+    clock.now = () => new Date("2026-01-15T08:03:00.000Z");
+    try {
+      const again = await (await fetch(url, json(owner, "POST", { action: "complete" }))).json() as { task: { status: string; completedAt: string; updatedAt: string } };
+      expect(again.task).toMatchObject({ status: "completed", completedAt: first!.completedAt, updatedAt: first!.updatedAt });
+      expect((await store.getCallbackTaskForCall(CALL_ID))?.completedAt).toBe(first!.completedAt);
+    } finally {
+      clock.now = realNow;
+    }
     // Undo restores the follow-up exactly: open again, same "Call back by" time, no completion left behind.
     const reopened = await (await fetch(url, json(owner, "POST", { action: "reopen" }))).json() as { task: { status: string; dueAt: string; completedAt: string | null } };
     expect(reopened.task).toMatchObject({ status: "open", dueAt: before!.dueAt, completedAt: null });

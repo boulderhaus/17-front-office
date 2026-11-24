@@ -7,44 +7,30 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { CallLink, Empty, ListBox, MoreLink, Muted, SectionTitle, ToneBadge, usePage } from "@/components/app/bits"
-import { ActionBar, addressFact, CallBackNote, CallHeader, callLabel, Facts, phoneFact, SafetyNote, SpamNote, Transcript, type Action } from "@/components/app/call-parts"
+import { ActionBar, CallBackNote, CallHeader, callLabel, Facts, phoneFact, SafetyNote, SpamNote, Transcript, type Action } from "@/components/app/call-parts"
 import { AlertsOffNotice, LineStatus } from "@/components/app/shell"
 import { api } from "@/lib/api"
 import { derive, shortAddress, urgency } from "@/lib/derive"
-import { allCallsRowSelected, attentionRowSelected, nextOpenCall, PANEL_EDGE, ROW_FOCUS, rowShowsDone, SELECTED_ROW } from "@/lib/selection"
+import { allCallsRowSelected, attentionRowSelected, nextOpenCall, PANEL_EDGE, panelSearch, revealDelta, ROW_FOCUS, rowShowsDone, SELECTED_ROW, stillOpenCalls } from "@/lib/selection"
+import { createTaskGate, QUIET_MS, runTaskAction, type TaskAction, type TaskDeps, type TaskMoves } from "@/lib/task-action"
 import { compactDate, dateKey, money, perCall, timeOnly } from "@/lib/format"
 import { useMediaQuery, useMode } from "@/lib/mode"
 import { ForwardingCard } from "@/components/app/forwarding-card"
 import type { ApiCall, ApiDashboard, ApiTask } from "@/lib/types"
 import { cn, tapWidth } from "@/lib/utils"
 
-/**
- * Where the open call goes when a follow-up changes: `leave` runs once Done or Later saves (the panel moves on
- * before the list refreshes), `back` once Undo has reopened it (the panel returns to it).
- */
-export interface TaskMoves { leave?: () => void; back?: () => void }
+// One gate for every Done, Later and Undo on the page: one save at a time, and a double-click never reaches the next caller.
+const taskGate = createTaskGate()
 
 export function useTaskActions() {
   const { reload } = useMode()
-  const act = async (callId: string, action: "complete" | "reopen" | "snooze", minutes?: number, moves: TaskMoves = {}): Promise<boolean> => {
-    try {
-      await api(`/api/app/calls/${encodeURIComponent(callId)}/task`, { method: "POST", body: { action, ...(minutes ? { minutes } : {}) } })
-      if (action !== "reopen") moves.leave?.()
-      await reload()
-      if (action === "reopen") moves.back?.()
-      if (action === "complete") {
-        // 8 seconds: long enough to read it and reach Undo.
-        toast.success("Marked done.", { duration: 8000, action: { label: "Undo", onClick: () => void act(callId, "reopen", undefined, { back: moves.back }) } })
-      } else if (action === "snooze") {
-        toast("Moved to Waiting.")
-      }
-      return true
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "That didn’t save. Please try again.")
-      return false
-    }
+  const deps: TaskDeps = {
+    post: (callId, action, minutes) => api(`/api/app/calls/${encodeURIComponent(callId)}/task`, { method: "POST", body: { action, ...(minutes ? { minutes } : {}) } }),
+    reload,
+    toast: { success: (message, options) => void toast.success(message, options), message: (message) => void toast(message), error: (message) => void toast.error(message) },
+    gate: taskGate,
   }
-  return act
+  return (callId: string, action: TaskAction, minutes?: number, moves: TaskMoves = {}): Promise<boolean> => runTaskAction(deps, callId, action, minutes, moves)
 }
 
 const LATER: Array<[string, number]> = [["In 1 hour", 60], ["In 4 hours", 240], ["Tomorrow", 1440]]
@@ -53,13 +39,26 @@ const LATER: Array<[string, number]> = [["In 1 hour", 60], ["In 4 hours", 240], 
 export function useTaskTiles() {
   const { preview } = useMode()
   const act = useTaskActions()
+  // From the click until the list has reloaded, and a moment longer when the panel moved on to the next caller,
+  // the status buttons are disabled: a second click never lands on the next caller's Done.
+  const [pending, setPending] = useState(false)
   return (task: ApiTask | null | undefined, after?: () => Promise<void> | void, moves?: TaskMoves): Action[] => {
     if (preview || !task || task.status === "cancelled") return []
-    const run = async (action: "complete" | "reopen" | "snooze", minutes?: number) => { if (await act(task.callId, action, minutes, moves)) await after?.() }
-    if (task.status === "completed") return [{ key: "reopen", label: "Reopen", icon: <RotateCcw />, group: "status", onClick: () => void run("reopen") }]
+    const run = async (action: TaskAction, minutes?: number) => {
+      setPending(true)
+      let moved = false
+      const tracked: TaskMoves | undefined = moves && { ...moves, leave: () => { moved = true; moves.leave?.() } }
+      try {
+        if (await act(task.callId, action, minutes, tracked)) await after?.()
+      } finally {
+        if (moved) window.setTimeout(() => setPending(false), QUIET_MS)
+        else setPending(false)
+      }
+    }
+    if (task.status === "completed") return [{ key: "reopen", label: "Reopen", icon: <RotateCcw />, group: "status", disabled: pending, busy: pending, onClick: () => void run("reopen") }]
     return [
-      { key: "done", label: "Done", icon: <Check />, group: "status", onClick: () => void run("complete") },
-      { key: "later", label: "Later", icon: <Clock />, group: "status", menu: LATER.map(([label, minutes]) => ({ label, onSelect: () => void run("snooze", minutes) })) },
+      { key: "done", label: "Done", icon: <Check />, group: "status", disabled: pending, busy: pending, onClick: () => void run("complete") },
+      { key: "later", label: "Later", icon: <Clock />, group: "status", disabled: pending, busy: pending, menu: LATER.map(([label, minutes]) => ({ label, onSelect: () => void run("snooze", minutes) })) },
     ]
   }
 }
@@ -67,6 +66,7 @@ export function useTaskTiles() {
 export function TodayPage() {
   const { dashboard, preview, base } = useMode()
   const [params] = useSearchParams()
+  const location = useLocation()
   const wide = useMediaQuery("(min-width: 1024px)")
   if (!dashboard) return null
   // Old links: /app?view=pipeline|calendar
@@ -75,8 +75,12 @@ export function TodayPage() {
   const d = derive(dashboard)
   const selectedId = params.get("call")
   const selected = selectedId ? d.callsById.get(selectedId) ?? null : null
+  // The last waiting caller was just marked done or moved to later, and no other call is still open: the panel
+  // says so instead of opening a finished call or a robocall (until someone new is waiting).
+  const doneLast = (location.state as { caughtUp?: string } | null)?.caughtUp
+  const caughtUp = Boolean(doneLast) && !selected && d.actionable.every((task) => task.callId === doneLast)
   // Wide screens: one call is always open on the right, and it is the only place its buttons live.
-  const panelCall = selected ?? d.callsById.get(d.actionable[0]?.callId ?? "") ?? dashboard.calls[0] ?? null
+  const panelCall = caughtUp ? null : selected ?? d.callsById.get(d.actionable[0]?.callId ?? "") ?? dashboard.calls[0] ?? null
   // One lit row: the one that was clicked (from=all marks the "All calls" list).
   const from = params.get("from")
   const waiting = new Set(d.actionable.map((task) => task.callId))
@@ -99,7 +103,7 @@ export function TodayPage() {
         <section aria-labelledby="attention" className="grid gap-2.5 scroll-mt-20" id="attention-list">
           <SectionTitle id="attention" title="Needs your attention" count={d.actionable.length} urgent={d.urgentCount > 0} />
           {d.actionable.length ? (
-            <ListBox>{d.actionable.map((task) => <TaskRow key={task.callId} task={task} call={d.callsById.get(task.callId)} due={d.due(task)} selected={attentionRowSelected({ wide, panelId: panelCall?.id, callId: task.callId, from })} wide={wide} />)}</ListBox>
+            <ListBox>{d.actionable.map((task) => <TaskRow key={task.callId} task={task} call={d.callsById.get(task.callId)} due={d.due(task)} selected={attentionRowSelected({ wide, panelId: panelCall?.id, callId: task.callId, from })} open={wide && panelCall?.id === task.callId} wide={wide} />)}</ListBox>
           ) : (
             <Empty image title="You’re all caught up." text="Emergencies, callbacks and times to confirm show up here the moment a call ends." />
           )}
@@ -109,8 +113,8 @@ export function TodayPage() {
         {owner && dashboard.onboarding.completed && <CalendarCard dashboard={dashboard} />}
       </div>
       <aside className={cn("lg:sticky lg:top-20", !selected && "max-lg:hidden")}>
-        <CallPanel call={panelCall} task={panelCall ? d.taskFor(panelCall.id) : undefined} tz={d.tz} standalone={Boolean(selected)}
-          next={(doneId) => nextOpenCall(d.actionable.map((task) => task.callId), dashboard.calls.map((call) => call.id), doneId)} />
+        <CallPanel call={panelCall} task={panelCall ? d.taskFor(panelCall.id) : undefined} tz={d.tz} standalone={Boolean(selected)} linked caughtUp={caughtUp}
+          next={(doneId) => nextOpenCall(d.actionable.map((task) => task.callId), stillOpenCalls(dashboard.calls, (callId) => d.taskFor(callId)?.status), doneId)} />
       </aside>
     </div>
   )
@@ -156,12 +160,13 @@ function Meta({ icon, children }: { icon: ReactNode; children: ReactNode }) {
 
 /**
  * A caller waiting on the owner. Phone: the row carries Call back / Done / Later (no detail pane there).
- * Wide screens: the row selects; every row but the lit one carries one quiet Done. The lit row's buttons live
- * once, in the pane on the right.
+ * Wide screens: the row selects; every row but the open one carries one quiet Done. The open call's buttons live
+ * once, in the pane on the right (`open`, whichever list it was opened from; `selected` is the lit row).
  */
-function TaskRow({ task, call, due, selected, wide }: { task: ApiTask; call: ApiCall | undefined; due: string; selected: boolean; wide: boolean }) {
+function TaskRow({ task, call, due, selected, open, wide }: { task: ApiTask; call: ApiCall | undefined; due: string; selected: boolean; open: boolean; wide: boolean }) {
   const { preview } = useMode()
   const act = useTaskActions()
+  const [pending, setPending] = useState(false)
   const badge = urgency(task, call)
   const address = shortAddress(call)
   const body = (
@@ -178,16 +183,21 @@ function TaskRow({ task, call, due, selected, wide }: { task: ApiTask; call: Api
     </>
   )
   if (wide) {
-    // The link's ::after covers the row, so a click anywhere selects it; Done sits above that layer.
+    // The link's ::after covers the row, so a click anywhere selects it; Done sits above that layer. Every row keeps
+    // the Done column (an invisible stand-in on the open row), so all badges share one right edge and never move.
+    const doneClass = "relative z-10 inline-flex h-9 items-center gap-1.5 self-end rounded-lg border border-transparent px-2.5 text-sm font-semibold text-muted-foreground transition-colors group-hover:border-muted-foreground hover:bg-card hover:text-foreground focus-visible:border-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-ink disabled:pointer-events-none disabled:opacity-50 [&_svg]:size-4"
+    const done = () => {
+      setPending(true)
+      void act(task.callId, "complete").finally(() => setPending(false))
+    }
     return (
-      <div className={cn("group relative grid grid-cols-[minmax(0,1fr)_auto] gap-3 px-4 py-3.5 hover:bg-muted/50", selected && SELECTED_ROW)}>
+      <div className={cn("group relative px-4 py-3.5 hover:bg-muted/50", preview ? "grid" : "grid grid-cols-[minmax(0,1fr)_auto] gap-3", selected && SELECTED_ROW)}>
         <CallLink callId={task.callId} aria-current={selected} className="grid gap-1.5 outline-none after:absolute after:inset-0 focus-visible:after:outline-2 focus-visible:after:-outline-offset-2 focus-visible:after:outline-brand-ink">{body}</CallLink>
-        {rowShowsDone({ wide, selected, preview }) && (
-          <button type="button" aria-label={`Mark ${call?.fields.callerName ?? "call"} handled`} onClick={() => void act(task.callId, "complete")}
-            className="relative z-10 inline-flex h-9 items-center gap-1.5 self-end rounded-lg border border-transparent px-2.5 text-sm font-semibold text-muted-foreground transition-colors group-hover:border-muted-foreground hover:bg-card hover:text-foreground focus-visible:border-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-ink [&_svg]:size-4">
+        {rowShowsDone({ wide, open, preview }) ? (
+          <button type="button" aria-label={`Mark ${call?.fields.callerName ?? "call"} handled`} disabled={pending} aria-busy={pending || undefined} onClick={done} className={doneClass}>
             <Check />Done
           </button>
-        )}
+        ) : !preview && <span aria-hidden className={cn(doneClass, "invisible")}><Check />Done</span>}
       </div>
     )
   }
@@ -364,27 +374,49 @@ function GuaranteeCard({ dashboard }: { dashboard: ApiDashboard }) {
   )
 }
 
+/** Bring the lit row into sight when the panel moved on to a caller whose row is off-screen (under the top bar counts). */
+function revealLitRow() {
+  const link = document.querySelector<HTMLElement>('[aria-current="true"]')
+  if (!link) return
+  const row = (link.closest(".group") ?? link).getBoundingClientRect()
+  const top = document.querySelector("header")?.getBoundingClientRect().bottom ?? 0
+  const delta = revealDelta(row, { top: Math.max(0, top), bottom: window.innerHeight })
+  if (delta) window.scrollBy({ top: delta, behavior: "smooth" })
+}
+
 /**
  * The open call: the one place on wide screens with its buttons. On a phone, legacy ?call= links show it alone.
  * With `next` (Calls), Done or Later on a wide screen moves the panel to the next caller; Undo brings it back.
+ * `linked` (Calls only) ties the panel to the lit row: the matching ink left edge and the yellow header band.
  */
-export function CallPanel({ call, task, tz, standalone, next }: { call: ApiCall | null; task: ApiTask | undefined; tz: string; standalone: boolean; next?: (doneId: string) => string | null }) {
+export function CallPanel({ call, task, tz, standalone, next, linked = false, caughtUp = false }: { call: ApiCall | null; task: ApiTask | undefined; tz: string; standalone: boolean; next?: (doneId: string) => string | null; linked?: boolean; caughtUp?: boolean }) {
   const { base, preview } = useMode()
   const tiles = useTaskTiles()
   const wide = useMediaQuery("(min-width: 1024px)")
   const navigate = useNavigate()
   const { pathname } = useLocation()
   // Only while the owner is still on this page: an Undo tapped after leaving never pulls them back.
-  const openCall = (id: string | null) => {
+  const openCall = (id: string | null, doneId?: string) => {
     if (window.location.pathname !== pathname) return
-    const params = new URLSearchParams(window.location.search)
-    if (id) params.set("call", id)
-    else params.delete("call")
-    params.delete("from")
-    const search = params.toString()
-    navigate({ pathname, search: search ? `?${search}` : "" }, { replace: true })
+    navigate({ pathname, search: panelSearch(window.location.search, id) }, { replace: true, state: id ? null : { caughtUp: doneId } })
   }
+  // After Done or Later, focus goes to the panel the next caller now fills, not their Done button.
+  const focusPanel = () => requestAnimationFrame(() => {
+    const panel = document.getElementById("detail")
+    const active = document.activeElement
+    if (panel && (!active || active === document.body || panel.contains(active))) panel.focus({ preventScroll: true })
+  })
   if (!call) {
+    if (caughtUp) {
+      return (
+        <Card>
+          <CardContent className="grid gap-1.5">
+            <h2 className="text-lg font-semibold">You’re all caught up.</h2>
+            <p className="text-[15px] text-muted-foreground">Emergencies, callbacks and times to confirm show up here the moment a call ends.</p>
+          </CardContent>
+        </Card>
+      )
+    }
     return (
       <Card>
         <CardContent className="grid gap-1.5">
@@ -396,27 +428,36 @@ export function CallPanel({ call, task, tz, standalone, next }: { call: ApiCall 
   }
   const badge = urgency(task, call)
   const spam = call.outcome === "ignored_spam"
-  const facts: Array<[string, ReactNode]> = [
+  const facts: Array<[string, string]> = [
     phoneFact(call),
-    addressFact(call),
+    ["Address", call.fields.address?.trim() || "Not confirmed"],
     ["Called", compactDate(call.startedAt, tz)],
     ...(call.fields.requestedStart ? [[call.outcome === "booked" ? "Booked for" : "Asked for", compactDate(call.fields.requestedStart, tz)] as [string, string]] : []),
     ...(call.fields.equipmentDetails ? [["Equipment", call.fields.equipmentDetails] as [string, string]] : []),
     ...(call.fields.accessNotes ? [["Access", call.fields.accessNotes] as [string, string]] : []),
   ]
   const callId = call.id
-  const moves = wide && next ? { leave: () => openCall(next(callId)), back: () => openCall(callId) } : undefined
+  const moves: TaskMoves | undefined = wide && next ? {
+    leave: () => {
+      const to = next(callId)
+      openCall(to, callId)
+      focusPanel()
+    },
+    back: () => openCall(callId),
+    settle: () => requestAnimationFrame(() => requestAnimationFrame(revealLitRow)),
+  } : undefined
   return (
-    <section id="detail" aria-label="Open call" className={cn("grid gap-4 rounded-xl border bg-card p-4 lg:max-h-[calc(100dvh-7rem)] lg:overflow-y-auto lg:p-5", PANEL_EDGE)}>
+    <section id="detail" aria-label="Open call" tabIndex={linked ? -1 : undefined} className={cn("grid gap-4 rounded-xl border bg-card p-4 lg:max-h-[calc(100dvh-7rem)] lg:overflow-y-auto lg:p-5", linked && cn(PANEL_EDGE, "outline-none"))}>
       {standalone && <Button variant="ghost" className="-ml-2 h-11 w-fit text-base lg:hidden" asChild><Link to={base}>← Calls</Link></Button>}
-      {/* The same yellow as the lit row: the header band names the caller whose row is lit. */}
-      <div className="-mx-4 -mt-4 rounded-tr-xl bg-accent px-4 pt-4 pb-3 lg:-mx-5 lg:-mt-5 lg:px-5 lg:pt-5">
-        <CallHeader call={call} tone={badge.tone} label={badge.label} />
-      </div>
+      {linked ? (
+        // The same yellow as the lit row: the header band names the caller whose row is lit.
+        <div className="-mx-4 -mt-4 rounded-tr-xl bg-accent px-4 pt-4 pb-3 lg:-mx-5 lg:-mt-5 lg:px-5 lg:pt-5">
+          <CallHeader call={call} tone={badge.tone} label={badge.label} />
+        </div>
+      ) : <CallHeader call={call} tone={badge.tone} label={badge.label} />}
       <SafetyNote call={call} />
       {spam && <SpamNote />}
-      <ActionBar call={call} extra={spam ? [] : tiles(task, undefined, moves)} />
-      <CallBackNote call={call} />
+      <ActionBar call={call} extra={spam ? [] : tiles(task, undefined, moves)} reachNote={<CallBackNote call={call} />} />
       <Facts rows={facts} />
       <div className="grid gap-3">
         <h3 className="text-[17px] font-semibold">Call transcript</h3>
