@@ -10,7 +10,7 @@ import { createRequestHandler } from "../src/http/app.js";
 type Call = { url: string; method: string; body: Record<string, unknown> | null; key: string | undefined };
 
 /** A fake Telnyx that sells numbers, creates assistants and routes numbers, recording every request. */
-function fakeTelnyx(options: { available?: Record<string, string[]>; orderStatuses?: string[]; failAssistantCreate?: boolean | undefined; carriers?: Record<string, { name: string; type: string }> | undefined } = {}) {
+function fakeTelnyx(options: { available?: Record<string, string[]>; orderStatuses?: string[]; failAssistantCreate?: boolean | undefined; failConnect?: boolean | undefined; carriers?: Record<string, { name: string; type: string }> | undefined } = {}) {
   const calls: Call[] = [];
   const orders = [...(options.orderStatuses ?? ["pending", "success"])];
   const owned = new Map<string, { id: string; connection_id: string | null; screening?: string }>();
@@ -53,6 +53,7 @@ function fakeTelnyx(options: { available?: Record<string, string[]>; orderStatus
     }
     const patch = /\/phone_numbers\/(num-\d+)$/.exec(url);
     if (patch && method === "PATCH") {
+      if (options.failConnect) return json({ errors: [{ detail: "Telnyx internal routing detail" }] }, 500);
       const entry = [...owned.values()].find((value) => value.id === patch[1])!;
       entry.connection_id = (body?.connection_id as string | null) ?? null;
       return json({ data: { connection_id: entry.connection_id } });
@@ -127,8 +128,8 @@ describe("owner one-tap go-live", () => {
   let server: Server | null = null;
   afterEach(async () => { if (server) await new Promise<void>((resolve) => server!.close(() => resolve())); server = null; });
 
-  async function shop(options: { live?: boolean; failAssistantCreate?: boolean | undefined; env?: Record<string, string>; carriers?: Record<string, { name: string; type: string }> | undefined } = {}) {
-    const telnyx = fakeTelnyx({ available: { "941": ["+19415550123", "+19415550124"] }, failAssistantCreate: options.failAssistantCreate, carriers: options.carriers });
+  async function shop(options: { live?: boolean; failAssistantCreate?: boolean | undefined; failConnect?: boolean | undefined; env?: Record<string, string>; carriers?: Record<string, { name: string; type: string }> | undefined } = {}) {
+    const telnyx = fakeTelnyx({ available: { "941": ["+19415550123", "+19415550124"] }, failAssistantCreate: options.failAssistantCreate, failConnect: options.failConnect, carriers: options.carriers });
     const store = new InMemoryStore();
     await store.saveConfig(createDemoConfig());
     const clock = { at: new Date("2026-11-23T15:00:00Z"), now() { return this.at; } };
@@ -253,6 +254,17 @@ describe("owner one-tap go-live", () => {
     expect(response.status).toBe(409);
     expect(((await response.json()) as { error: string }).error).toContain("waiting on carrier approval");
     expect(telnyx.calls.some((call) => call.url.includes("/number_orders"))).toBe(false);
+  });
+
+  it("never shows the owner the phone company's name or raw error when connecting the line fails", async () => {
+    const { baseUrl, cookie, goLive } = await shop({ failConnect: true });
+    const location = decodeURIComponent((await goLive()).headers.get("location")!);
+    expect(location).toContain("couldn’t connect your Front Office number");
+    expect(location).not.toMatch(/telnyx/i);
+    const { csrf } = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie } })).json() as { csrf: string };
+    const activation = await (await fetch(`${baseUrl}/api/app/onboarding/activate`, { method: "POST", headers: { cookie, "content-type": "application/json", "x-csrf-token": csrf }, body: "{}" })).json() as { activation: { status: string; message: string } };
+    expect(activation.activation.status).toBe("failed");
+    expect(activation.activation.message).not.toMatch(/telnyx/i);
   });
 
   it("shows a retry message when Telnyx is down and buys nothing", async () => {
