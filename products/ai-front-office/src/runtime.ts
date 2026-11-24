@@ -112,7 +112,7 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
         ...(env.PROVIDER_TEST_MODE ? { allowedDestinations: new Set(Object.values(destinations)) } : {}),
       })
     : null;
-  const sender = new NotificationRouter(smsSender, emailSender, pushSender, voiceSender);
+  const sender = new NotificationRouter(smsSender, emailSender, pushSender, voiceSender, new Set(env.PUBLIC_DEMO_TENANT_ID ? [env.PUBLIC_DEMO_TENANT_ID] : []));
   return {
     store,
     calendar,

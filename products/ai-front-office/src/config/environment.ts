@@ -11,6 +11,12 @@ const schema = z.object({
   PORT: z.coerce.number().int().positive().default(8787),
   PUBLIC_BASE_URL: z.string().url().default("http://127.0.0.1:8787"),
   DEFAULT_TENANT_ID: z.string().min(1).default("demo"),
+  /**
+   * The public demo line (anyone may call it to hear Front Office). It keeps answering outside provider test mode
+   * without the paid/readiness gate, and never texts, emails or calls anyone. Only a tenant with no owner account
+   * qualifies, so a real shop can never be exempted by mistake.
+   */
+  PUBLIC_DEMO_TENANT_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).max(100).optional()),
   DEFAULT_BUSINESS_NAME: z.string().min(1).max(120).default("Your Service Business"),
   DEFAULT_TIMEZONE: z.string().min(1).default("America/Chicago"),
   DEMO_MODE: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
