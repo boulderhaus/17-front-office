@@ -18,7 +18,7 @@ describe.skipIf(!databaseUrl)("PostgreSQL grace-line lookups", () => {
   });
   afterAll(async () => { await Promise.all([store?.close(), pool?.end()]); });
 
-  it("finds a shop by the Front Office number callers dial, and only while it owns it", async () => {
+  it("finds a shop by the Call Otto number callers dial, and only while it owns it", async () => {
     const tenantId = `shop_${randomUUID()}`;
     const number = `+1555555${String(Math.floor(Math.random() * 10_000)).padStart(4, "0")}`;
     await store.saveConfig(createDemoConfig(tenantId));

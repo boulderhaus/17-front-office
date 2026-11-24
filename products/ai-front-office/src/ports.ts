@@ -26,7 +26,7 @@ export interface Store {
   getIntegrationSecret(tenantId: string, provider: string, key: string): Promise<string | null>;
   saveIntegrationSecret(tenantId: string, provider: string, key: string, value: string): Promise<void>;
   deleteIntegrationSecret(tenantId: string, provider: string, key: string): Promise<void>;
-  /** The shop whose provisioned Front Office number (telnyx/inbound_number) is this E.164 number. */
+  /** The shop whose provisioned Call Otto number (telnyx/inbound_number) is this E.164 number. */
   getTenantIdByInboundNumber(phoneNumber: string): Promise<string | null>;
   /** Fill the number lookup for rows saved before it existed. Idempotent; duplicate numbers stay unindexed. */
   backfillInboundNumberLookups(): Promise<{ updated: number; conflicts: number }>;

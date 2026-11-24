@@ -10,7 +10,7 @@ import type { Clock, Store } from "../ports.js";
 import { redactError } from "./retry.js";
 
 /**
- * Billing grace line. When a shop's subscription lapses we keep its Front Office number answering
+ * Billing grace line. When a shop's subscription lapses we keep its Call Otto number answering
  * with a voicemail (callers forwarded from the business phone never hit a dead line), text the
  * owner each message, remind them on day 23, and release the number on day 30.
  */
@@ -252,8 +252,8 @@ export class GraceLineService {
       const daysLeft = Math.max(1, Math.ceil((GRACE_DAYS * DAY_MS - elapsed) / DAY_MS));
       const result = await queueOwnerMessage(this.context, {
         tenantId,
-        sms: `Front Office for ${config.businessName}: in ${daysLeft} days this number stops working and forwarded calls will hit a dead line. Update billing in your dashboard to keep it, or ${lowerFirst(off)}`,
-        emailSubject: `Your Front Office number stops working in ${daysLeft} days`,
+        sms: `Call Otto for ${config.businessName}: in ${daysLeft} days this number stops working and forwarded calls will hit a dead line. Update billing in your dashboard to keep it, or ${lowerFirst(off)}`,
+        emailSubject: `Your Call Otto number stops working in ${daysLeft} days`,
         idempotencyBase: `grace-reminder:${tenantId}:${startedAt}`,
       });
       if (result.queued > 0) {

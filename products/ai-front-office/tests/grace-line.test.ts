@@ -164,9 +164,9 @@ describe("billing grace line", () => {
       const sent = h.outbox("voicemail:");
       expect(sent).toHaveLength(1);
       expect(sent[0]!.channel).toBe("sms");
-      expect(sent[0]!.body).toContain("Front Office voicemail for Synthetic Heating: (555) 555-0123 said: “Hi, this is Pat. Our furnace stopped");
+      expect(sent[0]!.body).toContain("Call Otto voicemail for Synthetic Heating: (555) 555-0123 said: “Hi, this is Pat. Our furnace stopped");
       expect(sent[0]!.body).toContain("…”");
-      expect(sent[0]!.body).toContain("Your Front Office plan is paused; to stop forwarding");
+      expect(sent[0]!.body).toContain("Your Call Otto plan is paused; to stop forwarding");
       expect(h.outbox("voicemail-fallback:")[0]!.state).toBe("cancelled");
 
       // Unsigned, or bound to another call, is refused and queues nothing.

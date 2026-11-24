@@ -235,7 +235,7 @@ describe("period-end overage respects Unlimited", () => {
 
   it("speaks fair use in the usage alert when Unlimited is on", () => {
     const text = usageAlertText({ includedCalls: 60, overageCentsPerCall: 75, unlimitedCalls: true }, { billableCalls: 140 }, 75);
-    expect(text.sms).toBe("Front Office: you've answered 140 of your 180 fair-use calls this month. Past that, calls are $0.75 each. Change plans in Settings.");
+    expect(text.sms).toBe("Otto: you've answered 140 of your 180 fair-use calls this month. Past that, calls are $0.75 each. Change plans in Settings.");
     expect(text.sms).toMatch(/^[A-Za-z0-9 !"#%&'()*+,\-./:;<=>?@$_\n]+$/);
   });
 });

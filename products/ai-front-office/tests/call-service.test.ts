@@ -71,7 +71,7 @@ describe("call outcomes", () => {
     expect(calendar.events).toHaveLength(0);
     expect((await new OutboxWorker(store, sender, clock).runOnce()).sent).toBe(2);
     expect(sender.sent[0]?.priority).toBe("high");
-    expect(sender.sent[0]?.body).toMatch(/^Front Office: URGENT: /);
+    expect(sender.sent[0]?.body).toMatch(/^Otto: URGENT: /);
   });
 
   it("alerts on an emergency before confirmation or fee gates", async () => {
@@ -85,7 +85,7 @@ describe("call outcomes", () => {
     expect(result.status).toBe("pending");
     expect(calendar.events).toHaveLength(0);
     await new OutboxWorker(store, sender, clock).runOnce();
-    expect(sender.sent[0]?.body).toMatch(/^Front Office: URGENT: /);
+    expect(sender.sent[0]?.body).toMatch(/^Otto: URGENT: /);
   });
 
   it("counts a direct booking only after read-back, complete evidence, and customer confirmation queue", async () => {
@@ -179,7 +179,7 @@ describe("call outcomes", () => {
     const result = await service.queueHumanHandoff({ tenantId: "demo", providerCallId: "human", fromNumber: "+15555550101", callerName: "Angry Caller", problemDescription: "I need a person now" });
     expect(result.transferAvailable).toBe(false);
     await new OutboxWorker(store, sender, clock).runOnce();
-    expect(sender.sent[0]?.body).toMatch(/^Front Office: URGENT: caller asked for you\nNew call: /);
+    expect(sender.sent[0]?.body).toMatch(/^Otto: URGENT: caller asked for you\nNew call: /);
   });
 
   it("delivers a later urgent alert before an earlier routine alert", async () => {
@@ -188,7 +188,7 @@ describe("call outcomes", () => {
     await service.triageCall({ tenantId: "demo", providerCallId: "urgent-priority", fromNumber: "+15555550101", problemDescription: "No heat and an infant is in the house" });
     expect((await new OutboxWorker(store, sender, clock).runOnce(1)).sent).toBe(1);
     expect(sender.sent[0]?.priority).toBe("high");
-    expect(sender.sent[0]?.body).toMatch(/^Front Office: URGENT: /);
+    expect(sender.sent[0]?.body).toMatch(/^Otto: URGENT: /);
   });
 
   it("does not book an address outside the configured service area", async () => {
@@ -299,6 +299,13 @@ describe("call outcomes", () => {
   it("does not escalate a routine call because the assistant asked a safety screening question", async () => {
     await start("screening");
     const call = await service.finalize({ ...summary("screening", { problemDescription: "Annual AC tune-up" }), transcript: "AI assistant: Any smoke, gas smell, or burning odor?\nCaller: No, just a tune-up." });
+    expect(call.emergency?.severity).toBe("routine");
+    expect(call.outcome).not.toBe("handoff_queued");
+  });
+
+  it("reads Otto's lines (the transcript label since the Call Otto rename) as the assistant, not the caller", async () => {
+    await start("screening-otto");
+    const call = await service.finalize({ ...summary("screening-otto", { problemDescription: "Annual AC tune-up" }), transcript: "Caller: Hi, I need a tune-up.\nOtto: Any smoke, gas smell, or burning odor?\nCaller: No, just a tune-up." });
     expect(call.emergency?.severity).toBe("routine");
     expect(call.outcome).not.toBe("handoff_queued");
   });

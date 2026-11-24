@@ -8,7 +8,7 @@ import { pushBody, type PushMessage } from "../adapters/web-push.js";
 /**
  * The owner's new-call email: the same words as the owner text, so an owner without texts (texting not approved
  * yet, or never opted in) still hears about every lead. Subject is the text's first line:
- * "Front Office: URGENT: no AC" or "Front Office: New call: Maria".
+ * "Otto: URGENT: no AC" or "Otto: New call: Maria".
  */
 export function ownerCallEmail(smsBody: string, settingsUrl: string): string {
   const lines = smsBody.replace(new RegExp(`^${OWNER_SMS_PREFIX}`), "").split("\n");
@@ -38,7 +38,7 @@ export function ownerCallPushMessage(smsBody: string, callId: string, urgent: bo
   const content = (blank === -1 ? lines : lines.slice(0, blank)).map((line) => line.replace(/^- /, "").trim()).filter(Boolean);
   return {
     title: content[0] ?? "New call",
-    body: content.slice(1).join(" · ") || "Open Front Office to see the call.",
+    body: content.slice(1).join(" · ") || "Open Call Otto to see the call.",
     url: `/app/calls/${encodeURIComponent(callId)}`,
     tag: `call:${callId}`,
     urgent,
@@ -59,15 +59,15 @@ export function ownerPushNotification(input: { tenantId: string; callId: string 
 
 /**
  * What the urgent owner call says, in plain spoken words:
- * "Front Office: urgent call from Maria, no AC, wants someone today. Check your Front Office app."
+ * "Call Otto: urgent call from Maria, no AC, wants someone today. Check your Call Otto app."
  */
 export function urgentCallSpeech(call: Pick<CallRecord, "fields" | "emergency">, wants: string | null): string {
   const name = callerFirstName(call.fields.callerName);
   const who = name === "Unknown caller" ? "a caller" : name;
   const evidence = call.emergency?.evidence.find((item) => item.trim());
   const what = (call.fields.problemDescription || evidence || "").replace(/\s+/g, " ").trim().slice(0, 90).replace(/[.,;:\s]+$/, "");
-  const parts = [`Front Office: urgent call from ${who}`, what, wants ? wants.replace(/^Wants/, "wants") : null].filter(Boolean);
-  return `${parts.join(", ")}. Check your Front Office app.`;
+  const parts = [`Call Otto: urgent call from ${who}`, what, wants ? wants.replace(/^Wants/, "wants") : null].filter(Boolean);
+  return `${parts.join(", ")}. Check your Call Otto app.`;
 }
 
 /** One urgent owner call per call record, to the owner's mobile. */
@@ -101,7 +101,7 @@ export function lineLiveNotifications(input: { tenantId: string; businessName: s
   if (input.pushOn) out.push(ownerPushNotification({ tenantId: input.tenantId, callId: null, keyBase, now: input.now, message: { title: "Your line is live", body: `${number} now answers for ${input.businessName}.`, url: "/app", tag: "line-live" } }));
   if (input.email) {
     out.push({ ...common, id: randomUUID(), channel: "email", destinationRef: `email:${input.email}`, idempotencyKey: `${keyBase}:email`,
-      body: formatEmailBody("Your Front Office line is live", `Your Front Office number ${number} now answers for ${input.businessName}.\n\nIf you haven't yet, send your missed calls to it: ${base}/app/start?step=forward\n\nSee your calls: ${base}/app`) });
+      body: formatEmailBody("Your Call Otto line is live", `Your Call Otto number ${number} now answers for ${input.businessName}.\n\nIf you haven't yet, send your missed calls to it: ${base}/app/start?step=forward\n\nSee your calls: ${base}/app`) });
   }
   for (const destinationRef of input.smsRefs) {
     out.push({ ...common, id: randomUUID(), channel: "sms", destinationRef, idempotencyKey: `${keyBase}:sms:${destinationRef}`,

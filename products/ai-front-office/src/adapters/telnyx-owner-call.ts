@@ -104,7 +104,7 @@ export function ownerAlertState(clientState: unknown): OwnerAlertState | null {
 }
 
 export const OWNER_CALL_STOP_PROMPT = "To stop these calls, press 9.";
-export const OWNER_CALL_STOPPED = "Done. Front Office won't call you about emergencies anymore. You can turn these calls back on in Settings. Goodbye.";
+export const OWNER_CALL_STOPPED = "Done. Call Otto won't call you about emergencies anymore. You can turn these calls back on in Settings. Goodbye.";
 const VOICE = { voice: "AWS.Polly.Joanna", language: "en-US" };
 
 /**

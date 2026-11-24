@@ -112,7 +112,7 @@ describe("Telnyx self-serve provisioning", () => {
     expect(id).toBe("assistant-1");
     const create = telnyx.calls.find((call) => call.url.endsWith("/ai/assistants") && call.method === "POST")!;
     expect(create.key).toBe("front-office-assistant-t1");
-    expect(create.body).toMatchObject({ name: "Front Office · Gulf Air", instructions: "shop prompt", model: "synthetic/model", voice_settings: { voice: "synthetic-voice" } });
+    expect(create.body).toMatchObject({ name: "Call Otto · Gulf Air", instructions: "shop prompt", model: "synthetic/model", voice_settings: { voice: "synthetic-voice" } });
     expect(create.body).not.toHaveProperty("promote_to_main");
   });
 
@@ -241,7 +241,7 @@ describe("owner one-tap go-live", () => {
     const notices = () => [...store.notifications.values()].filter((item) => item.idempotencyKey.startsWith(`line-live:${account.tenantId}:`));
     const email = notices().find((item) => item.channel === "email")!;
     expect(email.destinationRef).toBe("email:owner@synthetic.example");
-    expect(email.body).toContain("Subject: Your Front Office line is live");
+    expect(email.body).toContain("Subject: Your Call Otto line is live");
     expect(email.body).toContain("(941) 555-0123 now answers for Gulf Air");
     expect(notices().some((item) => item.channel === "sms")).toBe(true);
     await handler.runActivationJobs();
@@ -307,7 +307,7 @@ describe("owner one-tap go-live", () => {
   it("never shows the owner the phone company's name or raw error when connecting the line fails", async () => {
     const { baseUrl, cookie, goLive } = await shop({ failConnect: true });
     const location = decodeURIComponent((await goLive()).headers.get("location")!);
-    expect(location).toContain("couldn’t connect your Front Office number");
+    expect(location).toContain("couldn’t connect your Call Otto number");
     expect(location).not.toMatch(/telnyx/i);
     const { csrf } = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie } })).json() as { csrf: string };
     const activation = await (await fetch(`${baseUrl}/api/app/onboarding/activate`, { method: "POST", headers: { cookie, "content-type": "application/json", "x-csrf-token": csrf }, body: "{}" })).json() as { activation: { status: string; message: string } };
@@ -318,7 +318,7 @@ describe("owner one-tap go-live", () => {
   it("shows a retry message when Telnyx is down and buys nothing", async () => {
     const { goLive, telnyx } = await shop({ failAssistantCreate: true });
     const location = decodeURIComponent((await goLive()).headers.get("location")!);
-    expect(location).toContain("couldn't set up your Front Office number");
+    expect(location).toContain("couldn't set up your Call Otto number");
     expect(telnyx.calls.some((call) => call.url.includes("/number_orders"))).toBe(false);
   });
 
@@ -368,7 +368,7 @@ describe("owner one-tap go-live", () => {
       expect((await dashboard()).line.business.plan?.on).toBe("**004*19415550123#");
     });
 
-    it("refuses the Front Office number itself and a bad number", async () => {
+    it("refuses the Call Otto number itself and a bad number", async () => {
       const { api } = await liveShop();
       expect((await api("/api/app/line/business-number", { number: "+19415550123" })).status).toBe(400);
       expect((await api("/api/app/line/business-number", { number: "555" })).status).toBe(400);

@@ -20,7 +20,7 @@ export class TelnyxForwardingClient {
 
   /**
    * Ring the owner's business number from our line. If forwarding works, the call lands on the
-   * shop's Front Office number and the assistant webhook marks the check passed. The call ends by
+   * shop's Call Otto number and the assistant webhook marks the check passed. The call ends by
    * itself after `time_limit_secs`.
    */
   async placeCheckCall(input: { connectionId: string; from: string; to: string; webhookUrl: string; tenantId: string }): Promise<string | null> {

@@ -49,7 +49,7 @@
 }
 
 :root {
-    /* Front Office brand on shadcn tokens: warm paper, ink, highlighter yellow. */
+    /* Call Otto brand on shadcn tokens: warm paper, ink, highlighter yellow. */
     --brand-yellow: #e9f447;
     --brand-ink: #0b2545;
     --brand-paper: #faf8f1;

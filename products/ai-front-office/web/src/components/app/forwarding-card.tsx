@@ -73,7 +73,7 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
       <div className="grid gap-4 px-5 py-5">
         <header className="flex items-start justify-between gap-3">
           <div className="grid gap-0.5">
-            <small className="text-[13px] font-medium text-muted-foreground">Your new Front Office number</small>
+            <small className="text-[13px] font-medium text-muted-foreground">Your new Call Otto number</small>
             {line.number ? (
               <strong className="tabular text-xl font-semibold tracking-tight"><Phone className="mr-1.5 inline size-4 align-[-2px]" />{formatPhone(line.number)}</strong>
             ) : (
@@ -174,7 +174,7 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
 
             {confirmed && (
               <div className="grid gap-2 text-sm">
-                <p>Calls you miss on {formatPhone(business.number!)} now come to Front Office.</p>
+                <p>Calls you miss on {formatPhone(business.number!)} now come to Call Otto.</p>
                 {plan?.off && (
                   <details className="group">
                     <summary className="cursor-pointer font-semibold underline underline-offset-4">How to turn forwarding off</summary>

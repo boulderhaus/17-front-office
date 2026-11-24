@@ -63,7 +63,7 @@ export function StartPage() {
     // Run once per visit, as soon as the dashboard is loaded.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dashboard])
-  useEffect(() => { document.title = "Set up · Front Office" }, [])
+  useEffect(() => { document.title = "Set up · Call Otto" }, [])
   // Pin the step once paid, so a background refresh (e.g. forwarding just confirmed) never jumps the screen.
   useEffect(() => {
     if (!dashboard?.paid || params.get("step")) return
@@ -92,7 +92,7 @@ export function StartPage() {
             {back ? (
               <button type="button" aria-label={back === "calls" ? "Back to Calls" : "Back"} onClick={() => (back === "calls" ? navigate("/app") : go(back))} className="-ml-2 grid size-11 shrink-0 place-items-center rounded-full text-brand-ink hover:bg-brand-ink/5 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"><ArrowLeft className="size-6" /></button>
             ) : null}
-            <span className="flex items-center gap-2.5"><BrandMark /><span className="text-lg font-semibold tracking-tight">Front <em className="font-serif italic">Office</em></span></span>
+            <span className="flex items-center gap-2.5"><BrandMark /><span className="text-lg font-semibold tracking-tight">Call <em className="font-serif italic">Otto</em></span></span>
           </span>
           <span className="truncate text-[13px] font-medium text-muted-foreground">{dashboard.shop.businessName}</span>
         </div>
@@ -141,7 +141,7 @@ function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDa
   const shown = withUnlimited && plan?.unlimited ? plan.unlimited : plan
   return (
     <>
-      <Heading title={<span className="marker">Add a card to turn on your line</span>}>Your Front Office line turns on the moment you’re back here. No extra button.</Heading>
+      <Heading title={<span className="marker">Add a card to turn on your line</span>}>Your Call Otto line turns on the moment you’re back here. No extra button.</Heading>
       {note && !cancelled && <p role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">{note}</p>}
       {cancelled && <p role="status" className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-950">No charge was made. Add a card whenever you’re ready.</p>}
       <Card className="relative overflow-hidden border-brand-ink/15">
@@ -241,7 +241,7 @@ function ActivationNote({ activation, dashboard, retry }: { activation: Activati
 function ForwardStep({ dashboard, next }: { dashboard: ApiDashboard; next: () => void }) {
   return (
     <>
-      <Heading oneLine title="Send missed calls to Front Office">Your phone still rings first. Only calls you miss come here.</Heading>
+      <Heading oneLine title="Send missed calls to Call Otto">Your phone still rings first. Only calls you miss come here.</Heading>
       <ForwardingCard
         dashboard={dashboard}
         footer={({ confirmed }) => (confirmed || (!dashboard.line.number && dashboard.line.business.number) ? (
@@ -254,7 +254,7 @@ function ForwardStep({ dashboard, next }: { dashboard: ApiDashboard; next: () =>
       {!(dashboard.line.confirmedAt || (!dashboard.line.number && dashboard.line.business.number)) && (
         <p className="px-1 text-sm text-muted-foreground">
           <button type="button" className="inline-flex min-h-11 items-center font-semibold text-brand-ink underline underline-offset-4" onClick={next}>Skip for now</button>
-          <span className="block">Front Office won’t get your missed calls until forwarding is on.</span>
+          <span className="block">Call Otto won’t get your missed calls until forwarding is on.</span>
         </p>
       )}
     </>

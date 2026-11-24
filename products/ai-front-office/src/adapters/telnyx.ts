@@ -299,7 +299,7 @@ function collectToolArguments(messages: TelnyxConversationEndedEnvelope["data"][
 function readableTranscript(messages: TelnyxConversationEndedEnvelope["data"]["payload"]["messages"]): string | null {
   const lines = messages.flatMap((message) => {
     if (!message.content?.trim() || (message.role !== "user" && message.role !== "assistant")) return [];
-    return [`${message.role === "user" ? "Caller" : "AI assistant"}: ${message.content.trim()}`];
+    return [`${message.role === "user" ? "Caller" : "Otto"}: ${message.content.trim()}`];
   });
   return lines.length > 0 ? lines.join("\n") : null;
 }
@@ -344,7 +344,7 @@ export class TelnyxSmsAdapter implements NotificationPort {
     if (await this.options.isOptedOut?.(notification.tenantId, to)) throw new Error("Destination has opted out of SMS");
     const from = notification.senderRef === "founder" ? this.options.founderFromNumber : this.options.fromNumber;
     if (!from) throw new Error("Founder welcome sender is not configured");
-    // Owner texts (not texts to callers, not the founder's personal note) name Front Office first, and the first
+    // Owner texts (not texts to callers, not the founder's personal note) name Call Otto first, and the first
     // one a number ever gets ends with the STOP line. A text that already has STOP language does not use up the notice.
     let text = notification.body;
     if (!direct && notification.senderRef !== "founder") {

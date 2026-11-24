@@ -8,7 +8,7 @@ import type { Store } from "../ports.js";
 export const OWNER_CALL_CONSENT_VERSION = "owner-urgent-calls-2026-11-23b";
 export const OWNER_CALL_CONSENT_LABEL = "Call my mobile with an automated message when a caller has an emergency (optional)";
 /** Shown in full beside the signup box and the Settings switch, so both record the same wording version. */
-export const OWNER_CALL_CONSENT_DETAIL = "By choosing this, you agree that Front Office by Dutchworks LLC may call this number with automated, artificial-voice messages about emergency calls to your business. Not required to sign up. Press 9 during a call, or turn it off in Settings, to stop.";
+export const OWNER_CALL_CONSENT_DETAIL = "By choosing this, you agree that Call Otto by Dutchworks LLC may call this number with automated, artificial-voice messages about emergency calls to your business. Not required to sign up. Press 9 during a call, or turn it off in Settings, to stop.";
 /** Integration secret (provider "notifications") holding the active consent; absent means no automated calls. */
 export const OWNER_CALL_CONSENT_KEY = "owner_call_consent";
 /** Every grant ever given and how it ended, kept after a stop as proof of the consent behind earlier calls. */

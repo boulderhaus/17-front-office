@@ -40,7 +40,7 @@ export interface ApiTask {
 }
 
 export interface ApiDashboard {
-  /** The shop's Front Office number and the carrier codes that forward the owner's business line to it. */
+  /** The shop's Call Otto number and the carrier codes that forward the owner's business line to it. */
   line: {
     number: string | null;
     mode: BusinessConfig["operationMode"];

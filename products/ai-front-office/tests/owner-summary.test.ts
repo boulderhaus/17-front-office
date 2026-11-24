@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryStore } from "../src/adapters/in-memory.js";
-import { ResendEmailAdapter } from "../src/adapters/resend.js";
+import { ResendEmailAdapter, resendFrom } from "../src/adapters/resend.js";
+import { demoEnvironment } from "../src/config/environment.js";
 import { OwnerSummaryService } from "../src/application/owner-summary-service.js";
 import { createDemoConfig } from "../src/domain/config.js";
 import type { CallRecord, CallbackTask, OutboxNotification } from "../src/domain/models.js";
@@ -74,10 +75,16 @@ describe("owner summaries", () => {
     expect(await run("pending_activation", null)).toBe(0);
   });
 
+  it("sends owner email as Call Otto from the configured address", () => {
+    expect(demoEnvironment({ RESEND_API_KEY: "re_synthetic", RESEND_FROM_EMAIL: "hello@callotto.example" }).RESEND_FROM_NAME).toBe("Call Otto");
+    expect(resendFrom("Call Otto", "hello@callotto.example")).toBe("Call Otto <hello@callotto.example>");
+    expect(() => demoEnvironment({ RESEND_FROM_NAME: "Bad <name>" })).toThrow();
+  });
+
   it("sends a plain-text Resend email with provider idempotency", async () => {
     const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({ id: "email_synthetic" }), { status: 200, headers: { "content-type": "application/json" } }));
     const fetcher = fetchMock as unknown as typeof fetch;
-    const sender = new ResendEmailAdapter({ apiKey: "re_synthetic_key", from: "Front Office <updates@example.com>", fetcher });
+    const sender = new ResendEmailAdapter({ apiKey: "re_synthetic_key", from: "Call Otto <updates@example.com>", fetcher });
     const notification: OutboxNotification = {
       id: "00000000-0000-4000-8000-000000000005", tenantId: "shop-summary", callId: null,
       channel: "email", destinationRef: "email:owner@synthetic.example",

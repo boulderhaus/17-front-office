@@ -23,7 +23,7 @@ export function ToneDot({ tone, label }: { tone: Tone; label: string }) {
 
 export function BrandMark({ className }: { className?: string }) {
   return (
-    <span className={cn("grid size-8 shrink-0 place-items-center rounded-lg bg-brand-yellow text-[13px] font-black tracking-tight text-brand-ink", className)}>FO</span>
+    <span className={cn("grid size-8 shrink-0 place-items-center rounded-lg bg-brand-yellow text-[13px] font-black tracking-tight text-brand-ink", className)}>CO</span>
   )
 }
 

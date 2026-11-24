@@ -31,7 +31,7 @@ function applicationServerKey(base64url: string): Uint8Array<ArrayBuffer> {
 }
 
 /**
- * "Turn on call alerts on this phone": a web push the moment Front Office takes a call, with a tap that opens it.
+ * "Turn on call alerts on this phone": a web push the moment Call Otto takes a call, with a tap that opens it.
  * iPhone needs the app on the Home Screen first (iOS 16.4 or newer); Android and computers are one tap.
  */
 export function CallAlertsCard({ className }: { className?: string }) {
@@ -103,7 +103,7 @@ export function CallAlertsCard({ className }: { className?: string }) {
         <BellRing className="mt-0.5 size-5 shrink-0 text-brand-ink" />
         <div className="grid gap-1">
           <strong className="text-[15px] font-semibold">Call alerts on this phone</strong>
-          <span className="text-[14px] text-muted-foreground">Your phone buzzes the moment Front Office takes a call. Tap the alert to see who called.</span>
+          <span className="text-[14px] text-muted-foreground">Your phone buzzes the moment Call Otto takes a call. Tap the alert to see who called.</span>
         </div>
       </div>
       {state === "checking" && <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Checking this phone…</p>}
@@ -116,17 +116,17 @@ export function CallAlertsCard({ className }: { className?: string }) {
       )}
       {state === "iphone-install" && (
         <div className="grid gap-2 rounded-lg bg-brand-paper px-3 py-3 text-[15px]">
-          <strong className="font-semibold">On iPhone, add Front Office to your Home Screen first:</strong>
+          <strong className="font-semibold">On iPhone, add Call Otto to your Home Screen first:</strong>
           <ol className="grid list-decimal gap-1.5 pl-5">
             <li>In Safari, tap the Share button <Share className="inline size-4 align-[-2px]" aria-label="Share" /> at the bottom of the screen.</li>
             <li>Tap <strong className="font-semibold">Add to Home Screen</strong>, then <strong className="font-semibold">Add</strong>.</li>
-            <li>Open Front Office from your Home Screen and tap <strong className="font-semibold">Turn on call alerts</strong> here.</li>
+            <li>Open Call Otto from your Home Screen and tap <strong className="font-semibold">Turn on call alerts</strong> here.</li>
           </ol>
           <span className="text-[13px] text-muted-foreground">Needs iPhone software 16.4 or newer.</span>
         </div>
       )}
-      {state === "blocked" && <p className="rounded-lg bg-amber-50 px-3 py-2.5 text-[14px] text-amber-950">Alerts are blocked for Front Office on this phone. Turn on notifications for it in your phone’s Settings, then come back here.</p>}
-      {state === "unsupported" && <p className="text-[14px] text-muted-foreground">This browser can’t show call alerts. On Android, use Chrome. On iPhone, use Safari and add Front Office to your Home Screen.</p>}
+      {state === "blocked" && <p className="rounded-lg bg-amber-50 px-3 py-2.5 text-[14px] text-amber-950">Alerts are blocked for Call Otto on this phone. Turn on notifications for it in your phone’s Settings, then come back here.</p>}
+      {state === "unsupported" && <p className="text-[14px] text-muted-foreground">This browser can’t show call alerts. On Android, use Chrome. On iPhone, use Safari and add Call Otto to your Home Screen.</p>}
     </div>
   )
 }
