@@ -54,7 +54,7 @@ const runWorker = async (): Promise<void> => {
   workerActive = true;
   try {
     const result = await worker.runOnce();
-    if (result.sent + result.retried + result.dead > 0) logger({ level: "info", event: "outbox_cycle", ...result });
+    if (result.sent + result.retried + result.dead + result.held > 0) logger({ level: "info", event: "outbox_cycle", ...result });
     if (Date.now() >= nextRecoveryAt) {
       nextRecoveryAt = Date.now() + 30_000;
       for (const tenantId of await runtime.store.listTenantIds()) {

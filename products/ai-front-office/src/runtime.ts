@@ -88,6 +88,7 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
         isOptedOut: (tenantId, phone) => store.isSmsOptedOut(tenantId, phone),
         claimStopNotice: (phone, notificationId, firstAttempt) => store.claimSmsStopNotice(phone, notificationId, new Date().toISOString(), firstAttempt),
         webhookUrl: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx`,
+        textingApproved: env.TELNYX_MESSAGING_APPROVED,
         ...(env.PROVIDER_TEST_MODE ? { allowedDirectDestinations: new Set(Object.values(destinations)) } : {}),
       })
     : null;

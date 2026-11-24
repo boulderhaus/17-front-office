@@ -157,6 +157,17 @@ export interface NotificationPort {
   send(notification: OutboxNotification): Promise<{ providerReceipt: string }>;
 }
 
+/**
+ * The sender refused on purpose and must not be retried: texting is not approved by the carriers yet (10DLC),
+ * so an owner or caller text is held, never sent. The outbox records it as "held" and moves on.
+ */
+export class NotificationHeldError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "NotificationHeldError";
+  }
+}
+
 export interface Clock {
   now(): Date;
 }

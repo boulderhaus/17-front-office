@@ -170,7 +170,9 @@ describe("operational safety", () => {
     const env = loadEnvironment(base);
     const report = buildActivationReport({ env, config: createDemoConfig(), googleConnected: false, ownerPhoneConfigured: false });
     expect(report.go).toBe(false);
-    expect(report.blocking.map((item) => item.id)).toEqual(expect.arrayContaining(["telnyx_voice", "telnyx_sms", "sms_compliance", "calendar", "owner_phone", "live_proof"]));
+    expect(report.blocking.map((item) => item.id)).toEqual(expect.arrayContaining(["telnyx_voice", "telnyx_sms", "calendar", "owner_phone", "live_proof"]));
+    // Texting approval warns but never blocks voice: texts are held until it lands.
+    expect(report.checks.find((item) => item.id === "sms_compliance")?.status).toBe("warn");
     expect(() => loadEnvironment({ ...base, PROVIDER_TEST_MODE: "true" })).toThrow("PROVIDER_TEST_MODE requires");
     expect(() => loadEnvironment({ ...base, DATA_ENCRYPTION_KEY: "wrong-format" })).toThrow("DATA_ENCRYPTION_KEY must decode to exactly 32 bytes");
   });

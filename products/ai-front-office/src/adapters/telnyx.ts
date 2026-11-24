@@ -2,7 +2,7 @@ import { createHash, createPublicKey, verify } from "node:crypto";
 import { z } from "zod";
 import { withTimeout } from "../application/retry.js";
 import type { CallSummaryInput, CollectedCallFields, OutboxNotification } from "../domain/models.js";
-import type { NotificationPort } from "../ports.js";
+import { NotificationHeldError, type NotificationPort } from "../ports.js";
 import { brandOwnerSms, hasStopLanguage, withOwnerSmsCompliance } from "../domain/owner-sms.js";
 
 const toolCallSchema = z.object({
@@ -315,6 +315,11 @@ interface TelnyxSmsOptions {
   messagingProfileId?: string;
   resolveDestination: (tenantId: string, reference: string) => Promise<string | null>;
   allowedDirectDestinations?: ReadonlySet<string>;
+  /**
+   * Carrier approval for texting (TELNYX_MESSAGING_APPROVED). Until then nothing is sent, except in provider
+   * test mode to the allowlisted test numbers (allowedDirectDestinations): every other text is held.
+   */
+  textingApproved: boolean;
   isOptedOut?: (tenantId: string, phone: string) => Promise<boolean>;
   /** Claims a number's one-time "Reply STOP to opt out" line for this notification (see Store.claimSmsStopNotice). */
   claimStopNotice?: (phone: string, notificationId: string, firstAttempt: boolean) => Promise<boolean>;
@@ -333,6 +338,9 @@ export class TelnyxSmsAdapter implements NotificationPort {
     }
     const to = direct ?? await this.options.resolveDestination(notification.tenantId, notification.destinationRef);
     if (!to || !isAllowedUsNumber(to)) throw new Error(`No valid US phone number is configured for destination reference ${notification.destinationRef}`);
+    if (!this.options.textingApproved && !this.options.allowedDirectDestinations?.has(to)) {
+      throw new NotificationHeldError("Texting is not approved yet; text held, not sent");
+    }
     if (await this.options.isOptedOut?.(notification.tenantId, to)) throw new Error("Destination has opted out of SMS");
     const from = notification.senderRef === "founder" ? this.options.founderFromNumber : this.options.fromNumber;
     if (!from) throw new Error("Founder welcome sender is not configured");
