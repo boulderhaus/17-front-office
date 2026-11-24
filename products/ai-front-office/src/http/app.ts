@@ -1093,6 +1093,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         if (error instanceof HttpError && error.message.startsWith("Live provider prerequisites")) {
           throw new HttpError(409, "New lines are waiting on carrier approval. Your setup is saved; turn your line on here once it clears.");
         }
+        if (error instanceof HttpError && error.message === ASSISTANT_TAKEN) throw new HttpError(409, OWNER_SETUP_STUCK);
         throw error;
       }
       const refreshed = await dependencies.store.getOwnerAccountById(account.id) ?? account;
@@ -1310,10 +1311,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         dependencies.store.getProviderRouteForTenant("telnyx", account.tenantId),
         dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
       ]);
-      if (!dependencies.env.TELNYX_API_KEY || !route || !inboundNumber) throw new HttpError(409, "The live phone route is not configured for this shop");
+      if (!dependencies.env.TELNYX_API_KEY || !route || !inboundNumber) throw new HttpError(409, "Your line isn’t set up yet, so it can’t be paused or turned on here.");
       liveRouteChange = voiceRouting(inboundNumber, route.externalId);
       await liveRouteChange.setPaused(updated.paused)
-        .catch(() => { throw new HttpError(502, "Telnyx could not change the live phone route; your setting was not changed"); });
+        .catch((error) => {
+          log({ level: "error", event: "owner_route_change_failed", tenantId: account.tenantId, paused: updated.paused, error: safeError(error) });
+          throw new HttpError(502, "We couldn’t change your line just now. Nothing was changed. Try again in a minute.");
+        });
     }
     try {
       await saveAssistantConfig(dependencies.store, dependencies.env, updated);
@@ -1408,7 +1412,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         // Show the reason on the dashboard instead of a bare error page.
         const reason = error.message.startsWith("Live provider prerequisites")
           ? "New lines are waiting on carrier approval. Your setup is saved; turn your line on here once it clears."
-          : error.message;
+          : error.message === ASSISTANT_TAKEN ? OWNER_SETUP_STUCK : error.message;
         return redirect(response, `/app?line_error=${encodeURIComponent(reason.slice(0, 200))}`);
       }
       return redirect(response, "/app?line=live");
@@ -1585,7 +1589,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
     const recordingMatch = /^\/app\/provider\/telnyx\/recordings\/(.+)$/.exec(url.pathname);
     if (method === "GET" && recordingMatch?.[1]) {
-      if (!recordingClient) throw new HttpError(503, "Telnyx recordings are not configured");
+      if (!recordingClient) throw new HttpError(503, "Recordings aren’t available right now.");
       let providerCallId: string;
       try {
         providerCallId = decodeURIComponent(recordingMatch[1]);
@@ -1857,6 +1861,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (error.message.startsWith("Live provider prerequisites")) {
         return { status: "waiting", message: "Your Front Office number is on its way. Phone carriers approve new business lines, which usually takes 1 to 3 business days. Everything else is saved, so keep going. We’ll turn it on the moment it clears." };
       }
+      if (error.message === ASSISTANT_TAKEN) return { status: "failed", message: OWNER_SETUP_STUCK };
       if (error.status === 409) return { status: "blocked", message: `${error.message.replace(/^This shop is missing: /, "Add your ")}. You can do that in Settings.` };
       return { status: "failed", message: error.message };
     }
@@ -1937,7 +1942,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       }
 
       const existingRoute = await dependencies.store.getProviderRoute("telnyx", assistantId);
-      if (existingRoute && existingRoute.tenantId !== account.tenantId) throw new HttpError(409, "That Telnyx assistant is already assigned to another tenant");
+      if (existingRoute && existingRoute.tenantId !== account.tenantId) {
+        log({ level: "error", event: "go_live_assistant_owned_elsewhere", tenantId: account.tenantId, otherTenantId: existingRoute.tenantId });
+        throw new HttpError(409, ASSISTANT_TAKEN);
+      }
       const liveRoute = voiceRouting(inboundNumber, assistantId);
       // Carrier spam screening: flag by default (the assistant checks intent sooner), reject only with
       // CALL_SCREENING_MODE=reject. Idempotent on every activation; a failure is logged and never blocks
@@ -1950,7 +1958,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       await dependencies.store.saveProviderRoute({ provider: "telnyx", externalId: assistantId, tenantId: account.tenantId, createdAt: existingRoute?.createdAt ?? now, updatedAt: now });
       try {
         await liveRoute.setPaused(false)
-          .catch(() => { throw new HttpError(502, "Telnyx could not verify and connect that assistant and phone number"); });
+          .catch((error) => {
+            log({ level: "error", event: "go_live_connect_failed", tenantId: account.tenantId, error: safeError(error) });
+            throw new HttpError(502, "We couldn’t connect your Front Office number just now. Try again in a minute.");
+          });
         await dependencies.store.saveConfig({ ...config, paused: false });
         await dependencies.store.updateOwnerAccountStatus(account.id, "active", now);
       } catch (error) {
@@ -2883,6 +2894,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (!report.go) throw new HttpError(503, "Commercial activation gate is not satisfied");
   }
 }
+
+/** Operator-facing (admin activation); owners see OWNER_SETUP_STUCK instead. */
+const ASSISTANT_TAKEN = "That Telnyx assistant is already assigned to another tenant";
+const OWNER_SETUP_STUCK = "We couldn’t finish setting up your line. We’ve been alerted and will fix it. Your setup is saved.";
 
 function toolForPath(pathname: string): VoiceToolName | null {
   return pathname.startsWith("/tools/") ? TOOL_ROUTES[pathname.slice(7)] ?? null : null;
