@@ -248,6 +248,16 @@ describe("owner one-tap go-live", () => {
     expect(notices()).toHaveLength(2);
   });
 
+  it("keeps scanning when one shop's data breaks the activation job", async () => {
+    const { store, account, handler } = await shop();
+    const list = store.listTenantIds.bind(store);
+    const lookup = store.getOwnerAccountByTenant.bind(store);
+    store.listTenantIds = async () => ["broken-shop", ...await list()];
+    store.getOwnerAccountByTenant = async (tenantId: string) => { if (tenantId === "broken-shop") throw new Error("bad row"); return lookup(tenantId); };
+    expect(await handler.runActivationJobs()).toMatchObject({ activated: 1 });
+    expect((await store.getOwnerAccountById(account.id))!.status).toBe("active");
+  });
+
   it("sends the opt-in confirmation once to owners who opted in before texting was approved", async () => {
     const before = await shop({ env: { TELNYX_MESSAGING_APPROVED: "false" } });
     const confirmations = (store: typeof before.store) => [...store.notifications.values()].filter((item) => item.idempotencyKey.startsWith("owner-optin:"));

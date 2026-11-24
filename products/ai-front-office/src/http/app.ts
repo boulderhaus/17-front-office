@@ -530,6 +530,12 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     // Not swallowed: a stale notice would leave every later text to this number without the STOP line.
     if (phone) await dependencies.store.resetSmsStopNotice(phone);
     if (!dependencies.env.TELNYX_MESSAGING_APPROVED) return;
+    await dependencies.store.withLock(`optin-confirm:${tenantId}`, () => enqueueOptInConfirmation(tenantId, idempotencyKey))
+      .catch((error) => log({ level: "warn", event: "owner_optin_confirmation_failed", tenantId, error: safeError(error) }));
+  }
+
+  /** Callers hold the optin-confirm lock for the shop, so the approval job and a fresh opt-in never both send it. */
+  async function enqueueOptInConfirmation(tenantId: string, idempotencyKey: string): Promise<void> {
     try {
       const now = dependencies.clock.now().toISOString();
       await dependencies.store.enqueueNotification({
@@ -2046,8 +2052,20 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const result = { activated: 0, blocked: 0, optInConfirmations: 0 };
     const providerReady = liveProviderBlockers().length === 0 && Boolean(stripeClient);
     for (const tenantId of await dependencies.store.listTenantIds()) {
+      try {
+        await activationJobsForShop(tenantId, providerReady, result);
+      } catch (error) {
+        // One bad shop never stops the scan for the rest.
+        log({ level: "error", event: "activation_job_shop_failed", tenantId, error: safeError(error) });
+      }
+    }
+    return result;
+  }
+
+  async function activationJobsForShop(tenantId: string, providerReady: boolean, result: { activated: number; blocked: number; optInConfirmations: number }): Promise<void> {
+    {
       const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
-      if (!account) continue;
+      if (!account) return;
       if (providerReady && account.status === "pending_activation" && isPaidStatus((await dependencies.store.getSubscription(tenantId))?.status)) {
         try {
           await goLive(account, null);
@@ -2060,15 +2078,16 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       }
       if (dependencies.env.TELNYX_MESSAGING_APPROVED) {
         const config = await dependencies.store.getConfig(tenantId);
-        if (config.ownerNotificationRefs.length > 0
-          && await dependencies.store.getIntegrationSecret(tenantId, "notifications", "owner_sms_consent")
-          && !await dependencies.store.getIntegrationSecret(tenantId, "notifications", "optin_confirmation_queued_at")) {
-          await queueOwnerOptInConfirmation(tenantId, null, `owner-optin:${tenantId}:approved`);
-          result.optInConfirmations += 1;
+        if (config.ownerNotificationRefs.length > 0 && await dependencies.store.getIntegrationSecret(tenantId, "notifications", "owner_sms_consent")) {
+          const queued = await dependencies.store.withLock(`optin-confirm:${tenantId}`, async () => {
+            if (await dependencies.store.getIntegrationSecret(tenantId, "notifications", "optin_confirmation_queued_at")) return false;
+            await enqueueOptInConfirmation(tenantId, `owner-optin:${tenantId}:approved`);
+            return true;
+          });
+          if (queued) result.optInConfirmations += 1;
         }
       }
     }
-    return result;
   }
 
   /** Records how a go-live ended: live, blocked (4xx: a prerequisite is missing) or failed (5xx: provider or server). */
