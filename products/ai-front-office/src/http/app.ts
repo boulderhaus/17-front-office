@@ -364,7 +364,7 @@ function publicOwnerDemo(now: Date): {
   };
 }
 
-const OWNER_APP_PATH = /^\/app(?:\/(?:start|jobs|calendar|settings|calls|calls\/[0-9a-f-]{36}))?\/?$/i;
+const OWNER_APP_PATH = /^\/app(?:\/(?:start|jobs|calendar|settings|settings\/[a-z-]{1,40}|calls|calls\/[0-9a-f-]{36}))?\/?$/i;
 const DEMO_APP_PATH = /^\/demo(?:\/(?:jobs|calendar|calls|calls\/[A-Za-z0-9-]{1,64}))?\/?$/;
 function isOwnerAppPath(pathname: string): boolean { return OWNER_APP_PATH.test(pathname); }
 function isDemoAppPath(pathname: string): boolean { return DEMO_APP_PATH.test(pathname); }

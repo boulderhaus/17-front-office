@@ -255,6 +255,10 @@ describe("Owner JSON API and React app serving", () => {
     const owner = await signUp("a@synthetic.example");
     const app = await fetch(`${baseUrl}/app/calls/${CALL_ID}`, { headers: { cookie: owner.cookie } });
     expect(await app.text()).toContain('id="root"');
+    // Settings has its own pages (/app/settings/plan, …); a reload or shared link must land on the app too.
+    const settingsPage = await fetch(`${baseUrl}/app/settings/plan`, { headers: { cookie: owner.cookie } });
+    expect(settingsPage.status).toBe(200);
+    expect(await settingsPage.text()).toContain('id="root"');
   });
 
   it("streams a recording from our own origin, forwarding byte ranges, only to its shop", async () => {

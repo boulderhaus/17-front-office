@@ -1,24 +1,20 @@
-import type { ReactNode } from "react"
+import { useState, type ReactNode } from "react"
 import { Link, useLocation } from "react-router-dom"
-import { Badge } from "@/components/ui/badge"
+import { ChevronLeft, ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { Tone } from "@/lib/derive"
 import { useMediaQuery, useMode } from "@/lib/mode"
 
 const TONES: Record<Tone, string> = {
-  danger: "border-red-200 bg-red-50 text-red-700",
-  warn: "border-amber-200 bg-amber-50 text-amber-800",
-  good: "border-emerald-200 bg-emerald-50 text-emerald-700",
-  neutral: "border-border bg-card text-foreground",
+  danger: "bg-red-50 text-red-700 ring-red-200",
+  warn: "bg-amber-50 text-amber-800 ring-amber-200",
+  good: "bg-emerald-50 text-emerald-800 ring-emerald-200",
+  neutral: "bg-secondary text-foreground/80 ring-border",
 }
 
+/** One status word per row: "Urgent", "Confirm time", "Booked", "Likely spam". */
 export function ToneBadge({ tone, children, className }: { tone: Tone; children: ReactNode; className?: string }) {
-  return <Badge variant="outline" className={cn("h-6 rounded-md px-2 font-semibold", TONES[tone], className)}>{children}</Badge>
-}
-
-export function ToneDot({ tone, label }: { tone: Tone; label: string }) {
-  const colors: Record<Tone, string> = { danger: "bg-red-600", warn: "bg-amber-500", good: "bg-emerald-600", neutral: "bg-stone-300" }
-  return <span aria-label={label} title={label} className={cn("inline-block size-2.5 shrink-0 rounded-full", colors[tone])} />
+  return <span className={cn("inline-flex h-6 shrink-0 items-center rounded-md px-2 text-[13px] font-semibold whitespace-nowrap ring-1 ring-inset", TONES[tone], className)}>{children}</span>
 }
 
 export function BrandMark({ className }: { className?: string }) {
@@ -27,37 +23,80 @@ export function BrandMark({ className }: { className?: string }) {
   )
 }
 
-export function SectionTitle({ title, count, action }: { title: string; count?: number; action?: ReactNode }) {
+/** A section heading. The count is a solid pill so it reads at a glance. */
+export function SectionTitle({ title, count, urgent, action, id }: { title: string; count?: number; urgent?: boolean; action?: ReactNode; id?: string }) {
   return (
-    <div className="flex items-center justify-between gap-3 px-1">
-      <h2 className="flex items-center gap-2 text-base font-semibold tracking-tight">
+    <div className="flex min-h-9 items-center justify-between gap-3">
+      <h2 id={id} className="flex items-center gap-2 text-[17px] font-semibold tracking-tight">
         {title}
-        {count !== undefined && <span className="tabular grid h-6 min-w-6 place-items-center rounded-md border bg-secondary px-1.5 text-xs font-semibold">{count}</span>}
+        {count !== undefined && count > 0 && (
+          <span className={cn("tabular grid h-6 min-w-6 place-items-center rounded-full px-2 text-[13px] font-bold text-white", urgent ? "bg-red-600" : "bg-brand-ink")}>{count}</span>
+        )}
       </h2>
       {action}
     </div>
   )
 }
 
+/** A link that reads as a link: ink, semibold, a chevron, a 44px tap area. */
+export function MoreLink({ to, children }: { to: string; children: ReactNode }) {
+  return (
+    <Link to={to} className="-mr-2 inline-flex min-h-11 items-center gap-0.5 rounded-lg px-2 text-[15px] font-semibold text-brand-ink hover:bg-muted">
+      {children}<ChevronRight className="size-4" />
+    </Link>
+  )
+}
+
+/** One white surface with divided rows: the single container style for every list. */
+export function ListBox({ children, className }: { children: ReactNode; className?: string }) {
+  return <div className={cn("divide-y overflow-hidden rounded-xl border bg-card", className)}>{children}</div>
+}
+
 /** On a phone a call opens its own screen; on wide screens it opens in the side panel. */
-export function CallLink({ callId, className, children }: { callId: string; className?: string; children: ReactNode }) {
+export function CallLink({ callId, className, children, ...rest }: { callId: string; className?: string; children: ReactNode; "aria-current"?: boolean; style?: React.CSSProperties }) {
   const { base } = useMode()
   const wide = useMediaQuery("(min-width: 1024px)")
   const location = useLocation()
-  const to = wide ? `${location.pathname}?call=${encodeURIComponent(callId)}` : `${base}/calls/${encodeURIComponent(callId)}`
-  return <Link to={to} className={className}>{children}</Link>
+  const params = new URLSearchParams(location.search)
+  params.set("call", callId)
+  const to = wide ? `${location.pathname}?${params.toString()}` : `${base}/calls/${encodeURIComponent(callId)}`
+  return <Link to={to} className={className} {...rest}>{children}</Link>
 }
 
 export function Empty({ title, text, image }: { title: string; text: string; image?: boolean }) {
   return (
     <div className="grid justify-items-center gap-1.5 rounded-xl border border-dashed bg-card px-5 py-7 text-center">
-      {image && <img src="/assets/front-office-mascot-flat.png" alt="" width={88} height={93} className="mb-1" />}
+      {image && <img src="/assets/front-office-mascot-flat.png" alt="" width={72} height={76} className="mb-1" />}
       <strong className="text-base font-semibold">{title}</strong>
-      <span className="max-w-xs text-sm text-muted-foreground">{text}</span>
+      <span className="max-w-xs text-[15px] text-muted-foreground">{text}</span>
     </div>
   )
 }
 
 export function Muted({ children }: { children: ReactNode }) {
-  return <p className="px-4 py-3 text-sm text-muted-foreground">{children}</p>
+  return <p className="px-4 py-3.5 text-[15px] text-muted-foreground">{children}</p>
+}
+
+/** A page of a list: 10 rows, then Previous / Next with "1–10 of 23". Never an endless scroll. */
+export function usePage<T>(items: T[], size = 10) {
+  const [page, setPage] = useState(0)
+  const pages = Math.max(1, Math.ceil(items.length / size))
+  const current = Math.min(page, pages - 1)
+  return {
+    rows: items.slice(current * size, current * size + size),
+    pager: items.length > size ? <Pager page={current} pages={pages} size={size} total={items.length} onPage={setPage} /> : null,
+  }
+}
+
+function Pager({ page, pages, size, total, onPage }: { page: number; pages: number; size: number; total: number; onPage: (page: number) => void }) {
+  const from = page * size + 1
+  const to = Math.min(total, from + size - 1)
+  const button = "inline-flex h-11 items-center gap-1 rounded-lg border bg-card px-3 text-[15px] font-semibold disabled:opacity-40"
+  return (
+    <nav aria-label="Pages" className="flex items-center justify-between gap-3 pt-1">
+      <button type="button" className={button} disabled={page === 0} onClick={() => onPage(page - 1)}><ChevronLeft className="size-4" />Previous</button>
+      <span className="tabular text-sm text-muted-foreground">{from}–{to} of {total}</span>
+      <button type="button" className={button} disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>Next<ChevronRight className="size-4" /></button>
+    </nav>
+  )
 }

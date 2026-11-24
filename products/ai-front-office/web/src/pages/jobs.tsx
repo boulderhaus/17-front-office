@@ -1,91 +1,85 @@
 import { useSearchParams } from "react-router-dom"
-import { Card } from "@/components/ui/card"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { CallLink, Muted, ToneBadge } from "@/components/app/bits"
+import { ChevronRight } from "lucide-react"
+import { CallLink, ListBox, Muted, ToneBadge, usePage } from "@/components/app/bits"
 import { CallPanel } from "./today"
 import { derive, type Tone } from "@/lib/derive"
 import { compactDate } from "@/lib/format"
-import { useMode } from "@/lib/mode"
+import { useMediaQuery, useMode } from "@/lib/mode"
 import type { ApiCall } from "@/lib/types"
+import { cn } from "@/lib/utils"
 
-interface Row { call: ApiCall; label: string; tone: Tone; meta: string }
+interface Row { call: ApiCall; label: string; tone: Tone; when: string }
 
 export function JobsPage() {
   const { dashboard } = useMode()
   const [params, setParams] = useSearchParams()
-  if (!dashboard) return null
-  const d = derive(dashboard)
+  const wide = useMediaQuery("(min-width: 1024px)")
+  const d = dashboard ? derive(dashboard) : null
   const rows = (items: Array<Row | null>): Row[] => items.filter((item): item is Row => item !== null)
-  const columns: Array<{ id: string; title: string; empty: string; rows: Row[] }> = [
-    { id: "reply", title: "Needs reply", empty: "Nothing needs a reply.", rows: rows(d.actionable.map((task) => { const call = d.callsById.get(task.callId); return call ? { call, label: task.priority === "high" ? "Urgent" : "Call back", tone: task.priority === "high" ? "danger" : "neutral", meta: task.reason } : null })) },
-    { id: "waiting", title: "Waiting", empty: "Nothing snoozed.", rows: rows(d.snoozed.map((task) => { const call = d.callsById.get(task.callId); return call ? { call, label: "Later", tone: "neutral", meta: `Back ${compactDate(task.dueAt, d.tz)}` } : null })) },
-    { id: "booked", title: "Booked", empty: "No upcoming bookings.", rows: d.booked.map((call) => ({ call, label: "Booked", tone: "good" as Tone, meta: compactDate(call.fields.requestedStart!, d.tz) })) },
-    { id: "handled", title: "Handled", empty: "Nothing handled yet.", rows: rows(d.handled.map((task) => { const call = d.callsById.get(task.callId); return call ? { call, label: "Handled", tone: "neutral", meta: compactDate(task.completedAt ?? task.updatedAt, d.tz) } : null })) },
-  ]
-  const tab = columns.some((column) => column.id === params.get("tab")) ? params.get("tab")! : "reply"
-  const selected = params.get("call") ? d.callsById.get(params.get("call")!) ?? null : null
+  const lists: Array<{ id: string; title: string; empty: string; whenLabel: string; rows: Row[] }> = d ? [
+    { id: "reply", title: "Needs reply", whenLabel: "Call back by", empty: "Nobody is waiting on a reply.", rows: rows(d.actionable.map((task) => { const call = d.callsById.get(task.callId); return call ? { call, label: task.priority === "high" ? "Urgent" : call.fields.requestedStart ? "Confirm time" : "Call back", tone: task.priority === "high" ? "danger" : call.fields.requestedStart ? "warn" : "neutral", when: d.due(task) === "Due now" ? "Now" : d.due(task).replace(/^Due /, "") } : null })) },
+    { id: "waiting", title: "Waiting", whenLabel: "Back on", empty: "Nothing set for later.", rows: rows(d.snoozed.map((task) => { const call = d.callsById.get(task.callId); return call ? { call, label: "Later", tone: "neutral", when: compactDate(task.dueAt, d.tz) } : null })) },
+    { id: "booked", title: "Booked", whenLabel: "Visit", empty: "No booked visits in the next 7 days.", rows: d.booked.map((call) => ({ call, label: "Booked", tone: "good" as Tone, when: compactDate(call.fields.requestedStart!, d.tz) })) },
+    { id: "complete", title: "Complete", whenLabel: "Completed", empty: "Nothing completed yet.", rows: rows(d.handled.map((task) => { const call = d.callsById.get(task.callId); return call ? { call, label: "Complete", tone: "neutral", when: compactDate(task.completedAt ?? task.updatedAt, d.tz) } : null })) },
+  ] : []
+  // All: every job once, newest call first, with the status it has in its own list.
+  const seen = new Set<string>()
+  const all = lists.flatMap((list) => list.rows).filter((row) => (seen.has(row.call.id) ? false : (seen.add(row.call.id), true)))
+    .sort((left, right) => right.call.startedAt.localeCompare(left.call.startedAt))
+  const columns = d ? [{ id: "all", title: "All", whenLabel: "Date", empty: "No jobs yet. Calls that need you show up here.", rows: all.map((row) => ({ ...row, when: compactDate(row.call.startedAt, d.tz) })) }, ...lists] : []
+  const tab = columns.find((column) => column.id === (params.get("tab") === "handled" ? "complete" : params.get("tab") ?? "reply")) ?? columns[1]
+  if (!dashboard || !d || !tab) return null
+  const selectedId = params.get("call")
+  // Wide screens: the open job sits on the right; the first row opens by default so the pane is never empty.
+  const selected = (selectedId ? d.callsById.get(selectedId) : null) ?? (wide ? tab.rows[0]?.call ?? null : null)
+  const pick = (id: string) => setParams({ tab: id }, { replace: true })
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start">
-      <section className="grid min-w-0 gap-3">
-        <h2 className="px-1 text-base font-semibold tracking-tight">Every job at a glance</h2>
-        <Tabs value={tab} onValueChange={(value) => setParams({ tab: value }, { replace: true })} className="min-w-0 gap-3">
-          <div className="-mx-4 overflow-x-auto px-4 [scrollbar-width:none] md:mx-0 md:px-0">
-          <TabsList className="h-11 w-max">
-            {columns.map((column) => (
-              <TabsTrigger key={column.id} value={column.id} className="h-9 px-3 text-sm">
-                {column.title}
-                <span className="tabular ml-1 rounded-md bg-background/70 px-1.5 text-xs">{column.rows.length}</span>
-              </TabsTrigger>
-            ))}
-          </TabsList>
-          </div>
-          {columns.map((column) => (
-            <TabsContent key={column.id} value={column.id}>
-              {column.rows.length === 0 ? <Card className="py-0"><Muted>{column.empty}</Muted></Card> : (
-                <>
-                  <div className="grid gap-2 md:hidden">
-                    {column.rows.map((row) => (
-                      <CallLink key={row.call.id} callId={row.call.id} className="grid gap-1 rounded-xl border bg-card p-3.5 shadow-xs">
-                        <span className="flex items-center justify-between gap-2"><strong className="truncate font-semibold">{row.call.fields.callerName ?? "Unknown caller"}</strong><ToneBadge tone={row.tone}>{row.label}</ToneBadge></span>
-                        <small className="line-clamp-2 text-[13px] text-muted-foreground">{row.call.fields.problemDescription || "No summary"}</small>
-                        <time className="text-xs text-muted-foreground">{row.meta}</time>
-                      </CallLink>
-                    ))}
-                  </div>
-                  <Card className="hidden overflow-hidden py-0 md:block">
-                    <Table>
-                      <TableHeader className="bg-muted/60">
-                        <TableRow>
-                          <TableHead className="pl-4">Caller</TableHead>
-                          <TableHead>Problem</TableHead>
-                          <TableHead>Status</TableHead>
-                          <TableHead className="pr-4 text-right">When</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {column.rows.map((row) => (
-                          <TableRow key={row.call.id} data-state={selected?.id === row.call.id ? "selected" : undefined} className="relative h-14">
-                            <TableCell className="pl-4 font-semibold"><CallLink callId={row.call.id} className="after:absolute after:inset-0">{row.call.fields.callerName ?? "Unknown caller"}</CallLink></TableCell>
-                            <TableCell className="max-w-[28ch] truncate text-muted-foreground">{row.call.fields.problemDescription || "No summary"}</TableCell>
-                            <TableCell><ToneBadge tone={row.tone}>{row.label}</ToneBadge></TableCell>
-                            <TableCell className="pr-4 text-right text-sm text-muted-foreground">{row.meta}</TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </Card>
-                </>
-              )}
-            </TabsContent>
-          ))}
-        </Tabs>
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_400px] lg:items-start xl:grid-cols-[minmax(0,1fr)_440px]">
+      <section className="grid min-w-0 content-start gap-4">
+        {/* Five equal tiles: the count is the overview, the tap is the filter. Never scrolls sideways. */}
+        <div role="tablist" aria-label="Jobs" className="grid grid-cols-5 gap-1 rounded-xl bg-secondary p-1">
+          {columns.map((column) => {
+            const active = column.id === tab.id
+            return (
+              <button key={column.id} role="tab" aria-selected={active} type="button" onClick={() => pick(column.id)}
+                className={cn("grid min-h-16 content-center justify-items-center gap-0.5 rounded-lg px-1 text-center", active ? "bg-card shadow-sm ring-1 ring-border" : "text-muted-foreground hover:bg-card/60")}>
+                <strong className={cn("tabular text-[22px] leading-none font-semibold", active && "text-foreground", column.id === "reply" && column.rows.some((row) => row.tone === "danger") && "text-red-700")}>{column.rows.length}</strong>
+                <span className="text-[13px] leading-tight font-semibold">{column.title}</span>
+              </button>
+            )
+          })}
+        </div>
+        <JobList key={tab.id} tab={tab} selectedId={selected?.id ?? null} />
       </section>
-      {selected && (
-        <aside className="max-lg:hidden lg:sticky lg:top-20 lg:w-[380px]">
-          <CallPanel call={selected} task={d.taskFor(selected.id)} tz={d.tz} standalone={false} />
-        </aside>
-      )}
+      <aside className="max-lg:hidden lg:sticky lg:top-20">
+        <CallPanel call={selected} task={selected ? d.taskFor(selected.id) : undefined} tz={d.tz} standalone={false} />
+      </aside>
     </div>
+  )
+}
+
+function JobList({ tab, selectedId }: { tab: { empty: string; whenLabel: string; rows: Row[] }; selectedId: string | null }) {
+  const { rows: page, pager } = usePage(tab.rows)
+  if (tab.rows.length === 0) return <ListBox><Muted>{tab.empty}</Muted></ListBox>
+  return (
+    <>
+      <ListBox>
+        <div className="hidden grid-cols-[minmax(0,10rem)_minmax(0,1fr)_7.5rem_8.5rem] gap-4 bg-muted/60 px-4 py-2.5 text-[13px] font-semibold text-muted-foreground md:grid">
+          <span>Caller</span><span>Problem</span><span>Status</span><span className="text-right">{tab.whenLabel}</span>
+        </div>
+        {page.map((row) => (
+          <CallLink key={row.call.id} callId={row.call.id} aria-current={selectedId === row.call.id}
+            className={cn("grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-0.5 px-4 py-3 hover:bg-muted/50 md:grid-cols-[minmax(0,10rem)_minmax(0,1fr)_7.5rem_8.5rem] md:gap-4", selectedId === row.call.id && "bg-accent hover:bg-accent")}>
+            <strong className="truncate text-base font-semibold">{row.call.fields.callerName ?? "Unknown caller"}</strong>
+            <span className="order-3 truncate text-[15px] text-muted-foreground md:order-none">{row.call.fields.problemDescription || "No summary"}</span>
+            <span className="order-2 justify-self-end md:order-none md:justify-self-start"><ToneBadge tone={row.tone}>{row.label}</ToneBadge></span>
+            <span className="order-4 flex items-center justify-end gap-1 text-right text-sm text-muted-foreground md:order-none">
+              <span className="tabular">{row.when}</span><ChevronRight className="size-4 lg:hidden" />
+            </span>
+          </CallLink>
+        ))}
+      </ListBox>
+      {pager}
+    </>
   )
 }

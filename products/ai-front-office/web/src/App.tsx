@@ -7,7 +7,7 @@ import { AppShell } from "@/components/app/shell"
 import { CalendarPage } from "@/pages/calendar"
 import { CallPage } from "@/pages/call"
 import { JobsPage } from "@/pages/jobs"
-import { SettingsPage } from "@/pages/settings"
+import { SettingsArea } from "@/pages/settings"
 import { StartPage } from "@/pages/start"
 import { TodayPage } from "@/pages/today"
 import { useApi } from "@/lib/api"
@@ -19,14 +19,14 @@ import type { ApiDashboard } from "@/lib/types"
  * Screens that show callers' names, numbers, addresses, transcripts or recordings are
  * `ph-no-capture`: session replay records a blank box and autocapture ignores them.
  */
-function Screen({ title, children, callerData = true }: { title: string; children: React.ReactNode; callerData?: boolean }) {
-  return <AppShell title={title}>{callerData ? <div className="ph-no-capture">{children}</div> : children}</AppShell>
+function Screen({ title, children, callerData = true, back, hideTitle }: { title: string; children: React.ReactNode; callerData?: boolean; back?: { to: string; label: string }; hideTitle?: boolean }) {
+  return <AppShell title={title} back={back} hideTitle={hideTitle}>{callerData ? <div className="ph-no-capture">{children}</div> : children}</AppShell>
 }
 
 function Loading() {
   return (
     <div className="grid gap-4">
-      <div className="grid grid-cols-3 gap-2.5">{[0, 1, 2].map((key) => <Skeleton key={key} className="h-24 rounded-xl" />)}</div>
+      <Skeleton className="h-[84px] rounded-xl" />
       {[0, 1].map((key) => <Skeleton key={key} className="h-40 rounded-xl" />)}
     </div>
   )
@@ -47,8 +47,9 @@ function Workspace({ base }: { base: "/app" | "/demo" }) {
         {!preview && <Route path="start" element={dashboard.data ? <StartPage /> : <div className="mx-auto max-w-xl p-4">{ready(null)}</div>} />}
         <Route path="jobs" element={<Screen title="Jobs">{ready(<JobsPage />)}</Screen>} />
         <Route path="calendar" element={<Screen title="Calendar">{ready(<CalendarPage />)}</Screen>} />
-        <Route path="calls/:id" element={<Screen title="Call"><CallPage /></Screen>} />
-        {!preview && <Route path="settings" element={<Screen title="Settings" callerData={false}><SettingsPage /></Screen>} />}
+        <Route path="calls/:id" element={<Screen title="Call" back={{ to: base, label: "Calls" }} hideTitle><CallPage /></Screen>} />
+        {/* One route for the whole settings area, so an unsaved edit survives moving between its pages. */}
+        {!preview && <Route path="settings/*" element={<SettingsArea />} />}
         <Route path="*" element={<Navigate to={base} replace />} />
       </Routes>
     </ModeContext.Provider>
