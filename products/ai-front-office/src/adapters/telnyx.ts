@@ -480,3 +480,33 @@ export class TelnyxRecordingClient {
     }
   }
 }
+
+/** Telnyx errors that mean the call or its assistant is gone, so a message can never land. */
+const CALL_GONE_CODES = new Set(["90015", "90018"]);
+
+/**
+ * Adds messages to the AI assistant running on a live call (Telnyx "Add messages to AI Assistant").
+ * `command_id` makes a repeat of the same command a no-op on Telnyx's side.
+ */
+export class TelnyxAssistantMessenger {
+  constructor(private readonly apiKey: string, private readonly fetcher: typeof fetch = fetch) {}
+
+  /**
+   * "sent" when Telnyx accepted it, "call_ended" when the call is already over, "rejected" for any other 4xx that a
+   * retry cannot fix (say the assistant already left after a transfer). Throws on 408, 429, 5xx and network errors.
+   */
+  async addSystemMessage(callControlId: string, content: string, commandId: string, options: { triggerResponse?: boolean } = {}): Promise<"sent" | "call_ended" | "rejected"> {
+    const response = await withTimeout(this.fetcher(`https://api.telnyx.com/v2/calls/${encodeURIComponent(callControlId)}/actions/ai_assistant_add_messages`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" },
+      // trigger_response false (the default): the message applies on the assistant's next natural turn, so it never talks
+      // over the caller. true starts a turn now, which may interrupt them.
+      body: JSON.stringify({ messages: [{ role: "system", content }], command_id: commandId, trigger_response: options.triggerResponse === true }),
+    }), 4_000);
+    if (response.ok) return "sent";
+    const payload = await response.json().catch(() => ({})) as { errors?: Array<{ code?: unknown }> };
+    if (response.status === 404 || payload.errors?.some((error) => CALL_GONE_CODES.has(String(error.code)))) return "call_ended";
+    if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) return "rejected";
+    throw new Error(`Telnyx add-messages failed with HTTP ${response.status}${payload.errors?.[0]?.code ? ` (code ${String(payload.errors[0].code)})` : ""}`);
+  }
+}

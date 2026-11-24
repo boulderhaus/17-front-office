@@ -5,7 +5,8 @@ import { CallService } from "./application/call-service.js";
 import { DataDeletionService } from "./application/data-deletion.js";
 import { GraceLineService } from "./application/grace-line.js";
 import { OwnerSummaryService } from "./application/owner-summary-service.js";
-import { TelnyxRecordingClient } from "./adapters/telnyx.js";
+import { CallLengthGuard } from "./application/call-length.js";
+import { TelnyxAssistantMessenger, TelnyxRecordingClient } from "./adapters/telnyx.js";
 import { loadEnvironment } from "./config/environment.js";
 import { createRequestHandler, createStripeClient } from "./http/app.js";
 import { OverageBillingService } from "./application/billing-jobs.js";
@@ -111,6 +112,27 @@ const runWorker = async (): Promise<void> => {
 const interval = setInterval(() => void runWorker(), 1_000);
 interval.unref();
 
+// Graceful call length: system messages to the live assistant at 4:30 and 5:30. Its own loop, so a slow job above
+// never delays a nudge. Claimed per call in the shared ledger, so every replica may run it.
+const callLength = env.TELNYX_API_KEY && !env.DEMO_MODE
+  ? new CallLengthGuard(runtime.store, new TelnyxAssistantMessenger(env.TELNYX_API_KEY), systemClock, logger)
+  : null;
+let callLengthActive = false;
+const runCallLength = async (): Promise<void> => {
+  if (!callLength || callLengthActive) return;
+  callLengthActive = true;
+  try {
+    await callLength.runOnce();
+  } catch (error) {
+    logger({ level: "error", event: "call_length_cycle_failed", error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });
+    telemetry.captureException(error, { route: "job:call_length" });
+  } finally {
+    callLengthActive = false;
+  }
+};
+const callLengthInterval = setInterval(() => void runCallLength(), 5_000);
+callLengthInterval.unref();
+
 await new Promise<void>((resolve, reject) => {
   server.once("error", reject);
   server.listen(env.PORT, env.HOST, () => resolve());
@@ -121,6 +143,7 @@ void runWorker();
 const shutdown = async (signal: string): Promise<void> => {
   logger({ level: "info", event: "shutdown_started", signal });
   clearInterval(interval);
+  clearInterval(callLengthInterval);
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await runtime.close();
   // Deliver queued analytics and errors before the container stops.

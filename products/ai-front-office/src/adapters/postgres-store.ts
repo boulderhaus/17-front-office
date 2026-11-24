@@ -223,6 +223,15 @@ export class PostgresStore implements Store {
     return result.rows.map((row) => this.mapCall(row as Row));
   }
 
+  async listInProgressCalls(startedAfter: string, limit: number): Promise<CallRecord[]> {
+    // Uses calls_in_progress_started_idx (migration 014): only live calls are in that partial index.
+    const result = await this.#pool.query(
+      "SELECT * FROM calls WHERE outcome = 'in_progress' AND started_at >= $1 ORDER BY started_at ASC LIMIT $2",
+      [startedAfter, limit],
+    );
+    return result.rows.map((row) => this.mapCall(row as Row));
+  }
+
   async listCallsStartedBetween(tenantId: string, from: string, to: string, limit: number): Promise<CallRecord[]> {
     // Uses calls_tenant_started_idx; the window bounds the scan, the limit only guards memory.
     const result = await this.#pool.query(

@@ -106,7 +106,7 @@ export function toolLimitReached(tool: VoiceToolName): ToolFailure {
 
 /**
  * The per-call counts live in the store (tool_call_budgets), so they hold across replicas and restarts.
- * Calls are capped at six minutes; the retention loop drops ledger rows untouched for two hours.
+ * Calls end by about six minutes (seven at the Telnyx backstop); the retention loop drops ledger rows untouched for two hours.
  */
 export const TOOL_LEDGER_RETENTION_MS = 2 * 60 * 60_000;
 

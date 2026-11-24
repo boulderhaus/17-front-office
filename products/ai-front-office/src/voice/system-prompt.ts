@@ -91,7 +91,8 @@ ENDING THE CALL
 - After a completed intake, give one compact recap, ask "Anything else?", and wait once. That is the natural closing pause.
 - When the caller says goodbye or is done, save any intake, say one short closing line, and invoke the built-in hangup tool in the same turn. Never say "goodbye" without immediately invoking hangup.
 - If the caller goes silent, ask once, "Are you still there?" If still silent, save any intake, say "I'll let you go. Goodbye.", and invoke the built-in hangup tool in the same turn.
-- Any tool may return wrap_up=true once the call has run about five minutes. Then stop asking questions, save the intake, say exactly "${WRAP_UP_LINE}", and invoke the built-in hangup tool in the same turn.`;
+- Any tool may return wrap_up=true once the call has run about five minutes. Then stop asking questions, save the intake, say exactly "${WRAP_UP_LINE}", and invoke the built-in hangup tool in the same turn.
+- A system message may tell you to finish the call or to wrap up now. Follow it right away; only the safety rules come first.`;
 }
 
 /** The tool the assistant calls to drop a vendor, solicitor, recruiter, robocall or wrong number. */
@@ -101,10 +102,39 @@ export const SPAM_CATEGORIES = ["vendor", "solicitor", "sales", "recruiter", "ro
 export const SPAM_GOODBYE = "Sorry, this line is only for service calls. Goodbye.";
 /** Fixed wrap-up line once a call passes the soft limit. */
 export const WRAP_UP_LINE = "I've got everything I need; the owner will call you back.";
-/** Soft limit: save_intake tells the assistant to wrap up after this many seconds. */
+/** Soft limit: every tool result carries wrap_up=true after this many seconds. */
 export const WRAP_UP_AFTER_SECONDS = 300;
-/** Hard cap: Telnyx stops the assistant after this many seconds (telephony_settings.time_limit_secs). */
-export const CALL_TIME_LIMIT_SECONDS = 360;
+/**
+ * Calls aim to end by six minutes without ever being cut off mid-sentence. The server adds two system messages to
+ * the live assistant (Telnyx ai_assistant_add_messages): "finish within a minute" at 4:30 and "wrap up now" at 5:30.
+ * They reach the model even when it calls no tool, unlike wrap_up. See src/application/call-length.ts.
+ */
+export const FINISH_NUDGE_AFTER_SECONDS = 270;
+export const WRAP_UP_NUDGE_AFTER_SECONDS = 330;
+/**
+ * Those two land on the assistant's next natural turn. If the call is still up at 6:30 (the caller has talked
+ * through both), the wrap-up message is sent again and forces a turn: a short interruption beats the 7:00 cut.
+ */
+export const FORCED_WRAP_UP_AFTER_SECONDS = 390;
+/**
+ * Backstop only: Telnyx stops the assistant after this many seconds (telephony_settings.time_limit_secs). It sits
+ * a minute past the target so a caller hears the wrap-up line, not a dead line.
+ */
+export const CALL_TIME_LIMIT_SECONDS = 420;
+
+/** 4:30 system message: close out within a minute. */
+export function buildFinishNudge(options: { emergency: boolean }): string {
+  const safety = options.emergency ? " Before you close, remind them in one sentence to leave and call 911 if anyone may be in danger." : "";
+  return `The call has run four and a half minutes. Wrap it up within one minute: ask no new questions and start no new topics. If you don't have a callback number yet, confirm it.${safety} Then save the intake, say exactly "${WRAP_UP_LINE}", and invoke the built-in hangup tool in the same turn.`;
+}
+
+/** 5:30 system message: say the wrap-up line on this turn and hang up. */
+export function buildWrapUpNudge(options: { emergency: boolean }): string {
+  const closing = `say exactly "${WRAP_UP_LINE}" now and invoke the built-in hangup tool in the same turn. Do not ask anything else.`;
+  return options.emergency
+    ? `Time is up. If anyone may be in danger, tell them in one sentence to leave and call 911, then ${closing}`
+    : `Time is up. Save the intake if it changed, then ${closing}`;
+}
 /** Telnyx checks in after this much caller silence (telephony_settings.user_idle_reply_secs). */
 export const USER_IDLE_REPLY_SECONDS = 4;
 /** Telnyx stops the assistant after this much caller silence (telephony_settings.user_idle_timeout_secs; 10 is Telnyx's minimum). */

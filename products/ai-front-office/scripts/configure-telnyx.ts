@@ -12,7 +12,7 @@ export interface AssistantPush {
 
 /**
  * Every assistant we run gets the current prompt, tools, voice (TELNYX_VOICE), turn-taking and
- * telephony_settings (six-minute time_limit_secs, idle timers): the demo/template assistant plus each shop's provisioned assistant.
+ * telephony_settings (seven-minute backstop time_limit_secs, idle timers): the demo/template assistant plus each shop's provisioned assistant.
  */
 export async function planAssistantPushes(input: { store: Store; defaultTenantId: string; demoAssistantId?: string | undefined; publicBaseUrl: string; voice?: string | undefined }): Promise<AssistantPush[]> {
   const pushes: AssistantPush[] = [];
