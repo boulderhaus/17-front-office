@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { continueOwnerAlertCall, ownerAlertState, urgentOwnerCallsConfigured } from "../adapters/telnyx-owner-call.js";
-import { OWNER_CALL_CONSENT_KEY, ownerCallConsentRecord } from "../domain/owner-call-consent.js";
+import { grantOwnerCallConsent, hasOwnerCallConsent, OWNER_CALL_CONSENT_DETAIL, revokeOwnerCallConsent } from "../domain/owner-call-consent.js";
 import { deviceId, listPushSubscriptions, parsePushSubscription, removePushSubscriptions, savePushSubscription } from "../adapters/web-push.js";
 import { lineLiveNotifications, ownerPushNotification } from "../application/owner-alerts.js";
 import { SERVICE_WORKER, WEB_MANIFEST } from "./pwa.js";
@@ -389,9 +389,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   });
   const vapid = dependencies.env.VAPID_PUBLIC_KEY && dependencies.env.VAPID_PRIVATE_KEY ? { publicKey: dependencies.env.VAPID_PUBLIC_KEY } : null;
   /** Automated emergency calls to the owner: offered when configured; on only with recorded consent. */
-  const urgentCallsState = async (tenantId: string): Promise<{ available: boolean; on: boolean }> => ({
+  const urgentCallsState = async (tenantId: string): Promise<{ available: boolean; on: boolean; disclosure: string }> => ({
     available: urgentOwnerCallsConfigured(dependencies.env),
-    on: Boolean(await dependencies.store.getIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY)),
+    on: await hasOwnerCallConsent(dependencies.store, tenantId, await dependencies.store.getIntegrationSecret(tenantId, "notifications", "owner-primary")),
+    disclosure: OWNER_CALL_CONSENT_DETAIL,
   });
   const recordingClient = dependencies.env.TELNYX_API_KEY ? new TelnyxRecordingClient(dependencies.env.TELNYX_API_KEY, dependencies.fetcher ?? fetch) : null;
   const routingClient = dependencies.env.TELNYX_API_KEY && dependencies.env.TELNYX_FROM_NUMBER && dependencies.env.TELNYX_ASSISTANT_ID
@@ -765,7 +766,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       }
       if (parsed.data.ownerCallConsent === "yes" && phone) {
         // TCPA: prior express consent to automated emergency calls, with the exact wording version shown.
-        await dependencies.store.saveIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY, ownerCallConsentRecord({ at: now, source: "signup", ip }));
+        await grantOwnerCallConsent(dependencies.store, tenantId, { at: now, source: "signup", ip, phone });
       }
       if (parsed.data.ownerSmsConsent === "yes") {
         // Proof of opt-in for the carrier: when, from where, and the exact wording version shown.
@@ -1068,11 +1069,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (typeof body.on !== "boolean") throw new HttpError(400, "Say on or off");
       const now = dependencies.clock.now().toISOString();
       if (body.on) {
-        if (!await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")) throw new HttpError(400, "Add your mobile number first.");
-        await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", OWNER_CALL_CONSENT_KEY, ownerCallConsentRecord({ at: now, source: "settings", ip: requestIp(request) }));
+        const mobile = await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary");
+        if (!mobile) throw new HttpError(400, "Add your mobile number first.");
+        await grantOwnerCallConsent(dependencies.store, account.tenantId, { at: now, source: "settings", ip: requestIp(request), phone: mobile });
       } else {
-        await dependencies.store.deleteIntegrationSecret(account.tenantId, "notifications", OWNER_CALL_CONSENT_KEY);
-        await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner_call_opt_out", JSON.stringify({ at: now, source: "settings" }));
+        await revokeOwnerCallConsent(dependencies.store, account.tenantId, { at: now, source: "settings" });
       }
       log({ level: "info", event: body.on ? "owner_calls_opted_in" : "owner_calls_opted_out", tenantId: account.tenantId, source: "settings" });
       return sendJson(response, 200, { urgentCalls: await urgentCallsState(account.tenantId) });
@@ -2414,8 +2415,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         const digits = typeof envelope.data.payload.digits === "string" ? envelope.data.payload.digits : null;
         const onOptOut = async () => {
           // Pressed 9: no more automated calls to this owner until they turn them back on in Settings.
-          await dependencies.store.deleteIntegrationSecret(ownerAlert.tenantId, "notifications", OWNER_CALL_CONSENT_KEY);
-          await dependencies.store.saveIntegrationSecret(ownerAlert.tenantId, "notifications", "owner_call_opt_out", JSON.stringify({ at: dependencies.clock.now().toISOString(), source: "keypad" }));
+          // Only a grant older than this keypress: a redelivered webhook never undoes a later "turn it back on".
+          await revokeOwnerCallConsent(dependencies.store, ownerAlert.tenantId, { at: dependencies.clock.now().toISOString(), source: "keypad", before: envelope.data.occurred_at ?? dependencies.clock.now().toISOString() });
           log({ level: "info", event: "owner_calls_opted_out", tenantId: ownerAlert.tenantId, source: "keypad" });
         };
         await continueOwnerAlertCall({ apiKey: dependencies.env.TELNYX_API_KEY, eventType: envelope.data.event_type, eventId: envelope.data.id, callControlId, state: ownerAlert, digits, onOptOut, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })

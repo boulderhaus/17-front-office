@@ -31,7 +31,7 @@ export interface OwnerCallOptions {
    */
   claimDial: (key: string) => Promise<boolean>;
   /** TCPA: the owner agreed to automated calls (signup or Settings) and has not stopped them. */
-  hasConsent: (tenantId: string) => Promise<boolean>;
+  hasConsent: (tenantId: string, phone: string) => Promise<boolean>;
   /** Provider test mode: only these numbers may be called. */
   allowedDestinations?: ReadonlySet<string>;
   fetcher?: typeof fetch;
@@ -48,7 +48,7 @@ export class TelnyxOwnerCallSender implements NotificationPort {
     if (!to || !/^\+1[2-9]\d{9}$/.test(to)) throw new NotificationHeldError("No owner mobile number to call");
     if (this.options.allowedDestinations && !this.options.allowedDestinations.has(to)) throw new NotificationHeldError("Provider test mode: owner number is not allowlisted");
     // Consent can be withdrawn (Settings or pressing 9) between queueing and sending.
-    if (!await this.options.hasConsent(notification.tenantId)) throw new NotificationHeldError("Owner has not agreed to automated urgent calls");
+    if (!await this.options.hasConsent(notification.tenantId, to)) throw new NotificationHeldError("Owner has not agreed to automated urgent calls");
     const now = this.options.clock.now().getTime();
     const recent = (this.#recent.get(notification.tenantId) ?? []).filter((at) => now - at < 60 * 60_000);
     if (recent.length >= CALLS_PER_HOUR) throw new NotificationHeldError("Urgent owner call limit reached for this hour");
@@ -135,6 +135,6 @@ export async function continueOwnerAlertCall(input: { apiKey: string; eventType:
     headers: { authorization: `Bearer ${input.apiKey}`, "content-type": "application/json" },
     body: JSON.stringify(body),
   }), 8_000);
-  // Hanging up a call that already ended (404/422) is fine; a refused speak or gather is not.
-  if (!response.ok && !(action === "hangup" && (response.status === 404 || response.status === 422))) throw new Error(`Owner call ${action} failed with HTTP ${response.status}`);
+  // The call already ended (404/422) is fine for a hangup or the stop confirmation; a refused summary is not.
+  if (!response.ok && !(action !== "gather_using_speak" && (response.status === 404 || response.status === 422))) throw new Error(`Owner call ${action} failed with HTTP ${response.status}`);
 }

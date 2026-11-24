@@ -143,7 +143,7 @@ export function SettingsPage() {
   const toggleUrgentCalls = async (on: boolean) => {
     setUrgentBusy(true)
     try {
-      const result = await api<{ urgentCalls: { available: boolean; on: boolean } }>("/api/app/alerts/urgent-calls", { method: "POST", body: { on } })
+      const result = await api<{ urgentCalls: { available: boolean; on: boolean; disclosure: string } }>("/api/app/alerts/urgent-calls", { method: "POST", body: { on } })
       if (settings.data) settings.setData({ ...settings.data, urgentCalls: result.urgentCalls })
       toast.success(on ? "We’ll call your mobile about emergencies." : "Emergency calls are off.")
     } catch (error) {
@@ -249,7 +249,7 @@ export function SettingsPage() {
           </Field>
           {settings.data.urgentCalls?.available && (
             <Toggle id="urgentCalls" label="Call me about emergencies" checked={settings.data.urgentCalls.on} disabled={urgentBusy}
-              hint="An automated call to your mobile with a short summary, only when a caller has an emergency. Press 9 during a call to stop them."
+              hint={settings.data.urgentCalls.disclosure}
               onChange={(on) => void toggleUrgentCalls(on)} />
           )}
           <Toggle id="ownerDailySmsEnabled" label={<>Daily text recap <em className="ml-1 not-italic text-brand-ink/70">Included</em></>} hint="Follow-ups and appointments, once each morning." checked={flag("ownerDailySmsEnabled")} onChange={(value) => set("ownerDailySmsEnabled", value)} />

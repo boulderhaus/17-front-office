@@ -141,7 +141,7 @@ export type SettingsValues = Record<string, string | boolean>
 
 export interface ApiSettings {
   /** Automated emergency calls to the owner's mobile: offered, and on only with the owner's recorded consent. */
-  urgentCalls?: { available: boolean; on: boolean }
+  urgentCalls?: { available: boolean; on: boolean; disclosure: string }
   csrf: string
   values: SettingsValues
   status: string

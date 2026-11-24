@@ -39,7 +39,7 @@ describe("urgent calls ring the owner", () => {
       ownerPhone: "+15555550100",
     });
     const service = new CallService(store, new InMemoryCalendar(), clock, "https://front-office.example", { urgentCallAvailable: true });
-    await store.saveIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY, "{}");
+    await store.saveIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY, JSON.stringify({ at: now.toISOString(), phone: "+15555550100" }));
     const end = (id: string, problemDescription: string, llmEmergencyScore?: number) => service.finalize({
       webhookEventId: `end:${id}`, tenantId, providerCallId: id, fromNumber: "+15555550142", startedAt: "2026-11-23T14:50:00.000Z", endedAt: now.toISOString(), durationSeconds: 95,
       fields: { ...fields, problemDescription }, transcript: `Caller: ${problemDescription}`, recordingUrl: null, consentState: "disclosed",
@@ -108,7 +108,7 @@ describe("urgent calls ring the owner", () => {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("no address");
     const tenantId = "shop_consent";
-    await store.saveIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY, "{}");
+    await store.saveIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY, JSON.stringify({ at: "2026-11-23T14:00:00.000Z", phone: "+15555550100" }));
     const state = (phase: OwnerAlertState["phase"]) => ownerAlertClientState({ tenantId, speech: "Front Office: urgent call from Maria, no AC. Check your Front Office app.", phase });
     const post = (eventType: string, id: string, options: { key?: KeyObject; phase?: OwnerAlertState["phase"]; digits?: string } = {}) => {
       const body = JSON.stringify({ data: { record_type: "event", event_type: eventType, id, occurred_at: now.toISOString(), payload: { call_control_id: "v3:owner-1", client_state: state(options.phase ?? "dial"), ...(options.digits === undefined ? {} : { digits: options.digits }) } } });
@@ -134,13 +134,18 @@ describe("urgent calls ring the owner", () => {
     // Nothing pressed: hang up, consent kept.
     await post("call.gather.ended", "evt-no-digits", { phase: "gather", digits: "" });
     expect(actions[actions.length - 1]!.url).toBe("https://api.telnyx.com/v2/calls/v3%3Aowner-1/actions/hangup");
-    expect(await store.getIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY)).toBe("{}");
+    expect(await store.getIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY)).not.toBeNull();
     // Pressed 9: consent removed, confirmation spoken, then hang up.
     await post("call.gather.ended", "evt-nine", { phase: "gather", digits: "9" });
     expect(await store.getIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY)).toBeNull();
     const bye = actions[actions.length - 1]!;
     expect(bye.url).toBe("https://api.telnyx.com/v2/calls/v3%3Aowner-1/actions/speak");
     expect(String(bye.body.payload)).toContain("won't call you about emergencies anymore");
+    expect(await store.getIntegrationSecret(tenantId, "notifications", "owner_call_consent_log")).toContain("keypad");
+    // The owner turns calls back on; a redelivered old keypress never turns them off again.
+    await store.saveIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY, JSON.stringify({ at: new Date(now.getTime() + 60_000).toISOString(), phone: "+15555550100" }));
+    await post("call.gather.ended", "evt-nine", { phase: "gather", digits: "9" });
+    expect(await store.getIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY)).not.toBeNull();
     await post("call.speak.ended", "evt-bye", { phase: "bye" });
     expect(actions[actions.length - 1]!.url).toBe("https://api.telnyx.com/v2/calls/v3%3Aowner-1/actions/hangup");
     expect(await store.listCalls("demo", 10)).toHaveLength(0);
@@ -179,12 +184,18 @@ describe("consent to automated emergency calls", () => {
     expect(JSON.parse((await store.getIntegrationSecret(yes.tenantId, "notifications", OWNER_CALL_CONSENT_KEY))!)).toMatchObject({ source: "signup", wording: "owner-urgent-calls-2026-11-23" });
     const no = await signup("no@consent.example", {});
     expect(await store.getIntegrationSecret(no.tenantId, "notifications", OWNER_CALL_CONSENT_KEY)).toBeNull();
-    const settings = await (await fetch(`${base}/api/app/settings`, { headers: { cookie: no.cookie } })).json() as { csrf: string; urgentCalls: { available: boolean; on: boolean } };
-    expect(settings.urgentCalls).toEqual({ available: true, on: false });
+    const settings = await (await fetch(`${base}/api/app/settings`, { headers: { cookie: no.cookie } })).json() as { csrf: string; urgentCalls: { available: boolean; on: boolean; disclosure: string } };
+    expect(settings.urgentCalls).toMatchObject({ available: true, on: false });
+    expect(settings.urgentCalls.disclosure).toContain("artificial-voice");
     const toggle = (on: boolean) => fetch(`${base}/api/app/alerts/urgent-calls`, { method: "POST", headers: { cookie: no.cookie, "content-type": "application/json", "x-csrf-token": settings.csrf }, body: JSON.stringify({ on }) });
-    expect(await (await toggle(true)).json()).toEqual({ urgentCalls: { available: true, on: true } });
+    expect(await (await toggle(true)).json()).toMatchObject({ urgentCalls: { available: true, on: true } });
     expect(JSON.parse((await store.getIntegrationSecret(no.tenantId, "notifications", OWNER_CALL_CONSENT_KEY))!)).toMatchObject({ source: "settings" });
-    expect(await (await toggle(false)).json()).toEqual({ urgentCalls: { available: true, on: false } });
+    // Consent belongs to the number: a new mobile is never called without a new yes.
+    await store.saveIntegrationSecret(no.tenantId, "notifications", "owner-primary", "+19415550111");
+    expect((await (await fetch(`${base}/api/app/settings`, { headers: { cookie: no.cookie } })).json() as { urgentCalls: { on: boolean } }).urgentCalls.on).toBe(false);
+    await store.saveIntegrationSecret(no.tenantId, "notifications", "owner-primary", "+19415550199");
+    expect(await (await toggle(false)).json()).toMatchObject({ urgentCalls: { available: true, on: false } });
+    expect(await store.getIntegrationSecret(no.tenantId, "notifications", "owner_call_consent_log")).toContain("settings");
     expect(await store.getIntegrationSecret(no.tenantId, "notifications", OWNER_CALL_CONSENT_KEY)).toBeNull();
     expect(await (await fetch(`${base}/terms`)).text()).toContain("press 9 during any of these calls");
   });
