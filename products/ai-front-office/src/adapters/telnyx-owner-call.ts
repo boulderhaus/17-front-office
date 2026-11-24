@@ -30,6 +30,8 @@ export interface OwnerCallOptions {
    * replicas and restarts. A lost or failed dial is never retried, so the owner is never rung twice.
    */
   claimDial: (key: string) => Promise<boolean>;
+  /** TCPA: the owner agreed to automated calls (signup or Settings) and has not stopped them. */
+  hasConsent: (tenantId: string) => Promise<boolean>;
   /** Provider test mode: only these numbers may be called. */
   allowedDestinations?: ReadonlySet<string>;
   fetcher?: typeof fetch;
@@ -45,6 +47,8 @@ export class TelnyxOwnerCallSender implements NotificationPort {
     const to = await this.options.resolveDestination(notification.tenantId, notification.destinationRef);
     if (!to || !/^\+1[2-9]\d{9}$/.test(to)) throw new NotificationHeldError("No owner mobile number to call");
     if (this.options.allowedDestinations && !this.options.allowedDestinations.has(to)) throw new NotificationHeldError("Provider test mode: owner number is not allowlisted");
+    // Consent can be withdrawn (Settings or pressing 9) between queueing and sending.
+    if (!await this.options.hasConsent(notification.tenantId)) throw new NotificationHeldError("Owner has not agreed to automated urgent calls");
     const now = this.options.clock.now().getTime();
     const recent = (this.#recent.get(notification.tenantId) ?? []).filter((at) => now - at < 60 * 60_000);
     if (recent.length >= CALLS_PER_HOUR) throw new NotificationHeldError("Urgent owner call limit reached for this hour");
@@ -61,7 +65,7 @@ export class TelnyxOwnerCallSender implements NotificationPort {
         timeout_secs: 30,
         time_limit_secs: 90,
         webhook_url: this.options.webhookUrl,
-        client_state: ownerAlertClientState(notification.body),
+        client_state: ownerAlertClientState({ tenantId: notification.tenantId, speech: notification.body, phase: "dial" }),
       }),
     }), 8_000).catch((error: unknown) => {
       throw new NotificationHeldError(`Urgent owner call not confirmed, not retried: ${error instanceof Error ? error.message.slice(0, 120) : "request failed"}`);
@@ -73,29 +77,64 @@ export class TelnyxOwnerCallSender implements NotificationPort {
   }
 }
 
-export function ownerAlertClientState(speech: string): string {
-  return Buffer.from(`${STATE_PREFIX}${speech.slice(0, SPEECH_LIMIT)}`).toString("base64");
+/** What our own owner alert call carries in client_state: which shop, the words, and where the call is. */
+export interface OwnerAlertState {
+  tenantId: string;
+  speech: string;
+  /** dial: ringing or just answered. gather: reading the summary, listening for 9. bye: saying the stop confirmation. */
+  phase: "dial" | "gather" | "bye";
 }
 
-/** The words to read when a webhook's client_state is one of our owner alert calls; null for any other call. */
-export function ownerAlertSpeech(clientState: unknown): string | null {
+export function ownerAlertClientState(state: OwnerAlertState): string {
+  return Buffer.from(`${STATE_PREFIX}${JSON.stringify({ t: state.tenantId, s: state.speech.slice(0, SPEECH_LIMIT), p: state.phase })}`).toString("base64");
+}
+
+/** Our owner alert call's state from a (signed) webhook's client_state; null for any other call. */
+export function ownerAlertState(clientState: unknown): OwnerAlertState | null {
   if (typeof clientState !== "string" || !clientState) return null;
   const decoded = Buffer.from(clientState, "base64").toString("utf8");
-  return decoded.startsWith(STATE_PREFIX) ? decoded.slice(STATE_PREFIX.length) : null;
+  if (!decoded.startsWith(STATE_PREFIX)) return null;
+  try {
+    const value = JSON.parse(decoded.slice(STATE_PREFIX.length)) as { t?: unknown; s?: unknown; p?: unknown };
+    if (typeof value.t !== "string" || typeof value.s !== "string" || (value.p !== "dial" && value.p !== "gather" && value.p !== "bye")) return null;
+    return { tenantId: value.t, speech: value.s, phase: value.p };
+  } catch {
+    return null;
+  }
 }
 
-/** Answered: read the summary twice (the owner may miss the start). Spoken: hang up. */
-export async function continueOwnerAlertCall(input: { apiKey: string; eventType: string; eventId: string; callControlId: string; speech: string; fetcher?: typeof fetch }): Promise<void> {
-  const action = input.eventType === "call.answered" ? "speak" : input.eventType === "call.speak.ended" ? "hangup" : null;
+export const OWNER_CALL_STOP_PROMPT = "To stop these calls, press 9.";
+export const OWNER_CALL_STOPPED = "Done. Front Office won't call you about emergencies anymore. You can turn these calls back on in Settings. Goodbye.";
+const VOICE = { voice: "AWS.Polly.Joanna", language: "en-US" };
+
+/**
+ * Answered: read the summary twice, then "To stop these calls, press 9", listening for 9 (TCPA opt-out).
+ * Pressed 9: stop calling this shop's owner (onOptOut), confirm, hang up. Otherwise: hang up.
+ */
+export async function continueOwnerAlertCall(input: { apiKey: string; eventType: string; eventId: string; callControlId: string; state: OwnerAlertState; digits: string | null; onOptOut: () => Promise<void>; fetcher?: typeof fetch }): Promise<void> {
+  const { state } = input;
+  let action: string | null = null;
+  let body: Record<string, unknown> = { command_id: input.eventId };
+  if (input.eventType === "call.answered" && state.phase === "dial") {
+    action = "gather_using_speak";
+    body = { ...body, ...VOICE, payload: `${state.speech} I'll say that again. ${state.speech} ${OWNER_CALL_STOP_PROMPT}`, valid_digits: "9", minimum_digits: 1, maximum_digits: 1, timeout_millis: 8_000, client_state: ownerAlertClientState({ ...state, phase: "gather" }) };
+  } else if (input.eventType === "call.gather.ended" && state.phase === "gather") {
+    if (input.digits?.includes("9")) {
+      await input.onOptOut();
+      action = "speak";
+      body = { ...body, ...VOICE, payload: OWNER_CALL_STOPPED, client_state: ownerAlertClientState({ ...state, phase: "bye" }) };
+    } else {
+      action = "hangup";
+    }
+  } else if (input.eventType === "call.speak.ended" && state.phase === "bye") {
+    action = "hangup";
+  }
   if (!action) return;
-  const body = action === "speak"
-    ? { payload: `${input.speech} I'll say that again. ${input.speech}`, voice: "AWS.Polly.Joanna", language: "en-US", command_id: input.eventId }
-    : { command_id: input.eventId };
   const response = await withTimeout((input.fetcher ?? fetch)(`https://api.telnyx.com/v2/calls/${encodeURIComponent(input.callControlId)}/actions/${action}`, {
     method: "POST",
     headers: { authorization: `Bearer ${input.apiKey}`, "content-type": "application/json" },
     body: JSON.stringify(body),
   }), 8_000);
-  // Hanging up a call that already ended (404/422) is fine; a refused speak is not.
+  // Hanging up a call that already ended (404/422) is fine; a refused speak or gather is not.
   if (!response.ok && !(action === "hangup" && (response.status === 404 || response.status === 422))) throw new Error(`Owner call ${action} failed with HTTP ${response.status}`);
 }

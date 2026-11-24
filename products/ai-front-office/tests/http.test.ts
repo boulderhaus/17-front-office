@@ -960,8 +960,8 @@ describe("HTTP boundary", () => {
       expect(signupPage).toContain(phrase);
     }
     expect(signupPage.slice(signupPage.indexOf('name="ownerSmsConsent"'), signupPage.indexOf("</label>", signupPage.indexOf('name="ownerSmsConsent"')))).not.toMatch(/\balerts?\b/i);
-    // The fewest fields: shop, mobile, email, password.
-    expect([...signupPage.matchAll(/<input name="(\w+)"/g)].map((match) => match[1]).filter((name) => !["ownerSmsConsent", "faxNumber"].includes(name!))).toEqual(["businessName", "phone", "email", "password"]);
+    // The fewest fields: shop, mobile, email, password (plus the two optional, unchecked consent boxes).
+    expect([...signupPage.matchAll(/<input name="(\w+)"/g)].map((match) => match[1]).filter((name) => !["ownerSmsConsent", "ownerCallConsent", "faxNumber"].includes(name!))).toEqual(["businessName", "phone", "email", "password"]);
     // Three steps now: Your shop, Your card, Forward your calls. No hours step.
     expect(signupPage).toContain("Step 1 of 3 · Your shop");
     expect(signupPage).toContain("<li>Forward your calls</li></ol>");
