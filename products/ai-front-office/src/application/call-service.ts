@@ -18,7 +18,7 @@ import { BookingCoordinator } from "./booking-coordinator.js";
 import { redactError, withRetry } from "./retry.js";
 import { UsageAlertService } from "./usage-alerts.js";
 import { callbackLinkToken, ownerCallSms, shortWhen, urgentReason } from "../domain/owner-sms.js";
-import { ownerCallEmailNotification, ownerCallPushMessage, ownerPushNotification } from "./owner-alerts.js";
+import { ownerCallEmailNotification, ownerCallPushMessage, ownerPushNotification, urgentCallSpeech, urgentOwnerCallNotification } from "./owner-alerts.js";
 import { listPushSubscriptions } from "../adapters/web-push.js";
 
 /** Sticky quality flag: a spam mark was refused or undone, so this call always counts and reaches the owner. */
@@ -74,6 +74,7 @@ export class CallService {
   readonly #callbackLinkKey: string | null;
   readonly #ownerEmailAvailable: boolean;
   readonly #pushAvailable: boolean;
+  readonly #urgentCallAvailable: boolean;
 
   constructor(
     private readonly store: Store,
@@ -82,11 +83,13 @@ export class CallService {
     private readonly publicBaseUrl: string,
     /** ownerEmailAvailable: email delivery is configured, so owners without text alerts can be emailed. */
     /** pushAvailable: web push (VAPID) is configured, so phones with call alerts on get every lead. */
-    options: { ownerEmailAvailable?: boolean; pushAvailable?: boolean; callbackLinkKey?: string | null } = {},
+    /** urgentCallAvailable: urgent and life-safety calls ring the owner's mobile with a spoken summary. */
+    options: { ownerEmailAvailable?: boolean; pushAvailable?: boolean; urgentCallAvailable?: boolean; callbackLinkKey?: string | null } = {},
   ) {
     this.#callbackLinkKey = options.callbackLinkKey ?? null;
     this.#ownerEmailAvailable = options.ownerEmailAvailable === true;
     this.#pushAvailable = options.pushAvailable === true;
+    this.#urgentCallAvailable = options.urgentCallAvailable === true;
     this.#booking = new BookingCoordinator(store, calendar, clock);
     this.#usageAlerts = new UsageAlertService(store, clock, publicBaseUrl, options.ownerEmailAvailable === true);
   }
@@ -897,6 +900,14 @@ export class CallService {
    */
   private async enqueueOwnerCopies(call: CallRecord, smsBody: string, high: boolean, keyBase: string, emailAllowed: boolean): Promise<void> {
     const now = this.clock.now().toISOString();
+    // Urgent or life-safety: ring the owner's mobile too, once per call (the handoff alert and the summary share it).
+    if (this.#urgentCallAvailable && call.emergency?.emergency === true
+      && await this.store.getOwnerAccountByTenant(call.tenantId)
+      && await this.store.getIntegrationSecret(call.tenantId, "notifications", "owner-primary")) {
+      const config = await this.store.getConfig(call.tenantId);
+      const speech = urgentCallSpeech(call, this.wantsLine(call.fields.requestedStart, config.timezone));
+      await this.store.enqueueNotification(urgentOwnerCallNotification({ tenantId: call.tenantId, callId: call.id, speech, now }));
+    }
     if (this.#pushAvailable && (await listPushSubscriptions(this.store, call.tenantId)).length > 0) {
       await this.store.enqueueNotification(ownerPushNotification({ tenantId: call.tenantId, callId: call.id, message: ownerCallPushMessage(smsBody, call.id, high), keyBase, now }));
     }

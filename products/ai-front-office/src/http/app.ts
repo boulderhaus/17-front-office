@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { continueOwnerAlertCall, ownerAlertSpeech, urgentOwnerCallsConfigured } from "../adapters/telnyx-owner-call.js";
 import { deviceId, listPushSubscriptions, parsePushSubscription, removePushSubscriptions, savePushSubscription } from "../adapters/web-push.js";
 import { ownerPushNotification } from "../application/owner-alerts.js";
 import { SERVICE_WORKER, WEB_MANIFEST } from "./pwa.js";
@@ -377,6 +378,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     callbackLinkKey: dependencies.env.SESSION_SIGNING_KEY ?? null,
     ownerEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
     pushAvailable: Boolean(dependencies.env.VAPID_PUBLIC_KEY && dependencies.env.VAPID_PRIVATE_KEY),
+    urgentCallAvailable: urgentOwnerCallsConfigured(dependencies.env),
   });
   const vapid = dependencies.env.VAPID_PUBLIC_KEY && dependencies.env.VAPID_PRIVATE_KEY ? { publicKey: dependencies.env.VAPID_PUBLIC_KEY } : null;
   const recordingClient = dependencies.env.TELNYX_API_KEY ? new TelnyxRecordingClient(dependencies.env.TELNYX_API_KEY, dependencies.fetcher ?? fetch) : null;
@@ -2298,6 +2300,16 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       return sendJson(response, 200, { received: true });
     }
     const envelope = parseTelnyxEnvelope(rawBody);
+    const ownerAlert = ownerAlertSpeech(envelope.data.payload.client_state);
+    if (ownerAlert !== null) {
+      // Our urgent call to an owner: speak when answered, hang up when done. Never a customer call record.
+      const callControlId = envelope.data.payload.call_control_id;
+      if (typeof callControlId === "string" && dependencies.env.TELNYX_API_KEY && await dependencies.store.claimWebhook(telnyxEventId(envelope, rawBody))) {
+        await continueOwnerAlertCall({ apiKey: dependencies.env.TELNYX_API_KEY, eventType: envelope.data.event_type, eventId: envelope.data.id, callControlId, speech: ownerAlert, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })
+          .catch((error) => log({ level: "error", event: "owner_alert_call_step_failed", step: envelope.data.event_type, error: safeError(error) }));
+      }
+      return sendJson(response, 200, { received: true });
+    }
     if (envelope.data.event_type === "message.finalized") {
       const finalized = asTelnyxMessageFinalized(envelope);
       if (!await dependencies.store.claimWebhook(telnyxEventId(envelope, rawBody))) return sendJson(response, 200, { received: true, duplicate: true });

@@ -7,6 +7,7 @@ import { TelnyxSmsAdapter } from "./adapters/telnyx.js";
 import { ResendEmailAdapter } from "./adapters/resend.js";
 import { NotificationRouter } from "./adapters/notification-router.js";
 import { WebPushSender } from "./adapters/web-push.js";
+import { TelnyxOwnerCallSender, urgentOwnerCallsConfigured } from "./adapters/telnyx-owner-call.js";
 import { UnavailableCalendar } from "./adapters/unavailable.js";
 import { parseOwnerDestinations, type Environment } from "./config/environment.js";
 import { createDemoConfig } from "./domain/config.js";
@@ -100,12 +101,20 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
   const pushSender = env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY
     ? new WebPushSender({ store, clock: systemClock, vapid: { publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY, subject: env.VAPID_SUBJECT } })
     : null;
-  const sender = new NotificationRouter(smsSender, emailSender, pushSender);
+  const voiceSender = urgentOwnerCallsConfigured(env)
+    ? new TelnyxOwnerCallSender({
+        apiKey: env.TELNYX_API_KEY!, connectionId: env.TELNYX_CHECK_CONNECTION_ID!, from: env.TELNYX_FROM_NUMBER!, clock: systemClock,
+        webhookUrl: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx`,
+        resolveDestination: async (tenantId, reference) => (await store.getIntegrationSecret(tenantId, "notifications", reference)) ?? null,
+        ...(env.PROVIDER_TEST_MODE ? { allowedDestinations: new Set(Object.values(destinations)) } : {}),
+      })
+    : null;
+  const sender = new NotificationRouter(smsSender, emailSender, pushSender, voiceSender);
   return {
     store,
     calendar,
     sender,
-    integrations: { "Telnyx Voice": telnyxVoiceConfigured, "Google Calendar": googleConfigured, "Telnyx SMS": telnyxSmsConfigured, "Weekly Email": emailConfigured, "Web Push": Boolean(pushSender) },
+    integrations: { "Telnyx Voice": telnyxVoiceConfigured, "Google Calendar": googleConfigured, "Telnyx SMS": telnyxSmsConfigured, "Weekly Email": emailConfigured, "Web Push": Boolean(pushSender), "Urgent owner calls": Boolean(voiceSender) },
     close: () => store.close(),
   };
 }

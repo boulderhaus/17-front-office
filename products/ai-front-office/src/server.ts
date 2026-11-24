@@ -13,6 +13,7 @@ import { OverageBillingService } from "./application/billing-jobs.js";
 import { createTelemetry } from "./adapters/posthog.js";
 import { systemClock } from "./ports.js";
 import { createRuntime } from "./runtime.js";
+import { urgentOwnerCallsConfigured } from "./adapters/telnyx-owner-call.js";
 import { TOOL_LEDGER_RETENTION_MS } from "./voice/tool-results.js";
 
 const env = loadEnvironment(process.env);
@@ -27,7 +28,7 @@ server.keepAliveTimeout = 5_000;
 server.maxRequestsPerSocket = 1_000;
 
 const worker = new OutboxWorker(runtime.store, runtime.sender, systemClock);
-const recovery = new CallService(runtime.store, runtime.calendar, systemClock, env.PUBLIC_BASE_URL, { callbackLinkKey: env.SESSION_SIGNING_KEY ?? null, ownerEmailAvailable: Boolean(env.RESEND_API_KEY && env.RESEND_FROM_EMAIL), pushAvailable: Boolean(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY) });
+const recovery = new CallService(runtime.store, runtime.calendar, systemClock, env.PUBLIC_BASE_URL, { callbackLinkKey: env.SESSION_SIGNING_KEY ?? null, ownerEmailAvailable: Boolean(env.RESEND_API_KEY && env.RESEND_FROM_EMAIL), pushAvailable: Boolean(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY), urgentCallAvailable: urgentOwnerCallsConfigured(env) });
 const deletion = new DataDeletionService(
   runtime.store,
   env.TELNYX_API_KEY ? new TelnyxRecordingClient(env.TELNYX_API_KEY) : null,
