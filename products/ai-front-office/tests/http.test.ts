@@ -80,6 +80,10 @@ describe("HTTP boundary", () => {
     expect(stripeImage.status).toBe(200);
     expect(stripeImage.headers.get("content-type")).toBe("image/png");
     expect((await stripeImage.arrayBuffer()).byteLength).toBeGreaterThan(10_000);
+    // The signup SMS consent box, linked from the toll-free verification as the opt-in image.
+    const optInImage = await fetch(`${baseUrl}/assets/sms-opt-in.png`);
+    expect(optInImage.status).toBe(200);
+    expect(optInImage.headers.get("content-type")).toBe("image/png");
     const signupWizard = await fetch(`${baseUrl}/assets/signup-wizard.js`);
     expect(signupWizard.status).toBe(200);
     expect(signupWizard.headers.get("content-type")).toContain("text/javascript");
