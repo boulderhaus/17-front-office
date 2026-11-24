@@ -747,6 +747,13 @@ describe("HTTP boundary", () => {
       const denied = await fetch(`${baseUrl}${path}`, { method: "POST", headers: { cookie: memberCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }) });
       expect(denied.status).toBe(403);
     }
+    // Removing a teammate drops their Google grant: a suspended member's calendar is never used again.
+    const teammate = await store.getOwnerAccountByEmail("teammate@synthetic.example");
+    await store.saveIntegrationSecret(account!.tenantId, "google", `refresh_token:${teammate!.id}`, "synthetic-refresh-token");
+    expect(await (await fetch(`${baseUrl}/app/team`, { headers: { cookie: memberCookie } })).text()).toContain('href="/privacy#google-calendar"');
+    const removed = await fetch(`${baseUrl}/app/team/remove`, { method: "POST", redirect: "manual", headers: { cookie: ownerCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, accountId: teammate!.id }) });
+    expect(removed.status).toBe(303);
+    expect(await store.getIntegrationSecret(account!.tenantId, "google", `refresh_token:${teammate!.id}`)).toBeNull();
     const setup = await (await fetch(`${baseUrl}/app/setup`, { headers: { cookie: ownerCookie } })).text();
     expect(setup).toContain("Where can you take a job?");
     expect(setup).toContain("Connect Google Calendar");
@@ -976,9 +983,19 @@ describe("HTTP boundary", () => {
     const privacyHtml = await privacy.text();
     expect(privacyHtml).toContain("not sold, rented, or shared with third parties or affiliates for marketing");
     expect(privacyHtml).toContain("that call's recording is deleted after the call");
+    // Google OAuth verification: the Limited Use statement linked to Google's policy, the two scopes, revoking, and the providers.
+    const privacyText = privacyHtml.replace(/<[^>]+>/g, "");
+    expect(privacyText).toContain("Call Otto's use and transfer of information received from Google APIs to any other app will adhere to the Google API Services User Data Policy, including the Limited Use requirements.");
+    expect(privacyHtml).toContain('<a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>');
+    for (const phrase of ["calendar.freebusy", "calendar.events", 'href="https://myaccount.google.com/permissions"', "train AI or machine learning models", "encrypted with AES-256", '<h2 id="google-calendar">', "when a teammate is removed", "Call Otto connects to Google over HTTPS"]) {
+      expect(privacyHtml).toContain(phrase);
+    }
+    for (const provider of ["Telnyx", "Stripe", "Resend", "Railway", "PostHog"]) expect(privacyHtml).toContain(`<strong>${provider}</strong>`);
     const terms = await fetch(`${baseUrl}/terms`);
     expect(terms.status).toBe(200);
     const termsHtml = await terms.text();
+    expect(termsHtml).toContain("authorizes Call Otto to check when that calendar is busy and to add booked jobs to it");
+    for (const page of [termsHtml, privacyHtml]) expect(page).not.toMatch(/\s—\s/);
     expect(termsHtml).toContain("solely responsible for giving any notice and obtaining any consent");
     expect(termsHtml).toContain("Reply STOP to opt out or HELP for help");
     expect(termsHtml).toContain("creating an account, activating service, or paying for a subscription");

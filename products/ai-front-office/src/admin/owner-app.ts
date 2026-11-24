@@ -281,9 +281,10 @@ export function renderOwnerSettings(input: {
   if (!leadOptions.some(([value]) => value === c.minimumLeadTimeMinutes)) leadOptions.push([c.minimumLeadTimeMinutes, `${c.minimumLeadTimeMinutes} minutes`]);
   const addOn = (name: string, enabled: boolean, available: boolean | undefined, title: string, price: string, text: string): string =>
     `<label class="fo-option"><input type="checkbox" name="${name}"${checked(enabled)}${available ? "" : " disabled"}><span><strong>${title} <em>${price}</em></strong><small>${text}</small>${available ? "" : "<small class=\"fo-warn\">Not available yet.</small>"}</span></label>`;
+  const googleDataLink = `<p class="fo-muted"><a href="/privacy#google-calendar">How Call Otto uses Google Calendar data</a></p>`;
   const calendar = i.googleConnected
-    ? `<p class="fo-ok">${ownerIcon("check")}Google Calendar connected</p><a class="fo-ghost" href="/app/integrations/google/start">Reconnect</a>`
-    : i.googleAvailable ? `<p>Connect the calendar your jobs live on so Call Otto can offer real open times.</p><a class="fo-btn" href="/app/integrations/google/start">Connect Google Calendar</a>` : `<p class="fo-muted">Calendar connection isn’t available yet.</p>`;
+    ? `<p class="fo-ok">${ownerIcon("check")}Google Calendar connected</p><a class="fo-ghost" href="/app/integrations/google/start">Reconnect</a>${googleDataLink}`
+    : i.googleAvailable ? `<p>Connect the calendar your jobs live on so Call Otto can offer real open times.</p><a class="fo-btn" href="/app/integrations/google/start">Connect Google Calendar</a>${googleDataLink}` : `<p class="fo-muted">Calendar connection isn’t available yet.</p>`;
   const paid = isPaidStatus(input.subscription?.status);
   const form = `<form class="fo-form" method="post" action="/app/config">${csrfField}<input type="hidden" name="flatMonthlyPrice" value="${Math.round(c.flatMonthlyPriceCents / 100)}">
 <section class="fo-card fo-group"><h2>Answering</h2>

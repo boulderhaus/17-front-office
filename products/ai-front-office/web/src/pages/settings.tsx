@@ -316,6 +316,7 @@ export function SettingsPage() {
                 <Button size="tap" variant="brand" asChild><a href="/app/integrations/google/start">Connect Google Calendar</a></Button>
               </>
             ) : <p className="text-sm text-muted-foreground">Calendar connection isn’t available yet.</p>}
+            {i.googleConnected || i.googleAvailable ? <a className="text-sm text-muted-foreground underline underline-offset-4" href="/privacy#google-calendar">How Call Otto uses Google Calendar data</a> : null}
           </CardContent>
         </Card>
         <PlanCard plan={plan} csrf={csrf} onChanged={async () => { await settings.reload(); await reloadDashboard() }} />

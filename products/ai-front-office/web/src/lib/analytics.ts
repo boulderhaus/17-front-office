@@ -7,8 +7,9 @@ import type { CaptureResult, PostHog } from "posthog-js"
  * Callers' details never leave the browser:
  * - the call screens render inside `ph-no-capture` (replay shows a blank box, autocapture skips them);
  * - autocapture keeps no element text or attributes (tel: links, aria-labels with names);
- * - every input is masked in replay; console logs and network bodies are not recorded;
- * - a last-line filter strips anything shaped like an email or phone number from event properties.
+ * - replay masks all text and every input; console logs and network bodies are not recorded;
+ * - a last-line filter strips anything shaped like an email or phone number from event properties
+ *   (replay snapshots skip it: their text is already masked at record time).
  *
  * The SDK is a separate chunk, fetched only when analytics is on.
  */
@@ -53,7 +54,7 @@ export function startAnalytics(): void {
       enable_recording_console_log: false,
       session_recording: {
         maskAllInputs: true,
-        maskTextSelector: ".ph-mask",
+        maskTextSelector: "*",
         recordHeaders: false,
         recordBody: false,
       },
