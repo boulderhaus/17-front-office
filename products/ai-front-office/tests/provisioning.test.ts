@@ -181,7 +181,7 @@ describe("owner one-tap go-live", () => {
     expect(screening?.body).toEqual({ inbound_call_screening: "flag_calls" });
     // The six-minute cap ships with every new shop assistant, not only via the prompt.
     const created = telnyx.calls.find((call) => call.method === "POST" && call.url.endsWith("/ai/assistants"));
-    expect((created?.body?.telephony_settings as { time_limit_secs?: number } | undefined)?.time_limit_secs).toBe(360);
+    expect((created?.body?.telephony_settings as { time_limit_secs?: number } | undefined)?.time_limit_secs).toBe(420);
     const dashboard = await (await fetch(`${baseUrl}/app`, { headers: { cookie } })).text();
     expect(dashboard).toContain("(941) 555-0123");
     expect(dashboard).toContain("*719415550123");

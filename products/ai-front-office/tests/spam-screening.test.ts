@@ -70,7 +70,7 @@ describe("call-minute guards in the assistant", () => {
 
   it("sets Telnyx's six-minute cap and silence timers and exposes the spam tool", () => {
     const update = buildTelnyxAssistantUpdate(config, "https://front-office.example") as { telephony_settings: Record<string, unknown> };
-    expect(update.telephony_settings).toMatchObject({ time_limit_secs: 360, user_idle_reply_secs: 4, user_idle_timeout_secs: 10 });
+    expect(update.telephony_settings).toMatchObject({ time_limit_secs: 420, user_idle_reply_secs: 4, user_idle_timeout_secs: 10 });
     const tool = buildTelnyxTools(config, "https://front-office.example")
       .find((entry) => (entry.webhook as { name?: string } | undefined)?.name === "mark_spam_call") as {
         webhook: { url: string; body_parameters: { required: string[]; properties: { category: { enum: string[] } } }; preset_body_fields: Record<string, unknown> };
@@ -380,7 +380,7 @@ describe("assistant config push", () => {
     await store.saveProviderRoute({ provider: "telnyx", externalId: "assistant-a", tenantId: "shop-a", createdAt: stamp, updatedAt: stamp });
     const plan = await planAssistantPushes({ store, defaultTenantId: "demo", demoAssistantId: "assistant-demo", publicBaseUrl: "https://front-office.example" });
     expect(plan.map((entry) => [entry.tenantId, entry.assistantId])).toEqual([["demo", "assistant-demo"], ["shop-a", "assistant-a"]]);
-    for (const entry of plan) expect((entry.update.telephony_settings as { time_limit_secs: number }).time_limit_secs).toBe(360);
+    for (const entry of plan) expect((entry.update.telephony_settings as { time_limit_secs: number }).time_limit_secs).toBe(420);
   });
 });
 

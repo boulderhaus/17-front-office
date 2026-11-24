@@ -480,3 +480,28 @@ export class TelnyxRecordingClient {
     }
   }
 }
+
+/** Telnyx errors that mean the call or its assistant is gone, so a message can never land. */
+const CALL_GONE_CODES = new Set(["90015", "90018"]);
+
+/**
+ * Adds messages to the AI assistant running on a live call (Telnyx "Add messages to AI Assistant").
+ * `command_id` makes a repeat of the same command a no-op on Telnyx's side.
+ */
+export class TelnyxAssistantMessenger {
+  constructor(private readonly apiKey: string, private readonly fetcher: typeof fetch = fetch) {}
+
+  /** "sent" when Telnyx accepted it, "call_ended" when the call is already over. Throws on anything else. */
+  async addSystemMessage(callControlId: string, content: string, commandId: string): Promise<"sent" | "call_ended"> {
+    const response = await withTimeout(this.fetcher(`https://api.telnyx.com/v2/calls/${encodeURIComponent(callControlId)}/actions/ai_assistant_add_messages`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" },
+      // trigger_response stays false: the message applies on the assistant's next natural turn, so it never talks over the caller.
+      body: JSON.stringify({ messages: [{ role: "system", content }], command_id: commandId, trigger_response: false }),
+    }), 4_000);
+    if (response.ok) return "sent";
+    const payload = await response.json().catch(() => ({})) as { errors?: Array<{ code?: unknown }> };
+    if (response.status === 404 || payload.errors?.some((error) => CALL_GONE_CODES.has(String(error.code)))) return "call_ended";
+    throw new Error(`Telnyx add-messages failed with HTTP ${response.status}${payload.errors?.[0]?.code ? ` (code ${String(payload.errors[0].code)})` : ""}`);
+  }
+}
