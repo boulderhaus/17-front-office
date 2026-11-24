@@ -249,6 +249,15 @@ export async function reconcileStripePlans(setup: StripePlansSetup, stripe: Stri
     if (product.status !== 200 || product.json.active === false) { log(`Product ${productId} is already archived or missing.`); continue; }
     const active = await listAll<StripePrice>(stripe, `prices?product=${encodeURIComponent(productId)}&active=true`);
     let kept = false;
+    // Stripe won't archive a product's default price, so the default is cleared first (only when it is archivable).
+    const defaultPrice = typeof product.json.default_price === "string" ? product.json.default_price : null;
+    if (defaultPrice && active.some((item) => item.id === defaultPrice) && !inUse.has(defaultPrice)) {
+      if (!create) log(`Would clear the default price ${defaultPrice} of ${productId}.`);
+      else {
+        await stripe("POST", `products/${encodeURIComponent(productId)}`, new URLSearchParams({ default_price: "" }));
+        log(`Cleared the default price ${defaultPrice} of ${productId}`);
+      }
+    }
     for (const item of active) {
       handled.add(item.id);
       if (keepBecauseInUse(item.id)) { kept = true; continue; }

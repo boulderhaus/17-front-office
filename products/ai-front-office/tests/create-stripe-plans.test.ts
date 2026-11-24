@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { archiveProductArgs, imageUrlArg, planStripeSetup, reconcileStripePlans, type StripeCall } from "../scripts/create-stripe-plans.js";
 
-interface FakeProduct { id: string; name: string; description: string | null; images?: string[]; active: boolean; metadata: Record<string, string> }
+interface FakeProduct { id: string; name: string; description: string | null; images?: string[]; default_price?: string | null; active: boolean; metadata: Record<string, string> }
 interface FakePrice { id: string; product: string; unit_amount: number; currency: string; recurring: { interval: string }; lookup_key: string | null; active: boolean; metadata: Record<string, string> }
 
 /** A tiny in-memory Stripe: products, prices (with lookup-key transfer), coupons, idempotency keys. */
@@ -49,6 +49,7 @@ function fakeStripe() {
       if (body!.has("name")) product.name = body!.get("name")!;
       if (body!.has("description")) product.description = body!.get("description");
       if (body!.has("images[0]")) product.images = [body!.get("images[0]")!];
+      if (body!.has("default_price")) product.default_price = body!.get("default_price") || null;
       out = { status: 200, json: { ...product } };
     } else if (method === "POST" && parts[0] === "prices" && parts.length === 1) {
       const lookupKey = body!.get("lookup_key");
@@ -62,6 +63,8 @@ function fakeStripe() {
     } else if (method === "POST" && parts[0] === "prices") {
       const price = prices.find((item) => item.id === parts[1])!;
       if (failures.archive > 0) { failures.archive -= 1; throw new Error("synthetic network failure"); }
+      // Like Stripe: a product's default price can't be archived.
+      if (body!.get("active") === "false" && products.some((item) => item.default_price === price.id)) return { status: 400, json: { error: { message: "default price" } } };
       writes.push(`archive price ${price.id}`);
       price.active = body!.get("active") === "true";
       out = { status: 200, json: { ...price } };
@@ -76,7 +79,7 @@ function fakeStripe() {
 function seedOneProductLayout(stripe: ReturnType<typeof fakeStripe>) {
   const setup = planStripeSetup({});
   stripe.products.push({ id: "prod_old", name: "Front Office", description: null, active: true, metadata: { front_office: "plans" } });
-  stripe.products.push({ id: "prod_legacy_solo", name: "Front Office Solo", description: "old", active: true, metadata: {} });
+  stripe.products.push({ id: "prod_legacy_solo", name: "Front Office Solo", description: "old", default_price: "price_legacy49", active: true, metadata: {} });
   stripe.prices.push({ id: "price_legacy49", product: "prod_legacy_solo", unit_amount: 4_900, currency: "usd", recurring: { interval: "month" }, lookup_key: null, active: true, metadata: {} });
   setup.prices.forEach((price, index) => stripe.prices.push({ id: `price_old${index}`, product: "prod_old", unit_amount: price.unitAmount, currency: "usd", recurring: { interval: "month" }, lookup_key: price.lookupKey, active: true, metadata: { plan: price.plan } }));
   stripe.coupons.set("front_office_first_month_50", { id: "front_office_first_month_50", percent_off: 50 });
