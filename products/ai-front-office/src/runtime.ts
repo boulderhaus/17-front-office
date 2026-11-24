@@ -7,6 +7,7 @@ import { TelnyxSmsAdapter } from "./adapters/telnyx.js";
 import { ResendEmailAdapter } from "./adapters/resend.js";
 import { NotificationRouter } from "./adapters/notification-router.js";
 import { WebPushSender } from "./adapters/web-push.js";
+import { hasOwnerCallConsent } from "./domain/owner-call-consent.js";
 import { TelnyxOwnerCallSender, urgentOwnerCallsConfigured } from "./adapters/telnyx-owner-call.js";
 import { UnavailableCalendar } from "./adapters/unavailable.js";
 import { parseOwnerDestinations, type Environment } from "./config/environment.js";
@@ -107,6 +108,7 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
         webhookUrl: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx`,
         resolveDestination: async (tenantId, reference) => (await store.getIntegrationSecret(tenantId, "notifications", reference)) ?? null,
         claimDial: (key) => store.claimWebhook(key),
+        hasConsent: (tenantId, phone) => hasOwnerCallConsent(store, tenantId, phone),
         ...(env.PROVIDER_TEST_MODE ? { allowedDestinations: new Set(Object.values(destinations)) } : {}),
       })
     : null;
