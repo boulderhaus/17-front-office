@@ -201,7 +201,7 @@ describe("billing grace line", () => {
       await h.sweep.runOnce();
       const reminders = h.outbox("grace-reminder:");
       expect(reminders).toHaveLength(1);
-      expect(reminders[0]!.body).toContain("in 7 days this number stops working");
+      expect(reminders[0]!.body).toContain("Otto: in 7 days your Call Otto number for Synthetic Heating stops working");
       expect(reminders[0]!.body).toContain("to stop forwarding");
       expect(h.telnyx.released).toEqual([]);
 

@@ -59,14 +59,14 @@ export function ownerPushNotification(input: { tenantId: string; callId: string 
 
 /**
  * What the urgent owner call says, in plain spoken words:
- * "Call Otto: urgent call from Maria, no AC, wants someone today. Check your Call Otto app."
+ * "Otto here: urgent call from Maria, no AC, wants someone today. Check your Call Otto app."
  */
 export function urgentCallSpeech(call: Pick<CallRecord, "fields" | "emergency">, wants: string | null): string {
   const name = callerFirstName(call.fields.callerName);
   const who = name === "Unknown caller" ? "a caller" : name;
   const evidence = call.emergency?.evidence.find((item) => item.trim());
   const what = (call.fields.problemDescription || evidence || "").replace(/\s+/g, " ").trim().slice(0, 90).replace(/[.,;:\s]+$/, "");
-  const parts = [`Call Otto: urgent call from ${who}`, what, wants ? wants.replace(/^Wants/, "wants") : null].filter(Boolean);
+  const parts = [`Otto here: urgent call from ${who}`, what, wants ? wants.replace(/^Wants/, "wants") : null].filter(Boolean);
   return `${parts.join(", ")}. Check your Call Otto app.`;
 }
 

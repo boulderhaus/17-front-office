@@ -25,9 +25,9 @@ describe("urgent calls ring the owner", () => {
 
   it("says who, what and when in plain words", () => {
     const speech = urgentCallSpeech({ fields, emergency: { emergency: true, severity: "urgent", score: 0.9, evidence: ["no AC"], immediateInstruction: null } }, "Wants someone today");
-    expect(speech).toBe("Call Otto: urgent call from Maria, no AC, wants someone today. Check your Call Otto app.");
+    expect(speech).toBe("Otto here: urgent call from Maria, no AC, wants someone today. Check your Call Otto app.");
     expect(urgentCallSpeech({ fields: { ...fields, callerName: null, problemDescription: "" }, emergency: { emergency: true, severity: "life_safety", score: 1, evidence: ["gas smell"], immediateInstruction: null } }, null))
-      .toBe("Call Otto: urgent call from a caller, gas smell. Check your Call Otto app.");
+      .toBe("Otto here: urgent call from a caller, gas smell. Check your Call Otto app.");
   });
 
   it("queues one call per urgent call to an owner-app shop with a mobile number, never for routine calls", async () => {
@@ -52,7 +52,7 @@ describe("urgent calls ring the owner", () => {
     const calls = [...store.notifications.values()].filter((item) => item.channel === "voice");
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ destinationRef: "owner-primary", priority: "high" });
-    expect(calls[0]!.body).toMatch(/^Call Otto: urgent call from Maria, Gas smell in the kitchen/);
+    expect(calls[0]!.body).toMatch(/^Otto here: urgent call from Maria, Gas smell in the kitchen/);
   });
 
   it("dials the owner from our number, carries the words in client state, holds past three an hour and in test mode", async () => {
@@ -64,7 +64,7 @@ describe("urgent calls ring the owner", () => {
     const claims = new InMemoryStore();
     const options = { apiKey: "KEY", connectionId: "check-connection", from: "+15555550199", webhookUrl: "https://front-office.example/webhooks/telnyx", clock, fetcher, resolveDestination: async () => "+15555550100", claimDial: (key: string) => claims.claimWebhook(key), hasConsent: async () => true };
     const sender = new TelnyxOwnerCallSender(options);
-    const notification = (callId: string) => urgentOwnerCallNotification({ tenantId: "shop", callId, speech: "Call Otto: urgent call from Maria, no AC. Check your Call Otto app.", now: now.toISOString() });
+    const notification = (callId: string) => urgentOwnerCallNotification({ tenantId: "shop", callId, speech: "Otto here: urgent call from Maria, no AC. Check your Call Otto app.", now: now.toISOString() });
     const receipts = [];
     for (const id of ["a", "b", "c"]) receipts.push((await sender.send(notification(id))).providerReceipt);
     expect(new Set(receipts).size).toBe(3);
@@ -73,7 +73,7 @@ describe("urgent calls ring the owner", () => {
     expect(posted).toHaveLength(3);
     await expect(sender.send(notification("d"))).rejects.toBeInstanceOf(NotificationHeldError);
     expect(posted[0]).toMatchObject({ connection_id: "check-connection", to: "+15555550100", from: "+15555550199", webhook_url: "https://front-office.example/webhooks/telnyx" });
-    expect(ownerAlertState(posted[0]!.client_state)).toEqual({ tenantId: "shop", speech: "Call Otto: urgent call from Maria, no AC. Check your Call Otto app.", phase: "dial" });
+    expect(ownerAlertState(posted[0]!.client_state)).toEqual({ tenantId: "shop", speech: "Otto here: urgent call from Maria, no AC. Check your Call Otto app.", phase: "dial" });
     expect(ownerAlertState(Buffer.from("forwarding-check:shop").toString("base64"))).toBeNull();
     // No recorded consent (never agreed, or pressed 9 since): never dialed.
     await expect(new TelnyxOwnerCallSender({ ...options, hasConsent: async () => false }).send(notification("g"))).rejects.toThrow("not agreed");
@@ -109,7 +109,7 @@ describe("urgent calls ring the owner", () => {
     if (!address || typeof address === "string") throw new Error("no address");
     const tenantId = "shop_consent";
     await store.saveIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY, JSON.stringify({ at: "2026-11-23T14:00:00.000Z", phone: "+15555550100" }));
-    const state = (phase: OwnerAlertState["phase"]) => ownerAlertClientState({ tenantId, speech: "Call Otto: urgent call from Maria, no AC. Check your Call Otto app.", phase });
+    const state = (phase: OwnerAlertState["phase"]) => ownerAlertClientState({ tenantId, speech: "Otto here: urgent call from Maria, no AC. Check your Call Otto app.", phase });
     const post = (eventType: string, id: string, options: { key?: KeyObject; phase?: OwnerAlertState["phase"]; digits?: string } = {}) => {
       const body = JSON.stringify({ data: { record_type: "event", event_type: eventType, id, occurred_at: now.toISOString(), payload: { call_control_id: "v3:owner-1", client_state: state(options.phase ?? "dial"), ...(options.digits === undefined ? {} : { digits: options.digits }) } } });
       const timestamp = String(Math.floor(now.getTime() / 1_000));
