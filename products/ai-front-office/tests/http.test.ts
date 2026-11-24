@@ -946,7 +946,8 @@ describe("HTTP boundary", () => {
     // "Unlimited" only ever appears as the add-on, with its fair-use limit right next to the toggle.
     expect(landingHtml).toContain("Fair use: up to 3× your plan’s calls.");
     expect(landingHtml).not.toMatch(/unlimited (minutes|answering)/i);
-    expect(landingHtml).toContain('Front Office is a product of <a href="https://bydutchworks.com"');
+    expect(landingHtml).not.toContain("Coastal Highway");
+    expect(landingHtml).not.toContain("610-8092");
     expect(landingHtml).not.toMatch(/\s—\s/);
     expect(landingHtml).not.toContain("ServiceTitan’s contractor benchmarks");
     expect(landingHtml).not.toContain("approve the setup before it ever answers a customer");
@@ -965,7 +966,7 @@ describe("HTTP boundary", () => {
     expect(signupPage).toContain("Step 1 of 3 · Your shop");
     expect(signupPage).toContain("<li>Forward your calls</li></ol>");
     expect(signupPage).not.toMatch(/<li>Hours<\/li>|of 4/);
-    expect(signupPage).toContain('Front Office is a product of <a href="https://bydutchworks.com"');
+    expect(signupPage).not.toContain("Coastal Highway");
     const privacy = await fetch(`${baseUrl}/privacy`);
     expect(privacy.status).toBe(200);
     const privacyHtml = await privacy.text();
@@ -989,9 +990,6 @@ describe("HTTP boundary", () => {
       expect(page).not.toContain("supplied during onboarding");
     }
     expect(termsHtml).toContain('Contact Front Office support at <a href="mailto:hello@bydutchworks.com">hello@bydutchworks.com</a> or <a href="tel:+19296108092">(929) 610-8092</a> for help.');
-    for (const page of [landingHtml, signupPage]) {
-      expect(page).toContain('Dutchworks LLC</a>.<br>16192 Coastal Highway, Lewes, DE 19958<br><a href="tel:+19296108092">(929) 610-8092</a> · <a href="mailto:hello@bydutchworks.com">hello@bydutchworks.com</a>');
-    }
     const simulator = await fetch(`${baseUrl}/admin/simulator`, { headers: { authorization: `Bearer ${adminToken}` } });
     expect(simulator.status).toBe(200);
     expect(await simulator.text()).toContain("Run all 15 launch scenarios");
