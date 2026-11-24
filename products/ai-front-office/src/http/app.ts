@@ -592,7 +592,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       response.end(WEB_MANIFEST);
       return;
     }
-    if (method === "GET" && (url.pathname === "/assets/front-office-mascot-flat.png" || url.pathname === "/assets/stripe-product.png" || url.pathname === "/assets/icon-192.png" || url.pathname === "/assets/icon-512.png" || url.pathname === "/assets/apple-touch-icon.png")) {
+    if (method === "GET" && (url.pathname === "/assets/front-office-mascot-flat.png" || url.pathname === "/assets/stripe-product.png" || url.pathname === "/assets/icon-192.png" || url.pathname === "/assets/icon-512.png" || url.pathname === "/assets/apple-touch-icon.png" || url.pathname === "/assets/sms-opt-in.png")) {
       const asset = await readFile(resolve(process.cwd(), "public" + url.pathname));
       response.statusCode = 200;
       response.setHeader("content-type", "image/png");
