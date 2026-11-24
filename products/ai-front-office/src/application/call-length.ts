@@ -11,7 +11,7 @@ import { redactError } from "./retry.js";
 
 /** Sends one system message to the assistant on a live call. */
 export interface AssistantMessenger {
-  addSystemMessage(callControlId: string, content: string, commandId: string): Promise<"sent" | "call_ended">;
+  addSystemMessage(callControlId: string, content: string, commandId: string): Promise<"sent" | "call_ended" | "rejected">;
 }
 
 export type CallLengthStage = "finish" | "wrap_up";
@@ -71,8 +71,8 @@ export class CallLengthGuard {
     try {
       const result = await this.messenger.addSystemMessage(call.providerCallId, callLengthNudge(stage, call), `front-office-${key}`);
       await this.store.completeToolResult(call.providerCallId, key, { result }, this.clock.now().toISOString());
-      this.log({ level: "info", event: "call_length_nudge", stage, result, tenantId: call.tenantId, callId: call.id });
-      return result === "sent" ? "sent" : "ended";
+      this.log({ level: result === "rejected" ? "warn" : "info", event: "call_length_nudge", stage, result, tenantId: call.tenantId, callId: call.id });
+      return result === "sent" ? "sent" : result === "call_ended" ? "ended" : "failed";
     } catch (error) {
       // The claim stays pending, so another cycle retries once it goes stale (every CLAIM_STALE_MS, not every tick);
       // command_id keeps a retry from doubling a message Telnyx already took.

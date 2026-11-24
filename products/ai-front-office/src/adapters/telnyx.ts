@@ -491,8 +491,11 @@ const CALL_GONE_CODES = new Set(["90015", "90018"]);
 export class TelnyxAssistantMessenger {
   constructor(private readonly apiKey: string, private readonly fetcher: typeof fetch = fetch) {}
 
-  /** "sent" when Telnyx accepted it, "call_ended" when the call is already over. Throws on anything else. */
-  async addSystemMessage(callControlId: string, content: string, commandId: string): Promise<"sent" | "call_ended"> {
+  /**
+   * "sent" when Telnyx accepted it, "call_ended" when the call is already over, "rejected" for any other 4xx that a
+   * retry cannot fix (say the assistant already left after a transfer). Throws on 408, 429, 5xx and network errors.
+   */
+  async addSystemMessage(callControlId: string, content: string, commandId: string): Promise<"sent" | "call_ended" | "rejected"> {
     const response = await withTimeout(this.fetcher(`https://api.telnyx.com/v2/calls/${encodeURIComponent(callControlId)}/actions/ai_assistant_add_messages`, {
       method: "POST",
       headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" },
@@ -502,6 +505,7 @@ export class TelnyxAssistantMessenger {
     if (response.ok) return "sent";
     const payload = await response.json().catch(() => ({})) as { errors?: Array<{ code?: unknown }> };
     if (response.status === 404 || payload.errors?.some((error) => CALL_GONE_CODES.has(String(error.code)))) return "call_ended";
+    if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) return "rejected";
     throw new Error(`Telnyx add-messages failed with HTTP ${response.status}${payload.errors?.[0]?.code ? ` (code ${String(payload.errors[0].code)})` : ""}`);
   }
 }

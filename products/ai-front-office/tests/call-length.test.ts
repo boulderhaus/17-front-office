@@ -23,8 +23,8 @@ class MutableClock implements Clock {
 
 class RecordingMessenger implements AssistantMessenger {
   sent: Array<{ callControlId: string; content: string; commandId: string }> = [];
-  next: Array<"sent" | "call_ended" | Error> = [];
-  async addSystemMessage(callControlId: string, content: string, commandId: string): Promise<"sent" | "call_ended"> {
+  next: Array<"sent" | "call_ended" | "rejected" | Error> = [];
+  async addSystemMessage(callControlId: string, content: string, commandId: string): Promise<"sent" | "call_ended" | "rejected"> {
     const outcome = this.next.shift() ?? "sent";
     if (outcome instanceof Error) throw outcome;
     this.sent.push({ callControlId, content, commandId });
@@ -147,6 +147,17 @@ describe("call length guard", () => {
     expect(messenger.sent).toHaveLength(1);
   });
 
+  it("does not retry a message Telnyx rejected", async () => {
+    await start("v3:transferred");
+    clock.advance(280_000);
+    messenger.next.push("rejected");
+    expect(await guard.runOnce()).toEqual({ sent: 0, ended: 0, failed: 1 });
+    expect(logs.at(-1)).toMatchObject({ level: "warn", event: "call_length_nudge", result: "rejected" });
+    clock.advance(30_000);
+    await guard.runOnce();
+    expect(messenger.sent).toHaveLength(1);
+  });
+
   it("logs a failed send and retries it only after the claim goes stale", async () => {
     await start("v3:flaky");
     clock.advance(275_000);
@@ -184,6 +195,8 @@ describe("Telnyx add-messages client", () => {
     expect(await respond(422, "90018").addSystemMessage("v3:a", "x", "c")).toBe("call_ended");
     expect(await respond(422, "90015").addSystemMessage("v3:a", "x", "c")).toBe("call_ended");
     expect(await respond(404, "10005").addSystemMessage("v3:a", "x", "c")).toBe("call_ended");
+    expect(await respond(422, "90061").addSystemMessage("v3:a", "x", "c")).toBe("rejected");
+    await expect(respond(429, "10011").addSystemMessage("v3:a", "x", "c")).rejects.toThrow("HTTP 429");
     await expect(respond(500, "10007").addSystemMessage("v3:a", "x", "c")).rejects.toThrow("HTTP 500 (code 10007)");
   });
 });
