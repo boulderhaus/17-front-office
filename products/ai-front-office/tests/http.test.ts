@@ -634,11 +634,9 @@ describe("HTTP boundary", () => {
     const settingsHtml = await settings.text();
     const csrf = /name="csrf" value="([^"]+)"/.exec(settingsHtml)?.[1];
     expect(csrf).toBeTruthy();
-    const update = await fetch(`${baseUrl}/app/config`, {
-      method: "POST",
-      redirect: "manual",
-      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
+    // Lead texts are on by default; saving without touching the toggle keeps them on and records no choice.
+    expect((await store.getConfig(account!.tenantId)).ownerRealtimeSmsEnabled).toBe(true);
+    const settingsBody = (extra: Record<string, string>) => new URLSearchParams({ ...{
         csrf: csrf!, businessName: "Synthetic HVAC", timezone: "America/New_York",
         greeting: "Thanks for calling. I am the owner's AI assistant.", serviceState: "active",
         bookingMode: "confirm", operationMode: "after_hours", answerAfterRings: "5", flatMonthlyPrice: "49",
@@ -647,7 +645,19 @@ describe("HTTP boundary", () => {
         emergencyKeywords: "gas smell, no heat", serviceCategories: "HVAC repair, maintenance",
         weekdayStart: "17:30", weekdayEnd: "07:30", bookableWeekdayStart: "08:30", bookableWeekdayEnd: "16:30",
         minimumLeadTimeMinutes: "120", weekends: "on", recordingDisclosure: "This call may be recorded and handled by an AI assistant.",
-      }),
+      }, ...extra });
+    const untouched = await fetch(`${baseUrl}/app/config`, {
+      method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: settingsBody({ ownerRealtimeSmsEnabled: "on" }),
+    });
+    expect(untouched.status).toBe(303);
+    expect(await store.getConfig(account!.tenantId)).toMatchObject({ ownerRealtimeSmsEnabled: true });
+    expect((await store.getConfig(account!.tenantId)).ownerRealtimeSmsSetByOwner).not.toBe(true);
+    const update = await fetch(`${baseUrl}/app/config`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+      body: settingsBody({}),
     });
     expect(update.status).toBe(303);
     const updated = await store.getConfig(account!.tenantId);
@@ -657,6 +667,8 @@ describe("HTTP boundary", () => {
     expect(updated.includedCalls).toBe(60);
     expect(updated.overageCentsPerCall).toBe(75);
     expect(updated.customerSmsEnabled).toBe(false);
+    // Unticking it is an explicit choice the default-on rollout must never undo.
+    expect(updated).toMatchObject({ ownerRealtimeSmsEnabled: false, ownerRealtimeSmsSetByOwner: true });
   });
 
   it("allows account creation without optional SMS enrollment", async () => {
