@@ -930,6 +930,14 @@ describe("HTTP boundary", () => {
     expect(termsHtml).toContain("Reply STOP to opt out or HELP for help");
     expect(termsHtml).toContain("creating an account, activating service, or paying for a subscription");
     expect(termsHtml).not.toContain("By continuing, you consent");
+    // Public business details for carrier (10DLC) review: company, business address, phone and email, and nothing personal.
+    const company = "Front Office is a product of Dutchworks LLC, 16192 Coastal Highway, Lewes, DE 19958. Phone <a href=\"tel:+19296108092\">(929) 610-8092</a>, email <a href=\"mailto:hello@bydutchworks.com\">hello@bydutchworks.com</a>.";
+    expect(privacyHtml).toContain(`<h2>Who we are</h2><p>${company}</p>`);
+    expect(termsHtml).toContain(`<h2>Who we are</h2><p>${company}</p>`);
+    expect(termsHtml).toContain("Front Office, a product of Dutchworks LLC, sends call alerts");
+    for (const page of [landingHtml, signupPage]) {
+      expect(page).toContain('Dutchworks LLC</a>.<br>16192 Coastal Highway, Lewes, DE 19958<br><a href="tel:+19296108092">(929) 610-8092</a> · <a href="mailto:hello@bydutchworks.com">hello@bydutchworks.com</a>');
+    }
     const simulator = await fetch(`${baseUrl}/admin/simulator`, { headers: { authorization: `Bearer ${adminToken}` } });
     expect(simulator.status).toBe(200);
     expect(await simulator.text()).toContain("Run all 15 launch scenarios");
