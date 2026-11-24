@@ -11,6 +11,7 @@ function fakeStripe() {
   const coupons = new Map<string, Record<string, unknown>>();
   const replays = new Map<string, { status: number; json: Record<string, unknown> }>();
   const writes: string[] = [];
+  const failures = { archive: 0 };
   let next = 0;
   const id = (prefix: string) => `${prefix}_${(next += 1).toString().padStart(4, "0")}`;
   const metadata = (body: URLSearchParams) => Object.fromEntries([...body.entries()].filter(([key]) => key.startsWith("metadata[")).map(([key, value]) => [key.slice(9, -1), value]));
@@ -25,6 +26,9 @@ function fakeStripe() {
       out = { status: 200, json: { data: products.filter((item) => q.get("active") !== "true" || item.active), has_more: false } };
     } else if (method === "GET" && parts[0] === "products") {
       const found = products.find((item) => item.id === parts[1]);
+      if (found) out = { status: 200, json: { ...found } };
+    } else if (method === "GET" && parts[0] === "prices" && parts.length === 2) {
+      const found = prices.find((item) => item.id === parts[1]);
       if (found) out = { status: 200, json: { ...found } };
     } else if (method === "GET" && parts[0] === "prices") {
       const keys = q.getAll("lookup_keys[]");
@@ -57,6 +61,7 @@ function fakeStripe() {
       out = { status: 200, json: { ...price } };
     } else if (method === "POST" && parts[0] === "prices") {
       const price = prices.find((item) => item.id === parts[1])!;
+      if (failures.archive > 0) { failures.archive -= 1; throw new Error("synthetic network failure"); }
       writes.push(`archive price ${price.id}`);
       price.active = body!.get("active") === "true";
       out = { status: 200, json: { ...price } };
@@ -64,7 +69,7 @@ function fakeStripe() {
     if (idempotencyKey) replays.set(idempotencyKey, out);
     return out;
   };
-  return { call, products, prices, coupons, writes };
+  return { call, products, prices, coupons, writes, failures };
 }
 
 /** Live Stripe before the split: one "Front Office" product holding all six prices, plus stale products. */
@@ -127,6 +132,38 @@ describe("scripts/create-stripe-plans.ts four-product layout", () => {
     const second = await reconcileStripePlans(setup, stripe.call, { create: true, log: () => {} });
     expect(stripe.writes.length).toBe(writes);
     expect(second.envLines).toEqual(first.envLines);
+  });
+
+  it("never archives a price the app's env still uses, and archives it on the rerun after the env moves", async () => {
+    const stripe = fakeStripe();
+    seedOneProductLayout(stripe);
+    const lines: string[] = [];
+    const inUse = ["price_old0", "price_legacy49"];
+    const first = await reconcileStripePlans(planStripeSetup({}), stripe.call, { create: true, inUse, archiveProducts: ["prod_legacy_solo"], log: (line) => lines.push(line) });
+    expect(stripe.prices.find((item) => item.id === "price_old0")!.active).toBe(true);
+    expect(stripe.prices.find((item) => item.id === "price_legacy49")!.active).toBe(true);
+    expect(stripe.prices.filter((item) => /^price_old[1-5]$/.test(item.id)).every((item) => !item.active)).toBe(true);
+    expect(stripe.products.find((item) => item.id === "prod_old")!.active).toBe(true);
+    expect(stripe.products.find((item) => item.id === "prod_legacy_solo")!.active).toBe(true);
+    // The env lines come out before any archive line.
+    expect(lines.findIndex((line) => line.includes("Set these env vars"))).toBeLessThan(lines.findIndex((line) => line.startsWith("Archived")));
+    expect(first.envLines).toHaveLength(9);
+
+    await reconcileStripePlans(planStripeSetup({}), stripe.call, { create: true, inUse: [first.priceIds.STRIPE_PRICE_ID_SOLO!], archiveProducts: ["prod_legacy_solo"], log: () => {} });
+    expect(stripe.prices.filter((item) => item.product === "prod_old" || item.product === "prod_legacy_solo").every((item) => !item.active)).toBe(true);
+    expect(stripe.products.filter((item) => item.id === "prod_old" || item.id === "prod_legacy_solo").every((item) => !item.active)).toBe(true);
+  });
+
+  it("finishes the archive on a rerun after a run died between the move and the archive", async () => {
+    const stripe = fakeStripe();
+    seedOneProductLayout(stripe);
+    stripe.failures.archive = 1;
+    await expect(reconcileStripePlans(planStripeSetup({}), stripe.call, { create: true, log: () => {} })).rejects.toThrow(/synthetic/);
+    expect(stripe.prices.filter((item) => item.product === "prod_old" && item.active).length).toBeGreaterThan(0);
+    await reconcileStripePlans(planStripeSetup({}), stripe.call, { create: true, log: () => {} });
+    expect(stripe.prices.filter((item) => item.product === "prod_old").every((item) => !item.active)).toBe(true);
+    expect(stripe.products.find((item) => item.id === "prod_old")!.active).toBe(false);
+    expect(stripe.products.filter((item) => item.active && item.metadata.front_office_product)).toHaveLength(4);
   });
 
   it("refuses to archive one of its own products", async () => {

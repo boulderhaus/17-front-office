@@ -8,7 +8,8 @@
  * Idempotent: products are found by metadata front_office_product=<solo|team|fleet|unlimited>, prices by lookup_key,
  * the coupon by its own id, and every create carries an idempotency key. A price whose lookup_key still sits on
  * another product (the old single "Front Office" product) gets a new price on the right product with
- * transfer_lookup_key=true, and the old price is archived; the old product is archived once it has no active prices.
+ * transfer_lookup_key=true. Only once every new price exists (and its env lines are printed) are the replaced prices and
+ * the old product archived, and never a price the app's current env still points at: set the env, redeploy, rerun.
  *
  *   node --import tsx scripts/create-stripe-plans.ts            # dry run (the default): read-only lookups if a key is set
  *   node dist/scripts/create-stripe-plans.js                    # the same, compiled
@@ -88,7 +89,8 @@ export function productBody(product: PlannedProduct): URLSearchParams {
 }
 
 /** The price body sent to Stripe: amount, interval, lookup key and the metadata the app and reports rely on. */
-export function priceBody(price: PlannedPrice, productId: string): URLSearchParams {
+/** replaces: the price this one takes the lookup key from, recorded so an interrupted run can still archive it. */
+export function priceBody(price: PlannedPrice, productId: string, replaces?: string): URLSearchParams {
   return new URLSearchParams({
     product: productId,
     currency: "usd",
@@ -100,6 +102,7 @@ export function priceBody(price: PlannedPrice, productId: string): URLSearchPara
     "metadata[front_office]": price.kind === "plan" ? "plan" : "unlimited_addon",
     "metadata[plan]": price.plan,
     ...(price.kind === "plan" ? { "metadata[included_calls]": String(price.includedCalls) } : { "metadata[fair_use_calls]": String(price.includedCalls) }),
+    ...(replaces ? { "metadata[replaces]": replaces } : {}),
   });
 }
 
@@ -116,7 +119,7 @@ export function isDirectRun(moduleUrl: string, argv1: string | undefined): boole
 type Json = Record<string, unknown> & { id?: string; error?: { message?: string } };
 export type StripeCall = (method: "GET" | "POST", path: string, body?: URLSearchParams, idempotencyKey?: string) => Promise<{ status: number; json: Json }>;
 interface StripeProduct { id: string; name?: string; description?: string | null; images?: string[]; active?: boolean; metadata?: Record<string, string> }
-interface StripePrice { id: string; product?: string; unit_amount?: number; currency?: string; recurring?: { interval?: string } | null; lookup_key?: string | null; active?: boolean }
+interface StripePrice { id: string; product?: string; unit_amount?: number; currency?: string; recurring?: { interval?: string } | null; lookup_key?: string | null; active?: boolean; metadata?: Record<string, string> }
 
 /** Every page of a Stripe list (products, prices). */
 async function listAll<T extends { id: string }>(stripe: StripeCall, path: string): Promise<T[]> {
@@ -131,7 +134,8 @@ async function listAll<T extends { id: string }>(stripe: StripeCall, path: strin
   }
 }
 
-export interface ReconcileOptions { create: boolean; archiveProducts?: string[]; log?: (line: string) => void }
+/** inUse: price ids the running app is configured with (never archived, so checkout keeps working until env moves). */
+export interface ReconcileOptions { create: boolean; archiveProducts?: string[]; inUse?: string[]; log?: (line: string) => void }
 export interface ReconcileResult { productIds: Partial<Record<ProductKey, string>>; priceIds: Record<string, string>; couponId: string | null; envLines: string[] }
 
 /**
@@ -168,7 +172,8 @@ export async function reconcileStripePlans(setup: StripePlansSetup, stripe: Stri
     log(`Created product ${planned.name}: ${created.json.id}`);
   }
 
-  // Prices, by lookup key. One on the right product is reused; one elsewhere is replaced and archived.
+  // Prices, by lookup key. One on the right product is reused; one elsewhere is replaced (and archived below).
+  const displaced = new Set<string>();
   for (const price of setup.prices) {
     const productId = result.productIds[price.product];
     const found = await stripe("GET", `prices?active=true&lookup_keys[]=${encodeURIComponent(price.lookupKey)}&limit=1`);
@@ -179,39 +184,21 @@ export async function reconcileStripePlans(setup: StripePlansSetup, stripe: Stri
       }
       log(`Found ${price.label}: ${existing.id}`);
       result.priceIds[price.envName] = existing.id;
+      // A run that died between the move and the archive left the price it replaced active: finish that here.
+      if (existing.metadata?.replaces) displaced.add(existing.metadata.replaces);
       continue;
     }
-    const move = existing ? ` (moving lookup_key from ${existing.id} on ${existing.product}, which gets archived)` : "";
-    if (!create || !productId) { log(`Would create ${price.label} price $${(price.unitAmount / 100).toFixed(2)}/month on "${setup.products.find((item) => item.key === price.product)!.name}" (${price.lookupKey})${move}.`); continue; }
-    const created = await stripe("POST", "prices", priceBody(price, productId), `front-office-price-${price.lookupKey}-${productId}`);
+    const move = existing ? ` (moving lookup_key from ${existing.id} on ${existing.product})` : "";
+    if (!create || !productId) {
+      log(`Would create ${price.label} price $${(price.unitAmount / 100).toFixed(2)}/month on "${setup.products.find((item) => item.key === price.product)!.name}" (${price.lookupKey})${move}.`);
+      if (existing) displaced.add(existing.id);
+      continue;
+    }
+    const created = await stripe("POST", "prices", priceBody(price, productId, existing?.id), `front-office-price-${price.lookupKey}-${productId}`);
     if (!created.json.id) throw new Error(`Stripe did not return an id for price ${price.lookupKey}`);
     result.priceIds[price.envName] = created.json.id;
+    if (existing) displaced.add(existing.id);
     log(`Created ${price.label}: ${created.json.id}${move}`);
-    if (existing) {
-      await stripe("POST", `prices/${encodeURIComponent(existing.id)}`, new URLSearchParams({ active: "false" }));
-      log(`Archived old price ${existing.id}`);
-    }
-  }
-
-  // The old single product (and any product named on the command line) is archived once it has no active prices.
-  const ours = new Set(Object.values(result.productIds));
-  const oldProducts = activeProducts.filter((item) => item.metadata?.[OLD_PRODUCT_METADATA.key] === OLD_PRODUCT_METADATA.value && !ours.has(item.id)).map((item) => item.id);
-  for (const id of options.archiveProducts ?? []) if (ours.has(id)) throw new Error(`${id} is one of the four Front Office products; refusing to archive it.`);
-  for (const productId of new Set([...oldProducts, ...(options.archiveProducts ?? [])])) {
-    const product = await stripe("GET", `products/${encodeURIComponent(productId)}`);
-    if (product.status !== 200 || product.json.active === false) { log(`Product ${productId} is already archived or missing.`); continue; }
-    const named = options.archiveProducts?.includes(productId) ?? false;
-    const active = await listAll<StripePrice>(stripe, `prices?product=${encodeURIComponent(productId)}&active=true`);
-    // Only on a dry run can the old product still hold prices that are about to move.
-    const remaining = create ? active : active.filter((item) => !setup.prices.some((price) => price.lookupKey === item.lookup_key));
-    if (remaining.length && !named) { log(`Keeping product ${productId}: it still has active prices ${remaining.map((item) => item.id).join(", ")}.`); continue; }
-    if (!create) { log(`Would archive product ${productId} "${String(product.json.name)}"${remaining.length ? ` and its prices ${remaining.map((item) => item.id).join(", ")}` : ""}.`); continue; }
-    for (const item of remaining) {
-      await stripe("POST", `prices/${encodeURIComponent(item.id)}`, new URLSearchParams({ active: "false" }));
-      log(`Archived price ${item.id}`);
-    }
-    await stripe("POST", `products/${encodeURIComponent(productId)}`, new URLSearchParams({ active: "false" }));
-    log(`Archived product ${productId} "${String(product.json.name)}"`);
   }
 
   // Coupon with our own id, so it is found again instead of created twice. Never changed once it exists.
@@ -235,6 +222,49 @@ export async function reconcileStripePlans(setup: StripePlansSetup, stripe: Stri
   // STRIPE_PRICE_ID is the Solo fallback the readiness check reads; keep it on the current Solo price.
   if (result.priceIds.STRIPE_PRICE_ID_SOLO) result.envLines.push(`STRIPE_PRICE_ID=${result.priceIds.STRIPE_PRICE_ID_SOLO}`);
   if (result.couponId) result.envLines.push(`STRIPE_FIRST_MONTH_COUPON_ID=${result.couponId}`, `STRIPE_FIRST_MONTH_PERCENT_OFF=${setup.coupon.percentOff}`);
+  const allPriced = setup.prices.every((price) => result.priceIds[price.envName]);
+  // Printed before anything is archived, so a failure below never loses the new ids.
+  if (create && result.envLines.length) log(`\nSet these env vars:\n${result.envLines.join("\n")}\n`);
+
+  // Archive: the prices that were replaced, and the old single product (and any named product) with all its active
+  // prices. Only once every planned price exists, and never a price the running app's env still points at.
+  const ours = new Set(Object.values(result.productIds));
+  for (const id of options.archiveProducts ?? []) if (ours.has(id)) throw new Error(`${id} is one of the four Front Office products; refusing to archive it.`);
+  if (create && !allPriced) { log("Not archiving anything: not every planned price exists yet."); return result; }
+  const inUse = new Set(options.inUse ?? []);
+  const keepBecauseInUse = (priceId: string): boolean => {
+    if (!inUse.has(priceId)) return false;
+    log(`Keeping price ${priceId} active: the app's env still uses it. Set the env vars above, redeploy, then rerun to archive it.`);
+    return true;
+  };
+  const archivePrice = async (priceId: string): Promise<void> => {
+    if (!create) { log(`Would archive price ${priceId}.`); return; }
+    await stripe("POST", `prices/${encodeURIComponent(priceId)}`, new URLSearchParams({ active: "false" }));
+    log(`Archived price ${priceId}`);
+  };
+  const oldProducts = activeProducts.filter((item) => item.metadata?.[OLD_PRODUCT_METADATA.key] === OLD_PRODUCT_METADATA.value && !ours.has(item.id)).map((item) => item.id);
+  const handled = new Set<string>();
+  for (const productId of new Set([...oldProducts, ...(options.archiveProducts ?? [])])) {
+    const product = await stripe("GET", `products/${encodeURIComponent(productId)}`);
+    if (product.status !== 200 || product.json.active === false) { log(`Product ${productId} is already archived or missing.`); continue; }
+    const active = await listAll<StripePrice>(stripe, `prices?product=${encodeURIComponent(productId)}&active=true`);
+    let kept = false;
+    for (const item of active) {
+      handled.add(item.id);
+      if (keepBecauseInUse(item.id)) { kept = true; continue; }
+      await archivePrice(item.id);
+    }
+    if (kept) { log(`Keeping product ${productId} "${String(product.json.name)}" until its prices can be archived.`); continue; }
+    if (!create) { log(`Would archive product ${productId} "${String(product.json.name)}".`); continue; }
+    await stripe("POST", `products/${encodeURIComponent(productId)}`, new URLSearchParams({ active: "false" }));
+    log(`Archived product ${productId} "${String(product.json.name)}"`);
+  }
+  for (const priceId of displaced) {
+    if (handled.has(priceId)) continue;
+    const price = await stripe("GET", `prices/${encodeURIComponent(priceId)}`);
+    if (price.status !== 200 || price.json.active === false) continue;
+    if (!keepBecauseInUse(priceId)) await archivePrice(priceId);
+  }
   return result;
 }
 
@@ -285,14 +315,15 @@ async function main(): Promise<void> {
       ...(body ? { body } : {}),
     });
     const json = await response.json().catch(() => ({})) as Json;
-    if (!response.ok && response.status !== 404) throw new Error(`Stripe ${method} /${path.split("?")[0]} failed with HTTP ${response.status}: ${json.error?.message ?? "unknown error"}`);
+    // Only a GET may miss (a coupon or product that isn't there yet); any failed write stops the run.
+    if (!response.ok && !(method === "GET" && response.status === 404)) throw new Error(`Stripe ${method} /${path.split("?")[0]} failed with HTTP ${response.status}: ${json.error?.message ?? "unknown error"}`);
     return { status: response.status, json };
   };
 
-  const result = await reconcileStripePlans(setup, stripe, { create, archiveProducts });
-  console.log(create
-    ? (result.envLines.length ? `\nSet these env vars:\n${result.envLines.join("\n")}` : "\nNothing to set.")
-    : "\nDry run: nothing changed. Pass --create (and --live for a live key) to make these changes.");
+  // Every price id the app is configured with right now: never archived by this run.
+  const inUse = Object.entries(process.env).filter(([name, value]) => /^STRIPE_.*PRICE_ID/.test(name) && value?.startsWith("price_")).map(([, value]) => value!);
+  await reconcileStripePlans(setup, stripe, { create, archiveProducts, inUse });
+  if (!create) console.log("\nDry run: nothing changed. Pass --create (and --live for a live key) to make these changes.");
 }
 
 if (isDirectRun(import.meta.url, process.argv[1])) await main();
