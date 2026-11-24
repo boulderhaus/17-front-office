@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { OutboxNotification } from "../domain/models.js";
 import { formatEmailBody } from "../adapters/resend.js";
-import { OWNER_SMS_PREFIX } from "../domain/owner-sms.js";
+import { callerFirstName, OWNER_SMS_PREFIX } from "../domain/owner-sms.js";
+import type { CallRecord } from "../domain/models.js";
 import { pushBody, type PushMessage } from "../adapters/web-push.js";
 
 /**
@@ -52,6 +53,31 @@ export function ownerPushNotification(input: { tenantId: string; callId: string 
     body: pushBody(input.message),
     priority: input.message.urgent ? "high" : "normal", state: "pending", attempts: 0, nextAttemptAt: input.now,
     idempotencyKey: `${input.keyBase}:push`,
+    providerReceipt: null, lastError: null, createdAt: input.now, sentAt: null,
+  };
+}
+
+/**
+ * What the urgent owner call says, in plain spoken words:
+ * "Front Office: urgent call from Maria, no AC, wants someone today. Check your Front Office app."
+ */
+export function urgentCallSpeech(call: Pick<CallRecord, "fields" | "emergency">, wants: string | null): string {
+  const name = callerFirstName(call.fields.callerName);
+  const who = name === "Unknown caller" ? "a caller" : name;
+  const evidence = call.emergency?.evidence.find((item) => item.trim());
+  const what = (call.fields.problemDescription || evidence || "").replace(/\s+/g, " ").trim().slice(0, 90).replace(/[.,;:\s]+$/, "");
+  const parts = [`Front Office: urgent call from ${who}`, what, wants ? wants.replace(/^Wants/, "wants") : null].filter(Boolean);
+  return `${parts.join(", ")}. Check your Front Office app.`;
+}
+
+/** One urgent owner call per call record, to the owner's mobile. */
+export function urgentOwnerCallNotification(input: { tenantId: string; callId: string; speech: string; now: string }): OutboxNotification {
+  return {
+    id: randomUUID(), tenantId: input.tenantId, callId: input.callId, channel: "voice",
+    destinationRef: "owner-primary",
+    body: input.speech,
+    priority: "high", state: "pending", attempts: 0, nextAttemptAt: input.now,
+    idempotencyKey: `urgent-owner-call:${input.callId}`,
     providerReceipt: null, lastError: null, createdAt: input.now, sentAt: null,
   };
 }
