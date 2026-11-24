@@ -52,6 +52,8 @@ export interface ForwardingPlan {
 }
 
 export interface ApiDashboard {
+  /** Web push call alerts: the VAPID key (null: not offered yet) and how many phones have them on. */
+  push?: { publicKey: string | null; devices: number }
   line: {
     number: string | null
     mode: "overflow" | "after_hours" | "always"

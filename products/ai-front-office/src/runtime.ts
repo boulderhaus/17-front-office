@@ -6,10 +6,11 @@ import { PostgresStore } from "./adapters/postgres-store.js";
 import { TelnyxSmsAdapter } from "./adapters/telnyx.js";
 import { ResendEmailAdapter } from "./adapters/resend.js";
 import { NotificationRouter } from "./adapters/notification-router.js";
+import { WebPushSender } from "./adapters/web-push.js";
 import { UnavailableCalendar } from "./adapters/unavailable.js";
 import { parseOwnerDestinations, type Environment } from "./config/environment.js";
 import { createDemoConfig } from "./domain/config.js";
-import type { CalendarPort, NotificationPort, Store } from "./ports.js";
+import { systemClock, type CalendarPort, type NotificationPort, type Store } from "./ports.js";
 import { CryptoBox } from "./security/crypto-box.js";
 
 export interface Runtime {
@@ -96,12 +97,15 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
   const emailSender = emailConfigured
     ? new ResendEmailAdapter({ apiKey: env.RESEND_API_KEY!, from: env.RESEND_FROM_EMAIL! })
     : null;
-  const sender = new NotificationRouter(smsSender, emailSender);
+  const pushSender = env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY
+    ? new WebPushSender({ store, clock: systemClock, vapid: { publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY, subject: env.VAPID_SUBJECT } })
+    : null;
+  const sender = new NotificationRouter(smsSender, emailSender, pushSender);
   return {
     store,
     calendar,
     sender,
-    integrations: { "Telnyx Voice": telnyxVoiceConfigured, "Google Calendar": googleConfigured, "Telnyx SMS": telnyxSmsConfigured, "Weekly Email": emailConfigured },
+    integrations: { "Telnyx Voice": telnyxVoiceConfigured, "Google Calendar": googleConfigured, "Telnyx SMS": telnyxSmsConfigured, "Weekly Email": emailConfigured, "Web Push": Boolean(pushSender) },
     close: () => store.close(),
   };
 }

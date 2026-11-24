@@ -18,7 +18,8 @@ import { BookingCoordinator } from "./booking-coordinator.js";
 import { redactError, withRetry } from "./retry.js";
 import { UsageAlertService } from "./usage-alerts.js";
 import { callbackLinkToken, ownerCallSms, shortWhen, urgentReason } from "../domain/owner-sms.js";
-import { ownerCallEmailNotification } from "./owner-alerts.js";
+import { ownerCallEmailNotification, ownerCallPushMessage, ownerPushNotification } from "./owner-alerts.js";
+import { listPushSubscriptions } from "../adapters/web-push.js";
 
 /** Sticky quality flag: a spam mark was refused or undone, so this call always counts and reaches the owner. */
 const SPAM_REFUSED = "spam_refused";
@@ -72,6 +73,7 @@ export class CallService {
   readonly #usageAlerts: UsageAlertService;
   readonly #callbackLinkKey: string | null;
   readonly #ownerEmailAvailable: boolean;
+  readonly #pushAvailable: boolean;
 
   constructor(
     private readonly store: Store,
@@ -79,10 +81,12 @@ export class CallService {
     private readonly clock: Clock,
     private readonly publicBaseUrl: string,
     /** ownerEmailAvailable: email delivery is configured, so owners without text alerts can be emailed. */
-    options: { ownerEmailAvailable?: boolean; callbackLinkKey?: string | null } = {},
+    /** pushAvailable: web push (VAPID) is configured, so phones with call alerts on get every lead. */
+    options: { ownerEmailAvailable?: boolean; pushAvailable?: boolean; callbackLinkKey?: string | null } = {},
   ) {
     this.#callbackLinkKey = options.callbackLinkKey ?? null;
     this.#ownerEmailAvailable = options.ownerEmailAvailable === true;
+    this.#pushAvailable = options.pushAvailable === true;
     this.#booking = new BookingCoordinator(store, calendar, clock);
     this.#usageAlerts = new UsageAlertService(store, clock, publicBaseUrl, options.ownerEmailAvailable === true);
   }
@@ -542,7 +546,7 @@ export class CallService {
       wants: this.wantsLine(call.fields.requestedStart, config.timezone),
       link: this.ownerCallLink(call, ownerPortal),
     });
-    await this.enqueueOwnerCopies(call, handoffBody, true, `human-handoff:${call.id}`);
+    await this.enqueueOwnerCopies(call, handoffBody, true, `human-handoff:${call.id}`, true);
     for (const destinationRef of config.ownerNotificationRefs) {
       await this.store.enqueueNotification({
         id: randomUUID(),
@@ -850,7 +854,6 @@ export class CallService {
       || call.outcome === "handoff_queued"
       || call.outcome === "failed"
       || keyPrefix === "recovery-summary";
-    if (!safetyAlert && !config.ownerRealtimeSmsEnabled) return;
     const now = this.clock.now().toISOString();
     const ownerPortal = await this.store.getOwnerAccountByTenant(call.tenantId) ? "/app" : "/admin";
     const when = proposedTime ?? call.fields.requestedStart;
@@ -862,7 +865,10 @@ export class CallService {
       wants: this.wantsLine(when, config.timezone),
       link: this.ownerCallLink(call, ownerPortal),
     });
-    await this.enqueueOwnerCopies(call, body, call.emergency?.emergency === true, `${keyPrefix}:${call.id}`);
+    // Phones with call alerts on hear about every lead; email and texts follow the instant-alerts switch for routine ones.
+    const routineAllowed = safetyAlert || config.ownerRealtimeSmsEnabled;
+    await this.enqueueOwnerCopies(call, body, call.emergency?.emergency === true, `${keyPrefix}:${call.id}`, routineAllowed);
+    if (!routineAllowed) return;
     for (const destinationRef of config.ownerNotificationRefs) {
       const notification: OutboxNotification = {
         id: randomUUID(),
@@ -889,11 +895,14 @@ export class CallService {
    * The owner text's words, by email too: texts can't reach an owner before carrier approval (or one who never
    * opted in), so email is how every lead still reaches them. Only for owner-app shops with email configured.
    */
-  private async enqueueOwnerCopies(call: CallRecord, smsBody: string, high: boolean, keyBase: string): Promise<void> {
-    if (!this.#ownerEmailAvailable) return;
+  private async enqueueOwnerCopies(call: CallRecord, smsBody: string, high: boolean, keyBase: string, emailAllowed: boolean): Promise<void> {
+    const now = this.clock.now().toISOString();
+    if (this.#pushAvailable && (await listPushSubscriptions(this.store, call.tenantId)).length > 0) {
+      await this.store.enqueueNotification(ownerPushNotification({ tenantId: call.tenantId, callId: call.id, message: ownerCallPushMessage(smsBody, call.id, high), keyBase, now }));
+    }
+    if (!this.#ownerEmailAvailable || !emailAllowed) return;
     const account = await this.store.getOwnerAccountByTenant(call.tenantId);
     if (!account?.email) return;
-    const now = this.clock.now().toISOString();
     await this.store.enqueueNotification(ownerCallEmailNotification({
       tenantId: call.tenantId, callId: call.id, email: account.email, smsBody,
       settingsUrl: `${this.publicBaseUrl.replace(/\/$/, "")}/app/settings`, high, keyBase, now,

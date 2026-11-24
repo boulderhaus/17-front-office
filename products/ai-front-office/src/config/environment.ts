@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { DEFAULT_TELNYX_VOICE } from "../voice/system-prompt.js";
+import { validVapidKeys } from "../adapters/web-push.js";
 
 export { DEFAULT_TELNYX_VOICE };
 
@@ -118,6 +119,10 @@ const schema = z.object({
   PLAN_FLEET_UNLIMITED_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(12_500)),
   /** Each answered call past the plan's included calls, billed at the end of the billing period. */
   OVERAGE_CENTS_PER_CALL: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(0).max(1_000).default(75)),
+  /** Web push for owner call alerts (scripts/generate-vapid-keys.ts). Both or neither; unset hides "Turn on call alerts". */
+  VAPID_PUBLIC_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().regex(/^[A-Za-z0-9_-]{87}$/, "VAPID_PUBLIC_KEY must be a base64url P-256 public key").optional()),
+  VAPID_PRIVATE_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().regex(/^[A-Za-z0-9_-]{43}$/, "VAPID_PRIVATE_KEY must be a base64url P-256 private key").optional()),
+  VAPID_SUBJECT: z.preprocess((value) => value === "" ? undefined : value, z.string().regex(/^(mailto:\S+@\S+|https:\/\/\S+)$/).default("mailto:hello@bydutchworks.com")),
   RESEND_API_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("re_").optional()),
   RESEND_FROM_EMAIL: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
   // Product analytics + error tracking. Unset = everything off (tests, local).
@@ -144,6 +149,8 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
   if ((parsed.STRIPE_PRICE_ID_PLUS || parsed.STRIPE_PRICE_ID_PRO || parsed.STRIPE_PRICE_ID_TEAM || parsed.STRIPE_PRICE_ID_FLEET || parsed.STRIPE_PRICE_ID_UNLIMITED_SOLO || parsed.STRIPE_PRICE_ID_UNLIMITED_TEAM || parsed.STRIPE_PRICE_ID_UNLIMITED_FLEET || parsed.STRIPE_FIRST_MONTH_COUPON_ID) && stripeValues !== 3) {
     throw new Error("The Unlimited add-on prices, the bigger plans and the first-month coupon require the base Stripe configuration");
   }
+  if (Boolean(parsed.VAPID_PUBLIC_KEY) !== Boolean(parsed.VAPID_PRIVATE_KEY)) throw new Error("VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY must be configured together");
+  if (parsed.VAPID_PUBLIC_KEY && parsed.VAPID_PRIVATE_KEY && !validVapidKeys(parsed.VAPID_PUBLIC_KEY, parsed.VAPID_PRIVATE_KEY)) throw new Error("VAPID_PUBLIC_KEY does not match VAPID_PRIVATE_KEY");
   if (Boolean(parsed.RESEND_API_KEY) !== Boolean(parsed.RESEND_FROM_EMAIL)) {
     throw new Error("RESEND_API_KEY and RESEND_FROM_EMAIL must be configured together");
   }

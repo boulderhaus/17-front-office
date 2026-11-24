@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { deviceId, listPushSubscriptions, parsePushSubscription, removePushSubscriptions, savePushSubscription } from "../adapters/web-push.js";
+import { ownerPushNotification } from "../application/owner-alerts.js";
+import { SERVICE_WORKER, WEB_MANIFEST } from "./pwa.js";
 import { readFile } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -373,7 +376,9 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   const service = new CallService(dependencies.store, dependencies.calendar, dependencies.clock, dependencies.env.PUBLIC_BASE_URL, {
     callbackLinkKey: dependencies.env.SESSION_SIGNING_KEY ?? null,
     ownerEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
+    pushAvailable: Boolean(dependencies.env.VAPID_PUBLIC_KEY && dependencies.env.VAPID_PRIVATE_KEY),
   });
+  const vapid = dependencies.env.VAPID_PUBLIC_KEY && dependencies.env.VAPID_PRIVATE_KEY ? { publicKey: dependencies.env.VAPID_PUBLIC_KEY } : null;
   const recordingClient = dependencies.env.TELNYX_API_KEY ? new TelnyxRecordingClient(dependencies.env.TELNYX_API_KEY, dependencies.fetcher ?? fetch) : null;
   const routingClient = dependencies.env.TELNYX_API_KEY && dependencies.env.TELNYX_FROM_NUMBER && dependencies.env.TELNYX_ASSISTANT_ID
     ? new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: dependencies.env.TELNYX_FROM_NUMBER, assistantId: dependencies.env.TELNYX_ASSISTANT_ID })
@@ -552,7 +557,18 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       throw new HttpError(429, "Too many requests");
     }
 
-    if (method === "GET" && (url.pathname === "/assets/front-office-mascot-flat.png" || url.pathname === "/assets/stripe-product.png")) {
+    if (method === "GET" && url.pathname === "/app/sw.js") {
+      // Allowed to cover /app itself (the Calls screen), not only /app/..., so a tap can move an open app window.
+      response.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "service-worker-allowed": "/app" });
+      response.end(SERVICE_WORKER);
+      return;
+    }
+    if (method === "GET" && url.pathname === "/app/manifest.webmanifest") {
+      response.writeHead(200, { "content-type": "application/manifest+json; charset=utf-8", "cache-control": "public, max-age=3600" });
+      response.end(WEB_MANIFEST);
+      return;
+    }
+    if (method === "GET" && (url.pathname === "/assets/front-office-mascot-flat.png" || url.pathname === "/assets/stripe-product.png" || url.pathname === "/assets/icon-192.png" || url.pathname === "/assets/icon-512.png" || url.pathname === "/assets/apple-touch-icon.png")) {
       const asset = await readFile(resolve(process.cwd(), "public" + url.pathname));
       response.statusCode = 200;
       response.setHeader("content-type", "image/png");
@@ -991,7 +1007,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       preview: false,
     });
     // Opaque ids only, so the browser can identify the owner and group by shop without email or phone.
-    return telemetry.enabled ? { ...model, analytics: { distinctId: account.id, tenantId: account.tenantId } } : model;
+    const push = { publicKey: vapid?.publicKey ?? null, devices: vapid ? (await listPushSubscriptions(dependencies.store, account.tenantId)).length : 0 };
+    return telemetry.enabled ? { ...model, push, analytics: { distinctId: account.id, tenantId: account.tenantId } } : { ...model, push };
   }
   async function handleOwnerApi(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     const auth = await authenticateOwner(request);
@@ -1000,6 +1017,29 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const method = request.method ?? "GET";
     const owner = account.role !== "member";
     if (method === "GET" && url.pathname === "/api/app/dashboard") return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    if (method === "POST" && url.pathname === "/api/app/push/subscribe") {
+      if (!vapid) throw new HttpError(404, "Call alerts on this phone aren’t available yet.");
+      const subscription = parsePushSubscription(await readApiJson(request, session, 4_000));
+      if (!subscription) throw new HttpError(400, "This browser can’t get call alerts. Try Safari on iPhone (added to your Home Screen) or Chrome on Android.");
+      if (!limiter.allow(`push-subscribe:${account.tenantId}`, 20, 60 * 60_000)) throw new HttpError(429, "Too many tries. Please try again in a bit.");
+      const now = dependencies.clock.now().toISOString();
+      await savePushSubscription(dependencies.store, account.tenantId, { ...subscription, accountId: account.id }, now);
+      const device = deviceId(subscription.endpoint);
+      // A first alert right away, to this phone only, so the owner sees it work.
+      await dependencies.store.enqueueNotification(ownerPushNotification({
+        tenantId: account.tenantId, callId: null, destinationRef: `device:${device}`, now,
+        keyBase: `push-welcome:${account.tenantId}:${device}:${now}`,
+        message: { title: "Call alerts are on", body: "You’ll get an alert like this for every new call.", url: "/app", tag: "push-welcome" },
+      }));
+      log({ level: "info", event: "push_subscribed", tenantId: account.tenantId, device });
+      telemetry.capture("push_alerts_on", account.id, account.tenantId);
+      return sendJson(response, 200, { on: true, devices: (await listPushSubscriptions(dependencies.store, account.tenantId)).length });
+    }
+    if (method === "POST" && url.pathname === "/api/app/push/unsubscribe") {
+      const body = await readApiJson(request, session, 4_000) as { endpoint?: unknown };
+      if (typeof body.endpoint === "string") await removePushSubscriptions(dependencies.store, account.tenantId, [body.endpoint]);
+      return sendJson(response, 200, { on: false, devices: (await listPushSubscriptions(dependencies.store, account.tenantId)).length });
+    }
     if (method === "POST" && url.pathname === "/api/app/line/business-number") {
       if (!owner) throw new HttpError(403, "Only the owner can set up call forwarding");
       const body = await readApiJson(request, session, 1_000) as { number?: unknown; family?: unknown };

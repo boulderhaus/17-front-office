@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom"
 import { ArrowLeft, ArrowRight, CalendarClock, Check, CheckCircle2, Clock3, Loader2, MessageSquareText, Phone, PhoneCall } from "lucide-react"
 import { BrandMark } from "@/components/app/bits"
+import { CallAlertsCard } from "@/components/app/call-alerts"
 import { ForwardingCard } from "@/components/app/forwarding-card"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -299,6 +300,7 @@ function DoneStep({ dashboard, activation }: { dashboard: ApiDashboard; activati
           ))}
         </CardContent>
       </Card>
+      <CallAlertsCard />
       <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} disabled={busy} onClick={() => void finish()}>{busy ? <Loader2 className="animate-spin" /> : null}See my calls<ArrowRight /></Button>
       <p className="text-sm text-muted-foreground">Change your greeting, service area or hours anytime in <Link className="font-semibold underline underline-offset-4" to="/app/settings">Settings</Link>.</p>
     </>
