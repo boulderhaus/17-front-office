@@ -18,6 +18,8 @@ export type NotificationState =
   | "delivery_unconfirmed"
   | "retry"
   | "dead"
+  /** Never sent and never retried: the channel isn't allowed yet (texts before carrier approval). */
+  | "held"
   /** Superseded before sending (e.g. a voicemail fallback once the transcript arrived). */
   | "cancelled";
 

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { OutboxNotification } from "../domain/models.js";
-import type { Clock, NotificationPort, Store } from "../ports.js";
+import { NotificationHeldError, type Clock, type NotificationPort, type Store } from "../ports.js";
 import { redactError, withRetry } from "./retry.js";
 
 export class OutboxWorker {
@@ -10,11 +10,11 @@ export class OutboxWorker {
     private readonly clock: Clock,
   ) {}
 
-  async runOnce(limit = 20): Promise<{ sent: number; retried: number; dead: number }> {
+  async runOnce(limit = 20): Promise<{ sent: number; retried: number; dead: number; held: number }> {
     const now = this.clock.now();
     await this.store.requeueStaleNotifications(new Date(now.getTime() - 10 * 60_000).toISOString(), now.toISOString());
     const due = await this.store.claimDueNotifications(now.toISOString(), limit);
-    const result = { sent: 0, retried: 0, dead: 0 };
+    const result = { sent: 0, retried: 0, dead: 0, held: 0 };
     for (const notification of due) {
       try {
         const receipt = await withRetry(() => this.sender.send(notification), {
@@ -33,6 +33,14 @@ export class OutboxWorker {
         result.sent += 1;
       } catch (error) {
         notification.lastError = redactError(error);
+        if (error instanceof NotificationHeldError) {
+          // On purpose, not a failure: no retry, no failure alert. Its STOP-line claim (if any) is handed back.
+          await this.store.releaseSmsStopNotice(notification.id).catch(() => undefined);
+          notification.state = "held";
+          result.held += 1;
+          await this.store.saveNotification(notification);
+          continue;
+        }
         const maxAttempts = notification.priority === "high" ? 12 : 5;
         // Never sent, never retried: if it held the number's STOP line, the next owner text must carry it instead.
         // If that hand-back fails, stay in retry (one more attempt, then this again) rather than strand the notice.

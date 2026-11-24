@@ -30,7 +30,8 @@ export function buildActivationReport(input: {
     check("runtime", "Production runtime", !env.DEMO_MODE, env.DEMO_MODE ? "Demo mode cannot serve a customer." : "Production runtime selected."),
     check("telnyx_voice", "Telnyx voice configured", Boolean(env.TELNYX_API_KEY && env.TELNYX_PUBLIC_KEY && env.TELNYX_ASSISTANT_ID), "API key, webhook public key, and assistant ID are required."),
     check("telnyx_sms", "Telnyx SMS configured", Boolean(env.TELNYX_API_KEY && env.TELNYX_FROM_NUMBER && env.TELNYX_MESSAGING_PROFILE_ID), "API key, E.164 sender, and messaging profile are required."),
-    check("sms_compliance", "Production messaging approved", env.TELNYX_MESSAGING_APPROVED, env.TELNYX_MESSAGING_APPROVED ? "Production messaging approval is recorded." : "Keep provider-test mode enabled until the Telnyx account and US messaging campaign are approved."),
+    // Texting approval never blocks voice: until it lands, every text is held (never sent) and alerts go by push, email and urgent calls.
+    { id: "sms_compliance", label: "Production messaging approved", status: env.TELNYX_MESSAGING_APPROVED ? "pass" : "warn", detail: env.TELNYX_MESSAGING_APPROVED ? "Production messaging approval is recorded." : "Texts are held until the US messaging campaign is approved; voice can go live." },
     check("owner_phone", "Owner alert destination", input.ownerPhoneConfigured && config.ownerNotificationRefs.length > 0, input.ownerPhoneConfigured ? "Encrypted owner destination is configured." : "Owner notification phone is missing."),
     check("calendar", "Google Calendar connected", input.googleConnected, input.googleConnected ? "Encrypted refresh credential is present." : "Connect Google Calendar before activation."),
     check("public_url", "Public HTTPS URL", env.PUBLIC_BASE_URL.startsWith("https://"), env.PUBLIC_BASE_URL),

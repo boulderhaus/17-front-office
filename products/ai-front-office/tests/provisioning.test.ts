@@ -222,6 +222,16 @@ describe("owner one-tap go-live", () => {
     expect(screening?.body).toEqual({ inbound_call_screening: "reject_calls" });
   });
 
+  it("goes live on voice before texting is approved, and answers customer calls", async () => {
+    const { baseUrl, goLive, store, account, privateKey, clock } = await shop({ env: { TELNYX_MESSAGING_APPROVED: "false" } });
+    expect((await goLive()).headers.get("location")).toBe("/app?line=live");
+    expect((await store.getOwnerAccountById(account.id))!.status).toBe("active");
+    const init = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id: "evt-voice-only", occurred_at: clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: "+19415550110", call_control_id: "v3:voice-only", assistant_id: "assistant-1" } } });
+    const reply = await fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, privateKey, clock.now()), body: init });
+    expect(reply.status).toBe(200);
+    expect(((await reply.json()) as { dynamic_variables: { call_access: string } }).dynamic_variables.call_access).toBe("allowed");
+  });
+
   it("keeps the line off and explains why while carrier approval is pending", async () => {
     const { goLive, store, account, telnyx } = await shop({ live: false });
     const location = (await goLive()).headers.get("location")!;

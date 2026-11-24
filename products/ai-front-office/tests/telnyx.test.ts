@@ -13,6 +13,8 @@ import {
 } from "../src/adapters/telnyx.js";
 import { createDemoConfig } from "../src/domain/config.js";
 import { InMemoryStore } from "../src/adapters/in-memory.js";
+import { OutboxWorker } from "../src/application/outbox-worker.js";
+import { NotificationHeldError } from "../src/ports.js";
 import type { OutboxNotification } from "../src/domain/models.js";
 import { buildTelnyxAssistantUpdate } from "../src/voice/system-prompt.js";
 
@@ -113,6 +115,7 @@ describe("Telnyx provider boundary", () => {
     const adapter = new TelnyxSmsAdapter({
       apiKey: "synthetic-key",
       fromNumber: "+15555550199",
+      textingApproved: true,
       messagingProfileId: "00000000-0000-4000-8000-000000000001",
       resolveDestination: async () => "+15555550100",
       webhookUrl: "https://front-office.example/webhooks/telnyx",
@@ -161,6 +164,7 @@ describe("Telnyx provider boundary", () => {
     const replica = () => new TelnyxSmsAdapter({
       apiKey: "synthetic-key",
       fromNumber: "+15555550199",
+      textingApproved: true,
       resolveDestination: async () => "+15555550100",
       claimStopNotice: (phone, id, firstAttempt) => store.claimSmsStopNotice(phone, id, "2026-11-23T12:00:00.000Z", firstAttempt),
       fetcher,
@@ -205,6 +209,7 @@ describe("Telnyx provider boundary", () => {
     const adapter = new TelnyxSmsAdapter({
       apiKey: "synthetic-key",
       fromNumber: "+15555550199",
+      textingApproved: true,
       resolveDestination: async () => "+15555550100",
       claimStopNotice: (phone, id, firstAttempt) => store.claimSmsStopNotice(phone, id, "2026-11-23T12:00:00.000Z", firstAttempt),
       fetcher,
@@ -230,6 +235,7 @@ describe("Telnyx provider boundary", () => {
     const adapter = new TelnyxSmsAdapter({
       apiKey: "synthetic-key",
       fromNumber: "+15555550199",
+      textingApproved: true,
       resolveDestination: async () => null,
       claimStopNotice: (phone, id, firstAttempt) => store.claimSmsStopNotice(phone, id, "2026-11-23T12:00:00.000Z", firstAttempt),
       fetcher,
@@ -244,6 +250,7 @@ describe("Telnyx provider boundary", () => {
     const adapter = new TelnyxSmsAdapter({
       apiKey: "synthetic-key",
       fromNumber: "+15555550199",
+      textingApproved: true,
       founderFromNumber: "+15555550200",
       resolveDestination: async () => "+15555550100",
       fetcher,
@@ -262,6 +269,7 @@ describe("Telnyx provider boundary", () => {
     const adapter = new TelnyxSmsAdapter({
       apiKey: "synthetic-key",
       fromNumber: "+15555550199",
+      textingApproved: true,
       resolveDestination: async () => "+15555550100",
       isOptedOut: async () => true,
       fetcher,
@@ -335,6 +343,30 @@ describe("Telnyx provider boundary", () => {
     expect(serialized).not.toContain("TOOL_TOKEN");
     expect(serialized).not.toContain("Retell");
     expect(serialized).not.toContain("Twilio");
+  });
+});
+
+describe("texts before carrier approval (10DLC)", () => {
+  it("holds every text until texting is approved, except to the provider-test numbers, and never retries it", async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ data: { id: "message-test" } })) as unknown as typeof fetch;
+    const unapproved = (allowed?: string[]) => new TelnyxSmsAdapter({
+      apiKey: "synthetic-key", fromNumber: "+15555550199", textingApproved: false,
+      ...(allowed ? { allowedDirectDestinations: new Set(allowed) } : {}),
+      resolveDestination: async () => "+15555550100", fetcher,
+    });
+    await expect(unapproved().send(syntheticNotification())).rejects.toBeInstanceOf(NotificationHeldError);
+    await expect(unapproved().send({ ...syntheticNotification(), destinationRef: "tel:+15555550100" })).rejects.toBeInstanceOf(NotificationHeldError);
+    expect(fetcher).not.toHaveBeenCalled();
+    // Provider test mode keeps working for the allowlisted test number only.
+    await expect(unapproved(["+15555550100"]).send(syntheticNotification())).resolves.toEqual({ providerReceipt: "message-test" });
+
+    const store = new InMemoryStore();
+    await store.enqueueNotification({ ...syntheticNotification(), id: "4c7c0e8e-7c1c-4f5d-9d1f-1b8a3a7b2c01", callId: null, idempotencyKey: "held-test" });
+    const clock = { now: () => new Date("2026-11-20T17:00:00.000Z") };
+    const result = await new OutboxWorker(store, unapproved(), clock).runOnce();
+    expect(result).toMatchObject({ sent: 0, retried: 0, dead: 0, held: 1 });
+    expect((await new OutboxWorker(store, unapproved(), clock).runOnce()).held).toBe(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 });
 

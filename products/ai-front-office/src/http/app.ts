@@ -1873,7 +1873,6 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       !dependencies.env.TELNYX_PUBLIC_KEY && "Telnyx webhook verification",
       !dependencies.env.TELNYX_FROM_NUMBER && "Telnyx SMS sender",
       !dependencies.env.TELNYX_MESSAGING_PROFILE_ID && "Telnyx messaging profile",
-      !dependencies.env.TELNYX_MESSAGING_APPROVED && "approved owner-alert messaging",
       !dependencies.env.LIVE_PROVIDER_PROOF_AT && "recorded live-provider proof",
       dependencies.env.PROVIDER_TEST_MODE && "provider test mode must be disabled",
     ].filter(Boolean) as string[];
@@ -2883,7 +2882,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (config.paused) throw new HttpError(503, "Service is paused");
     if (dependencies.env.PROVIDER_TEST_MODE) return;
     if (tenantId !== dependencies.env.DEFAULT_TENANT_ID) {
-      if (!dependencies.env.TELNYX_MESSAGING_APPROVED || !dependencies.env.LIVE_PROVIDER_PROOF_AT) throw new HttpError(503, "Commercial provider prerequisites are not satisfied");
+      // Voice goes live without carrier texting approval (10DLC): texts are held until it lands (TelnyxSmsAdapter).
+      if (!dependencies.env.LIVE_PROVIDER_PROOF_AT) throw new HttpError(503, "Commercial provider prerequisites are not satisfied");
       const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
       const subscription = await dependencies.store.getSubscription(tenantId);
       if (account?.status !== "active") throw new HttpError(503, "Shop activation is not complete");
