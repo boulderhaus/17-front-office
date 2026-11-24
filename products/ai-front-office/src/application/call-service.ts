@@ -18,6 +18,7 @@ import { BookingCoordinator } from "./booking-coordinator.js";
 import { redactError, withRetry } from "./retry.js";
 import { UsageAlertService } from "./usage-alerts.js";
 import { callbackLinkToken, ownerCallSms, shortWhen, urgentReason } from "../domain/owner-sms.js";
+import { ownerCallEmailNotification } from "./owner-alerts.js";
 
 /** Sticky quality flag: a spam mark was refused or undone, so this call always counts and reaches the owner. */
 const SPAM_REFUSED = "spam_refused";
@@ -70,6 +71,7 @@ export class CallService {
   readonly #booking: BookingCoordinator;
   readonly #usageAlerts: UsageAlertService;
   readonly #callbackLinkKey: string | null;
+  readonly #ownerEmailAvailable: boolean;
 
   constructor(
     private readonly store: Store,
@@ -80,6 +82,7 @@ export class CallService {
     options: { ownerEmailAvailable?: boolean; callbackLinkKey?: string | null } = {},
   ) {
     this.#callbackLinkKey = options.callbackLinkKey ?? null;
+    this.#ownerEmailAvailable = options.ownerEmailAvailable === true;
     this.#booking = new BookingCoordinator(store, calendar, clock);
     this.#usageAlerts = new UsageAlertService(store, clock, publicBaseUrl, options.ownerEmailAvailable === true);
   }
@@ -533,6 +536,13 @@ export class CallService {
     };
     await this.store.saveCall(call);
     await this.ensureCallbackTask(call, config, input.urgent ? `Urgent ${input.urgent.severity} call` : "Caller requested a human", true);
+    const handoffBody = ownerCallSms({
+      call,
+      urgentReason: urgentReason(call, true),
+      wants: this.wantsLine(call.fields.requestedStart, config.timezone),
+      link: this.ownerCallLink(call, ownerPortal),
+    });
+    await this.enqueueOwnerCopies(call, handoffBody, true, `human-handoff:${call.id}`);
     for (const destinationRef of config.ownerNotificationRefs) {
       await this.store.enqueueNotification({
         id: randomUUID(),
@@ -540,12 +550,7 @@ export class CallService {
         callId: call.id,
         channel: "sms",
         destinationRef,
-        body: ownerCallSms({
-          call,
-          urgentReason: urgentReason(call, true),
-          wants: this.wantsLine(call.fields.requestedStart, config.timezone),
-          link: this.ownerCallLink(call, ownerPortal),
-        }),
+        body: handoffBody,
         priority: "high",
         state: "pending",
         attempts: 0,
@@ -857,6 +862,7 @@ export class CallService {
       wants: this.wantsLine(when, config.timezone),
       link: this.ownerCallLink(call, ownerPortal),
     });
+    await this.enqueueOwnerCopies(call, body, call.emergency?.emergency === true, `${keyPrefix}:${call.id}`);
     for (const destinationRef of config.ownerNotificationRefs) {
       const notification: OutboxNotification = {
         id: randomUUID(),
@@ -877,6 +883,21 @@ export class CallService {
       };
       await this.store.enqueueNotification(notification);
     }
+  }
+
+  /**
+   * The owner text's words, by email too: texts can't reach an owner before carrier approval (or one who never
+   * opted in), so email is how every lead still reaches them. Only for owner-app shops with email configured.
+   */
+  private async enqueueOwnerCopies(call: CallRecord, smsBody: string, high: boolean, keyBase: string): Promise<void> {
+    if (!this.#ownerEmailAvailable) return;
+    const account = await this.store.getOwnerAccountByTenant(call.tenantId);
+    if (!account?.email) return;
+    const now = this.clock.now().toISOString();
+    await this.store.enqueueNotification(ownerCallEmailNotification({
+      tenantId: call.tenantId, callId: call.id, email: account.email, smsBody,
+      settingsUrl: `${this.publicBaseUrl.replace(/\/$/, "")}/app/settings`, high, keyBase, now,
+    }));
   }
 
   /**

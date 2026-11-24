@@ -127,6 +127,50 @@ describe("owner new-call text, end to end", () => {
   });
 });
 
+describe("owner lead email", () => {
+  const now = new Date("2026-01-15T08:00:00.000Z");
+  async function shop(options: { ownerEmailAvailable: boolean; realtime?: boolean; smsOptIn?: boolean }) {
+    const store = new InMemoryStore();
+    const tenantId = `shop_email_${randomUUID().slice(0, 8)}`;
+    await store.createOwnerWorkspace({
+      account: { id: randomUUID(), tenantId, email: "owner@example.test", displayName: "Owner", passwordHash: "synthetic", role: "owner", status: "active", createdAt: now.toISOString(), updatedAt: now.toISOString() },
+      config: { ...createDemoConfig(tenantId), businessName: "Suncoast Heating", timezone: "America/New_York", ownerNotificationRefs: options.smsOptIn === false ? [] : ["owner-primary"], ownerRealtimeSmsEnabled: options.realtime ?? true },
+      ownerPhone: "+15555550100",
+    });
+    const service = new CallService(store, new InMemoryCalendar(), { now: () => now }, "https://front-office.example", { callbackLinkKey: "synthetic-callback-link-key-abcdefghijklmnop", ownerEmailAvailable: options.ownerEmailAvailable });
+    return { store, tenantId, service };
+  }
+  const finish = (service: CallService, tenantId: string, id: string, extra: Partial<typeof fields> = {}) => service.finalize({
+    webhookEventId: `end:${id}`, tenantId, providerCallId: id, fromNumber: "+15555550142", startedAt: "2026-01-15T07:50:00.000Z", endedAt: now.toISOString(), durationSeconds: 95,
+    fields: { ...fields, ...extra }, transcript: "Synthetic", recordingUrl: null, consentState: "disclosed",
+  });
+
+  it("emails the owner's sign-in address the same words as the owner text, even without a text opt-in", async () => {
+    const { store, tenantId, service } = await shop({ ownerEmailAvailable: true, smsOptIn: false });
+    const call = await finish(service, tenantId, "email-1");
+    const emails = [...store.notifications.values()].filter((item) => item.channel === "email" && item.callId === call.id);
+    expect(emails).toHaveLength(1);
+    expect(emails[0]!.destinationRef).toBe("email:owner@example.test");
+    const [subject, , ...rest] = emails[0]!.body.split("\n");
+    expect(subject).toBe("Subject: Front Office: New call: Maria");
+    expect(rest.slice(0, 3)).toEqual(["New call: Maria", "- AC not cooling", "- 41 Palm Ave, Sarasota"]);
+    expect(emails[0]!.body).toContain("Call back: https://front-office.example/c/");
+    expect(emails[0]!.body).toContain("https://front-office.example/app/settings");
+    // A replayed end-of-call webhook never sends a second email.
+    await finish(service, tenantId, "email-1");
+    expect([...store.notifications.values()].filter((item) => item.channel === "email")).toHaveLength(1);
+  });
+
+  it("sends nothing by email when email isn't configured, and follows the instant-alerts switch for routine leads", async () => {
+    const off = await shop({ ownerEmailAvailable: false });
+    await finish(off.service, off.tenantId, "email-2");
+    expect([...off.store.notifications.values()].some((item) => item.channel === "email")).toBe(false);
+    const quiet = await shop({ ownerEmailAvailable: true, realtime: false });
+    await finish(quiet.service, quiet.tenantId, "email-3");
+    expect([...quiet.store.notifications.values()].some((item) => item.channel === "email")).toBe(false);
+  });
+});
+
 describe("call-back link", () => {
   const tenantId = "shop_a";
   const callId = "0f8fad5b-d9cb-469f-a165-70867728950e";
