@@ -285,7 +285,7 @@ function DoneStep({ dashboard, activation }: { dashboard: ApiDashboard; activati
     <>
       <div className="grid justify-items-start gap-4">
         <span className="grid size-14 place-items-center rounded-full bg-emerald-600 text-white shadow-[0_0_0_6px_rgba(5,150,105,.15)]"><Check className="size-8" strokeWidth={3} /></span>
-        <Heading title={<span className="marker">You’re set!</span>}>{waiting ? "Your setup is saved. Your line turns on by itself once it’s approved." : "Missed calls now get answered. New jobs show up in Calls."}</Heading>
+        <Heading title={<span className="marker">You’re set!</span>}>{waiting ? "Your setup is saved. We’ll turn your line on as soon as it’s approved and let you know." : "Missed calls now get answered. New jobs show up in Calls."}</Heading>
       </div>
       <Card>
         <CardContent className="grid gap-0 divide-y">

@@ -937,7 +937,7 @@ describe("HTTP boundary", () => {
     expect(landingHtml).toContain("If Front Office doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month.");
     expect(landingHtml).not.toMatch(/connected AI minutes|\/minute/);
     expect(landingHtml).toContain("EXAMPLE CALL");
-    for (const item of ["Phone rings", "Front Office picks up", "What you get by text", "New call: Maria", "- AC not cooling", "41 Palm Ave, Sarasota", "Wants someone today", "Call back", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
+    for (const item of ["Phone rings", "Front Office picks up", "What you get on your phone", "New call: Maria", "- AC not cooling", "41 Palm Ave, Sarasota", "Wants someone today", "Call back", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
     // The example loops with CSS only and holds still for people who turn motion off.
     expect(landingHtml).toContain("@keyframes demoFrame");
     expect(landingHtml).toMatch(/prefers-reduced-motion:reduce\)\{[^}]*\}[^@]*\.frame\{position:static;opacity:1;animation:none/);

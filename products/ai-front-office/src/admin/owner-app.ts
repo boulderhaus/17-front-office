@@ -309,7 +309,7 @@ ${i.directBookingAvailable ? `<label>Booking<select name="bookingMode"><option v
 <label>Prices (one per line, “Name: exact wording”)<textarea name="priceSnippets" rows="3" placeholder="Service call: Our service call is $89.">${e(c.priceSnippets.map((item) => `${item.label}: ${item.text}`).join("\n"))}</textarea></label>
 <label>Answers (one per line, “Topic: exact wording”)<textarea name="approvedKnowledge" rows="3" placeholder="Brands: We service all major brands.">${e(c.approvedKnowledge.map((item) => `${item.topic}: ${item.text}`).join("\n"))}</textarea></label><p class="fo-hint">Leave blank and Front Office won’t quote a price; it takes a message.</p></section>
 <section class="fo-card fo-group"><h2>Alerts to your phone</h2>
-<label>Mobile number<input type="tel" name="ownerPhone" inputmode="tel" autocomplete="tel" placeholder="${i.ownerPhoneConfigured ? "Saved. Enter a new number to replace it" : "+1 941 555 0100"}"></label><p class="fo-hint">Emergencies and “call me back” requests are always texted here.</p>
+<label>Mobile number<input type="tel" name="ownerPhone" inputmode="tel" autocomplete="tel" placeholder="${i.ownerPhoneConfigured ? "Saved. Enter a new number to replace it" : "+1 941 555 0100"}"></label><p class="fo-hint">Urgent calls ring this number. Text alerts come here too, once texts are on.</p>
 ${addOn("ownerDailySmsEnabled", c.ownerDailySmsEnabled, true, "Daily text recap", "Included", "Follow-ups and appointments, once each morning.")}
 <label>Recap time<select name="ownerDailySmsHour">${hourOptions}</select></label>
 ${addOn("ownerRealtimeSmsEnabled", c.ownerRealtimeSmsEnabled, true, "Instant lead texts", "Included", "Every routine new lead the moment the call ends.")}
