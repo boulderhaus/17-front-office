@@ -216,14 +216,14 @@ export class CallService {
     });
   }
 
-  /** True once the call passes the soft five-minute limit, unless an emergency or human handoff is under way. */
   /** A price or policy question the assistant looked up: a checkpoint on the call's path, nothing more. */
   async recordAnswerLookup(input: { tenantId: string; providerCallId: string; kind: "price" | "answer"; approved: boolean }): Promise<void> {
-    const call = await this.store.getCallByProviderId(input.providerCallId);
+    const call = await this.store.getCallByProviderId(input.providerCallId).catch(() => null);
     if (!call || call.tenantId !== input.tenantId) return;
-    await this.audit(call, "answer.lookup", this.clock.now(), "success", { kind: input.kind, approved: input.approved }, null);
+    await this.checkpoint(call, "answer.lookup", this.clock.now(), { kind: input.kind, approved: input.approved });
   }
 
+  /** True once the call passes the soft five-minute limit, unless an emergency or human handoff is under way. */
   async wrapUp(providerCallId: string): Promise<boolean> {
     const call = await this.store.getCallByProviderId(providerCallId);
     return call ? this.wrapUpFor(call) : false;
@@ -255,14 +255,14 @@ export class CallService {
     const call = emergency.emergency || fields.humanRequested ? withoutSpamMark(updated) : updated;
     input.signal?.throwIfAborted();
     await this.store.saveCall(call);
-    // Which checkpoints this intake covers. Booleans only: the values live on the call record.
-    await this.audit(call, "call.intake", this.clock.now(), "success", {
+    if (emergency.emergency) await this.queueHumanHandoffClaimed({ tenantId: input.tenantId, providerCallId: input.providerCallId, fromNumber: call.fromNumber, problemDescription: fields.problemDescription, urgent: emergency });
+    // Which checkpoints this intake covers, after any alert. Booleans only: the values live on the call record.
+    await this.checkpoint(call, "call.intake", this.clock.now(), {
       problem: fields.problemDescription.trim().length > 0,
       name: Boolean(fields.callerName?.trim()),
       callback: /^\+[1-9]\d{7,14}$/.test(fields.callbackNumber ?? call.fromNumber),
       address: Boolean(fields.address?.trim()),
-    }, null);
-    if (emergency.emergency) await this.queueHumanHandoffClaimed({ tenantId: input.tenantId, providerCallId: input.providerCallId, fromNumber: call.fromNumber, problemDescription: fields.problemDescription, urgent: emergency });
+    });
     const missing = [
       !fields.callerName?.trim() ? "caller_name" : null,
       !/^\+[1-9]\d{7,14}$/.test(fields.callbackNumber ?? call.fromNumber) ? "callback_number" : null,
@@ -357,8 +357,6 @@ export class CallService {
     const started = this.clock.now();
     const config = await this.store.getConfig(input.tenantId);
     const decision = triageEmergency(input.problemDescription, config, input.llmScore, input.llmReason);
-    const triaged = await this.store.getCallByProviderId(input.providerCallId);
-    if (triaged?.tenantId === input.tenantId) await this.audit(triaged, "call.triage", started, "success", { severity: decision.severity, emergency: decision.emergency }, null);
     if (decision.emergency) {
       await this.queueHumanHandoff({
         tenantId: input.tenantId,
@@ -369,6 +367,8 @@ export class CallService {
         urgent: decision,
       });
     }
+    const triaged = await this.store.getCallByProviderId(input.providerCallId).catch(() => null);
+    if (triaged?.tenantId === input.tenantId) await this.checkpoint(triaged, "call.triage", started, { severity: decision.severity, emergency: decision.emergency });
     return {
       severity: decision.severity,
       emergency: decision.emergency,
@@ -560,7 +560,6 @@ export class CallService {
       updatedAt: now,
     };
     await this.store.saveCall(call);
-    await this.audit(call, "call.handoff", this.clock.now(), "success", { reason: input.urgent ? "emergency" : "explicit_request" }, null);
     await this.ensureCallbackTask(call, config, input.urgent ? `Urgent ${input.urgent.severity} call` : "Caller requested a human", true);
     const handoffBody = ownerCallSms({
       call,
@@ -588,6 +587,7 @@ export class CallService {
         sentAt: null,
       });
     }
+    await this.checkpoint(call, "call.handoff", this.clock.now(), { reason: input.urgent ? "emergency" : "explicit_request" });
     // Provider-native transfer is intentionally disabled until the server can
     // authorize the exact destination and call-control action itself.
     const transferAvailable = false;
@@ -993,6 +993,11 @@ export class CallService {
     };
     await this.store.saveCall(call);
     return call;
+  }
+
+  /** A call-path checkpoint. Display only: a failed write must never block a tool reply or an owner alert. */
+  private async checkpoint(call: CallRecord, tool: string, started: Date, metadata: Record<string, unknown>): Promise<void> {
+    await this.audit(call, tool, started, "success", metadata, null).catch(() => undefined);
   }
 
   private async audit(

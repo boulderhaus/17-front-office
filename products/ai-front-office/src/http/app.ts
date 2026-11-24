@@ -904,7 +904,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const tenantId = await tenantForCall(input.provider_call_id);
       await requireOperational(tenantId);
       const answer = approvedAnswer(await dependencies.store.getConfig(tenantId), input.kind, input.key);
-      await service.recordAnswerLookup({ tenantId, providerCallId: input.provider_call_id, kind: input.kind, approved: answer.status === "approved" }).catch(() => undefined);
+      await service.recordAnswerLookup({ tenantId, providerCallId: input.provider_call_id, kind: input.kind, approved: answer.status === "approved" });
       return { ...answer, wrap_up: await service.wrapUp(input.provider_call_id) };
     }
     if (pathname === "/tools/check-service-area") return handleServiceArea(tool);
@@ -1740,18 +1740,19 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         dependencies.store.listNotifications(call.id),
       ]);
       const recordingUrl = call.recordingUrl?.startsWith("https://") ? call.recordingUrl.replace("/admin/provider/", "/app/provider/") : null;
-      const path = buildCallPath({ call, events, booking, now: dependencies.clock.now() });
+      const path = buildCallPath({ call, events, booking, notifications, now: dependencies.clock.now() });
       return sendHtml(response, 200, renderOwnerCallRecord({ account, config, call, booking, callbackTask, notifications, recordingUrl, csrf: session.csrf, canDelete: !member, path }));
     }
     const callPathMatch = /^\/app\/calls\/([0-9a-f-]+)\/path$/i.exec(url.pathname);
     if (method === "GET" && callPathMatch?.[1]) {
       const call = await dependencies.store.getCall(callPathMatch[1]);
       if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Call not found");
-      const [booking, events] = await Promise.all([
+      const [booking, events, notifications] = await Promise.all([
         dependencies.store.getBookingForCall(call.id),
         dependencies.store.listToolEvents(call.id),
+        dependencies.store.listNotifications(call.id),
       ]);
-      const path = buildCallPath({ call, events, booking, now: dependencies.clock.now() });
+      const path = buildCallPath({ call, events, booking, notifications, now: dependencies.clock.now() });
       response.setHeader("cache-control", "no-store");
       return sendJson(response, 200, { live: path.live, done: path.done, html: renderCallPath(call, path) });
     }

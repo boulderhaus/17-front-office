@@ -48,7 +48,7 @@ describe("Otto's path through a call", () => {
 
   async function path() {
     const call = (await store.getCallByProviderId(id))!;
-    return buildCallPath({ call, events: await store.listToolEvents(call.id), booking: await store.getBookingForCall(call.id), now: clock.now() });
+    return buildCallPath({ call, events: await store.listToolEvents(call.id), booking: await store.getBookingForCall(call.id), notifications: await store.listNotifications(call.id), now: clock.now() });
   }
   const states = async () => Object.fromEntries((await path()).steps.map((step) => [step.key, step.state]));
 
@@ -97,16 +97,30 @@ describe("Otto's path through a call", () => {
     const current = await path();
     expect(current.extras).toEqual([
       expect.objectContaining({ key: "price_question", state: "done", note: "Gave your approved price" }),
-      expect.objectContaining({ key: "owner_request", state: "done", note: "You were alerted to call back" }),
+      // Queued, not yet sent: the path never claims a text went out before it did.
+      expect.objectContaining({ key: "owner_request", state: "done", note: "callback alert sending" }),
     ]);
-    // A request for the owner changes the outcome mid-call; the path stays live until the call ends.
+    // A request for the owner changes the outcome mid-call; the path stays live until the call ends,
+    // and Otto isn't shown working on a booking that's no longer happening.
     expect(current.live).toBe(true);
+    expect(current.steps.find((step) => step.key === "booking")).toMatchObject({ state: "skipped", note: "You're calling them back" });
+    expect(current.steps.find((step) => step.key === "times")?.state).toBe("skipped");
+    expect(current.steps.find((step) => step.state === "current")?.key).toBe("safety");
   });
 
   it("flags an emergency at the safety check", async () => {
     await service.triageCall({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", problemDescription: "I smell gas in the basement" });
     const safety = (await path()).steps.find((step) => step.key === "safety");
-    expect(safety).toMatchObject({ state: "flagged", note: "Emergency: told to get safe, you were alerted" });
+    expect(safety).toMatchObject({ state: "flagged", note: "Emergency: told to get safe, alert sending" });
+
+    // Once the alert really went out, it says so; if it failed, it says that instead.
+    const call = (await store.getCallByProviderId(id))!;
+    const alerts = (await store.listNotifications(call.id)).filter((item) => item.idempotencyKey.startsWith("human-handoff:"));
+    expect(alerts.length).toBeGreaterThan(0);
+    for (const alert of alerts) await store.saveNotification({ ...alert, state: "delivered" });
+    expect((await path()).steps.find((step) => step.key === "safety")?.note).toBe("Emergency: told to get safe, you were alerted");
+    for (const alert of alerts) await store.saveNotification({ ...alert, state: "dead" });
+    expect((await path()).steps.find((step) => step.key === "safety")?.note).toBe("Emergency: told to get safe, alert didn't go through");
   });
 
   it("stops at the service check for a robocall and marks the rest skipped once it ends", async () => {
@@ -114,6 +128,31 @@ describe("Otto's path through a call", () => {
     expect((await service.markSpam({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", category: "robocall", callerQuote: "Press one to lower your rates" })).status).toBe("marked");
     await service.finalize({ webhookEventId: `end:${id}`, tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", startedAt: "2026-01-15T14:00:00.000Z", endedAt: clock.now().toISOString(), durationSeconds: 8, fields: { ...fields, callerName: null, address: null, problemDescription: "" }, transcript: "Press one to lower your rates", recordingUrl: null, consentState: "disclosed" });
     expect(await states()).toEqual({ greeting: "done", service_check: "flagged", problem: "skipped", safety: "skipped", caller: "skipped", address: "skipped", times: "skipped", booking: "skipped", wrap_up: "skipped" });
+  });
+
+  it("shows a booking waiting on the owner as waiting, not done", async () => {
+    await store.saveConfig({ ...createDemoConfig(), ownerRealtimeSmsEnabled: true, bookingMode: "confirm" });
+    await service.saveIntake({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", fields });
+    const slots = await service.checkAvailability({ tenantId: "demo", providerCallId: id, windowStart: "2026-01-15T15:00:00.000Z", windowEnd: "2026-01-15T18:00:00.000Z" });
+    const result = await service.bookConfirmedSlot({ tenantId: "demo", providerCallId: id, slotStart: slots.slots[0]!.start, callerName: "Test Caller", callbackNumber: "+15555550100", address: fields.address!, serviceCategory: "HVAC maintenance", problemDescription: fields.problemDescription, explicitConfirmation: true, diagnosticFeeAccepted: true });
+    expect(result.status).toBe("pending");
+    expect((await path()).steps.find((step) => step.key === "booking")).toMatchObject({ state: "waiting", note: "Waiting on your OK" });
+  });
+
+  it("lists price questions and asks for the owner only when they happened", async () => {
+    await service.saveIntake({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", fields });
+    expect((await path()).extras).toEqual([]);
+  });
+
+  it("never lets a failed checkpoint write block an emergency alert", async () => {
+    store.addToolEvent = async () => { throw new Error("tool_events unavailable"); };
+    const result = await service.saveIntake({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", fields: { ...fields, problemDescription: "I smell gas in the kitchen" } });
+    expect(result.status).toBe("saved");
+    const triage = await service.triageCall({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", problemDescription: "I smell gas in the kitchen" });
+    expect(triage.emergency).toBe(true);
+    await service.recordAnswerLookup({ tenantId: "demo", providerCallId: id, kind: "price", approved: false });
+    const call = (await store.getCallByProviderId(id))!;
+    expect((await store.listNotifications(call.id)).some((item) => item.idempotencyKey.startsWith("human-handoff:") && item.priority === "high")).toBe(true);
   });
 
   it("never stores the caller's details on a checkpoint", async () => {
@@ -167,7 +206,7 @@ describe("live path on the owner's call page", () => {
     const live = await fetch(`${baseUrl}/app/calls/${call.id}/path`, { headers: { cookie } });
     expect(live.headers.get("cache-control")).toBe("no-store");
     const body = await live.json() as { live: boolean; done: number; html: string };
-    expect(body).toMatchObject({ live: true, done: 3 });
+    expect(body).toMatchObject({ live: true, done: 4 });
     expect(body.html).toContain('class="current"');
 
     const script = await fetch(`${baseUrl}/app/call-path.js`);

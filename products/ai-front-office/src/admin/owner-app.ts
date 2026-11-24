@@ -272,33 +272,52 @@ export function renderCallPath(call: Pick<CallRecord, "id" | "startedAt">, path:
     const seconds = Math.max(0, Math.round((Date.parse(at) - Date.parse(call.startedAt)) / 1000));
     return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
   };
-  const mark: Record<CallPathStep["state"], string> = { done: ownerIcon("check"), flagged: ownerIcon("alert"), current: "<i></i>", todo: "", skipped: "" };
-  const words: Record<CallPathStep["state"], string> = { done: "done", flagged: "flagged", current: "happening now", todo: "not yet", skipped: "skipped" };
+  const mark: Record<CallPathStep["state"], string> = { done: ownerIcon("check"), waiting: ownerIcon("clock"), flagged: ownerIcon("alert"), current: "<i></i>", todo: "", skipped: "" };
+  const words: Record<CallPathStep["state"], string> = { done: "done", waiting: "waiting on you", flagged: "needs attention", current: "happening now", todo: "not yet", skipped: "skipped" };
   const item = (step: CallPathStep<string>, index: number | null): string =>
-    `<li class="${step.state}"><span class="fo-path-mark" aria-hidden="true">${mark[step.state] || (index === null ? "" : String(index + 1))}</span><span class="fo-path-text"><strong>${e(step.label)}</strong>${step.note ? `<small>${e(step.note)}</small>` : ""}</span><span class="fo-path-time">${step.at && (step.state === "done" || step.state === "flagged") ? `<time datetime="${e(step.at)}">${clock(step.at)}</time>` : `<span class="fo-sr">${words[step.state]}</span>`}</span></li>`;
+    `<li class="${step.state}"><span class="fo-path-mark" aria-hidden="true">${mark[step.state] || (index === null ? "" : String(index + 1))}</span><span class="fo-path-text"><strong>${e(step.label)}</strong>${step.note ? `<small>${e(step.note)}</small>` : ""}</span><span class="fo-path-time">${step.at && (step.state === "done" || step.state === "waiting" || step.state === "flagged") ? `<time datetime="${e(step.at)}">${clock(step.at)}</time>` : `<span class="fo-sr">${words[step.state]}</span>`}</span></li>`;
   const live = path.live ? ` data-live-path="/app/calls/${encodeURIComponent(callId)}/path"` : "";
-  return `<section class="fo-path${path.live ? " live" : ""}"${live} aria-label="Otto's path through this call"><div class="fo-path-head"><h3>Otto’s path</h3><span>${path.live ? '<i></i>Live · ' : ""}${path.done} of ${path.steps.length}</span></div><ol>${path.steps.map((step, index) => item(step, index)).join("")}</ol><p class="fo-path-any">Any time in the call</p><ul>${path.extras.map((step) => item(step, null)).join("")}</ul>${path.live ? '<script src="/app/call-path.js" defer></script>' : ""}</section>`;
+  return `<section class="fo-path${path.live ? " live" : ""}"${live} aria-label="Otto's path through this call"><div class="fo-path-head"><h3>Otto’s path</h3><span>${path.live ? '<i></i>Live · ' : ""}${path.done} of ${path.steps.length}</span></div><ol>${path.steps.map((step, index) => item(step, index)).join("")}</ol>${path.extras.length ? `<p class="fo-path-any">Also came up</p><ul>${path.extras.map((step) => item(step, null)).join("")}</ul>` : ""}${path.live ? '<script src="/app/call-path.js" defer></script>' : ""}</section>`;
 }
 
 /** Polls the live path while the call is on; reloads once when it ends so the full record shows. */
 export const CALL_PATH_SCRIPT = `(() => {
+  let failures = 0;
+  let timer = 0;
+  const section = () => document.querySelector("[data-live-path]");
+  const stop = (words) => {
+    const current = section();
+    if (!current) return;
+    current.removeAttribute("data-live-path");
+    current.classList.remove("live");
+    const badge = current.querySelector(".fo-path-head span");
+    if (badge) badge.textContent = words;
+  };
+  const schedule = (ms) => { clearTimeout(timer); timer = setTimeout(tick, ms); };
   const tick = async () => {
-    const section = document.querySelector("[data-live-path]");
-    if (!section) return;
+    const current = section();
+    if (!current) return;
+    if (document.hidden) return;
     try {
-      const response = await fetch(section.getAttribute("data-live-path"), { credentials: "same-origin", cache: "no-store" });
-      if (response.status >= 400 && response.status < 500) return;
-      if (!response.ok) return setTimeout(tick, 5000);
+      const response = await fetch(current.getAttribute("data-live-path"), { credentials: "same-origin", cache: "no-store" });
+      if (response.status >= 400 && response.status < 500) return stop("Refresh for the latest");
+      if (!response.ok) throw new Error(String(response.status));
       const data = await response.json();
+      failures = 0;
       if (!data.live) return location.reload();
       const holder = document.createElement("div");
       holder.innerHTML = data.html;
       const next = holder.querySelector("[data-live-path]");
-      if (next) section.replaceWith(next);
-    } catch {}
-    setTimeout(tick, 2000);
+      if (next) current.replaceWith(next);
+      schedule(2000);
+    } catch {
+      failures += 1;
+      if (failures >= 5) return stop("Refresh for the latest");
+      schedule(Math.min(30000, 2000 * 2 ** failures));
+    }
   };
-  setTimeout(tick, 2000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) schedule(0); });
+  schedule(2000);
 })();
 `;
 
@@ -423,6 +442,7 @@ export function ownerIcon(name: string): string {
     check: '<path d="M20 6L9 17l-5-5"/>',
     back: '<path d="M15 18l-6-6 6-6"/>',
     map: '<path d="M12 21s-7-6.3-7-11a7 7 0 0 1 14 0c0 4.7-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     alert: '<path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>',
     play: '<path d="M7 4l13 8-13 8z"/>',
   };
@@ -526,6 +546,7 @@ button{font:inherit;cursor:pointer}svg{width:20px;height:20px;flex:none}
 .fo-path-mark svg{width:15px;height:15px;stroke-width:3}
 .fo-path li.done .fo-path-mark{background:var(--green);border-color:var(--green);color:#fff}
 .fo-path li.flagged .fo-path-mark{background:var(--red);border-color:var(--red);color:#fff}
+.fo-path li.waiting .fo-path-mark{background:var(--amber);border-color:var(--amber);color:#fff}
 .fo-path li.current{background:#f1f4e0}.fo-path li.current .fo-path-mark{border-color:var(--ink)}
 .fo-path li.skipped .fo-path-text,.fo-path li.todo .fo-path-text{color:var(--muted)}.fo-path li.skipped strong{font-weight:600}
 .fo-path-text{display:grid;min-width:0}.fo-path-text strong{font-size:14px}.fo-path-text small{font-size:12px;color:var(--muted)}
