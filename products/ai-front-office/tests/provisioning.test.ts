@@ -148,7 +148,8 @@ describe("owner one-tap go-live", () => {
       OWNER_DESTINATIONS_JSON: "{\"owner-primary\":\"+15555550100\"}",
       ...options.env,
     });
-    server = createServer(createRequestHandler({ env, store, calendar: new InMemoryCalendar(), clock, integrations: {}, logger: () => undefined, fetcher: telnyx.fetcher }));
+    const handler = createRequestHandler({ env, store, calendar: new InMemoryCalendar(), clock, integrations: {}, logger: () => undefined, fetcher: telnyx.fetcher });
+    server = createServer(handler);
     await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("no address");
@@ -164,7 +165,7 @@ describe("owner one-tap go-live", () => {
     const page = await (await fetch(`${baseUrl}/app`, { headers: { cookie } })).text();
     const csrf = /action="\/app\/line\/go-live"><input type="hidden" name="csrf" value="([^"]+)"/.exec(page)?.[1];
     const goLive = () => fetch(`${baseUrl}/app/line/go-live`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf: csrf ?? "" }) });
-    return { baseUrl, cookie, csrf, goLive, store, account, telnyx, privateKey: keys.privateKey, clock };
+    return { baseUrl, cookie, csrf, goLive, store, account, telnyx, privateKey: keys.privateKey, clock, handler, env };
   }
 
   it("buys a local number, creates and routes the shop's assistant, and shows forwarding codes", async () => {
@@ -230,6 +231,43 @@ describe("owner one-tap go-live", () => {
     const reply = await fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, privateKey, clock.now()), body: init });
     expect(reply.status).toBe(200);
     expect(((await reply.json()) as { dynamic_variables: { call_access: string } }).dynamic_variables.call_access).toBe("allowed");
+  });
+
+  it("turns a waiting paid shop on by itself and tells the owner the line is live, once", async () => {
+    const { store, account, handler } = await shop({ env: { TELNYX_MESSAGING_APPROVED: "false", RESEND_API_KEY: "re_synthetic", RESEND_FROM_EMAIL: "alerts@front-office.example" } });
+    expect((await store.getOwnerAccountById(account.id))!.status).toBe("pending_activation");
+    expect(await handler.runActivationJobs()).toMatchObject({ activated: 1 });
+    expect((await store.getOwnerAccountById(account.id))!.status).toBe("active");
+    const notices = () => [...store.notifications.values()].filter((item) => item.idempotencyKey.startsWith(`line-live:${account.tenantId}:`));
+    const email = notices().find((item) => item.channel === "email")!;
+    expect(email.destinationRef).toBe("email:owner@synthetic.example");
+    expect(email.body).toContain("Subject: Your Front Office line is live");
+    expect(email.body).toContain("(941) 555-0123 now answers for Gulf Air");
+    expect(notices().some((item) => item.channel === "sms")).toBe(true);
+    await handler.runActivationJobs();
+    expect(notices()).toHaveLength(2);
+  });
+
+  it("keeps scanning when one shop's data breaks the activation job", async () => {
+    const { store, account, handler } = await shop();
+    const list = store.listTenantIds.bind(store);
+    const lookup = store.getOwnerAccountByTenant.bind(store);
+    store.listTenantIds = async () => ["broken-shop", ...await list()];
+    store.getOwnerAccountByTenant = async (tenantId: string) => { if (tenantId === "broken-shop") throw new Error("bad row"); return lookup(tenantId); };
+    expect(await handler.runActivationJobs()).toMatchObject({ activated: 1 });
+    expect((await store.getOwnerAccountById(account.id))!.status).toBe("active");
+  });
+
+  it("sends the opt-in confirmation once to owners who opted in before texting was approved", async () => {
+    const before = await shop({ env: { TELNYX_MESSAGING_APPROVED: "false" } });
+    const confirmations = (store: typeof before.store) => [...store.notifications.values()].filter((item) => item.idempotencyKey.startsWith("owner-optin:"));
+    expect(confirmations(before.store)).toHaveLength(0);
+    expect((await before.handler.runActivationJobs()).optInConfirmations).toBe(0);
+    // Same shop data, server restarted with texting approved.
+    const approved = createRequestHandler({ env: { ...before.env, TELNYX_MESSAGING_APPROVED: true }, store: before.store, calendar: new InMemoryCalendar(), clock: before.clock, integrations: {}, logger: () => undefined, fetcher: before.telnyx.fetcher });
+    expect((await approved.runActivationJobs()).optInConfirmations).toBe(1);
+    expect((await approved.runActivationJobs()).optInConfirmations).toBe(0);
+    expect(confirmations(before.store).map((item) => item.idempotencyKey)).toEqual([`owner-optin:${before.account.tenantId}:approved`]);
   });
 
   it("keeps the line off and explains why while carrier approval is pending", async () => {

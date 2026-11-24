@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { continueOwnerAlertCall, ownerAlertSpeech, urgentOwnerCallsConfigured } from "../adapters/telnyx-owner-call.js";
 import { deviceId, listPushSubscriptions, parsePushSubscription, removePushSubscriptions, savePushSubscription } from "../adapters/web-push.js";
-import { ownerPushNotification } from "../application/owner-alerts.js";
+import { lineLiveNotifications, ownerPushNotification } from "../application/owner-alerts.js";
 import { SERVICE_WORKER, WEB_MANIFEST } from "./pwa.js";
 import { readFile } from "node:fs/promises";
 import { Readable } from "node:stream";
@@ -373,7 +373,12 @@ function ownerDashboardView(value: string | null): "today" | "pipeline" | "calen
   return value === "pipeline" || value === "calendar" ? value : "today";
 }
 
-export function createRequestHandler(dependencies: AppDependencies): RequestListener {
+export type FrontOfficeHandler = RequestListener & {
+  /** Background activation: waiting paid shops go live, and opted-in owners get the opt-in text once texting is approved. */
+  runActivationJobs(): Promise<{ activated: number; blocked: number; optInConfirmations: number }>;
+};
+
+export function createRequestHandler(dependencies: AppDependencies): FrontOfficeHandler {
   const service = new CallService(dependencies.store, dependencies.calendar, dependencies.clock, dependencies.env.PUBLIC_BASE_URL, {
     callbackLinkKey: dependencies.env.SESSION_SIGNING_KEY ?? null,
     ownerEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
@@ -422,7 +427,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
   /** The add-on can be bought only where this plan's Unlimited price exists. */
   const wantsUnlimited = (plan: Plan, value: unknown): boolean => Boolean(plan.unlimited) && (value === "yes" || value === "1" || value === "on" || value === true);
 
-  return (request, response) => {
+  const listener: RequestListener = (request, response) => {
     void handle(request, response).catch((error: unknown) => {
       const requestId = response.getHeader("x-request-id") ?? request.headers["x-request-id"] ?? "unassigned";
       const tool = request.method === "POST" ? toolForPath(new URL(request.url ?? "/", "http://localhost").pathname) : null;
@@ -438,6 +443,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       else sendJson(response, status, { error: message, request_id: requestId });
     });
   };
+  return Object.assign(listener, { runActivationJobs });
 
   /**
    * The provider only hands a tool's body to the model on 2xx, so every voice tool failure answers 200 with
@@ -524,6 +530,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     // Not swallowed: a stale notice would leave every later text to this number without the STOP line.
     if (phone) await dependencies.store.resetSmsStopNotice(phone);
     if (!dependencies.env.TELNYX_MESSAGING_APPROVED) return;
+    await dependencies.store.withLock(`optin-confirm:${tenantId}`, () => enqueueOptInConfirmation(tenantId, idempotencyKey))
+      .catch((error) => log({ level: "warn", event: "owner_optin_confirmation_failed", tenantId, error: safeError(error) }));
+  }
+
+  /** Callers hold the optin-confirm lock for the shop, so the approval job and a fresh opt-in never both send it. */
+  async function enqueueOptInConfirmation(tenantId: string, idempotencyKey: string): Promise<void> {
     try {
       const now = dependencies.clock.now().toISOString();
       await dependencies.store.enqueueNotification({
@@ -532,6 +544,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         priority: "normal", state: "pending", attempts: 0, nextAttemptAt: now,
         idempotencyKey, providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
       });
+      // The texting-approval job sends this to everyone who opted in before approval; this marks it done.
+      await dependencies.store.saveIntegrationSecret(tenantId, "notifications", "optin_confirmation_queued_at", now);
     } catch (error) {
       log({ level: "warn", event: "owner_optin_confirmation_failed", tenantId, error: safeError(error) });
     }
@@ -2005,12 +2019,75 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           });
         await dependencies.store.saveConfig({ ...config, paused: false });
         await dependencies.store.updateOwnerAccountStatus(account.id, "active", now);
+        if (account.status !== "active") await announceLineLive(account, config.businessName, config.ownerNotificationRefs, inboundNumber, now);
       } catch (error) {
         await liveRoute.setPaused(true).catch((rollbackError) => log({ level: "error", event: "owner_activation_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
         throw error;
       }
       return inboundNumber;
     })));
+  }
+
+  /** Tell the owner their line just went live (push, email, and text once texting is approved). Never blocks go-live. */
+  async function announceLineLive(account: OwnerAccount, businessName: string, smsRefs: string[], inboundNumber: string, now: string): Promise<void> {
+    try {
+      const email = dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL ? account.email : null;
+      const pushOn = Boolean(vapid) && (await listPushSubscriptions(dependencies.store, account.tenantId)).length > 0;
+      for (const notification of lineLiveNotifications({ tenantId: account.tenantId, businessName, inboundNumber, baseUrl: dependencies.env.PUBLIC_BASE_URL, email, pushOn, smsRefs, now })) {
+        await dependencies.store.enqueueNotification(notification);
+      }
+    } catch (error) {
+      log({ level: "warn", event: "line_live_notice_failed", tenantId: account.tenantId, error: safeError(error) });
+    }
+  }
+
+  /**
+   * Background, every few minutes on every replica (locked per shop inside goLive):
+   * 1. A paid shop still waiting for its line (carrier approval, provider test mode) goes live the moment the
+   *    prerequisites clear, and the owner hears "Your line is live". No owner tap needed.
+   * 2. Once texting is approved (TELNYX_MESSAGING_APPROVED), every owner who opted in before approval gets the
+   *    carrier-registered opt-in confirmation once; their texts then flow because the sender stops holding them.
+   */
+  async function runActivationJobs(): Promise<{ activated: number; blocked: number; optInConfirmations: number }> {
+    const result = { activated: 0, blocked: 0, optInConfirmations: 0 };
+    const providerReady = liveProviderBlockers().length === 0 && Boolean(stripeClient);
+    for (const tenantId of await dependencies.store.listTenantIds()) {
+      try {
+        await activationJobsForShop(tenantId, providerReady, result);
+      } catch (error) {
+        // One bad shop never stops the scan for the rest.
+        log({ level: "error", event: "activation_job_shop_failed", tenantId, error: safeError(error) });
+      }
+    }
+    return result;
+  }
+
+  async function activationJobsForShop(tenantId: string, providerReady: boolean, result: { activated: number; blocked: number; optInConfirmations: number }): Promise<void> {
+    {
+      const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
+      if (!account) return;
+      if (providerReady && account.status === "pending_activation" && isPaidStatus((await dependencies.store.getSubscription(tenantId))?.status)) {
+        try {
+          await goLive(account, null);
+          result.activated += 1;
+          log({ level: "info", event: "line_auto_activated", tenantId });
+        } catch (error) {
+          result.blocked += 1;
+          log({ level: error instanceof HttpError && error.status < 500 ? "info" : "error", event: "line_auto_activation_blocked", tenantId, status: error instanceof HttpError ? error.status : 500, error: safeError(error) });
+        }
+      }
+      if (dependencies.env.TELNYX_MESSAGING_APPROVED) {
+        const config = await dependencies.store.getConfig(tenantId);
+        if (config.ownerNotificationRefs.length > 0 && await dependencies.store.getIntegrationSecret(tenantId, "notifications", "owner_sms_consent")) {
+          const queued = await dependencies.store.withLock(`optin-confirm:${tenantId}`, async () => {
+            if (await dependencies.store.getIntegrationSecret(tenantId, "notifications", "optin_confirmation_queued_at")) return false;
+            await enqueueOptInConfirmation(tenantId, `owner-optin:${tenantId}:approved`);
+            return true;
+          });
+          if (queued) result.optInConfirmations += 1;
+        }
+      }
+    }
   }
 
   /** Records how a go-live ended: live, blocked (4xx: a prerequisite is missing) or failed (5xx: provider or server). */

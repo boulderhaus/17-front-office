@@ -81,3 +81,31 @@ export function urgentOwnerCallNotification(input: { tenantId: string; callId: s
     providerReceipt: null, lastError: null, createdAt: input.now, sentAt: null,
   };
 }
+
+/** "(941) 555-0123" from "+19415550123". */
+function spokenNumber(e164: string): string {
+  const digits = e164.replace(/^\+1/, "");
+  return /^\d{10}$/.test(digits) ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : e164;
+}
+
+/**
+ * "Your line is live": by push, email and (once texting is approved, for opted-in owners) text. One of each per
+ * number, so a retry or a second replica never repeats it.
+ */
+export function lineLiveNotifications(input: { tenantId: string; businessName: string; inboundNumber: string; baseUrl: string; email: string | null; pushOn: boolean; smsRefs: string[]; now: string }): OutboxNotification[] {
+  const number = spokenNumber(input.inboundNumber);
+  const keyBase = `line-live:${input.tenantId}:${input.inboundNumber}`;
+  const base = input.baseUrl.replace(/\/$/, "");
+  const common = { tenantId: input.tenantId, callId: null, priority: "normal" as const, state: "pending" as const, attempts: 0, nextAttemptAt: input.now, providerReceipt: null, lastError: null, createdAt: input.now, sentAt: null };
+  const out: OutboxNotification[] = [];
+  if (input.pushOn) out.push(ownerPushNotification({ tenantId: input.tenantId, callId: null, keyBase, now: input.now, message: { title: "Your line is live", body: `${number} now answers for ${input.businessName}.`, url: "/app", tag: "line-live" } }));
+  if (input.email) {
+    out.push({ ...common, id: randomUUID(), channel: "email", destinationRef: `email:${input.email}`, idempotencyKey: `${keyBase}:email`,
+      body: formatEmailBody("Your Front Office line is live", `Your Front Office number ${number} now answers for ${input.businessName}.\n\nIf you haven't yet, send your missed calls to it: ${base}/app/start?step=forward\n\nSee your calls: ${base}/app`) });
+  }
+  for (const destinationRef of input.smsRefs) {
+    out.push({ ...common, id: randomUUID(), channel: "sms", destinationRef, idempotencyKey: `${keyBase}:sms:${destinationRef}`,
+      body: `Your line is live. ${number} now answers for ${input.businessName}.` });
+  }
+  return out;
+}
