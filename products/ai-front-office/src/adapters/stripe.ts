@@ -20,8 +20,6 @@ export interface StripePrices {
   legacy?: string[];
   /** The Unlimited calls add-on, one price per plan: a second subscription item next to the plan's. */
   unlimited?: Partial<Record<PlanId, string>>;
-  dailySms?: string;
-  realtimeSms?: string;
 }
 
 /** A refund made under the lead guarantee. */
@@ -89,7 +87,7 @@ export class StripeBillingClient {
   /**
    * Put a paying subscription on a plan, with or without the Unlimited add-on, prorated: the plan item's price
    * is swapped, the add-on item is added, re-priced for the new plan, or removed, all in one update, and Stripe
-   * invoices the difference now (credit for a downgrade). Other add-on items (SMS) are left alone. No change, no write.
+   * invoices the difference now (credit for a downgrade). Any other item is left alone. No change, no write.
    */
   async changePlan(subscriptionId: string, plan: PlanId, options: { unlimited?: boolean } = {}): Promise<{ addOnItems: Array<{ id: string; createdAt: string | null }> | null }> {
     const price = requiredPrice(this.planPrice(plan), `${plan} plan`);
@@ -261,7 +259,7 @@ export class StripeBillingClient {
     return data.url;
   }
 
-  async createCheckout(input: { tenantId: string; email: string; customerId?: string | null; successUrl: string; cancelUrl: string; idempotencyKey: string; dailySms: boolean; realtimeSms: boolean; now?: Date; trialDays?: number; submitMessage?: string; plan?: PlanId; unlimited?: boolean; couponId?: string | null }): Promise<{ id: string; url: string; expiresAt: string }> {
+  async createCheckout(input: { tenantId: string; email: string; customerId?: string | null; successUrl: string; cancelUrl: string; idempotencyKey: string; now?: Date; trialDays?: number; submitMessage?: string; plan?: PlanId; unlimited?: boolean; couponId?: string | null }): Promise<{ id: string; url: string; expiresAt: string }> {
     // Sessions expire in ~31 minutes (Stripe's minimum is 30) so a stale one cannot be paid later.
     const expiresAt = Math.floor((input.now ?? new Date()).getTime() / 1_000) + 31 * 60;
     const body = new URLSearchParams({
@@ -285,18 +283,10 @@ export class StripeBillingClient {
     else if (input.couponId) body.set("discounts[0][coupon]", input.couponId);
     // Said again on Stripe's page, right above the button, so nobody is surprised by the charge date.
     if (input.submitMessage) body.set("custom_text[submit][message]", input.submitMessage.slice(0, 1_000));
-    let lineItem = 1;
     if (input.unlimited) {
       // The Unlimited add-on: its own item, so it can be turned off later without touching the plan.
-      body.set(`line_items[${lineItem}][price]`, requiredPrice(this.unlimitedPrice(input.plan ?? "solo"), `${input.plan ?? "solo"} Unlimited add-on`));
-      body.set(`line_items[${lineItem}][quantity]`, "1");
-      lineItem += 1;
-    }
-    for (const [enabled, price, label] of [[input.dailySms, this.prices.dailySms, "daily SMS"], [input.realtimeSms, this.prices.realtimeSms, "instant lead SMS"]] as const) {
-      if (!enabled) continue;
-      body.set(`line_items[${lineItem}][price]`, requiredPrice(price, label));
-      body.set(`line_items[${lineItem}][quantity]`, "1");
-      lineItem += 1;
+      body.set("line_items[1][price]", requiredPrice(this.unlimitedPrice(input.plan ?? "solo"), `${input.plan ?? "solo"} Unlimited add-on`));
+      body.set("line_items[1][quantity]", "1");
     }
     const response = await withTimeout(this.fetcher("https://api.stripe.com/v1/checkout/sessions", {
       method: "POST",
@@ -368,45 +358,6 @@ export class StripeBillingClient {
       addOnItems: this.addOnItemsFrom(items),
       currentPeriodEnd: periodEnds.length ? new Date(Math.max(...periodEnds) * 1_000).toISOString() : null,
     };
-  }
-
-  async syncAddOns(subscriptionId: string, input: { dailySms: boolean; realtimeSms: boolean }): Promise<void> {
-    const response = await withTimeout(this.fetcher(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(subscriptionId)}?expand[]=items.data.price`, {
-      headers: { authorization: `Bearer ${this.secretKey}` },
-    }), 6_000);
-    const payload = await response.json().catch(() => ({})) as {
-      items?: { data?: Array<{ id?: string; price?: { id?: string } }> };
-      error?: { message?: string };
-    };
-    if (!response.ok) throw new Error(`Stripe subscription lookup failed with HTTP ${response.status}${payload.error?.message ? `: ${payload.error.message}` : ""}`);
-    const items = payload.items?.data ?? [];
-    const changes: Array<{ id?: string; price?: string; deleted?: boolean }> = [];
-    for (const [enabled, price, label] of [
-      [input.dailySms, this.prices.dailySms, "daily SMS"],
-      [input.realtimeSms, this.prices.realtimeSms, "instant lead SMS"],
-    ] as const) {
-      if (enabled && !price) throw new Error(`Stripe ${label} price is not configured`);
-      const existing = price ? items.find((item) => item.price?.id === price) : undefined;
-      if (enabled && price && !existing) changes.push({ price });
-      if (!enabled && existing?.id) changes.push({ id: existing.id, deleted: true });
-    }
-    if (changes.length === 0) return;
-    const body = new URLSearchParams({ proration_behavior: "always_invoice", payment_behavior: "error_if_incomplete" });
-    changes.forEach((change, index) => {
-      if (change.id) body.set(`items[${index}][id]`, change.id);
-      if (change.price) {
-        body.set(`items[${index}][price]`, change.price);
-        body.set(`items[${index}][quantity]`, "1");
-      }
-      if (change.deleted) body.set(`items[${index}][deleted]`, "true");
-    });
-    const update = await withTimeout(this.fetcher(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(subscriptionId)}`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${this.secretKey}`, "content-type": "application/x-www-form-urlencoded" },
-      body,
-    }), 6_000);
-    const updated = await update.json().catch(() => ({})) as { id?: string; error?: { message?: string } };
-    if (!update.ok || updated.id !== subscriptionId) throw new Error(`Stripe subscription update failed with HTTP ${update.status}${updated.error?.message ? `: ${updated.error.message}` : ""}`);
   }
 }
 

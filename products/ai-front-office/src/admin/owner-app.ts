@@ -266,7 +266,7 @@ export function renderOwnerSettings(input: {
   config: BusinessConfig;
   subscription: SubscriptionRecord | null;
   csrf: string;
-  integrations: { googleAvailable: boolean; googleConnected: boolean; ownerPhoneConfigured: boolean; weeklyEmailAvailable?: boolean; dailySmsAvailable?: boolean; realtimeSmsAvailable?: boolean; directBookingAvailable?: boolean };
+  integrations: { googleAvailable: boolean; googleConnected: boolean; ownerPhoneConfigured: boolean; weeklyEmailAvailable?: boolean; directBookingAvailable?: boolean };
   saved?: boolean;
 }): string {
   const c = input.config;
@@ -310,9 +310,9 @@ ${i.directBookingAvailable ? `<label>Booking<select name="bookingMode"><option v
 <label>Answers (one per line, “Topic: exact wording”)<textarea name="approvedKnowledge" rows="3" placeholder="Brands: We service all major brands.">${e(c.approvedKnowledge.map((item) => `${item.topic}: ${item.text}`).join("\n"))}</textarea></label><p class="fo-hint">Leave blank and Front Office won’t quote a price; it takes a message.</p></section>
 <section class="fo-card fo-group"><h2>Alerts to your phone</h2>
 <label>Mobile number<input type="tel" name="ownerPhone" inputmode="tel" autocomplete="tel" placeholder="${i.ownerPhoneConfigured ? "Saved. Enter a new number to replace it" : "+1 941 555 0100"}"></label><p class="fo-hint">Emergencies and “call me back” requests are always texted here.</p>
-${addOn("ownerDailySmsEnabled", c.ownerDailySmsEnabled, i.dailySmsAvailable, "Daily text recap", "+$5/mo", "Follow-ups and appointments, once each morning.")}
+${addOn("ownerDailySmsEnabled", c.ownerDailySmsEnabled, true, "Daily text recap", "Included", "Follow-ups and appointments, once each morning.")}
 <label>Recap time<select name="ownerDailySmsHour">${hourOptions}</select></label>
-${addOn("ownerRealtimeSmsEnabled", c.ownerRealtimeSmsEnabled, i.realtimeSmsAvailable, "Instant lead texts", "+$10/mo", "Every routine new lead the moment the call ends.")}
+${addOn("ownerRealtimeSmsEnabled", c.ownerRealtimeSmsEnabled, true, "Instant lead texts", "Included", "Every routine new lead the moment the call ends.")}
 ${addOn("ownerWeeklyEmailEnabled", c.ownerWeeklyEmailEnabled, i.weeklyEmailAvailable, "Sunday week-ahead email", "Included", "Open callbacks and the next seven days.")}
 <label>Calls alert<select name="usageAlertPercent">${usageAlertOptions(c.usageAlertPercent).map((percent) => `<option value="${percent}"${selected(c.usageAlertPercent === percent)}>When I’ve used ${percent}%</option>`).join("")}</select></label><p class="fo-hint">We tell you once when you reach this share of your ${c.includedCalls} calls, and again if you use them all.</p></section>
 <details class="fo-card fo-group fo-advanced"><summary>Advanced</summary>

@@ -77,7 +77,7 @@ Still open and needing confirmation:
 
 - Teams: owner/member accounts, invitations/removal, independent Google credentials and hours, free-calendar round robin, original-calendar readback/deletion. Database migration validated on disposable PostgreSQL. Real multi-calendar OAuth/scheduling and scale tests remain.
 - Warm transfer: native provider configuration and authorization foundation implemented, disabled by default. Need real owner answer, decline, voicemail, timeout, self-call and provider-failure tests; validate TeXML transfer compatibility. Not a production-ready claim.
-- Post-call: mobile inbox, transcript/recording access, callback tasks and SMS links exist. Routine instant SMS remains a disclosed $10 add-on; emergency/handoff alerts are included. This differs from the handoff's literal “text every call” hero; do not imply every routine instant text is included in $49.
+- Post-call: mobile inbox, transcript/recording access, callback tasks and SMS links exist. Routine instant lead texts and the daily recap are included in every plan (owner opt-in); emergency/handoff alerts are always on.
 - Spanish intake is deliberately pending until core safety and the paid mobile path pass live acceptance. Do not advertise multilingual support yet.
 
 ## 5. Verification and independent review

@@ -24,31 +24,6 @@ describe("Stripe billing boundary", () => {
     expect(session.get("customer")).toBe("cus_synthetic");
     expect(session.get("return_url")).toBe("https://example.com/app");
   });
-  it("adds selected recurring prices to checkout and safely syncs an active subscription", async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "cs_synthetic", url: "https://checkout.stripe.com/synthetic" }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ items: { data: [{ id: "si_daily", price: { id: "price_daily" } }] } }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "sub_synthetic" }), { status: 200 }));
-    const fetcher = fetchMock as unknown as typeof fetch;
-    const client = new StripeBillingClient("sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", {
-      base: "price_base", dailySms: "price_daily", realtimeSms: "price_realtime",
-    }, fetcher);
-    await client.createCheckout({
-      tenantId: "shop_synthetic", email: "owner@synthetic.example", successUrl: "https://example.com/success",
-      cancelUrl: "https://example.com/cancel", idempotencyKey: "checkout:synthetic", dailySms: true, realtimeSms: false,
-    });
-    const checkoutBody = fetchMock.mock.calls[0]![1]?.body as URLSearchParams;
-    expect(checkoutBody.get("line_items[0][price]")).toBe("price_base");
-    expect(checkoutBody.get("line_items[1][price]")).toBe("price_daily");
-    expect(checkoutBody.get("line_items[1][quantity]")).toBe("1");
-
-    await client.syncAddOns("sub_synthetic", { dailySms: false, realtimeSms: true });
-    const updateBody = fetchMock.mock.calls[2]![1]?.body as URLSearchParams;
-    expect(updateBody.get("items[0][id]")).toBe("si_daily");
-    expect(updateBody.get("items[0][deleted]")).toBe("true");
-    expect(updateBody.get("items[1][price]")).toBe("price_realtime");
-    expect(updateBody.get("proration_behavior")).toBe("always_invoice");
-  });
   it("accepts a current signed subscription event and maps it to one tenant", () => {
     const secret = "whsec_synthetic_abcdefghijklmnopqrstuvwxyz";
     const now = new Date("2026-11-21T18:00:00.000Z");
@@ -150,7 +125,7 @@ describe("Stripe webhook state is read from the Stripe API", () => {
     const store = new InMemoryStore();
     await store.saveConfig(createDemoConfig());
     const server = createServer(createRequestHandler({
-      env: demoEnvironment({ STRIPE_WEBHOOK_SECRET: secret, STRIPE_SECRET_KEY: "sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", STRIPE_PRICE_ID: "price_synthetic", STRIPE_DAILY_SMS_PRICE_ID: "price_daily_synthetic", TELNYX_API_KEY: "KEY_synthetic" }),
+      env: demoEnvironment({ STRIPE_WEBHOOK_SECRET: secret, STRIPE_SECRET_KEY: "sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", STRIPE_PRICE_ID: "price_synthetic", TELNYX_API_KEY: "KEY_synthetic" }),
       store, calendar: new InMemoryCalendar(), clock: { now: () => now }, integrations: {}, logger: () => undefined, fetcher,
     }));
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
@@ -279,7 +254,9 @@ describe("Stripe webhook state is read from the Stripe API", () => {
       const tap = () => fetch(`${h.baseUrl}/app/billing/checkout`, { method: "POST", redirect: "manual", headers: { cookie: h.cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }) });
       expect((await tap()).headers.get("location")).toContain("checkout.stripe.com");
       h.api.sessionComplete = true;
-      await h.store.saveConfig({ ...(await h.store.getConfig(h.tenantId)), ownerDailySmsEnabled: true });
+      // As if the owner had since picked another plan: the open session no longer matches, and it was already paid.
+      const open = JSON.parse((await h.store.getIntegrationSecret(h.tenantId, "stripe", "open_checkout"))!) as Record<string, unknown>;
+      await h.store.saveIntegrationSecret(h.tenantId, "stripe", "open_checkout", JSON.stringify({ ...open, addOns: "team" }));
       expect((await tap()).headers.get("location")).toContain("checkout=processing");
       expect(h.calls.filter((call) => call.url.endsWith("/v1/checkout/sessions"))).toHaveLength(1);
       h.api.status = "incomplete";
@@ -311,12 +288,12 @@ describe("Stripe webhook state is read from the Stripe API", () => {
       const created = h.calls.find((call) => call.url.endsWith("/v1/checkout/sessions"))!.body as URLSearchParams;
       expect(created.get("expires_at")).toBeTruthy();
       const config = await h.store.getConfig(h.tenantId);
-      await h.store.saveConfig({ ...config, ownerDailySmsEnabled: true });
-      const changed = await tap();
-      expect(changed.status).toBe(303);
-      expect(changed.headers.get("location")).toContain("checkout.stripe.com");
-      expect(changed.headers.get("location")).not.toBe(first);
-      expect(h.calls.some((call) => call.url.endsWith("/expire"))).toBe(true);
+      // Owner texts are included in every plan: turning the daily recap on keeps the same session.
+      await h.store.saveConfig({ ...config, ownerDailySmsEnabled: true, ownerRealtimeSmsEnabled: true });
+      expect((await tap()).headers.get("location")).toBe(first);
+      expect(h.calls.filter((call) => call.url.endsWith("/v1/checkout/sessions"))).toHaveLength(1);
+      const sessionBody = h.calls.find((call) => call.url.endsWith("/v1/checkout/sessions"))!.body as URLSearchParams;
+      expect(sessionBody.has("line_items[1][price]")).toBe(false);
       h.api.status = "canceled";
       await h.subscriptionEvent("customer.subscription.deleted");
       expect((await h.store.getSubscription(h.tenantId))?.providerCustomerId).toBe("cus_synthetic");
