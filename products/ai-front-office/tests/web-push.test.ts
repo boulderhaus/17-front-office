@@ -25,7 +25,8 @@ function decrypt(body: Buffer, ua: ReturnType<typeof createECDH>, auth: Buffer):
   const idLength = body[20]!;
   const asPublic = body.subarray(21, 21 + idLength);
   const ciphertext = body.subarray(21 + idLength);
-  const shared = ua.computeSecret(asPublic);
+  const raw = ua.computeSecret(asPublic);
+  const shared = Buffer.concat([Buffer.alloc(32 - raw.length), raw]);
   const ikm = Buffer.from(hkdfSync("sha256", shared, auth, Buffer.concat([Buffer.from("WebPush: info\0"), ua.getPublicKey(), asPublic]), 32));
   const cek = Buffer.from(hkdfSync("sha256", ikm, salt, Buffer.from("Content-Encoding: aes128gcm\0"), 16));
   const nonce = Buffer.from(hkdfSync("sha256", ikm, salt, Buffer.from("Content-Encoding: nonce\0"), 12));
@@ -59,6 +60,15 @@ describe("web push call alerts", () => {
     expect(verify("sha256", Buffer.from(`${head}.${claims}`), { key: jwk, dsaEncoding: "ieee-p1363" }, Buffer.from(signature!, "base64url"))).toBe(true);
   });
 
+  it("decrypts for every key, including the 1-in-256 shared secrets with a leading zero byte", () => {
+    const { ua, auth, json } = browserSubscription();
+    const parsed = parsePushSubscription(json)!;
+    for (let index = 0; index < 1_500; index += 1) {
+      expect(decrypt(encryptPushPayload(Buffer.from(`n${index}`), parsed), ua, auth)).toBe(`n${index}`);
+    }
+    for (let index = 0; index < 300; index += 1) expect(generateVapidKeys().privateKey).toHaveLength(43);
+  });
+
   it("accepts only the browsers' own push services over HTTPS", () => {
     const { json } = browserSubscription();
     expect(parsePushSubscription(json)).not.toBeNull();
@@ -90,6 +100,16 @@ describe("web push call alerts", () => {
     expect(receipts[0]!.providerReceipt).not.toBe(receipts[1]!.providerReceipt);
     expect(JSON.parse(seen[0]!)).toMatchObject({ title: "URGENT: gas smell", url: "/app/calls/11111111-1111-4111-8111-111111111111" });
     expect((await listPushSubscriptions(store, "shop")).map((item) => item.endpoint)).toEqual(["https://fcm.googleapis.com/fcm/send/a"]);
+  });
+
+  it("retries when any phone failed for a temporary reason, and forgets one that is no longer ours", async () => {
+    const store = new InMemoryStore();
+    for (const name of ["a", "b", "c"]) await savePushSubscription(store, "shop", { ...parsePushSubscription(browserSubscription(`https://fcm.googleapis.com/fcm/send/${name}`).json)!, accountId: "owner" }, now.toISOString());
+    const status: Record<string, number> = { a: 201, b: 503, c: 403 };
+    const fetcher = (async (url: string) => new Response(null, { status: status[url.slice(-1)]! })) as unknown as typeof fetch;
+    const sender = new WebPushSender({ store, clock, fetcher, vapid: { ...generateVapidKeys(), subject: "mailto:hello@example.test" } });
+    await expect(sender.send(ownerPushNotification({ tenantId: "shop", callId: null, message: { title: "t", body: "b", url: "/app" }, keyBase: "k", now: now.toISOString() }))).rejects.toThrow("1 delivered");
+    expect((await listPushSubscriptions(store, "shop")).map((item) => item.endpoint.slice(-1))).toEqual(["a", "b"]);
   });
 
   it("retries when no phone took it, and succeeds quietly when the shop has no phones", async () => {
@@ -139,6 +159,7 @@ describe("web push call alerts", () => {
     const base = `http://127.0.0.1:${address.port}`;
     const worker = await fetch(`${base}/app/sw.js`);
     expect(worker.headers.get("content-type")).toContain("javascript");
+    expect(worker.headers.get("service-worker-allowed")).toBe("/app");
     const source = await worker.text();
     expect(source).toContain("showNotification");
     expect(source).not.toContain("\"fetch\"");

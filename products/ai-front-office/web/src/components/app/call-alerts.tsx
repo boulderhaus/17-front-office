@@ -8,7 +8,7 @@ import { cn, tapWidth } from "@/lib/utils"
 
 type State = "checking" | "unsupported" | "iphone-install" | "blocked" | "off" | "on"
 
-const SCOPE = "/app/"
+const SCOPE = "/app"
 
 function isIphone(): boolean {
   return /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)

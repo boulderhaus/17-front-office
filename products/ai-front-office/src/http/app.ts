@@ -558,7 +558,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     }
 
     if (method === "GET" && url.pathname === "/app/sw.js") {
-      response.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" });
+      // Allowed to cover /app itself (the Calls screen), not only /app/..., so a tap can move an open app window.
+      response.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "service-worker-allowed": "/app" });
       response.end(SERVICE_WORKER);
       return;
     }

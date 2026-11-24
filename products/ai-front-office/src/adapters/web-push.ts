@@ -99,7 +99,7 @@ export async function removePushSubscriptions(store: Store, tenantId: string, en
 export function generateVapidKeys(): { publicKey: string; privateKey: string } {
   const ecdh = createECDH("prime256v1");
   ecdh.generateKeys();
-  return { publicKey: ecdh.getPublicKey().toString("base64url"), privateKey: ecdh.getPrivateKey().toString("base64url") };
+  return { publicKey: ecdh.getPublicKey().toString("base64url"), privateKey: fixed32(ecdh.getPrivateKey()).toString("base64url") };
 }
 
 /** True when the pair is a real P-256 key pair (the public key is the private key's). */
@@ -133,7 +133,8 @@ export function encryptPushPayload(payload: Buffer, subscription: { p256dh: stri
   const ephemeral = options.ephemeral ?? createECDH("prime256v1");
   if (!options.ephemeral) ephemeral.generateKeys();
   const asPublic = ephemeral.getPublicKey();
-  const shared = ephemeral.computeSecret(uaPublic);
+  // RFC 8291 uses the full 32-byte x-coordinate; OpenSSL drops leading zero bytes (about 1 send in 256).
+  const shared = fixed32(ephemeral.computeSecret(uaPublic));
   const salt = options.salt ?? randomBytes(16);
   const ikm = Buffer.from(hkdfSync("sha256", shared, authSecret, Buffer.concat([Buffer.from("WebPush: info\0"), uaPublic, asPublic]), 32));
   const cek = Buffer.from(hkdfSync("sha256", ikm, salt, Buffer.from("Content-Encoding: aes128gcm\0"), 16));
@@ -145,6 +146,15 @@ export function encryptPushPayload(payload: Buffer, subscription: { p256dh: stri
   return Buffer.concat([salt, recordSize, Buffer.from([asPublic.length]), asPublic, ciphertext]);
 }
 
+/** A P-256 scalar or shared secret as exactly 32 bytes, left-padded with zeros. */
+function fixed32(value: Buffer): Buffer {
+  if (value.length > 32) throw new Error("Unexpected P-256 value length");
+  if (value.length === 32) return value;
+  const out = Buffer.alloc(32);
+  value.copy(out, 32 - value.length);
+  return out;
+}
+
 /** The outbox body of a push notification. */
 export function pushBody(message: PushMessage): string {
   return JSON.stringify({ title: message.title.slice(0, 80), body: message.body.slice(0, 240), url: message.url, tag: message.tag, urgent: message.urgent === true });
@@ -153,8 +163,7 @@ export function pushBody(message: PushMessage): string {
 /**
  * Sends a "push" outbox notification to the shop's phones: destinationRef "devices" (every phone) or
  * "device:{deviceId}" (one phone, e.g. the confirmation right after turning alerts on). A phone the push
- * service says is gone (404/410) is forgotten. Delivered to at least one phone, or to none because there are
- * none, counts as sent; otherwise it throws so the outbox retries.
+ * service says is gone is forgotten. Any temporary failure throws so the outbox retries.
  */
 export class WebPushSender implements NotificationPort {
   constructor(private readonly options: { store: Store; vapid: VapidKeys; clock: Clock; fetcher?: typeof fetch; log?: (entry: Record<string, unknown>) => void }) {}
@@ -182,7 +191,8 @@ export class WebPushSender implements NotificationPort {
           },
           body: encryptPushPayload(payload, target),
         }), 4_000);
-        if (response.status === 404 || response.status === 410) gone.push(target.endpoint);
+        // Gone (404/410) or no longer ours (401/403: e.g. keys changed): forget the phone rather than retry forever.
+        if ([401, 403, 404, 410].includes(response.status)) gone.push(target.endpoint);
         else if (response.ok) delivered += 1;
         else lastError = `push service HTTP ${response.status}`;
       } catch (error) {
@@ -193,7 +203,9 @@ export class WebPushSender implements NotificationPort {
       await removePushSubscriptions(this.options.store, notification.tenantId, gone);
       this.options.log?.({ level: "info", event: "push_devices_forgotten", tenantId: notification.tenantId, count: gone.length });
     }
-    if (delivered === 0 && lastError) throw new Error(`Web push failed: ${lastError}`);
+    // Any phone that failed for a temporary reason: retry the whole notification. Phones that already have it
+    // show the retry in place of the first (same tag); forgotten phones are skipped.
+    if (lastError) throw new Error(`Web push failed (${delivered} delivered): ${lastError}`);
     return { providerReceipt: `push:${notification.id}:${delivered}` };
   }
 }
