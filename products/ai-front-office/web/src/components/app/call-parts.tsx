@@ -31,9 +31,11 @@ export function SafetyNote({ call }: { call: ApiCall }) {
 
 export function ContactActions({ call, extra }: { call: ApiCall; extra?: ReactNode }) {
   const address = call.fields.address?.trim() || null
+  // Likely spam: no one-tap Call back or Text, so a robocaller never gets a call back by accident.
+  const spam = call.outcome === "ignored_spam"
   return (
     <div className="ph-no-capture flex flex-wrap gap-2">
-      {call.phone && (
+      {call.phone && !spam && (
         <>
           <Button size="tap" className="min-w-36 flex-1" asChild><a href={`tel:${call.phone}`}><Phone />Call back</a></Button>
           <Button size="tap" variant="outline" asChild><a href={`sms:${call.phone}`}><MessageSquare />Text</a></Button>
