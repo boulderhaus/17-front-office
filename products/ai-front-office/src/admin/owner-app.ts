@@ -287,6 +287,7 @@ export const CALL_PATH_SCRIPT = `(() => {
     if (!section) return;
     try {
       const response = await fetch(section.getAttribute("data-live-path"), { credentials: "same-origin", cache: "no-store" });
+      if (response.status >= 400 && response.status < 500) return;
       if (!response.ok) return setTimeout(tick, 5000);
       const data = await response.json();
       if (!data.live) return location.reload();

@@ -3142,6 +3142,8 @@ function routeKey(pathname: string): string {
   if (pathname.startsWith("/tools/")) return `tool:${pathname.slice(7)}`;
   if (pathname.startsWith("/admin/calls/")) return "admin:call";
   if (pathname.startsWith("/c/")) return "callback-link";
+  // The live path polls every two seconds; its own bucket keeps it from starving the call page's actions.
+  if (/^\/app\/calls\/[^/]+\/path$/.test(pathname)) return "owner:call-path";
   if (pathname.startsWith("/app/calls/")) return "owner:call";
   if (pathname.startsWith("/app/provider/")) return "owner:recording";
   if (pathname.startsWith("/api/app/")) return "owner:api";
