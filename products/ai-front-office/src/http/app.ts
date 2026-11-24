@@ -1176,8 +1176,6 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           googleConnected,
           ownerPhoneConfigured: Boolean(ownerPhone),
           weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
-          dailySmsAvailable: Boolean(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID),
-          realtimeSmsAvailable: Boolean(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID),
           directBookingAvailable: dependencies.env.DIRECT_BOOKING_BETA,
         },
       });
@@ -1274,18 +1272,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (updated.ownerWeeklyEmailEnabled && !(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL)) {
       throw new HttpError(503, "Weekly email delivery is not configured yet");
     }
-    if (updated.ownerDailySmsEnabled && !dependencies.env.STRIPE_DAILY_SMS_PRICE_ID) throw new HttpError(503, "Daily SMS billing is not configured yet");
-    if (updated.ownerRealtimeSmsEnabled && !dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID) throw new HttpError(503, "Instant lead SMS billing is not configured yet");
-    const addOnsChanged = updated.ownerDailySmsEnabled !== current.ownerDailySmsEnabled
-      || updated.ownerRealtimeSmsEnabled !== current.ownerRealtimeSmsEnabled;
-    let addOnSubscriptionId: string | null = null;
-    if (addOnsChanged) {
-      const subscription = await dependencies.store.getSubscription(account.tenantId);
-      if (subscription && isPaidStatus(subscription.status)) {
-        if (!stripeClient || !subscription.providerSubscriptionId) throw new HttpError(503, "Subscription add-on billing is not available yet");
-        addOnSubscriptionId = subscription.providerSubscriptionId;
-      }
-    }
+    // Owner call texts and the daily recap are included in every plan: on/off is the owner's choice, never billed.
     if (account.status !== "active") updated.paused = true;
     if (updated.paused !== current.paused) updated.pausedForBilling = false;
     const ownerPhone = form.get("ownerPhone")?.trim();
@@ -1306,24 +1293,10 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       await liveRouteChange.setPaused(updated.paused)
         .catch(() => { throw new HttpError(502, "Telnyx could not change the live phone route; your setting was not changed"); });
     }
-    if (addOnSubscriptionId) {
-      await stripeClient!.syncAddOns(addOnSubscriptionId, {
-        dailySms: updated.ownerDailySmsEnabled,
-        realtimeSms: updated.ownerRealtimeSmsEnabled,
-      }).catch(async (error) => {
-        if (liveRouteChange) await liveRouteChange.setPaused(current.paused).catch(() => undefined);
-        log({ level: "error", event: "owner_addon_sync_failed", tenantId: account.tenantId, error: safeError(error) });
-        throw new HttpError(502, "Stripe could not update the notification add-ons; settings were not changed");
-      });
-    }
     try {
       await saveAssistantConfig(dependencies.store, dependencies.env, updated);
     } catch (error) {
       if (liveRouteChange) await liveRouteChange.setPaused(current.paused).catch((rollbackError) => log({ level: "error", event: "owner_route_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
-      if (addOnSubscriptionId) await stripeClient!.syncAddOns(addOnSubscriptionId, {
-        dailySms: current.ownerDailySmsEnabled,
-        realtimeSms: current.ownerRealtimeSmsEnabled,
-      }).catch((rollbackError) => log({ level: "error", event: "owner_addon_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
       throw error;
     }
     });
@@ -1488,8 +1461,6 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           googleConnected,
           ownerPhoneConfigured: Boolean(ownerPhone),
           weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
-          dailySmsAvailable: Boolean(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID),
-          realtimeSmsAvailable: Boolean(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID),
           directBookingAvailable: dependencies.env.DIRECT_BOOKING_BETA,
         },
       }));
@@ -1677,8 +1648,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
           return next;
         });
       }
-      // The open session is reused only for the same plan and add-ons.
-      const addOns = `${plan.id}${unlimited ? "+unlimited" : ""}:${config.ownerDailySmsEnabled ? 1 : 0}${config.ownerRealtimeSmsEnabled ? 1 : 0}`;
+      // The open session is reused only for the same plan and Unlimited choice.
+      const addOns = `${plan.id}${unlimited ? "+unlimited" : ""}`;
       const now = dependencies.clock.now();
       const savedOpen = await dependencies.store.getIntegrationSecret(account.tenantId, "stripe", "open_checkout");
       const open = savedOpen ? JSON.parse(savedOpen) as { id: string; url: string; expiresAt: string; addOns: string } : null;
@@ -1698,8 +1669,6 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         cancelUrl: returnTo === "start" ? `${base}/app/start?checkout=cancelled` : `${base}/app?checkout=cancelled`,
         // A retry after a timeout in the same half hour gets the same session back from Stripe.
         idempotencyKey: `checkout:${account.tenantId}:${addOns}:${Math.floor(now.getTime() / 1_800_000)}`,
-        dailySms: config.ownerDailySmsEnabled,
-        realtimeSms: config.ownerRealtimeSmsEnabled,
         now,
         trialDays,
         plan: plan.id,
@@ -2657,8 +2626,6 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         googleConnected,
         ownerPhoneConfigured: Boolean(ownerPhone),
         weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
-        dailySmsAvailable: Boolean(dependencies.env.STRIPE_DAILY_SMS_PRICE_ID),
-        realtimeSmsAvailable: Boolean(dependencies.env.STRIPE_REALTIME_SMS_PRICE_ID),
       }));
     }
     if (method === "POST" && url.pathname === "/admin/config") {
@@ -2920,8 +2887,6 @@ export function createStripeClient(env: Environment, fetcher: typeof fetch): Str
     ...(prices.fleet ? { fleet: prices.fleet } : {}),
     legacy: Object.values(legacyPlanPriceIds(env)).flat(),
     unlimited: Object.fromEntries(Object.entries(unlimitedPriceIds(env)).filter(([, price]) => Boolean(price))) as Partial<Record<PlanId, string>>,
-    ...(env.STRIPE_DAILY_SMS_PRICE_ID ? { dailySms: env.STRIPE_DAILY_SMS_PRICE_ID } : {}),
-    ...(env.STRIPE_REALTIME_SMS_PRICE_ID ? { realtimeSms: env.STRIPE_REALTIME_SMS_PRICE_ID } : {}),
   }, fetcher);
 }
 

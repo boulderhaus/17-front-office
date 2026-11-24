@@ -246,10 +246,10 @@ describe("Stripe: the add-on as its own subscription item", () => {
   it("adds the add-on as a second line at checkout, with the once-only half-off coupon on the whole first invoice", async () => {
     const stripe = fakeStripe((request) => request.url.endsWith("/v1/checkout/sessions") ? { json: { id: "cs_x", url: "https://checkout.stripe.com/c/pay/cs_x" } } : null);
     const client = new StripeBillingClient("sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", prices, stripe.fetcher);
-    await client.createCheckout({ tenantId: "t", email: "o@example.test", successUrl: "https://x.example/s", cancelUrl: "https://x.example/c", idempotencyKey: "k", dailySms: false, realtimeSms: false, plan: "team", unlimited: true, couponId: "front_office_first_month_50" });
+    await client.createCheckout({ tenantId: "t", email: "o@example.test", successUrl: "https://x.example/s", cancelUrl: "https://x.example/c", idempotencyKey: "k", plan: "team", unlimited: true, couponId: "front_office_first_month_50" });
     const body = Object.fromEntries(stripe.requests[0]!.body);
     expect(body).toMatchObject({ "line_items[0][price]": "price_team", "line_items[1][price]": "price_unl_team", "line_items[1][quantity]": "1", "discounts[0][coupon]": "front_office_first_month_50" });
-    await client.createCheckout({ tenantId: "t", email: "o@example.test", successUrl: "https://x.example/s", cancelUrl: "https://x.example/c", idempotencyKey: "k2", dailySms: false, realtimeSms: false, plan: "solo", unlimited: false });
+    await client.createCheckout({ tenantId: "t", email: "o@example.test", successUrl: "https://x.example/s", cancelUrl: "https://x.example/c", idempotencyKey: "k2", plan: "solo", unlimited: false });
     expect(stripe.requests[1]!.body.has("line_items[1][price]")).toBe(false);
   });
 

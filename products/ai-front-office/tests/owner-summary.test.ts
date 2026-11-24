@@ -44,6 +44,36 @@ describe("owner summaries", () => {
     expect(notifications.find((item) => item.channel === "email")?.body).toContain("your week ahead");
   });
 
+  it("sends the included daily recap only to live, paying shops", async () => {
+    const now = new Date("2026-11-22T13:05:00.000Z");
+    const run = async (accountStatus: "active" | "pending_activation", subscriptionStatus: "active" | "trialing" | "canceled" | "past_due" | null) => {
+      const store = new InMemoryStore();
+      const config = { ...createDemoConfig("shop-recap"), timezone: "America/New_York", ownerDailySmsEnabled: true, ownerDailySmsHour: 7 };
+      await store.createOwnerWorkspace({
+        config,
+        ownerPhone: "+15555550100",
+        account: {
+          id: "00000000-0000-4000-8000-000000000002", tenantId: config.tenantId,
+          email: "recap@synthetic.example", displayName: "Synthetic Owner", passwordHash: "synthetic",
+          status: accountStatus, createdAt: now.toISOString(), updatedAt: now.toISOString(),
+        },
+      });
+      if (subscriptionStatus) {
+        await store.saveSubscription({
+          tenantId: config.tenantId, providerCustomerId: "cus_synthetic", providerSubscriptionId: "sub_synthetic", status: subscriptionStatus,
+          currentPeriodEnd: null, providerEventCreatedAt: now.toISOString(), createdAt: now.toISOString(), updatedAt: now.toISOString(),
+        });
+      }
+      return (await new OwnerSummaryService(store, new FixedClock(now), "https://front-office.example").runOnce()).smsQueued;
+    };
+    expect(await run("active", "active")).toBe(1);
+    expect(await run("active", "trialing")).toBe(1);
+    expect(await run("active", null)).toBe(1);
+    expect(await run("active", "canceled")).toBe(0);
+    expect(await run("active", "past_due")).toBe(0);
+    expect(await run("pending_activation", null)).toBe(0);
+  });
+
   it("sends a plain-text Resend email with provider idempotency", async () => {
     const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({ id: "email_synthetic" }), { status: 200, headers: { "content-type": "application/json" } }));
     const fetcher = fetchMock as unknown as typeof fetch;

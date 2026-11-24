@@ -156,8 +156,6 @@ export interface ApiSettings {
     googleConnected: boolean
     ownerPhoneConfigured: boolean
     weeklyEmailAvailable: boolean
-    dailySmsAvailable: boolean
-    realtimeSmsAvailable: boolean
     directBookingAvailable: boolean
   }
 }

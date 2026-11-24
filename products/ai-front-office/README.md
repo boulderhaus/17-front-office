@@ -12,7 +12,7 @@ The application is buildable, tested, containerized, and deployed to a fail-clos
 - Disclose that the caller is speaking to the owner's AI assistant.
 - Never improvise a price, availability, service promise, or safety instruction.
 - Life-safety, urgent, failed, and human-handoff calls bypass paid notification gates and alert the owner immediately.
-- Routine instant lead texts cost $10/month; a daily SMS recap costs $5/month; a Sunday week-ahead email is included when enabled.
+- Instant lead texts to the owner and an optional daily SMS recap are included in every plan (owner opt-in, on/off in Settings); a Sunday week-ahead email is included when enabled.
 - A verified booking requires: calendar write/read-back, transcript, recording, complete intake, and diagnostic-fee acceptance when enabled. Customer confirmation SMS is an optional carrier-registered add-on, not a Solo-plan dependency.
 - A failure becomes an owned callback with a due time; it never disappears behind a green status.
 - Spam is neither billed nor pushed to the owner.

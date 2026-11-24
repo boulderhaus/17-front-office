@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { BusinessConfig, CallRecord, CallbackTask, OutboxNotification } from "../domain/models.js";
 import type { Clock, Store } from "../ports.js";
 import { formatEmailBody } from "../adapters/resend.js";
+import { isPaidStatus } from "../domain/billing.js";
 
 export class OwnerSummaryService {
   constructor(
@@ -22,9 +23,10 @@ export class OwnerSummaryService {
 
   private async runTenant(tenantId: string): Promise<{ smsQueued: number; emailQueued: number }> {
     const now = this.clock.now();
-    const [config, account, tasks, calls] = await Promise.all([
+    const [config, account, subscription, tasks, calls] = await Promise.all([
       this.store.getConfig(tenantId),
       this.store.getOwnerAccountByTenant(tenantId),
+      this.store.getSubscription(tenantId),
       this.store.listCallbackTasks(tenantId, 200),
       this.store.listCalls(tenantId, 250),
     ]);
@@ -35,7 +37,10 @@ export class OwnerSummaryService {
     let smsQueued = 0;
     let emailQueued = 0;
 
-    if (config.ownerDailySmsEnabled && local.hour >= config.ownerDailySmsHour) {
+    // The daily recap is included in every plan: it goes to live shops that are paying (or have no Stripe
+    // subscription at all, e.g. set up by hand), never to an unpaid signup or a lapsed shop.
+    const paying = account.status === "active" && (!subscription || isPaidStatus(subscription.status));
+    if (paying && config.ownerDailySmsEnabled && local.hour >= config.ownerDailySmsHour) {
       const body = dailySmsBody(openTasks, upcomingBookedCalls(calls, now, 1), this.dashboardUrl());
       for (const destinationRef of config.ownerNotificationRefs) {
         if (await this.store.enqueueNotification(notification({

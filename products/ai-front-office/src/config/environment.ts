@@ -118,8 +118,6 @@ const schema = z.object({
   PLAN_FLEET_UNLIMITED_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(12_500)),
   /** Each answered call past the plan's included calls, billed at the end of the billing period. */
   OVERAGE_CENTS_PER_CALL: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(0).max(1_000).default(75)),
-  STRIPE_DAILY_SMS_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
-  STRIPE_REALTIME_SMS_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   RESEND_API_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("re_").optional()),
   RESEND_FROM_EMAIL: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
   // Product analytics + error tracking. Unset = everything off (tests, local).
@@ -143,8 +141,8 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
   }
   const stripeValues = [parsed.STRIPE_SECRET_KEY, parsed.STRIPE_WEBHOOK_SECRET, parsed.STRIPE_PRICE_ID_SOLO ?? parsed.STRIPE_PRICE_ID].filter(Boolean).length;
   if (stripeValues !== 0 && stripeValues !== 3) throw new Error("STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and STRIPE_PRICE_ID_SOLO (or STRIPE_PRICE_ID) must be configured together");
-  if ((parsed.STRIPE_DAILY_SMS_PRICE_ID || parsed.STRIPE_REALTIME_SMS_PRICE_ID || parsed.STRIPE_PRICE_ID_PLUS || parsed.STRIPE_PRICE_ID_PRO || parsed.STRIPE_PRICE_ID_TEAM || parsed.STRIPE_PRICE_ID_FLEET || parsed.STRIPE_PRICE_ID_UNLIMITED_SOLO || parsed.STRIPE_PRICE_ID_UNLIMITED_TEAM || parsed.STRIPE_PRICE_ID_UNLIMITED_FLEET || parsed.STRIPE_FIRST_MONTH_COUPON_ID) && stripeValues !== 3) {
-    throw new Error("Stripe add-on prices, the bigger plans and the first-month coupon require the base Stripe configuration");
+  if ((parsed.STRIPE_PRICE_ID_PLUS || parsed.STRIPE_PRICE_ID_PRO || parsed.STRIPE_PRICE_ID_TEAM || parsed.STRIPE_PRICE_ID_FLEET || parsed.STRIPE_PRICE_ID_UNLIMITED_SOLO || parsed.STRIPE_PRICE_ID_UNLIMITED_TEAM || parsed.STRIPE_PRICE_ID_UNLIMITED_FLEET || parsed.STRIPE_FIRST_MONTH_COUPON_ID) && stripeValues !== 3) {
+    throw new Error("The Unlimited add-on prices, the bigger plans and the first-month coupon require the base Stripe configuration");
   }
   if (Boolean(parsed.RESEND_API_KEY) !== Boolean(parsed.RESEND_FROM_EMAIL)) {
     throw new Error("RESEND_API_KEY and RESEND_FROM_EMAIL must be configured together");
