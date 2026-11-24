@@ -68,7 +68,7 @@ export function LineStatus({ always }: { always?: boolean }) {
  * back: a sub-page (a call, a settings page) shows "‹ Calls" in the bar on a phone instead of the logo.
  */
 export function AppShell({ title, back, hideTitle, children }: { title: string; back?: { to: string; label: string }; hideTitle?: boolean; children: ReactNode }) {
-  useEffect(() => { document.title = `${title} · Front Office` }, [title])
+  useEffect(() => { document.title = `${title} · Call Otto` }, [title])
   const nav = useNav()
   const { dashboard, preview } = useMode()
   const location = useLocation()
@@ -82,7 +82,7 @@ export function AppShell({ title, back, hideTitle, children }: { title: string; 
         <SidebarHeader>
           <Link to={nav[0]!.to} className="flex items-center gap-2.5 px-1 py-1.5">
             <BrandMark />
-            <span className="truncate text-lg font-semibold tracking-tight group-data-[collapsible=icon]:hidden">Front <em className="font-serif italic">Office</em></span>
+            <span className="truncate text-lg font-semibold tracking-tight group-data-[collapsible=icon]:hidden">Call <em className="font-serif italic">Otto</em></span>
           </Link>
         </SidebarHeader>
         <SidebarContent>

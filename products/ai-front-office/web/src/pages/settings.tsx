@@ -27,8 +27,8 @@ const MODE_WORDS: Record<string, string> = { overflow: "Calls you miss", after_h
 
 export const SECTIONS: SectionDef[] = [
   { id: "business", title: "Business details", icon: Store, form: true, description: "Name, greeting, where you work and what you fix.", summary: ({ text }) => text("businessName"), render: () => <BusinessSection /> },
-  { id: "answering", title: "How calls are answered", icon: PhoneIncoming, form: true, description: "Which calls Front Office picks up, after hours and emergencies.", summary: ({ text }) => (text("serviceState") === "paused" ? "Paused" : MODE_WORDS[text("operationMode")] ?? "On"), render: () => <AnsweringSection /> },
-  { id: "answers", title: "Prices and answers", icon: MessageSquareQuote, form: true, description: "The only prices and facts Front Office may tell callers.", summary: ({ text }) => { const count = [text("priceSnippets"), text("approvedKnowledge")].join("\n").split("\n").filter((line) => line.trim()).length; return count ? `${count} saved` : "None yet" }, render: () => <AnswersSection /> },
+  { id: "answering", title: "How calls are answered", icon: PhoneIncoming, form: true, description: "Which calls Call Otto picks up, after hours and emergencies.", summary: ({ text }) => (text("serviceState") === "paused" ? "Paused" : MODE_WORDS[text("operationMode")] ?? "On"), render: () => <AnsweringSection /> },
+  { id: "answers", title: "Prices and answers", icon: MessageSquareQuote, form: true, description: "The only prices and facts Call Otto may tell callers.", summary: ({ text }) => { const count = [text("priceSnippets"), text("approvedKnowledge")].join("\n").split("\n").filter((line) => line.trim()).length; return count ? `${count} saved` : "None yet" }, render: () => <AnswersSection /> },
   { id: "alerts", title: "Alerts", icon: BellRing, form: true, description: "How we let you know about new calls.", summary: ({ settings }) => (settings.integrations.ownerPhoneConfigured ? "Mobile saved" : "No mobile yet"), render: () => <AlertsSection /> },
   { id: "calendar", title: "Calendar", icon: CalendarDays, form: true, description: "Google Calendar, appointment hours and booking.", summary: ({ settings }) => (settings.integrations.googleConnected ? "Connected" : settings.integrations.googleAvailable ? "Not connected" : "Not available yet"), render: () => <CalendarSection /> },
   { id: "plan", title: "Plan and billing", icon: CreditCard, form: false, description: "Your plan, your card, invoices, cancel.", summary: ({ settings }) => settings.plan.label, render: () => <PlanSection /> },
@@ -50,6 +50,9 @@ export interface SettingsContextValue {
   saving: boolean
   save: () => Promise<void>
   reload: () => Promise<void>
+  /** Automated emergency calls: saved on its own, right away (it records or withdraws the owner's consent). */
+  urgentBusy: boolean
+  toggleUrgentCalls: (on: boolean) => Promise<void>
 }
 
 const SettingsContext = createContext<SettingsContextValue | null>(null)
@@ -67,6 +70,20 @@ export function SettingsArea() {
   const settings = useApi<ApiSettings>("/api/app/settings")
   const [values, setValues] = useState<SettingsValues | null>(null)
   const [saving, setSaving] = useState(false)
+  const [urgentBusy, setUrgentBusy] = useState(false)
+  // Saved on its own, right away: it records (or withdraws) the owner's consent to automated calls.
+  const toggleUrgentCalls = async (on: boolean) => {
+    setUrgentBusy(true)
+    try {
+      const result = await api<{ urgentCalls: { available: boolean; on: boolean; disclosure: string } }>("/api/app/alerts/urgent-calls", { method: "POST", body: { on } })
+      if (settings.data) settings.setData({ ...settings.data, urgentCalls: result.urgentCalls })
+      toast.success(on ? "We’ll call your mobile about emergencies." : "Emergency calls are off.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "That didn’t change. Please try again.")
+    } finally {
+      setUrgentBusy(false)
+    }
+  }
   useEffect(() => { if (settings.data) setValues(settings.data.values) }, [settings.data])
   const section = SECTIONS.find((item) => item.id === sectionId) ?? null
 
@@ -100,8 +117,11 @@ export function SettingsArea() {
         }
       },
       reload: async () => { await settings.reload(); await reloadDashboard() },
+      urgentBusy,
+      toggleUrgentCalls,
     }
-  }, [settings, values, saving, reloadDashboard])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings, values, saving, reloadDashboard, urgentBusy])
 
   if (sectionId && !section) return <Navigate to={ALIASES[sectionId] ? `/app/settings/${ALIASES[sectionId]}` : "/app/settings"} replace />
   // A computer always shows a page next to the menu; a phone shows the list first.

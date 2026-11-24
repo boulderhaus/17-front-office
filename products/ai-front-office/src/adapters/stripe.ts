@@ -98,7 +98,7 @@ export class StripeBillingClient {
     const ours = this.planPrices();
     const addOns = this.unlimitedPrices();
     const item = items.find((entry) => entry.price?.id && ours.includes(entry.price.id));
-    if (!item?.id) throw new Error("Stripe subscription has no Front Office plan item");
+    if (!item?.id) throw new Error("Stripe subscription has no Call Otto plan item");
     const addOnItem = items.find((entry) => entry.price?.id && addOns.includes(entry.price.id));
     const changes: Array<{ id?: string; price?: string; deleted?: boolean }> = [];
     if (item.price?.id !== price) changes.push({ id: item.id, price });
@@ -153,7 +153,7 @@ export class StripeBillingClient {
         collection_method: "charge_automatically",
         auto_advance: "false",
         pending_invoice_items_behavior: "exclude",
-        description: "Front Office extra calls",
+        description: "Call Otto extra calls",
         // On the subscription, so Stripe charges the card the subscription pays with.
         ...(input.subscriptionId ? { subscription: input.subscriptionId } : {}),
         ...metadata,
@@ -237,7 +237,7 @@ export class StripeBillingClient {
       // rejects the same key with a changed body. A tagged configuration is found next time.
       const body = new URLSearchParams({
         "metadata[front_office]": PORTAL_CONFIGURATION_TAG,
-        "business_profile[headline]": "Manage your Front Office subscription",
+        "business_profile[headline]": "Manage your Call Otto subscription",
         "features[subscription_cancel][enabled]": "true",
         "features[subscription_cancel][mode]": "at_period_end",
         "features[payment_method_update][enabled]": "true",

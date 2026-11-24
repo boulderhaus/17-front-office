@@ -31,9 +31,9 @@ export function ownerShell(input: {
     tab("calendar", link("calendar"), "calendar", "Calendar"),
     tab("settings", settingsHref, "settings", input.preview ? "Start" : "Settings"),
   ].join("");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#faf8f1"><title>${e(input.title)} · Front Office</title><style>${OWNER_CSS}</style></head><body class="fo-body"><div class="fo">
-<aside class="fo-side" aria-label="Main navigation"><a class="fo-brand" href="${link("today")}"><span>FO</span><strong>Front <em>Office</em></strong></a><nav>${tabs}</nav><div class="fo-side-foot">${input.preview ? '<a href="/">Back to site</a><a class="fo-btn" href="/signup">Get started</a>' : '<a href="/app/team">Team &amp; calendars</a><a href="/logout">Sign out</a>'}</div></aside>
-<div class="fo-main"><header class="fo-top"><div class="fo-top-name"><span class="fo-mark">FO</span><span><small>${e(input.businessName)}</small><strong>${e(input.title)}</strong></span></div><a class="fo-status ${input.status.tone}" href="${settingsHref}"><i></i>${e(input.status.label)}</a></header>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#faf8f1"><title>${e(input.title)} · Call Otto</title><style>${OWNER_CSS}</style></head><body class="fo-body"><div class="fo">
+<aside class="fo-side" aria-label="Main navigation"><a class="fo-brand" href="${link("today")}"><span>CO</span><strong>Call <em>Otto</em></strong></a><nav>${tabs}</nav><div class="fo-side-foot">${input.preview ? '<a href="/">Back to site</a><a class="fo-btn" href="/signup">Get started</a>' : '<a href="/app/team">Team &amp; calendars</a><a href="/logout">Sign out</a>'}</div></aside>
+<div class="fo-main"><header class="fo-top"><div class="fo-top-name"><span class="fo-mark">CO</span><span><small>${e(input.businessName)}</small><strong>${e(input.title)}</strong></span></div><a class="fo-status ${input.status.tone}" href="${settingsHref}"><i></i>${e(input.status.label)}</a></header>
 <main class="fo-content">${input.body}</main></div>
 <nav class="fo-tabs" aria-label="Dashboard">${tabs}</nav></div></body></html>`;
 }
@@ -115,7 +115,7 @@ export function renderOwnerApp(input: {
     { done: rulesSaved, label: "Set your call rules", href: "/app/setup", cta: "Set rules" },
     { done: input.googleConnected, label: "Connect Google Calendar", href: "/app/integrations/google/start", cta: "Connect" },
     { done: paid, label: "Start your plan", href: "", cta: `Start ${money(input.config.flatMonthlyPriceCents)}/mo plan` },
-    { done: input.account.status === "active", label: "Get your Front Office number", href: "#go-live", cta: "Turn on my line" },
+    { done: input.account.status === "active", label: "Get your Call Otto number", href: "#go-live", cta: "Turn on my line" },
   ];
   const doneSteps = steps.filter((step) => step.done).length;
   const nextStep = steps.find((step) => !step.done);
@@ -149,7 +149,7 @@ export function renderOwnerApp(input: {
   const selected = callsById.get(input.selectedCallId ?? "") ?? null;
   const detailCall = selected ?? callsById.get(actionable[0]?.callId ?? "") ?? input.calls[0] ?? null;
   const detail = (call: CallRecord | null, standalone: boolean): string => {
-    if (!call) return `<section class="fo-card fo-detail-empty"><h2>No calls yet</h2><p>When Front Office answers, the caller, problem and next step show up here.</p></section>`;
+    if (!call) return `<section class="fo-card fo-detail-empty"><h2>No calls yet</h2><p>When Call Otto answers, the caller, problem and next step show up here.</p></section>`;
     const phone = phoneFor(call);
     const address = call.fields.address?.trim() || null;
     const task = input.tasks.find((item) => item.callId === call.id);
@@ -283,11 +283,11 @@ export function renderOwnerSettings(input: {
     `<label class="fo-option"><input type="checkbox" name="${name}"${checked(enabled)}${available ? "" : " disabled"}><span><strong>${title} <em>${price}</em></strong><small>${text}</small>${available ? "" : "<small class=\"fo-warn\">Not available yet.</small>"}</span></label>`;
   const calendar = i.googleConnected
     ? `<p class="fo-ok">${ownerIcon("check")}Google Calendar connected</p><a class="fo-ghost" href="/app/integrations/google/start">Reconnect</a>`
-    : i.googleAvailable ? `<p>Connect the calendar your jobs live on so Front Office can offer real open times.</p><a class="fo-btn" href="/app/integrations/google/start">Connect Google Calendar</a>` : `<p class="fo-muted">Calendar connection isn’t available yet.</p>`;
+    : i.googleAvailable ? `<p>Connect the calendar your jobs live on so Call Otto can offer real open times.</p><a class="fo-btn" href="/app/integrations/google/start">Connect Google Calendar</a>` : `<p class="fo-muted">Calendar connection isn’t available yet.</p>`;
   const paid = isPaidStatus(input.subscription?.status);
   const form = `<form class="fo-form" method="post" action="/app/config">${csrfField}<input type="hidden" name="flatMonthlyPrice" value="${Math.round(c.flatMonthlyPriceCents / 100)}">
 <section class="fo-card fo-group"><h2>Answering</h2>
-<label>Front Office is<select name="serviceState"><option value="active"${selected(!c.paused)}>On, answering calls</option><option value="paused"${selected(c.paused)}>Paused</option></select></label>${input.account.status === "active" ? "" : `<p class="fo-hint">Your line turns on after activation. Until then it stays paused.</p>`}
+<label>Call Otto is<select name="serviceState"><option value="active"${selected(!c.paused)}>On, answering calls</option><option value="paused"${selected(c.paused)}>Paused</option></select></label>${input.account.status === "active" ? "" : `<p class="fo-hint">Your line turns on after activation. Until then it stays paused.</p>`}
 <label>Answer<select name="operationMode"><option value="overflow"${selected(c.operationMode === "overflow")}>Only calls I miss</option><option value="after_hours"${selected(c.operationMode === "after_hours")}>After hours</option><option value="always"${selected(c.operationMode === "always")}>Every call</option></select></label>
 <div class="fo-grid2"><label>Ring my phone first<select name="answerAfterRings">${[2, 3, 4, 5, 6, 8, 10, 12].map((rings) => `<option value="${rings}"${selected(c.answerAfterRings === rings)}>${rings} rings</option>`).join("")}</select></label><label class="fo-check"><input type="checkbox" name="weekends"${checked(c.afterHours.weekends)}> Answer all weekend</label></div>
 <div class="fo-grid2"><label>After hours start<input type="time" name="weekdayStart" value="${e(c.afterHours.weekdayStart)}"></label><label>After hours end<input type="time" name="weekdayEnd" value="${e(c.afterHours.weekdayEnd)}"></label></div>
@@ -303,13 +303,13 @@ export function renderOwnerSettings(input: {
 <div class="fo-grid2"><label>First appointment<input type="time" name="bookableWeekdayStart" value="${e(c.bookableHours.weekdayStart)}"></label><label>Last one ends by<input type="time" name="bookableWeekdayEnd" value="${e(c.bookableHours.weekdayEnd)}"></label></div>
 <div class="fo-grid2"><label>Job length<select name="defaultServiceDurationMinutes">${[30, 45, 60, 90, 120, 180, 240].concat([c.defaultServiceDurationMinutes]).filter((value, index, all) => all.indexOf(value) === index).sort((left, right) => left - right).map((minutes) => `<option value="${minutes}"${selected(c.defaultServiceDurationMinutes === minutes)}>${minutes < 60 ? `${minutes} min` : `${minutes / 60} hr${minutes === 60 ? "" : "s"}`}</option>`).join("")}</select></label><label>Notice needed<select name="minimumLeadTimeMinutes">${leadOptions.map(([value, label]) => `<option value="${value}"${selected(c.minimumLeadTimeMinutes === value)}>${label}</option>`).join("")}</select></label></div>
 <label class="fo-check"><input type="checkbox" name="bookableWeekends"${checked(c.bookableHours.weekends)}> Offer weekend appointments</label>
-${i.directBookingAvailable ? `<label>Booking<select name="bookingMode"><option value="confirm"${selected(c.bookingMode === "confirm")}>Take the details; I’ll confirm</option><option value="direct"${selected(c.bookingMode === "direct")}>Book open times on my calendar</option></select></label>` : `<input type="hidden" name="bookingMode" value="confirm"><p class="fo-hint">Front Office takes the time the caller wants. You confirm it.</p>`}
+${i.directBookingAvailable ? `<label>Booking<select name="bookingMode"><option value="confirm"${selected(c.bookingMode === "confirm")}>Take the details; I’ll confirm</option><option value="direct"${selected(c.bookingMode === "direct")}>Book open times on my calendar</option></select></label>` : `<input type="hidden" name="bookingMode" value="confirm"><p class="fo-hint">Call Otto takes the time the caller wants. You confirm it.</p>`}
 <label class="fo-check"><input type="checkbox" name="requireDiagnosticFeeAcceptance"${checked(c.requireDiagnosticFeeAcceptance)}> Caller must accept your service-call fee</label></section>
 <section class="fo-card fo-group"><h2>What callers can be told</h2>
 <label>Prices (one per line, “Name: exact wording”)<textarea name="priceSnippets" rows="3" placeholder="Service call: Our service call is $89.">${e(c.priceSnippets.map((item) => `${item.label}: ${item.text}`).join("\n"))}</textarea></label>
-<label>Answers (one per line, “Topic: exact wording”)<textarea name="approvedKnowledge" rows="3" placeholder="Brands: We service all major brands.">${e(c.approvedKnowledge.map((item) => `${item.topic}: ${item.text}`).join("\n"))}</textarea></label><p class="fo-hint">Leave blank and Front Office won’t quote a price; it takes a message.</p></section>
+<label>Answers (one per line, “Topic: exact wording”)<textarea name="approvedKnowledge" rows="3" placeholder="Brands: We service all major brands.">${e(c.approvedKnowledge.map((item) => `${item.topic}: ${item.text}`).join("\n"))}</textarea></label><p class="fo-hint">Leave blank and Call Otto won’t quote a price; it takes a message.</p></section>
 <section class="fo-card fo-group"><h2>Alerts to your phone</h2>
-<label>Mobile number<input type="tel" name="ownerPhone" inputmode="tel" autocomplete="tel" placeholder="${i.ownerPhoneConfigured ? "Saved. Enter a new number to replace it" : "+1 941 555 0100"}"></label><p class="fo-hint">Urgent calls ring this number. Text alerts come here too, once texts are on.</p>
+<label>Mobile number<input type="tel" name="ownerPhone" inputmode="tel" autocomplete="tel" placeholder="${i.ownerPhoneConfigured ? "Saved. Enter a new number to replace it" : "+1 941 555 0100"}"></label><p class="fo-hint">Emergency calls (if on) and text alerts (once texts are on) come here.</p>
 ${addOn("ownerDailySmsEnabled", c.ownerDailySmsEnabled, true, "Daily text recap", "Included", "Follow-ups and appointments, once each morning.")}
 <label>Recap time<select name="ownerDailySmsHour">${hourOptions}</select></label>
 ${addOn("ownerRealtimeSmsEnabled", c.ownerRealtimeSmsEnabled, true, "Instant lead texts", "Included", "Every routine new lead the moment the call ends.")}
@@ -327,7 +327,7 @@ ${addOn("ownerWeeklyEmailEnabled", c.ownerWeeklyEmailEnabled, i.weeklyEmailAvail
 
 function forwardingCard(lineNumber: string, mode: "overflow" | "after_hours" | "always", open: boolean): string {
   const rows = forwardingInstructions(lineNumber, mode).map((row) => `<div><dt>${e(row.carrier)}</dt><dd><code>${e(row.on)}</code> <small>off: <code>${e(row.off)}</code></small></dd></div>`).join("");
-  return `<details class="fo-card fo-forward"${open ? " open" : ""}><summary><span><small>Your Front Office number</small><strong>${e(formatPhone(lineNumber))}</strong></span><span class="fo-badge">Forward your calls</span></summary><p>Keep your business number. On your business phone, dial your carrier’s code and press call. ${mode === "always" ? "Every call" : "Calls you don’t pick up"} will ring through to Front Office.</p><dl class="fo-facts">${rows}</dl><p class="fo-fine">To test: call your business number from another phone and let it ring. Office phone systems (RingCentral, Google Voice, Ooma) set this under call forwarding or “when unanswered”.</p></details>`;
+  return `<details class="fo-card fo-forward"${open ? " open" : ""}><summary><span><small>Your Call Otto number</small><strong>${e(formatPhone(lineNumber))}</strong></span><span class="fo-badge">Forward your calls</span></summary><p>Keep your business number. On your business phone, dial your carrier’s code and press call. ${mode === "always" ? "Every call" : "Calls you don’t pick up"} will ring through to Call Otto.</p><dl class="fo-facts">${rows}</dl><p class="fo-fine">To test: call your business number from another phone and let it ring. Office phone systems (RingCentral, Google Voice, Ooma) set this under call forwarding or “when unanswered”.</p></details>`;
 }
 
 function activity(calls: CallRecord[], completed: CallbackTask[], callsById: Map<string, CallRecord>, tz: string): string {

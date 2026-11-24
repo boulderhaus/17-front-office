@@ -49,14 +49,14 @@ function Field({ label, hint, children, className }: { label: string; hint?: str
 }
 
 /** A switch on the right, its label and one line of help on the left. Rows sit on dividers, not in boxes. */
-function ToggleRow({ id, label, hint, checked, onChange }: { id: string; label: string; hint?: ReactNode; checked: boolean; onChange: (value: boolean) => void }) {
+function ToggleRow({ id, label, hint, checked, onChange, disabled }: { id: string; label: string; hint?: ReactNode; checked: boolean; onChange: (value: boolean) => void; disabled?: boolean }) {
   return (
     <div className="flex items-start justify-between gap-4 border-t pt-4 first:border-t-0 first:pt-0">
       <Label htmlFor={id} className="grid gap-0.5 font-normal">
         <span className="text-[15px] font-medium">{label}</span>
         {hint && <span className="text-sm text-muted-foreground">{hint}</span>}
       </Label>
-      <Switch id={id} checked={checked} onCheckedChange={onChange} className="mt-0.5 shrink-0" />
+      <Switch id={id} checked={checked} disabled={disabled} onCheckedChange={onChange} className="mt-0.5 shrink-0" />
     </div>
   )
 }
@@ -80,17 +80,17 @@ export function BusinessSection() {
         </Pair>
       </SettingsCard>
       <SettingsCard title="Greeting">
-        <Field label="What Front Office says when it picks up"><Textarea required rows={2} className={areaClass} {...bind("greeting")} /></Field>
+        <Field label="What Call Otto says when it picks up"><Textarea required rows={2} className={areaClass} {...bind("greeting")} /></Field>
         <ToggleRow id="recordingNotice" label="Recording notice when a call is put through to you" checked={flag("recordingNotice")} onChange={(value) => set("recordingNotice", value)}
           hint={flag("recordingNotice") ? "On: you get a transcript only, no audio. Callers put through to you hear the notice first." : "Off: calls are saved with audio and no notice is played. Your state’s rules decide which is right."} />
       </SettingsCard>
-      <SettingsCard title="Where you work" description="Front Office checks each caller’s address against this list.">
+      <SettingsCard title="Where you work" description="Call Otto checks each caller’s address against this list.">
         <Field label="Cities and ZIP codes" hint="A city with its state, like “Sarasota FL”, or a 5-digit ZIP."><Textarea rows={2} placeholder="Sarasota FL, 34236" className={areaClass} {...bind("serviceAreaTerms")} /></Field>
       </SettingsCard>
       <SettingsCard title="What you fix">
         <Field label="Services you offer" hint="Separate with commas."><Textarea rows={2} className={areaClass} {...bind("serviceCategories")} /></Field>
       </SettingsCard>
-      <SettingsCard title="Names and words" description="Help Front Office say your street names and brands right.">
+      <SettingsCard title="Names and words" description="Help Call Otto say your street names and brands right.">
         <Field label="Say these words like this" hint="One per line, like “Myakka: my-AK-uh”."><Textarea rows={2} className={areaClass} {...bind("pronunciations")} /></Field>
       </SettingsCard>
     </>
@@ -104,7 +104,7 @@ export function AnsweringSection() {
   return (
     <>
       <SettingsCard title="Which calls">
-        <Field label="Front Office is" hint={settings.status === "active" ? undefined : "Your line turns on after it’s approved. Until then it stays paused."}>
+        <Field label="Call Otto is" hint={settings.status === "active" ? undefined : "Your line turns on after it’s approved. Until then it stays paused."}>
           <select className={selectClass} {...bind("serviceState")}><option value="active">On, answering calls</option><option value="paused">Paused</option></select>
         </Field>
         <Pair>
@@ -112,7 +112,7 @@ export function AnsweringSection() {
           <Field label="Ring my phone first"><select className={selectClass} {...bind("answerAfterRings")}>{[2, 3, 4, 5, 6, 8, 10, 12].map((rings) => <option key={rings} value={rings}>{rings} rings</option>)}</select></Field>
         </Pair>
       </SettingsCard>
-      <SettingsCard title="After hours" description="When Front Office answers every call, even ones you could pick up.">
+      <SettingsCard title="After hours" description="When Call Otto answers every call, even ones you could pick up.">
         <Pair>
           <Field label="Starts at"><Input type="time" className={fieldClass} {...bind("weekdayStart")} /></Field>
           <Field label="Ends at"><Input type="time" className={fieldClass} {...bind("weekdayEnd")} /></Field>
@@ -143,7 +143,7 @@ export function AnswersSection() {
   const { bind } = useSettings()
   return (
     <>
-      <SettingsCard title="Prices and answers" description="Front Office only says what’s written here. Leave a box empty and it takes a message instead.">
+      <SettingsCard title="Prices and answers" description="Call Otto only says what’s written here. Leave a box empty and it takes a message instead.">
         <Field label="Prices" hint="One per line, like “Service call: Our service call is $89.”"><Textarea rows={3} placeholder="Service call: Our service call is $89." className={areaClass} {...bind("priceSnippets")} /></Field>
         <Field label="Answers" hint="One per line, like “Brands: We service all major brands.”"><Textarea rows={3} placeholder="Brands: We service all major brands." className={areaClass} {...bind("approvedKnowledge")} /></Field>
       </SettingsCard>
@@ -154,15 +154,20 @@ export function AnswersSection() {
 /* ---------------------------------------------------------------- Alerts */
 
 export function AlertsSection() {
-  const { text, flag, set, bind, settings } = useSettings()
+  const { text, flag, set, bind, settings, urgentBusy, toggleUrgentCalls } = useSettings()
   const { integrations: i, plan } = settings
   return (
     <>
       <CallAlertsCard className="p-4 md:p-5" />
       <SettingsCard title="Your mobile">
-        <Field label="Mobile number" hint="Urgent calls ring this number. Text alerts come here too, once texts are on.">
+        <Field label="Mobile number" hint="Emergency calls (if on) and text alerts (once texts are on) come here.">
           <Input type="tel" inputMode="tel" autoComplete="tel" className={fieldClass} placeholder={i.ownerPhoneConfigured ? "Saved. Type a new number to replace it" : "+1 941 555 0100"} {...bind("ownerPhone")} />
         </Field>
+        {settings.urgentCalls?.available && (
+          <ToggleRow id="urgentCalls" label="Call me about emergencies" checked={settings.urgentCalls.on} disabled={urgentBusy}
+            hint={settings.urgentCalls.disclosure}
+            onChange={(on) => void toggleUrgentCalls(on)} />
+        )}
       </SettingsCard>
       <SettingsCard title="Texts">
         <ToggleRow id="ownerRealtimeSmsEnabled" label="A text for every new lead" hint="Sent the moment the call ends. Included in every plan." checked={flag("ownerRealtimeSmsEnabled")} onChange={(value) => set("ownerRealtimeSmsEnabled", value)} />
@@ -202,16 +207,16 @@ export function CalendarSection() {
       <SettingsCard title="Google Calendar">
         {i.googleConnected ? (
           <>
-            <p className="flex items-center gap-2 text-[15px] font-semibold text-emerald-800"><CheckCircle2 className="size-5 shrink-0" />Connected. Front Office checks when you’re busy, and confirmed jobs go on your calendar.</p>
+            <p className="flex items-center gap-2 text-[15px] font-semibold text-emerald-800"><CheckCircle2 className="size-5 shrink-0" />Connected. Call Otto checks when you’re busy, and confirmed jobs go on your calendar.</p>
             <Button size="tap" variant="outline" className={actionClass} asChild><a href="/app/integrations/google/start">Reconnect</a></Button>
           </>
         ) : i.googleAvailable ? (
           <>
-            <p className="text-[15px]">Connect the calendar your jobs live on. Front Office checks when you’re busy, and confirmed jobs land on it.</p>
+            <p className="text-[15px]">Connect the calendar your jobs live on. Call Otto checks when you’re busy, and confirmed jobs land on it.</p>
             <Button size="tap" variant="brand" className={actionClass} asChild><a href="/app/integrations/google/start">Connect Google Calendar</a></Button>
           </>
         ) : (
-          <p className="text-[15px]">Not available yet. Until it is, Front Office takes the time the caller asks for and you confirm it. Those jobs show as <strong className="font-semibold">Confirm time</strong> in Calls.</p>
+          <p className="text-[15px]">Not available yet. Until it is, Call Otto takes the time the caller asks for and you confirm it. Those jobs show as <strong className="font-semibold">Confirm time</strong> in Calls.</p>
         )}
       </SettingsCard>
       <SettingsCard title="Appointment hours" description="Times callers can ask for.">
@@ -230,7 +235,7 @@ export function CalendarSection() {
         </Pair>
         {i.directBookingAvailable ? (
           <Field label="When a caller picks a time"><select className={selectClass} {...bind("bookingMode")}><option value="confirm">Take the details; I’ll confirm</option><option value="direct">Book it on my calendar</option></select></Field>
-        ) : <p className="text-sm text-muted-foreground">Front Office takes the time the caller wants. You confirm it.</p>}
+        ) : <p className="text-sm text-muted-foreground">Call Otto takes the time the caller wants. You confirm it.</p>}
         <ToggleRow id="requireDiagnosticFeeAcceptance" label="Caller must agree to your service-call fee" hint="Uses the service-call price in How calls are answered." checked={flag("requireDiagnosticFeeAcceptance")} onChange={(value) => set("requireDiagnosticFeeAcceptance", value)} />
       </SettingsCard>
       <SettingsCard title="Teammates’ calendars" description="Each teammate connects their own calendar and sets their own hours on the Team page.">

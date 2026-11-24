@@ -57,7 +57,7 @@ export class UsageAlertService {
 
 /**
  * Plain words for a busy owner: the real numbers, the price of an extra call, and what to do.
- * "Front Office: you've answered 45 of your 60 calls this month. Extra calls are $0.75 each. Change plans in Settings."
+ * "Otto: you've answered 45 of your 60 calls this month. Extra calls are $0.75 each. Change plans in Settings."
  * Dollars, never "¢": ¢ is outside GSM-7 and would double the SMS segments.
  */
 export function usageAlertText(config: Pick<BusinessConfig, "includedCalls" | "overageCentsPerCall" | "unlimitedCalls">, usage: Pick<UsageSummary, "billableCalls">, percent: number): { subject: string; sms: string } {
@@ -65,11 +65,11 @@ export function usageAlertText(config: Pick<BusinessConfig, "includedCalls" | "o
   const rate = `$${(config.overageCentsPerCall / 100).toFixed(2)}`;
   // With Unlimited, the limit that matters is fair use (3× the plan's calls); past it, calls are billed again.
   const sms = config.unlimitedCalls
-    ? `Front Office: you've answered ${usage.billableCalls} of your ${included} fair-use calls this month. Past that, calls are ${rate} each. Change plans in Settings.`
-    : `Front Office: you've answered ${usage.billableCalls} of your ${included} calls this month. Extra calls are ${rate} each. Change plans in Settings.`;
+    ? `Otto: you've answered ${usage.billableCalls} of your ${included} fair-use calls this month. Past that, calls are ${rate} each. Change plans in Settings.`
+    : `Otto: you've answered ${usage.billableCalls} of your ${included} calls this month. Extra calls are ${rate} each. Change plans in Settings.`;
   const kind = config.unlimitedCalls ? "fair-use calls" : "calls";
   return {
-    subject: percent >= 100 ? `Front Office: you've answered all ${included} of your ${kind} this month` : `Front Office: you've answered ${usage.billableCalls} of your ${included} ${kind}`,
+    subject: percent >= 100 ? `Otto: you've answered all ${included} of your ${kind} this month` : `Otto: you've answered ${usage.billableCalls} of your ${included} ${kind}`,
     sms,
   };
 }

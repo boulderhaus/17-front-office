@@ -64,7 +64,7 @@ export function forwardingPlan(family: CarrierFamily, frontOfficeNumber: string,
     const on = `${always ? "*72" : "*71"}${digits}`;
     return {
       family, on, off: "*73", dialLink: telLink(on), offDialLink: telLink("*73"),
-      what: always ? "Every call goes straight to Front Office." : ringTip,
+      what: always ? "Every call goes straight to Call Otto." : ringTip,
       tips: [], iphoneTip,
     };
   }
@@ -75,7 +75,7 @@ export function forwardingPlan(family: CarrierFamily, frontOfficeNumber: string,
     const off = "##002#";
     return {
       family, on, off, dialLink: telLink(on), offDialLink: telLink(off),
-      what: always ? "Every call goes straight to Front Office." : `${ringTip} Same if you tap Decline or have no signal.`,
+      what: always ? "Every call goes straight to Call Otto." : `${ringTip} Same if you tap Decline or have no signal.`,
       tips: [], iphoneTip,
     };
   }

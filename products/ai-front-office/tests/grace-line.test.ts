@@ -164,9 +164,9 @@ describe("billing grace line", () => {
       const sent = h.outbox("voicemail:");
       expect(sent).toHaveLength(1);
       expect(sent[0]!.channel).toBe("sms");
-      expect(sent[0]!.body).toContain("Front Office voicemail for Synthetic Heating: (555) 555-0123 said: “Hi, this is Pat. Our furnace stopped");
+      expect(sent[0]!.body).toContain("Call Otto voicemail for Synthetic Heating: (555) 555-0123 said: “Hi, this is Pat. Our furnace stopped");
       expect(sent[0]!.body).toContain("…”");
-      expect(sent[0]!.body).toContain("Your Front Office plan is paused; to stop forwarding");
+      expect(sent[0]!.body).toContain("Your Call Otto plan is paused; to stop forwarding");
       expect(h.outbox("voicemail-fallback:")[0]!.state).toBe("cancelled");
 
       // Unsigned, or bound to another call, is refused and queues nothing.
@@ -201,7 +201,7 @@ describe("billing grace line", () => {
       await h.sweep.runOnce();
       const reminders = h.outbox("grace-reminder:");
       expect(reminders).toHaveLength(1);
-      expect(reminders[0]!.body).toContain("in 7 days this number stops working");
+      expect(reminders[0]!.body).toContain("Otto: in 7 days your Call Otto number for Synthetic Heating stops working");
       expect(reminders[0]!.body).toContain("to stop forwarding");
       expect(h.telnyx.released).toEqual([]);
 

@@ -1,13 +1,13 @@
 /**
- * Sets up Front Office billing in Stripe as four products, so checkout pages and receipts name the plan:
- *   "Front Office Solo", "Front Office Team", "Front Office Fleet"  (one monthly price each)
+ * Sets up Call Otto billing in Stripe as four products, so checkout pages and receipts name the plan:
+ *   "Call Otto Solo", "Call Otto Team", "Call Otto Fleet"  (one monthly price each)
  *   "Unlimited calls"                                              (the add-on: one price per plan, a second subscription item)
  * plus the "first month half off" coupon (50% off, duration once, no product restriction, so it covers the whole
  * first invoice, add-on included). Pro is no longer sold, so no Pro price is made (existing Pro prices keep working).
  *
  * Idempotent: products are found by metadata front_office_product=<solo|team|fleet|unlimited>, prices by lookup_key,
  * the coupon by its own id, and every create carries an idempotency key. A price whose lookup_key still sits on
- * another product (the old single "Front Office" product) gets a new price on the right product with
+ * another product (the old single "Call Otto" product) gets a new price on the right product with
  * transfer_lookup_key=true. Only once every new price exists (and its env lines are printed) are the replaced prices and
  * the old product archived, and never a price the app's current env still points at: set the env, redeploy, rerun.
  *
@@ -33,7 +33,7 @@ export interface PlannedProduct { key: ProductKey; name: string; description: st
 export interface PlannedPrice { plan: PlanId; kind: "plan" | "unlimited"; product: ProductKey; envName: string; label: string; unitAmount: number; includedCalls: number; lookupKey: string }
 export interface StripePlansSetup { products: PlannedProduct[]; prices: PlannedPrice[]; coupon: { id: string; percentOff: number } }
 
-/** The metadata key a Front Office product is found by. */
+/** The metadata key a Call Otto product is found by. */
 export const PRODUCT_METADATA_KEY = "front_office_product";
 /** The metadata the one-product layout (before 2026-11-23) tagged its product with. */
 const OLD_PRODUCT_METADATA = { key: "front_office", value: "plans" } as const;
@@ -62,11 +62,11 @@ export function planStripeSetup(env: Record<string, string | undefined>): Stripe
   const products: PlannedProduct[] = [
     ...plans.map((plan): PlannedProduct => ({
       key: plan.plan,
-      name: `Front Office ${plan.label}`,
+      name: `Call Otto ${plan.label}`,
       description: `Up to ${plan.includedCalls} answered calls a month, then ${perCall(overage)} per extra call.`,
       image,
     })),
-    { key: "unlimited", name: "Unlimited calls", description: `No extra-call charges on your Front Office plan. ${FAIR_USE_LINE}`, image },
+    { key: "unlimited", name: "Unlimited calls", description: `No extra-call charges on your Call Otto plan. ${FAIR_USE_LINE}`, image },
   ];
   const prices: PlannedPrice[] = [
     ...plans.map((plan): PlannedPrice => ({
@@ -229,7 +229,7 @@ export async function reconcileStripePlans(setup: StripePlansSetup, stripe: Stri
   // Archive: the prices that were replaced, and the old single product (and any named product) with all its active
   // prices. Only once every planned price exists, and never a price the running app's env still points at.
   const ours = new Set(Object.values(result.productIds));
-  for (const id of options.archiveProducts ?? []) if (ours.has(id)) throw new Error(`${id} is one of the four Front Office products; refusing to archive it.`);
+  for (const id of options.archiveProducts ?? []) if (ours.has(id)) throw new Error(`${id} is one of the four Call Otto products; refusing to archive it.`);
   if (create && !allPriced) { log("Not archiving anything: not every planned price exists yet."); return result; }
   const inUse = new Set(options.inUse ?? []);
   const keepBecauseInUse = (priceId: string): boolean => {

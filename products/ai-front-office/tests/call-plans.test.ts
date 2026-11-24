@@ -220,7 +220,7 @@ describe("lead guarantee", () => {
     await store.saveCallbackTask({ id: randomUUID(), tenantId, callId: withTask.id, ownerRef: "owner-primary", reason: "Call back", priority: "normal", status: "open", dueAt: "2026-01-12T01:00:00.000Z", completedAt: null, completionSource: null, createdAt: "2026-01-12T00:00:00.000Z", updatedAt: "2026-01-12T00:00:00.000Z" });
     now = new Date("2026-02-02T00:00:00Z");
     expect(await guarantee.status(tenantId)).toMatchObject({ state: "closed", leads: 1 });
-    await expect(guarantee.refund(tenantId, "owner")).rejects.toMatchObject({ status: 409, message: "Front Office sent you 1 real lead in your first 30 days, so the lead guarantee doesn’t apply." });
+    await expect(guarantee.refund(tenantId, "owner")).rejects.toMatchObject({ status: 409, message: "Call Otto sent you 1 real lead in your first 30 days, so the lead guarantee doesn’t apply." });
     await expect(guarantee.refund(tenantId, "admin")).rejects.toMatchObject({ status: 409 });
     expect(refunds).toHaveLength(0);
   });
@@ -348,7 +348,7 @@ describe("plan changes and the guarantee over HTTP", () => {
     await store.saveCall(call(shop.tenantId, "2026-01-10T00:00:00.000Z"));
     const refused = await shop.post("/api/app/billing/lead-refund");
     expect(refused.status).toBe(409);
-    expect((await refused.json() as { error: string }).error).toBe("Front Office sent you 1 real lead in your first 30 days, so the lead guarantee doesn’t apply.");
+    expect((await refused.json() as { error: string }).error).toBe("Call Otto sent you 1 real lead in your first 30 days, so the lead guarantee doesn’t apply.");
     expect(stripe.requests.some((request) => request.url.includes("/v1/refunds"))).toBe(false);
     dashboard = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie: shop.cookie } })).json() as { guarantee: { state: string; leads: number } };
     expect(dashboard.guarantee).toMatchObject({ state: "closed", leads: 1 });
@@ -391,7 +391,7 @@ describe("plan changes and the guarantee over HTTP", () => {
 describe("scripts/create-stripe-plans.ts", () => {
   it("plans the monthly prices by lookup key and the 50%-once coupon from the approved defaults", () => {
     const setup = planStripeSetup({});
-    expect(setup.products.map((product) => product.name)).toEqual(["Front Office Solo", "Front Office Team", "Front Office Fleet", "Unlimited calls"]);
+    expect(setup.products.map((product) => product.name)).toEqual(["Call Otto Solo", "Call Otto Team", "Call Otto Fleet", "Unlimited calls"]);
     expect(setup.prices.filter((price) => price.kind === "plan").map((price) => [price.envName, price.label, price.unitAmount, price.includedCalls, price.lookupKey])).toEqual([
       ["STRIPE_PRICE_ID_SOLO", "Solo", 4_999, 60, "front_office_solo_4999_monthly"],
       ["STRIPE_PRICE_ID_TEAM", "Team", 17_999, 250, "front_office_team_17999_monthly"],

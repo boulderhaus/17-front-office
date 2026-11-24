@@ -1,4 +1,4 @@
-/** The company behind Front Office, published on the site (carrier/10DLC reviews check these are public). */
+/** The company behind Call Otto, published on the site (carrier/10DLC reviews check these are public). */
 export const COMPANY = {
   legalName: "Dutchworks LLC",
   website: "https://bydutchworks.com",
@@ -9,9 +9,9 @@ export const COMPANY = {
   email: "hello@bydutchworks.com",
 } as const;
 
-/** One sentence for the Privacy and Terms pages: who operates Front Office and how to reach them. */
+/** One sentence for the Privacy and Terms pages: who operates Call Otto and how to reach them. */
 export function companyStatementHtml(): string {
-  return `Front Office is a product of ${COMPANY.legalName}, ${COMPANY.street}, ${COMPANY.locality}. Phone <a href="tel:${COMPANY.phoneE164}">${COMPANY.phoneDisplay}</a>, email <a href="mailto:${COMPANY.email}">${COMPANY.email}</a>.`;
+  return `Call Otto is a product of ${COMPANY.legalName}, ${COMPANY.street}, ${COMPANY.locality}. Phone <a href="tel:${COMPANY.phoneE164}">${COMPANY.phoneDisplay}</a>, email <a href="mailto:${COMPANY.email}">${COMPANY.email}</a>.`;
 }
 
 /** Version of the text-consent wording on the signup form, saved with each opt-in. */

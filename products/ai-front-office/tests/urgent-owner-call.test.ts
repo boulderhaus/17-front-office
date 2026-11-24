@@ -2,7 +2,8 @@ import { generateKeyPairSync, randomUUID, sign, type KeyObject } from "node:cryp
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
-import { ownerAlertClientState, ownerAlertSpeech, TelnyxOwnerCallSender } from "../src/adapters/telnyx-owner-call.js";
+import { ownerAlertClientState, ownerAlertState, TelnyxOwnerCallSender, type OwnerAlertState } from "../src/adapters/telnyx-owner-call.js";
+import { OWNER_CALL_CONSENT_KEY } from "../src/domain/owner-call-consent.js";
 import { CallService } from "../src/application/call-service.js";
 import { urgentCallSpeech, urgentOwnerCallNotification } from "../src/application/owner-alerts.js";
 import { loadEnvironment } from "../src/config/environment.js";
@@ -24,9 +25,9 @@ describe("urgent calls ring the owner", () => {
 
   it("says who, what and when in plain words", () => {
     const speech = urgentCallSpeech({ fields, emergency: { emergency: true, severity: "urgent", score: 0.9, evidence: ["no AC"], immediateInstruction: null } }, "Wants someone today");
-    expect(speech).toBe("Front Office: urgent call from Maria, no AC, wants someone today. Check your Front Office app.");
+    expect(speech).toBe("Otto here: urgent call from Maria, no AC, wants someone today. Check your Call Otto app.");
     expect(urgentCallSpeech({ fields: { ...fields, callerName: null, problemDescription: "" }, emergency: { emergency: true, severity: "life_safety", score: 1, evidence: ["gas smell"], immediateInstruction: null } }, null))
-      .toBe("Front Office: urgent call from a caller, gas smell. Check your Front Office app.");
+      .toBe("Otto here: urgent call from a caller, gas smell. Check your Call Otto app.");
   });
 
   it("queues one call per urgent call to an owner-app shop with a mobile number, never for routine calls", async () => {
@@ -38,6 +39,7 @@ describe("urgent calls ring the owner", () => {
       ownerPhone: "+15555550100",
     });
     const service = new CallService(store, new InMemoryCalendar(), clock, "https://front-office.example", { urgentCallAvailable: true });
+    await store.saveIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY, JSON.stringify({ at: now.toISOString(), phone: "+15555550100" }));
     const end = (id: string, problemDescription: string, llmEmergencyScore?: number) => service.finalize({
       webhookEventId: `end:${id}`, tenantId, providerCallId: id, fromNumber: "+15555550142", startedAt: "2026-11-23T14:50:00.000Z", endedAt: now.toISOString(), durationSeconds: 95,
       fields: { ...fields, problemDescription }, transcript: `Caller: ${problemDescription}`, recordingUrl: null, consentState: "disclosed",
@@ -50,7 +52,7 @@ describe("urgent calls ring the owner", () => {
     const calls = [...store.notifications.values()].filter((item) => item.channel === "voice");
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ destinationRef: "owner-primary", priority: "high" });
-    expect(calls[0]!.body).toMatch(/^Front Office: urgent call from Maria, Gas smell in the kitchen/);
+    expect(calls[0]!.body).toMatch(/^Otto here: urgent call from Maria, Gas smell in the kitchen/);
   });
 
   it("dials the owner from our number, carries the words in client state, holds past three an hour and in test mode", async () => {
@@ -60,9 +62,9 @@ describe("urgent calls ring the owner", () => {
       return new Response(JSON.stringify({ data: { call_control_id: `v3:owner-${posted.length}` } }), { status: 200 });
     }) as unknown as typeof fetch;
     const claims = new InMemoryStore();
-    const options = { apiKey: "KEY", connectionId: "check-connection", from: "+15555550199", webhookUrl: "https://front-office.example/webhooks/telnyx", clock, fetcher, resolveDestination: async () => "+15555550100", claimDial: (key: string) => claims.claimWebhook(key) };
+    const options = { apiKey: "KEY", connectionId: "check-connection", from: "+15555550199", webhookUrl: "https://front-office.example/webhooks/telnyx", clock, fetcher, resolveDestination: async () => "+15555550100", claimDial: (key: string) => claims.claimWebhook(key), hasConsent: async () => true };
     const sender = new TelnyxOwnerCallSender(options);
-    const notification = (callId: string) => urgentOwnerCallNotification({ tenantId: "shop", callId, speech: "Front Office: urgent call from Maria, no AC. Check your Front Office app.", now: now.toISOString() });
+    const notification = (callId: string) => urgentOwnerCallNotification({ tenantId: "shop", callId, speech: "Otto here: urgent call from Maria, no AC. Check your Call Otto app.", now: now.toISOString() });
     const receipts = [];
     for (const id of ["a", "b", "c"]) receipts.push((await sender.send(notification(id))).providerReceipt);
     expect(new Set(receipts).size).toBe(3);
@@ -71,8 +73,10 @@ describe("urgent calls ring the owner", () => {
     expect(posted).toHaveLength(3);
     await expect(sender.send(notification("d"))).rejects.toBeInstanceOf(NotificationHeldError);
     expect(posted[0]).toMatchObject({ connection_id: "check-connection", to: "+15555550100", from: "+15555550199", webhook_url: "https://front-office.example/webhooks/telnyx" });
-    expect(ownerAlertSpeech(posted[0]!.client_state)).toBe("Front Office: urgent call from Maria, no AC. Check your Front Office app.");
-    expect(ownerAlertSpeech(Buffer.from("forwarding-check:shop").toString("base64"))).toBeNull();
+    expect(ownerAlertState(posted[0]!.client_state)).toEqual({ tenantId: "shop", speech: "Otto here: urgent call from Maria, no AC. Check your Call Otto app.", phase: "dial" });
+    expect(ownerAlertState(Buffer.from("forwarding-check:shop").toString("base64"))).toBeNull();
+    // No recorded consent (never agreed, or pressed 9 since): never dialed.
+    await expect(new TelnyxOwnerCallSender({ ...options, hasConsent: async () => false }).send(notification("g"))).rejects.toThrow("not agreed");
     const testMode = new TelnyxOwnerCallSender({ ...options, allowedDestinations: new Set(["+15555550111"]) });
     await expect(testMode.send(notification("e"))).rejects.toBeInstanceOf(NotificationHeldError);
     // A dial that times out may have rung anyway: held, never retried.
@@ -81,14 +85,14 @@ describe("urgent calls ring the owner", () => {
     await expect(slow.send(notification("f"))).rejects.toThrow("already dialed");
   });
 
-  it("speaks the summary when the owner answers and hangs up after, from signed webhooks only", async () => {
+  it("reads the summary with a press-9 opt-out when the owner answers, from signed webhooks only", async () => {
     const keys = generateKeyPairSync("ed25519");
     const rawPublicKey = (keys.publicKey.export({ type: "spki", format: "der" }) as Buffer).subarray(-32).toString("base64");
     const actions: Array<{ url: string; body: Record<string, unknown> }> = [];
-    let refuseSpeak = true;
+    let refuseSpeak = false;
     const fetcher = (async (input: string | URL, init?: RequestInit) => {
       actions.push({ url: String(input), body: JSON.parse(String(init?.body ?? "{}")) });
-      if (refuseSpeak && String(input).endsWith("/speak")) return new Response("{}", { status: 422 });
+      if (refuseSpeak && /\/(speak|gather_using_speak)$/.test(String(input))) return new Response("{}", { status: 422 });
       return new Response(JSON.stringify({ data: { result: "ok" } }), { status: 200 });
     }) as typeof fetch;
     const env = loadEnvironment({
@@ -103,23 +107,96 @@ describe("urgent calls ring the owner", () => {
     await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("no address");
-    const post = (eventType: string, id: string, key: KeyObject = keys.privateKey) => {
-      const body = JSON.stringify({ data: { record_type: "event", event_type: eventType, id, occurred_at: now.toISOString(), payload: { call_control_id: "v3:owner-1", client_state: ownerAlertClientState("Front Office: urgent call from Maria, no AC. Check your Front Office app.") } } });
+    const tenantId = "shop_consent";
+    await store.saveIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY, JSON.stringify({ at: "2026-11-23T14:00:00.000Z", phone: "+15555550100" }));
+    const state = (phase: OwnerAlertState["phase"]) => ownerAlertClientState({ tenantId, speech: "Otto here: urgent call from Maria, no AC. Check your Call Otto app.", phase });
+    const post = (eventType: string, id: string, options: { key?: KeyObject; phase?: OwnerAlertState["phase"]; digits?: string } = {}) => {
+      const body = JSON.stringify({ data: { record_type: "event", event_type: eventType, id, occurred_at: now.toISOString(), payload: { call_control_id: "v3:owner-1", client_state: state(options.phase ?? "dial"), ...(options.digits === undefined ? {} : { digits: options.digits }) } } });
       const timestamp = String(Math.floor(now.getTime() / 1_000));
-      return fetch(`http://127.0.0.1:${address.port}/webhooks/telnyx`, { method: "POST", headers: { "content-type": "application/json", "telnyx-timestamp": timestamp, "telnyx-signature-ed25519": sign(null, Buffer.from(`${timestamp}|${body}`), key).toString("base64") }, body });
+      return fetch(`http://127.0.0.1:${address.port}/webhooks/telnyx`, { method: "POST", headers: { "content-type": "application/json", "telnyx-timestamp": timestamp, "telnyx-signature-ed25519": sign(null, Buffer.from(`${timestamp}|${body}`), options.key ?? keys.privateKey).toString("base64") }, body });
     };
-    expect((await post("call.answered", "evt-forged", generateKeyPairSync("ed25519").privateKey)).status).toBe(401);
+    expect((await post("call.answered", "evt-forged", { key: generateKeyPairSync("ed25519").privateKey })).status).toBe(401);
     expect(actions).toHaveLength(0);
-    // A refused speak answers 502 so Telnyx redelivers; the redelivery speaks (same command_id, so never twice).
+    // A refused gather answers 502 so Telnyx redelivers; the redelivery reads it (same command_id, so never twice).
+    refuseSpeak = true;
     expect((await post("call.answered", "evt-answered")).status).toBe(502);
     refuseSpeak = false;
     expect((await post("call.answered", "evt-answered")).status).toBe(200);
+    const gather = actions[actions.length - 1]!;
+    expect(gather.url).toBe("https://api.telnyx.com/v2/calls/v3%3Aowner-1/actions/gather_using_speak");
+    expect(gather.body).toMatchObject({ command_id: "evt-answered", valid_digits: "9", maximum_digits: 1 });
+    expect(String(gather.body.payload)).toContain("urgent call from Maria, no AC");
+    expect(String(gather.body.payload)).toMatch(/To stop these calls, press 9\.$/);
+    expect(ownerAlertState(gather.body.client_state)?.phase).toBe("gather");
+    // Speech events while gathering never hang up early.
+    await post("call.speak.ended", "evt-gather-speak", { phase: "gather" });
     expect(actions).toHaveLength(2);
-    expect(actions[1]!.url).toBe("https://api.telnyx.com/v2/calls/v3%3Aowner-1/actions/speak");
-    expect(actions[1]!.body.command_id).toBe("evt-answered");
-    expect(String(actions[1]!.body.payload)).toContain("urgent call from Maria, no AC");
-    await post("call.speak.ended", "evt-spoken");
-    expect(actions[2]!.url).toBe("https://api.telnyx.com/v2/calls/v3%3Aowner-1/actions/hangup");
+    // Nothing pressed: hang up, consent kept.
+    await post("call.gather.ended", "evt-no-digits", { phase: "gather", digits: "" });
+    expect(actions[actions.length - 1]!.url).toBe("https://api.telnyx.com/v2/calls/v3%3Aowner-1/actions/hangup");
+    expect(await store.getIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY)).not.toBeNull();
+    // Pressed 9: consent removed, confirmation spoken, then hang up.
+    await post("call.gather.ended", "evt-nine", { phase: "gather", digits: "9" });
+    expect(await store.getIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY)).toBeNull();
+    const bye = actions[actions.length - 1]!;
+    expect(bye.url).toBe("https://api.telnyx.com/v2/calls/v3%3Aowner-1/actions/speak");
+    expect(String(bye.body.payload)).toContain("won't call you about emergencies anymore");
+    expect(await store.getIntegrationSecret(tenantId, "notifications", "owner_call_consent_log")).toContain("keypad");
+    // The owner turns calls back on; a redelivered old keypress never turns them off again.
+    await store.saveIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY, JSON.stringify({ at: new Date(now.getTime() + 60_000).toISOString(), phone: "+15555550100" }));
+    await post("call.gather.ended", "evt-nine", { phase: "gather", digits: "9" });
+    expect(await store.getIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY)).not.toBeNull();
+    await post("call.speak.ended", "evt-bye", { phase: "bye" });
+    expect(actions[actions.length - 1]!.url).toBe("https://api.telnyx.com/v2/calls/v3%3Aowner-1/actions/hangup");
     expect(await store.listCalls("demo", 10)).toHaveLength(0);
+  });
+});
+
+describe("consent to automated emergency calls", () => {
+  let server: Server | null = null;
+  afterEach(async () => { if (server) await new Promise<void>((resolve) => server!.close(() => resolve())); server = null; });
+
+  it("is an unchecked box at signup, recorded with its wording version, and a switch in Settings", async () => {
+    const keys = generateKeyPairSync("ed25519");
+    const rawPublicKey = (keys.publicKey.export({ type: "spki", format: "der" }) as Buffer).subarray(-32).toString("base64");
+    const env = loadEnvironment({
+      NODE_ENV: "production", DEMO_MODE: "false", PUBLIC_BASE_URL: "https://front-office.example",
+      ADMIN_TOKEN: "admin-token-abcdefghijklmnopqrstuvwxyz", TOOL_TOKEN: "tool-token-abcdefghijklmnopqrstuvwxyz", SESSION_SIGNING_KEY: "session-signing-key-abcdefghijklmnopqrstuvwxyz",
+      DATABASE_URL: "postgresql://synthetic", DATA_ENCRYPTION_KEY: Buffer.alloc(32).toString("base64"),
+      TELNYX_API_KEY: "KEY_synthetic", TELNYX_PUBLIC_KEY: rawPublicKey, TELNYX_FROM_NUMBER: "+15555550199", TELNYX_CHECK_CONNECTION_ID: "check-connection",
+    });
+    const store = new InMemoryStore();
+    await store.saveConfig(createDemoConfig());
+    server = createServer(createRequestHandler({ env, store, calendar: new InMemoryCalendar(), clock, integrations: {}, logger: () => undefined }));
+    await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("no address");
+    const base = `http://127.0.0.1:${address.port}`;
+    const form = await (await fetch(`${base}/signup`)).text();
+    expect(form).toMatch(/<input name="ownerCallConsent" type="checkbox" value="yes" >/);
+    expect(form).toContain("Press 9 during a call, or turn it off in Settings, to stop.");
+    const signup = async (email: string, extra: Record<string, string>) => {
+      const response = await fetch(`${base}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Gulf Air", email, password: "synthetic-password-42", consent: "yes", phone: "9415550199", ...extra }) });
+      const account = (await store.getOwnerAccountByEmail(email))!;
+      return { cookie: response.headers.get("set-cookie")!.split(";")[0]!, tenantId: account.tenantId };
+    };
+    const yes = await signup("yes@consent.example", { ownerCallConsent: "yes" });
+    expect(JSON.parse((await store.getIntegrationSecret(yes.tenantId, "notifications", OWNER_CALL_CONSENT_KEY))!)).toMatchObject({ source: "signup", wording: "owner-urgent-calls-2026-11-23b" });
+    const no = await signup("no@consent.example", {});
+    expect(await store.getIntegrationSecret(no.tenantId, "notifications", OWNER_CALL_CONSENT_KEY)).toBeNull();
+    const settings = await (await fetch(`${base}/api/app/settings`, { headers: { cookie: no.cookie } })).json() as { csrf: string; urgentCalls: { available: boolean; on: boolean; disclosure: string } };
+    expect(settings.urgentCalls).toMatchObject({ available: true, on: false });
+    expect(settings.urgentCalls.disclosure).toContain("artificial-voice");
+    const toggle = (on: boolean) => fetch(`${base}/api/app/alerts/urgent-calls`, { method: "POST", headers: { cookie: no.cookie, "content-type": "application/json", "x-csrf-token": settings.csrf }, body: JSON.stringify({ on }) });
+    expect(await (await toggle(true)).json()).toMatchObject({ urgentCalls: { available: true, on: true } });
+    expect(JSON.parse((await store.getIntegrationSecret(no.tenantId, "notifications", OWNER_CALL_CONSENT_KEY))!)).toMatchObject({ source: "settings" });
+    // Consent belongs to the number: a new mobile is never called without a new yes.
+    await store.saveIntegrationSecret(no.tenantId, "notifications", "owner-primary", "+19415550111");
+    expect((await (await fetch(`${base}/api/app/settings`, { headers: { cookie: no.cookie } })).json() as { urgentCalls: { on: boolean } }).urgentCalls.on).toBe(false);
+    await store.saveIntegrationSecret(no.tenantId, "notifications", "owner-primary", "+19415550199");
+    expect(await (await toggle(false)).json()).toMatchObject({ urgentCalls: { available: true, on: false } });
+    expect(await store.getIntegrationSecret(no.tenantId, "notifications", "owner_call_consent_log")).toContain("settings");
+    expect(await store.getIntegrationSecret(no.tenantId, "notifications", OWNER_CALL_CONSENT_KEY)).toBeNull();
+    expect(await (await fetch(`${base}/terms`)).text()).toContain("press 9 during any of these calls");
   });
 });

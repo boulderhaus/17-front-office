@@ -4,9 +4,10 @@ import { anyGoogleClient, googleCredentials } from "./adapters/google-oauth-clie
 import { TeamCalendar } from "./adapters/team-calendar.js";
 import { PostgresStore } from "./adapters/postgres-store.js";
 import { TelnyxSmsAdapter } from "./adapters/telnyx.js";
-import { ResendEmailAdapter } from "./adapters/resend.js";
+import { ResendEmailAdapter, resendFrom } from "./adapters/resend.js";
 import { NotificationRouter } from "./adapters/notification-router.js";
 import { WebPushSender } from "./adapters/web-push.js";
+import { hasOwnerCallConsent } from "./domain/owner-call-consent.js";
 import { TelnyxOwnerCallSender, urgentOwnerCallsConfigured } from "./adapters/telnyx-owner-call.js";
 import { UnavailableCalendar } from "./adapters/unavailable.js";
 import { parseOwnerDestinations, type Environment } from "./config/environment.js";
@@ -96,7 +97,7 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
     : null;
   const emailConfigured = Boolean(env.RESEND_API_KEY && env.RESEND_FROM_EMAIL);
   const emailSender = emailConfigured
-    ? new ResendEmailAdapter({ apiKey: env.RESEND_API_KEY!, from: env.RESEND_FROM_EMAIL! })
+    ? new ResendEmailAdapter({ apiKey: env.RESEND_API_KEY!, from: resendFrom(env.RESEND_FROM_NAME, env.RESEND_FROM_EMAIL!) })
     : null;
   const pushSender = env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY
     ? new WebPushSender({ store, clock: systemClock, vapid: { publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY, subject: env.VAPID_SUBJECT } })
@@ -107,10 +108,13 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
         webhookUrl: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx`,
         resolveDestination: async (tenantId, reference) => (await store.getIntegrationSecret(tenantId, "notifications", reference)) ?? null,
         claimDial: (key) => store.claimWebhook(key),
+        hasConsent: (tenantId, phone) => hasOwnerCallConsent(store, tenantId, phone),
         ...(env.PROVIDER_TEST_MODE ? { allowedDestinations: new Set(Object.values(destinations)) } : {}),
       })
     : null;
-  const sender = new NotificationRouter(smsSender, emailSender, pushSender, voiceSender);
+  // Same rule as the answering exemption: the named demo tenant, and only while no owner account exists for it.
+  const sender = new NotificationRouter(smsSender, emailSender, pushSender, voiceSender,
+    async (tenantId) => tenantId === env.PUBLIC_DEMO_TENANT_ID && !await store.getOwnerAccountByTenant(tenantId));
   return {
     store,
     calendar,

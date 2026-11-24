@@ -112,7 +112,7 @@ function upcomingBookedCalls(calls: CallRecord[], now: Date, days: number): Call
 function dailySmsBody(tasks: CallbackTask[], appointments: CallRecord[], dashboardUrl: string): string {
   const urgent = tasks.filter((task) => task.priority === "high").length;
   return [
-    "Front Office: Today",
+    "Otto: Today",
     `${tasks.length} follow-up${tasks.length === 1 ? "" : "s"}${urgent ? ` (${urgent} urgent)` : ""}`,
     `${appointments.length} appointment${appointments.length === 1 ? "" : "s"} in the next 24 hours`,
     dashboardUrl,
@@ -131,7 +131,7 @@ function weeklyEmailBody(config: BusinessConfig, tasks: CallbackTask[], appointm
     `${appointments.length} booked appointment${appointments.length === 1 ? "" : "s"}`,
     ...(appointmentLines.length ? ["", "Appointments", ...appointmentLines] : []),
     "",
-    `Open Front Office: ${dashboardUrl}`,
+    `Open Call Otto: ${dashboardUrl}`,
     "",
     `Prepared ${new Intl.DateTimeFormat("en-US", { timeZone: config.timezone, dateStyle: "medium" }).format(now)}.`,
   ].join("\n");

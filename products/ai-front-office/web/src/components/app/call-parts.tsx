@@ -7,7 +7,7 @@ import { formatPhone, mapsUrl } from "@/lib/format"
 import type { ApiCall } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-export const ASSISTANT_NAME = "Front Office assistant"
+export const ASSISTANT_NAME = "Otto"
 
 export function CallHeader({ call, tone, label }: { call: ApiCall; tone: Tone; label: string }) {
   return (
@@ -37,7 +37,7 @@ export function SpamNote() {
   return (
     <p className="flex items-start gap-2 rounded-lg bg-secondary px-3 py-2.5 text-[15px] text-foreground/85">
       <ShieldAlert className="mt-0.5 size-4 shrink-0" />
-      <span>Front Office flagged this as likely spam. It doesn’t count toward your calls and needs no call back.</span>
+      <span>Call Otto flagged this as likely spam. It doesn’t count toward your calls and needs no call back.</span>
     </p>
   )
 }
@@ -132,7 +132,7 @@ export function phoneFact(call: ApiCall): [string, string] {
 interface Turn { speaker: "assistant" | "caller" | "other"; label: string; text: string }
 
 const SPEAKERS: Array<[RegExp, Turn["speaker"]]> = [
-  [/^(assistant|agent|ai|front office|receptionist)\s*:\s*/i, "assistant"],
+  [/^(otto|ai assistant|assistant|agent|ai|call otto|front office|receptionist)\s*:\s*/i, "assistant"],
   [/^(caller|customer|user|client)\s*:\s*/i, "caller"],
 ]
 

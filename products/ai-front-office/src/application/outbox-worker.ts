@@ -74,7 +74,7 @@ export class OutboxWorker {
     for (const destinationRef of config.ownerNotificationRefs) {
       await this.store.enqueueNotification({
         id: randomUUID(), tenantId: notification.tenantId, callId: notification.callId, channel: "sms", destinationRef,
-        body: `Front Office: CUSTOMER SMS FAILED\n${call.fields.callerName ?? "Unknown caller"} - ${call.fields.callbackNumber ?? call.fromNumber}\nManual follow-up required.`,
+        body: `Otto: CUSTOMER SMS FAILED\n${call.fields.callerName ?? "Unknown caller"} - ${call.fields.callbackNumber ?? call.fromNumber}\nManual follow-up required.`,
         priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
         idempotencyKey: `customer-sms-failure:${notification.id}:${destinationRef}`,
         providerReceipt: null, lastError: null, createdAt: now, sentAt: null,

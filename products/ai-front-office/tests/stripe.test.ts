@@ -180,7 +180,7 @@ describe("Stripe webhook state is read from the Stripe API", () => {
     } finally { await h.close(); }
   });
 
-  it("ignores subscriptions that are not for the Front Office plan or belong to another workspace", async () => {
+  it("ignores subscriptions that are not for the Call Otto plan or belong to another workspace", async () => {
     const h = await harness();
     try {
       h.api.price = "price_unrelated";

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { continueOwnerAlertCall, ownerAlertSpeech, urgentOwnerCallsConfigured } from "../adapters/telnyx-owner-call.js";
+import { continueOwnerAlertCall, ownerAlertState, urgentOwnerCallsConfigured } from "../adapters/telnyx-owner-call.js";
+import { grantOwnerCallConsent, hasOwnerCallConsent, OWNER_CALL_CONSENT_DETAIL, revokeOwnerCallConsent } from "../domain/owner-call-consent.js";
 import { deviceId, listPushSubscriptions, parsePushSubscription, removePushSubscriptions, savePushSubscription } from "../adapters/web-push.js";
 import { lineLiveNotifications, ownerPushNotification } from "../application/owner-alerts.js";
 import { SERVICE_WORKER, WEB_MANIFEST } from "./pwa.js";
@@ -191,6 +192,7 @@ const ownerSignupSchema = z.object({
   emergencyKeywords: z.string().trim().min(2).max(800).default("gas smell, carbon monoxide, no heat, frozen pipes"),
   weekends: z.string().optional(),
   ownerSmsConsent: z.literal("yes").optional(),
+  ownerCallConsent: z.literal("yes").optional(),
   founderSmsConsent: z.literal("yes").optional(),
   // Agreement to the terms is the notice beside the button; an old form may still send the box.
   consent: z.literal("yes").optional(),
@@ -386,6 +388,12 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     urgentCallAvailable: urgentOwnerCallsConfigured(dependencies.env),
   });
   const vapid = dependencies.env.VAPID_PUBLIC_KEY && dependencies.env.VAPID_PRIVATE_KEY ? { publicKey: dependencies.env.VAPID_PUBLIC_KEY } : null;
+  /** Automated emergency calls to the owner: offered when configured; on only with recorded consent. */
+  const urgentCallsState = async (tenantId: string): Promise<{ available: boolean; on: boolean; disclosure: string }> => ({
+    available: urgentOwnerCallsConfigured(dependencies.env),
+    on: await hasOwnerCallConsent(dependencies.store, tenantId, await dependencies.store.getIntegrationSecret(tenantId, "notifications", "owner-primary")),
+    disclosure: OWNER_CALL_CONSENT_DETAIL,
+  });
   const recordingClient = dependencies.env.TELNYX_API_KEY ? new TelnyxRecordingClient(dependencies.env.TELNYX_API_KEY, dependencies.fetcher ?? fetch) : null;
   const routingClient = dependencies.env.TELNYX_API_KEY && dependencies.env.TELNYX_FROM_NUMBER && dependencies.env.TELNYX_ASSISTANT_ID
     ? new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: dependencies.env.TELNYX_FROM_NUMBER, assistantId: dependencies.env.TELNYX_ASSISTANT_ID })
@@ -584,7 +592,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       response.end(WEB_MANIFEST);
       return;
     }
-    if (method === "GET" && (url.pathname === "/assets/front-office-mascot-flat.png" || url.pathname === "/assets/stripe-product.png" || url.pathname === "/assets/icon-192.png" || url.pathname === "/assets/icon-512.png" || url.pathname === "/assets/apple-touch-icon.png")) {
+    if (method === "GET" && (url.pathname === "/assets/front-office-mascot-flat.png" || url.pathname === "/assets/stripe-product.png" || url.pathname === "/assets/icon-192.png" || url.pathname === "/assets/icon-512.png" || url.pathname === "/assets/apple-touch-icon.png" || url.pathname === "/assets/sms-opt-in.png")) {
       const asset = await readFile(resolve(process.cwd(), "public" + url.pathname));
       response.statusCode = 200;
       response.setHeader("content-type", "image/png");
@@ -756,6 +764,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           log({ level: "info", event: "founder_welcome_unconfigured", tenantId });
         }
       }
+      if (parsed.data.ownerCallConsent === "yes" && phone) {
+        // TCPA: prior express consent to automated emergency calls, with the exact wording version shown.
+        await grantOwnerCallConsent(dependencies.store, tenantId, { at: now, source: "signup", ip, phone });
+      }
       if (parsed.data.ownerSmsConsent === "yes") {
         // Proof of opt-in for the carrier: when, from where, and the exact wording version shown.
         await dependencies.store.saveIntegrationSecret(tenantId, "notifications", "owner_sms_consent", JSON.stringify({ at: now, source: "signup", wording: SMS_CONSENT_VERSION, ip }));
@@ -804,7 +816,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         const link = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/reset?token=${encodeURIComponent(token)}`;
         await dependencies.store.enqueueNotification({
           id: randomUUID(), tenantId: resetAccount.tenantId, callId: null, channel: "email", destinationRef: `email:${resetAccount.email}`,
-          body: formatEmailBody("Reset your Front Office password", `Use this link within 30 minutes to choose a new password:\n\n${link}\n\nIf you didn't ask for this, ignore this email. Your password has not changed.`),
+          body: formatEmailBody("Reset your Call Otto password", `Use this link within 30 minutes to choose a new password:\n\n${link}\n\nIf you didn't ask for this, ignore this email. Your password has not changed.`),
           priority: "high", state: "pending", attempts: 0, nextAttemptAt: now.toISOString(),
           idempotencyKey: `password-reset:${tokenHash}`, providerReceipt: null, lastError: null, createdAt: now.toISOString(), sentAt: null,
         });
@@ -1051,6 +1063,21 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       telemetry.capture("push_alerts_on", account.id, account.tenantId);
       return sendJson(response, 200, { on: true, devices: (await listPushSubscriptions(dependencies.store, account.tenantId)).length });
     }
+    if (method === "POST" && url.pathname === "/api/app/alerts/urgent-calls") {
+      if (!owner) throw new HttpError(403, "Only the owner can change emergency calls");
+      const body = await readApiJson(request, session, 1_000) as { on?: unknown };
+      if (typeof body.on !== "boolean") throw new HttpError(400, "Say on or off");
+      const now = dependencies.clock.now().toISOString();
+      if (body.on) {
+        const mobile = await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary");
+        if (!mobile) throw new HttpError(400, "Add your mobile number first.");
+        await grantOwnerCallConsent(dependencies.store, account.tenantId, { at: now, source: "settings", ip: requestIp(request), phone: mobile });
+      } else {
+        await revokeOwnerCallConsent(dependencies.store, account.tenantId, { at: now, source: "settings" });
+      }
+      log({ level: "info", event: body.on ? "owner_calls_opted_in" : "owner_calls_opted_out", tenantId: account.tenantId, source: "settings" });
+      return sendJson(response, 200, { urgentCalls: await urgentCallsState(account.tenantId) });
+    }
     if (method === "POST" && url.pathname === "/api/app/push/unsubscribe") {
       const body = await readApiJson(request, session, 4_000) as { endpoint?: unknown };
       if (typeof body.endpoint === "string") await removePushSubscriptions(dependencies.store, account.tenantId, [body.endpoint]);
@@ -1063,7 +1090,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const number = typeof body.number === "string" ? normalizeUsPhone(body.number) : null;
       if (!number) throw new HttpError(400, "Enter your business phone number, like (941) 555-0123");
       const lineNumber = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number");
-      if (lineNumber && number === lineNumber) throw new HttpError(400, "That’s your Front Office number. Enter the number your customers call today.");
+      if (lineNumber && number === lineNumber) throw new HttpError(400, "That’s your Call Otto number. Enter the number your customers call today.");
       const chosen = body.family === "verizon" || body.family === "gsm" || body.family === "office" ? body.family as CarrierFamily : null;
       const previous = await readForwarding(account.tenantId);
       let carrier: CarrierInfo;
@@ -1090,7 +1117,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
         readForwarding(account.tenantId),
       ]);
-      if (!lineNumber) throw new HttpError(409, "Turn on your Front Office line first.");
+      if (!lineNumber) throw new HttpError(409, "Turn on your Call Otto line first.");
       if (!state.businessNumber) throw new HttpError(409, "Add your business phone number first.");
       if (!limiter.allow(`forwarding-check:${account.tenantId}`, 6, 60 * 60_000)) throw new HttpError(429, "That’s a lot of checks. Please wait a few minutes and try again.");
       const startedAt = dependencies.clock.now().toISOString();
@@ -1128,7 +1155,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
             `Call them back: ${ownerPhone ?? state.businessNumber ?? "no number on file"}`,
             `Business number: ${state.businessNumber ?? "not entered"}`,
             `Carrier: ${state.carrier?.name ?? "unknown"} (${state.carrier?.family ?? "unknown"}, ${state.carrier?.lineType ?? "unknown line type"})`,
-            `Forward to (Front Office number): ${lineNumber ?? "line not turned on yet"}`,
+            `Forward to (Call Otto number): ${lineNumber ?? "line not turned on yet"}`,
             `Account: ${account.email}`,
           ].join("\n")),
           priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
@@ -1235,6 +1262,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       ]);
       return sendJson(response, 200, {
         csrf: session.csrf,
+        urgentCalls: await urgentCallsState(account.tenantId),
         values: apiSettings(config),
         status: account.status,
         businessName: config.businessName,
@@ -1603,7 +1631,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         throw new HttpError(409, "Cancel your subscription in Billing first. You can delete your account once it has ended.");
       }
       await pauseLiveRoute(account.tenantId)
-        .catch(() => { throw new HttpError(502, "We couldn't disconnect your Front Office line. Nothing was deleted; please retry."); });
+        .catch(() => { throw new HttpError(502, "We couldn't disconnect your Call Otto line. Nothing was deleted; please retry."); });
       await releaseProvisionedLine(account.tenantId);
       await deletionService.deleteWorkspace(account.tenantId)
         .catch(() => { throw new HttpError(502, "A call recording couldn't be deleted. Nothing else was removed; please retry."); });
@@ -1915,7 +1943,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     } catch (error) {
       if (!(error instanceof HttpError)) throw error;
       if (error.message.startsWith("Live provider prerequisites")) {
-        return { status: "waiting", message: "Your Front Office number is on its way. Phone carriers approve new business lines, which usually takes 1 to 3 business days. Everything else is saved, so keep going. We’ll turn it on the moment it clears." };
+        return { status: "waiting", message: "Your Call Otto number is on its way. Phone carriers approve new business lines, which usually takes 1 to 3 business days. Everything else is saved, so keep going. We’ll turn it on the moment it clears." };
       }
       if (error.message === ASSISTANT_TAKEN) return { status: "failed", message: OWNER_SETUP_STUCK };
       if (error.status === 409) return { status: "blocked", message: `${error.message.replace(/^This shop is missing: /, "Add your ")}. You can do that in Settings.` };
@@ -1992,7 +2020,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         } catch (error) {
           if (error instanceof HttpError) throw error;
           log({ level: "error", event: "line_provisioning_failed", tenantId: account.tenantId, error: safeError(error) });
-          throw new HttpError(502, "We couldn't set up your Front Office number just now. Try again in a minute.");
+          throw new HttpError(502, "We couldn't set up your Call Otto number just now. Try again in a minute.");
         }
       }
 
@@ -2015,7 +2043,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         await liveRoute.setPaused(false)
           .catch((error) => {
             log({ level: "error", event: "go_live_connect_failed", tenantId: account.tenantId, error: safeError(error) });
-            throw new HttpError(502, "We couldn’t connect your Front Office number just now. Try again in a minute.");
+            throw new HttpError(502, "We couldn’t connect your Call Otto number just now. Try again in a minute.");
           });
         await dependencies.store.saveConfig({ ...config, paused: false });
         await dependencies.store.updateOwnerAccountStatus(account.id, "active", now);
@@ -2224,8 +2252,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       await dependencies.store.enqueueNotification({
         id: randomUUID(), tenantId, callId: null, channel: "sms", destinationRef,
         body: grace
-          ? `Front Office is paused: your subscription is ${statusWords}. For the next ${GRACE_DAYS} days calls forwarded to your Front Office line go to voicemail and we text you each message; after that the number stops working. Update billing in your dashboard, or ${lowerFirst(offCode)}`
-          : `Front Office is paused: your subscription is ${statusWords}. Calls forwarded to your Front Office line will not be answered. Update billing in your dashboard, or ${lowerFirst(offCode)}`,
+          ? `Call Otto is paused: your subscription is ${statusWords}. For the next ${GRACE_DAYS} days calls forwarded to your Call Otto line go to voicemail and we text you each message; after that the number stops working. Update billing in your dashboard, or ${lowerFirst(offCode)}`
+          : `Call Otto is paused: your subscription is ${statusWords}. Calls forwarded to your Call Otto line will not be answered. Update billing in your dashboard, or ${lowerFirst(offCode)}`,
         priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
         idempotencyKey: `billing-lapse:${tenantId}:${eventId}:${destinationRef}`,
         providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
@@ -2263,7 +2291,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     for (const destinationRef of config.ownerNotificationRefs) {
       await dependencies.store.enqueueNotification({
         id: randomUUID(), tenantId, callId: null, channel: "sms", destinationRef,
-        body: "Front Office is back on: your payment went through and calls forwarded to your Front Office line are being answered again.",
+        body: "Call Otto is back on: your payment went through and calls forwarded to your Call Otto line are being answered again.",
         priority: "normal", state: "pending", attempts: 0, nextAttemptAt: now,
         idempotencyKey: `billing-restored:${tenantId}:${eventId}:${destinationRef}`,
         providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
@@ -2377,14 +2405,22 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       return sendJson(response, 200, { received: true });
     }
     const envelope = parseTelnyxEnvelope(rawBody);
-    const ownerAlert = ownerAlertSpeech(envelope.data.payload.client_state);
-    if (ownerAlert !== null) {
+    const ownerAlert = ownerAlertState(envelope.data.payload.client_state);
+    if (ownerAlert) {
       // Our urgent call to an owner: speak when answered, hang up when done. Never a customer call record.
       // No webhook claim: a failed step answers 502 so Telnyx redelivers, and command_id (the event id) makes a
       // redelivered speak or hangup a no-op at Telnyx.
       const callControlId = envelope.data.payload.call_control_id;
       if (typeof callControlId === "string" && dependencies.env.TELNYX_API_KEY) {
-        await continueOwnerAlertCall({ apiKey: dependencies.env.TELNYX_API_KEY, eventType: envelope.data.event_type, eventId: envelope.data.id, callControlId, speech: ownerAlert, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })
+        const digits = typeof envelope.data.payload.digits === "string" ? envelope.data.payload.digits : null;
+        const onOptOut = async () => {
+          // Pressed 9: no more automated calls to this owner until they turn them back on in Settings.
+          // Only a grant older than this keypress: a redelivered webhook never undoes a later "turn it back on".
+          // Telnyx always stamps occurred_at; without it, stopping wins.
+          const revoked = await revokeOwnerCallConsent(dependencies.store, ownerAlert.tenantId, { at: dependencies.clock.now().toISOString(), source: "keypad", ...(envelope.data.occurred_at ? { before: envelope.data.occurred_at } : {}) });
+          if (revoked) log({ level: "info", event: "owner_calls_opted_out", tenantId: ownerAlert.tenantId, source: "keypad" });
+        };
+        await continueOwnerAlertCall({ apiKey: dependencies.env.TELNYX_API_KEY, eventType: envelope.data.event_type, eventId: envelope.data.id, callControlId, state: ownerAlert, digits, onOptOut, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })
           .catch((error) => {
             log({ level: "error", event: "owner_alert_call_step_failed", step: envelope.data.event_type, error: safeError(error) });
             throw new HttpError(502, "Owner alert call step failed");
@@ -2922,7 +2958,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (!config) return sendJson(response, 200, { received: true, ignored: "unknown_tenant" });
     const caller = describeCaller(form.get("From")?.trim() || null);
     const off = await offInstructionFor(tenantId);
-    const suffix = await graceStartedAt(dependencies.store, tenantId) ? ` Your Front Office plan is paused; ${lowerFirst(off)}` : "";
+    const suffix = await graceStartedAt(dependencies.store, tenantId) ? ` Your Call Otto plan is paused; ${lowerFirst(off)}` : "";
     const fallbackBase = `voicemail-fallback:${tenantId}:${callSid}`;
     // One gate per call: whichever callback arrives first decides whether a no-transcript fallback may exist.
     const firstForCall = await dependencies.store.claimWebhook(fallbackBase);
@@ -2933,7 +2969,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       // Goes out only if the transcript has not arrived (and cancelled it) within a few minutes.
       await queueOwnerMessage(graceContext, {
         tenantId,
-        sms: `Front Office voicemail for ${config.businessName}: ${caller} left you a message we couldn't transcribe. Call them back.${suffix}`,
+        sms: `Call Otto voicemail for ${config.businessName}: ${caller} left you a message we couldn't transcribe. Call them back.${suffix}`,
         emailSubject: `New voicemail for ${config.businessName}`,
         idempotencyBase: fallbackBase,
         sendAfter: new Date(dependencies.clock.now().getTime() + VOICEMAIL_FALLBACK_DELAY_MS),
@@ -2948,7 +2984,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const said = transcript ? `${caller} said: \u201c${transcript}\u201d.` : `${caller} left a message with no words we could make out.`;
     const result = await queueOwnerMessage(graceContext, {
       tenantId,
-      sms: `Front Office voicemail for ${config.businessName}: ${said}${suffix}`,
+      sms: `Call Otto voicemail for ${config.businessName}: ${said}${suffix}`,
       emailSubject: `New voicemail for ${config.businessName}`,
       idempotencyBase: `voicemail:${tenantId}:${callSid}`,
     });
@@ -3014,6 +3050,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (dependencies.env.DEMO_MODE) return;
     const config = await dependencies.store.getConfig(tenantId);
     if (config.paused) throw new HttpError(503, "Service is paused");
+    // The public demo line answers anyone, with or without provider test mode; it never sends (NotificationRouter).
+    if (tenantId === dependencies.env.PUBLIC_DEMO_TENANT_ID && !await dependencies.store.getOwnerAccountByTenant(tenantId)) return;
     if (dependencies.env.PROVIDER_TEST_MODE) return;
     if (tenantId !== dependencies.env.DEFAULT_TENANT_ID) {
       // Voice goes live without carrier texting approval (10DLC): texts are held until it lands (TelnyxSmsAdapter).

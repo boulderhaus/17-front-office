@@ -18,6 +18,7 @@ import { BookingCoordinator } from "./booking-coordinator.js";
 import { redactError, withRetry } from "./retry.js";
 import { UsageAlertService } from "./usage-alerts.js";
 import { callbackLinkToken, ownerCallSms, shortWhen, urgentReason } from "../domain/owner-sms.js";
+import { hasOwnerCallConsent } from "../domain/owner-call-consent.js";
 import { ownerCallEmailNotification, ownerCallPushMessage, ownerPushNotification, urgentCallSpeech, urgentOwnerCallNotification } from "./owner-alerts.js";
 import { listPushSubscriptions } from "../adapters/web-push.js";
 
@@ -903,7 +904,8 @@ export class CallService {
     // Urgent or life-safety: ring the owner's mobile too, once per call (the handoff alert and the summary share it).
     if (this.#urgentCallAvailable && call.emergency?.emergency === true
       && await this.store.getOwnerAccountByTenant(call.tenantId)
-      && await this.store.getIntegrationSecret(call.tenantId, "notifications", "owner-primary")) {
+      // TCPA: automated calls only with the owner's recorded consent for this mobile (signup or Settings; 9 stops it).
+      && await hasOwnerCallConsent(this.store, call.tenantId, await this.store.getIntegrationSecret(call.tenantId, "notifications", "owner-primary"))) {
       const config = await this.store.getConfig(call.tenantId);
       const speech = urgentCallSpeech(call, this.wantsLine(call.fields.requestedStart, config.timezone));
       await this.store.enqueueNotification(urgentOwnerCallNotification({ tenantId: call.tenantId, callId: call.id, speech, now }));
@@ -1123,13 +1125,13 @@ function formatSpokenSlots(slots: AvailabilitySlot[], timeZone: string, now: Dat
     .join("; ");
 }
 
-/** Caller lines from a readable transcript ("Caller: …" / "AI assistant: …"), including wrapped continuation lines. */
+/** Caller lines from a readable transcript ("Caller: …" / "Otto: …", or "AI assistant: …" before the rename), including wrapped continuation lines. */
 export function callerSpeech(transcript: string | null): string {
   let speaker: "caller" | "assistant" | null = null;
   const lines: string[] = [];
   for (const line of (transcript ?? "").split("\n")) {
     if (line.startsWith("Caller:")) { speaker = "caller"; lines.push(line.slice("Caller:".length).trim()); continue; }
-    if (line.startsWith("AI assistant:")) { speaker = "assistant"; continue; }
+    if (line.startsWith("Otto:") || line.startsWith("AI assistant:")) { speaker = "assistant"; continue; }
     if (speaker === "caller") lines.push(line.trim());
   }
   return lines.filter(Boolean).join("\n");
