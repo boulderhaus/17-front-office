@@ -531,8 +531,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       throw new HttpError(429, "Too many requests");
     }
 
-    if (method === "GET" && url.pathname === "/assets/front-office-mascot-flat.png") {
-      const asset = await readFile(resolve(process.cwd(), "public/assets/front-office-mascot-flat.png"));
+    if (method === "GET" && (url.pathname === "/assets/front-office-mascot-flat.png" || url.pathname === "/assets/stripe-product.png")) {
+      const asset = await readFile(resolve(process.cwd(), "public" + url.pathname));
       response.statusCode = 200;
       response.setHeader("content-type", "image/png");
       response.setHeader("cache-control", "public, max-age=86400");
