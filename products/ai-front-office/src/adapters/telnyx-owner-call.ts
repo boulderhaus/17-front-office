@@ -25,6 +25,11 @@ export interface OwnerCallOptions {
   webhookUrl: string;
   clock: Clock;
   resolveDestination: (tenantId: string, reference: string) => Promise<string | null>;
+  /**
+   * Durable once-only claim (Store.claimWebhook): each urgent notification dials at most once, across retries,
+   * replicas and restarts. A lost or failed dial is never retried, so the owner is never rung twice.
+   */
+  claimDial: (key: string) => Promise<boolean>;
   /** Provider test mode: only these numbers may be called. */
   allowedDestinations?: ReadonlySet<string>;
   fetcher?: typeof fetch;
@@ -43,6 +48,9 @@ export class TelnyxOwnerCallSender implements NotificationPort {
     const now = this.options.clock.now().getTime();
     const recent = (this.#recent.get(notification.tenantId) ?? []).filter((at) => now - at < 60 * 60_000);
     if (recent.length >= CALLS_PER_HOUR) throw new NotificationHeldError("Urgent owner call limit reached for this hour");
+    if (!await this.options.claimDial(`owner-call-dial:${notification.idempotencyKey}`)) throw new NotificationHeldError("Urgent owner call already dialed once");
+    this.#recent.set(notification.tenantId, [...recent, now]);
+    // One attempt only: a timeout may still have created the call, so nothing here is retried.
     const response = await withTimeout((this.options.fetcher ?? fetch)("https://api.telnyx.com/v2/calls", {
       method: "POST",
       headers: { authorization: `Bearer ${this.options.apiKey}`, "content-type": "application/json" },
@@ -55,11 +63,12 @@ export class TelnyxOwnerCallSender implements NotificationPort {
         webhook_url: this.options.webhookUrl,
         client_state: ownerAlertClientState(notification.body),
       }),
-    }), 8_000);
+    }), 8_000).catch((error: unknown) => {
+      throw new NotificationHeldError(`Urgent owner call not confirmed, not retried: ${error instanceof Error ? error.message.slice(0, 120) : "request failed"}`);
+    });
     const payload = await response.json().catch(() => ({})) as { data?: { call_control_id?: unknown } };
     const callControlId = typeof payload.data?.call_control_id === "string" ? payload.data.call_control_id : null;
-    if (!response.ok || !callControlId) throw new Error(`Owner call failed with HTTP ${response.status}`);
-    this.#recent.set(notification.tenantId, [...recent, now]);
+    if (!response.ok || !callControlId) throw new NotificationHeldError(`Urgent owner call failed with HTTP ${response.status}, not retried`);
     return { providerReceipt: `owner-call:${callControlId}` };
   }
 }
@@ -87,6 +96,6 @@ export async function continueOwnerAlertCall(input: { apiKey: string; eventType:
     headers: { authorization: `Bearer ${input.apiKey}`, "content-type": "application/json" },
     body: JSON.stringify(body),
   }), 8_000);
-  // The caller may already have hung up: that is fine.
-  if (!response.ok && response.status !== 404 && response.status !== 422) throw new Error(`Owner call ${action} failed with HTTP ${response.status}`);
+  // Hanging up a call that already ended (404/422) is fine; a refused speak is not.
+  if (!response.ok && !(action === "hangup" && (response.status === 404 || response.status === 422))) throw new Error(`Owner call ${action} failed with HTTP ${response.status}`);
 }

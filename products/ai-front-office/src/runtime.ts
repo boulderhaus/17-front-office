@@ -106,6 +106,7 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
         apiKey: env.TELNYX_API_KEY!, connectionId: env.TELNYX_CHECK_CONNECTION_ID!, from: env.TELNYX_FROM_NUMBER!, clock: systemClock,
         webhookUrl: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx`,
         resolveDestination: async (tenantId, reference) => (await store.getIntegrationSecret(tenantId, "notifications", reference)) ?? null,
+        claimDial: (key) => store.claimWebhook(key),
         ...(env.PROVIDER_TEST_MODE ? { allowedDestinations: new Set(Object.values(destinations)) } : {}),
       })
     : null;

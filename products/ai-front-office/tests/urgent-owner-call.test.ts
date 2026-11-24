@@ -59,26 +59,36 @@ describe("urgent calls ring the owner", () => {
       posted.push(JSON.parse(String(init.body)));
       return new Response(JSON.stringify({ data: { call_control_id: `v3:owner-${posted.length}` } }), { status: 200 });
     }) as unknown as typeof fetch;
-    const options = { apiKey: "KEY", connectionId: "check-connection", from: "+15555550199", webhookUrl: "https://front-office.example/webhooks/telnyx", clock, fetcher, resolveDestination: async () => "+15555550100" };
+    const claims = new InMemoryStore();
+    const options = { apiKey: "KEY", connectionId: "check-connection", from: "+15555550199", webhookUrl: "https://front-office.example/webhooks/telnyx", clock, fetcher, resolveDestination: async () => "+15555550100", claimDial: (key: string) => claims.claimWebhook(key) };
     const sender = new TelnyxOwnerCallSender(options);
     const notification = (callId: string) => urgentOwnerCallNotification({ tenantId: "shop", callId, speech: "Front Office: urgent call from Maria, no AC. Check your Front Office app.", now: now.toISOString() });
     const receipts = [];
     for (const id of ["a", "b", "c"]) receipts.push((await sender.send(notification(id))).providerReceipt);
     expect(new Set(receipts).size).toBe(3);
+    // A retried notification never rings the owner a second time, even on another sender (replica).
+    await expect(new TelnyxOwnerCallSender(options).send(notification("a"))).rejects.toBeInstanceOf(NotificationHeldError);
+    expect(posted).toHaveLength(3);
     await expect(sender.send(notification("d"))).rejects.toBeInstanceOf(NotificationHeldError);
     expect(posted[0]).toMatchObject({ connection_id: "check-connection", to: "+15555550100", from: "+15555550199", webhook_url: "https://front-office.example/webhooks/telnyx" });
     expect(ownerAlertSpeech(posted[0]!.client_state)).toBe("Front Office: urgent call from Maria, no AC. Check your Front Office app.");
     expect(ownerAlertSpeech(Buffer.from("forwarding-check:shop").toString("base64"))).toBeNull();
     const testMode = new TelnyxOwnerCallSender({ ...options, allowedDestinations: new Set(["+15555550111"]) });
     await expect(testMode.send(notification("e"))).rejects.toBeInstanceOf(NotificationHeldError);
+    // A dial that times out may have rung anyway: held, never retried.
+    const slow = new TelnyxOwnerCallSender({ ...options, fetcher: (async () => { throw new Error("timeout"); }) as unknown as typeof fetch });
+    await expect(slow.send(notification("f"))).rejects.toBeInstanceOf(NotificationHeldError);
+    await expect(slow.send(notification("f"))).rejects.toThrow("already dialed");
   });
 
   it("speaks the summary when the owner answers and hangs up after, from signed webhooks only", async () => {
     const keys = generateKeyPairSync("ed25519");
     const rawPublicKey = (keys.publicKey.export({ type: "spki", format: "der" }) as Buffer).subarray(-32).toString("base64");
     const actions: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let refuseSpeak = true;
     const fetcher = (async (input: string | URL, init?: RequestInit) => {
       actions.push({ url: String(input), body: JSON.parse(String(init?.body ?? "{}")) });
+      if (refuseSpeak && String(input).endsWith("/speak")) return new Response("{}", { status: 422 });
       return new Response(JSON.stringify({ data: { result: "ok" } }), { status: 200 });
     }) as typeof fetch;
     const env = loadEnvironment({
@@ -100,13 +110,16 @@ describe("urgent calls ring the owner", () => {
     };
     expect((await post("call.answered", "evt-forged", generateKeyPairSync("ed25519").privateKey)).status).toBe(401);
     expect(actions).toHaveLength(0);
+    // A refused speak answers 502 so Telnyx redelivers; the redelivery speaks (same command_id, so never twice).
+    expect((await post("call.answered", "evt-answered")).status).toBe(502);
+    refuseSpeak = false;
     expect((await post("call.answered", "evt-answered")).status).toBe(200);
-    expect((await post("call.answered", "evt-answered")).status).toBe(200);
-    expect(actions).toHaveLength(1);
-    expect(actions[0]!.url).toBe("https://api.telnyx.com/v2/calls/v3%3Aowner-1/actions/speak");
-    expect(String(actions[0]!.body.payload)).toContain("urgent call from Maria, no AC");
+    expect(actions).toHaveLength(2);
+    expect(actions[1]!.url).toBe("https://api.telnyx.com/v2/calls/v3%3Aowner-1/actions/speak");
+    expect(actions[1]!.body.command_id).toBe("evt-answered");
+    expect(String(actions[1]!.body.payload)).toContain("urgent call from Maria, no AC");
     await post("call.speak.ended", "evt-spoken");
-    expect(actions[1]!.url).toBe("https://api.telnyx.com/v2/calls/v3%3Aowner-1/actions/hangup");
+    expect(actions[2]!.url).toBe("https://api.telnyx.com/v2/calls/v3%3Aowner-1/actions/hangup");
     expect(await store.listCalls("demo", 10)).toHaveLength(0);
   });
 });

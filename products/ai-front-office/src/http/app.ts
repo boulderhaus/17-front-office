@@ -2303,10 +2303,15 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     const ownerAlert = ownerAlertSpeech(envelope.data.payload.client_state);
     if (ownerAlert !== null) {
       // Our urgent call to an owner: speak when answered, hang up when done. Never a customer call record.
+      // No webhook claim: a failed step answers 502 so Telnyx redelivers, and command_id (the event id) makes a
+      // redelivered speak or hangup a no-op at Telnyx.
       const callControlId = envelope.data.payload.call_control_id;
-      if (typeof callControlId === "string" && dependencies.env.TELNYX_API_KEY && await dependencies.store.claimWebhook(telnyxEventId(envelope, rawBody))) {
+      if (typeof callControlId === "string" && dependencies.env.TELNYX_API_KEY) {
         await continueOwnerAlertCall({ apiKey: dependencies.env.TELNYX_API_KEY, eventType: envelope.data.event_type, eventId: envelope.data.id, callControlId, speech: ownerAlert, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })
-          .catch((error) => log({ level: "error", event: "owner_alert_call_step_failed", step: envelope.data.event_type, error: safeError(error) }));
+          .catch((error) => {
+            log({ level: "error", event: "owner_alert_call_step_failed", step: envelope.data.event_type, error: safeError(error) });
+            throw new HttpError(502, "Owner alert call step failed");
+          });
       }
       return sendJson(response, 200, { received: true });
     }
