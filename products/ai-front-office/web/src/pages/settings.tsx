@@ -230,7 +230,7 @@ export function SettingsPage() {
 
         <Group title="Alerts to your phone">
           <CallAlertsCard className="p-3.5" />
-          <Field label="Mobile number" hint="Emergencies and “call me back” requests are always texted here.">
+          <Field label="Mobile number" hint="Urgent calls ring this number. Text alerts come here too, once texts are on.">
             <Input type="tel" inputMode="tel" autoComplete="tel" className={fieldClass} placeholder={i.ownerPhoneConfigured ? "Saved. Enter a new number to replace it" : "+1 941 555 0100"} {...bind("ownerPhone")} />
           </Field>
           <Toggle id="ownerDailySmsEnabled" label={<>Daily text recap <em className="ml-1 not-italic text-brand-ink/70">Included</em></>} hint="Follow-ups and appointments, once each morning." checked={flag("ownerDailySmsEnabled")} onChange={(value) => set("ownerDailySmsEnabled", value)} />

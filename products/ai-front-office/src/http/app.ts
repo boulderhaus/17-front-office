@@ -779,7 +779,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (!emailEnabled) return sendHtml(response, 200, renderForgotPassword({ emailEnabled, supportEmail: dependencies.env.SUPPORT_EMAIL ?? null }));
       if (!limiter.allow(`${ip}:forgot`, 5, 60 * 60_000)) throw new HttpError(429, "Too many reset requests");
       const parsed = z.object({ email: z.string().trim().toLowerCase().email().max(254) }).safeParse(Object.fromEntries(parseForm(await readBody(request, 4_000)).entries()));
-      if (!parsed.success) return sendHtml(response, 400, renderForgotPassword({ emailEnabled, error: "Enter the email on your account." }));
+      if (!parsed.success) return sendHtml(response, 400, renderForgotPassword({ emailEnabled, supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, error: "Enter the email on your account." }));
       const resetAccount = limiter.allow(`forgot-email:${parsed.data.email}`, 3, 60 * 60_000) ? await dependencies.store.getOwnerAccountByEmail(parsed.data.email) : null;
       if (resetAccount && resetAccount.status !== "suspended") {
         const { token, tokenHash } = createPasswordResetToken();
@@ -796,16 +796,16 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       // Same answer whether or not the account exists.
       return sendHtml(response, 200, renderForgotPassword({ emailEnabled, sent: true }));
     }
-    if (url.pathname === "/reset" && method === "GET") return sendHtml(response, 200, renderResetPassword(url.searchParams.get("token") ?? ""));
+    if (url.pathname === "/reset" && method === "GET") return sendHtml(response, 200, renderResetPassword(url.searchParams.get("token") ?? "", "", dependencies.env.SUPPORT_EMAIL ?? null));
     if (url.pathname === "/reset" && method === "POST") {
       if (!limiter.allow(`${ip}:reset`, 10, 60 * 60_000)) throw new HttpError(429, "Too many attempts");
       const form = parseForm(await readBody(request, 4_000));
       const token = form.get("token") ?? "";
       const password = form.get("password") ?? "";
-      if (password.length < 12 || password.length > 200) return sendHtml(response, 400, renderResetPassword(token, "Use at least 12 characters."));
-      if (password !== form.get("confirm")) return sendHtml(response, 400, renderResetPassword(token, "The two passwords don't match."));
+      if (password.length < 12 || password.length > 200) return sendHtml(response, 400, renderResetPassword(token, "Use at least 12 characters.", dependencies.env.SUPPORT_EMAIL ?? null));
+      if (password !== form.get("confirm")) return sendHtml(response, 400, renderResetPassword(token, "The two passwords don't match.", dependencies.env.SUPPORT_EMAIL ?? null));
       const accountId = token ? await dependencies.store.consumePasswordReset(hashPasswordResetToken(token), dependencies.clock.now().toISOString()) : null;
-      if (!accountId) return sendHtml(response, 400, renderForgotPassword({ emailEnabled: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL), error: "That reset link is expired or already used. Ask for a new one." }));
+      if (!accountId) return sendHtml(response, 400, renderForgotPassword({ emailEnabled: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL), supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, error: "That reset link is expired or already used. Ask for a new one." }));
       await dependencies.store.updateOwnerPassword(accountId, await hashOwnerPassword(password), dependencies.clock.now().toISOString());
       log({ level: "info", event: "owner_password_reset", accountId });
       response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
