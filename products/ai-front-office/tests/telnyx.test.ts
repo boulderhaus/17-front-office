@@ -12,6 +12,7 @@ import {
   verifyTelnyxWebhook,
 } from "../src/adapters/telnyx.js";
 import { createDemoConfig } from "../src/domain/config.js";
+import { InMemoryStore } from "../src/adapters/in-memory.js";
 import type { OutboxNotification } from "../src/domain/models.js";
 import { buildTelnyxAssistantUpdate } from "../src/voice/system-prompt.js";
 
@@ -144,9 +145,69 @@ describe("Telnyx provider boundary", () => {
     expect(JSON.parse(String((init as RequestInit).body))).toMatchObject({
       from: "+15555550199",
       to: "+15555550100",
-      text: "Synthetic alert",
+      text: "Front Office: Synthetic alert",
       webhook_url: "https://front-office.example/webhooks/telnyx",
     });
+  });
+
+  it("brands owner texts and adds the STOP line only to the first one a number gets, even across retries and replicas", async () => {
+    const store = new InMemoryStore();
+    const texts: string[] = [];
+    const fetcher = vi.fn(async (_url: string, init: RequestInit) => {
+      texts.push(JSON.parse(String(init.body)).text as string);
+      return jsonResponse({ data: { id: `message-${texts.length}` } });
+    }) as unknown as typeof fetch;
+    // Two adapters on one store stand in for two replicas.
+    const replica = () => new TelnyxSmsAdapter({
+      apiKey: "synthetic-key",
+      fromNumber: "+15555550199",
+      resolveDestination: async () => "+15555550100",
+      claimStopNotice: (phone, id) => store.claimSmsStopNotice(phone, id, "2026-11-23T12:00:00.000Z"),
+      fetcher,
+    });
+    const [a, b] = [replica(), replica()];
+    const first = { ...syntheticNotification(), id: "11111111-1111-4111-8111-111111111111", body: "New call: Maria\n\nCall back: https://x.example/c/t" };
+    const second = { ...syntheticNotification(), id: "22222222-2222-4222-8222-222222222222", body: "Front Office: Today\n1 follow-up" };
+    await Promise.all([a.send(first), b.send(second)]);
+    await b.send(first); // a retry of the notification that holds the notice
+    await a.send(second);
+    const withStop = texts.filter((text) => text.endsWith("\nReply STOP to opt out"));
+    expect(withStop).toHaveLength(2); // the winner, and its retry
+    expect(new Set(withStop).size).toBe(1);
+    expect(texts.every((text) => text.startsWith("Front Office: "))).toBe(true);
+    expect(texts.map((text) => text.replace(/\nReply STOP to opt out$/, "")).sort()).toEqual([
+      "Front Office: New call: Maria\n\nCall back: https://x.example/c/t",
+      "Front Office: New call: Maria\n\nCall back: https://x.example/c/t",
+      "Front Office: Today\n1 follow-up",
+      "Front Office: Today\n1 follow-up",
+    ]);
+
+    // After START the next owner text carries it again; a text that already says STOP does not use it up.
+    await store.resetSmsStopNotice("+15555550100");
+    texts.length = 0;
+    await a.send({ ...syntheticNotification(), id: "33333333-3333-4333-8333-333333333333", body: "Front Office by Dutchworks: You're subscribed. Reply HELP for help, STOP to cancel." });
+    await a.send({ ...syntheticNotification(), id: "44444444-4444-4444-8444-444444444444", body: "New call: Bob" });
+    await a.send({ ...syntheticNotification(), id: "55555555-5555-4555-8555-555555555555", body: "New call: Ana" });
+    expect(texts).toEqual([
+      "Front Office by Dutchworks: You're subscribed. Reply HELP for help, STOP to cancel.",
+      "Front Office: New call: Bob\nReply STOP to opt out",
+      "Front Office: New call: Ana",
+    ]);
+  });
+
+  it("leaves texts to callers unchanged", async () => {
+    const store = new InMemoryStore();
+    const fetcher = vi.fn(async () => jsonResponse({ data: { id: "message-caller" } })) as unknown as typeof fetch;
+    const adapter = new TelnyxSmsAdapter({
+      apiKey: "synthetic-key",
+      fromNumber: "+15555550199",
+      resolveDestination: async () => null,
+      claimStopNotice: (phone, id) => store.claimSmsStopNotice(phone, id, "2026-11-23T12:00:00.000Z"),
+      fetcher,
+    });
+    await adapter.send({ ...syntheticNotification(), destinationRef: "tel:+15555550101", body: "Suncoast Heating: Your visit is confirmed." });
+    expect(JSON.parse(String(((fetcher as unknown as ReturnType<typeof vi.fn>).mock.calls[0]![1] as RequestInit).body)).text).toBe("Suncoast Heating: Your visit is confirmed.");
+    expect(store.smsStopNotices.size).toBe(0);
   });
 
   it("uses the separately approved sender only for founder welcome SMS", async () => {

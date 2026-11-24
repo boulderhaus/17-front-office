@@ -16,7 +16,7 @@ import { renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.j
 import { chargeSentence, isPaidStatus } from "../domain/billing.js";
 import { currentPlan, hasUnlimitedPrice, introCouponId, knownPlans, legacyPlanPriceIds, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, unlimitedPriceIds, type Plan, type PlanId } from "../domain/plans.js";
 import { GuaranteeError, LeadGuaranteeService, recordFirstPaid, recordUnlimitedObservation, type UnlimitedItem } from "../application/billing-jobs.js";
-import { callbackLinkMatches, readCallbackLinkToken } from "../domain/owner-sms.js";
+import { callbackLinkMatches, OWNER_SMS_OPT_IN_CONFIRMATION, readCallbackLinkToken } from "../domain/owner-sms.js";
 import { callsCsv } from "./calls-csv.js";
 import { hoursFromChoice } from "../domain/hours.js";
 import { SMS_CONSENT_VERSION } from "../admin/footer.js";
@@ -509,6 +509,26 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
     if (!withinToolBudget(tool, count)) throw new ToolLimitError(tool, "budget");
   }
 
+  /**
+   * An owner just opted in to texts: the next owner text carries the STOP line again, and once production
+   * messaging is approved they get the registered opt-in confirmation. Never blocks the signup or setup save.
+   */
+  async function queueOwnerOptInConfirmation(tenantId: string, phone: string | null, idempotencyKey: string): Promise<void> {
+    try {
+      if (phone) await dependencies.store.resetSmsStopNotice(phone);
+      if (!dependencies.env.TELNYX_MESSAGING_APPROVED) return;
+      const now = dependencies.clock.now().toISOString();
+      await dependencies.store.enqueueNotification({
+        id: randomUUID(), tenantId, callId: null, channel: "sms", destinationRef: "owner-primary",
+        body: OWNER_SMS_OPT_IN_CONFIRMATION,
+        priority: "normal", state: "pending", attempts: 0, nextAttemptAt: now,
+        idempotencyKey, providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
+      });
+    } catch (error) {
+      log({ level: "warn", event: "owner_optin_confirmation_failed", tenantId, error: safeError(error) });
+    }
+  }
+
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     setSecurityHeaders(response);
     const requestId = typeof request.headers["x-request-id"] === "string" ? request.headers["x-request-id"] : randomUUID();
@@ -706,6 +726,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (parsed.data.ownerSmsConsent === "yes") {
         // Proof of opt-in for the carrier: when, from where, and the exact wording version shown.
         await dependencies.store.saveIntegrationSecret(tenantId, "notifications", "owner_sms_consent", JSON.stringify({ at: now, source: "signup", wording: SMS_CONSENT_VERSION, ip }));
+        await queueOwnerOptInConfirmation(tenantId, phone!, `owner-optin:${tenantId}:signup`);
       }
       const session = mintOwnerSession(account, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
       response.setHeader("set-cookie", ownerSessionCookie(session, dependencies.env.NODE_ENV === "production"));
@@ -1349,8 +1370,12 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       const phoneInput = form.get("ownerPhone")?.trim();
       const phone = phoneInput ? normalizeUsPhone(phoneInput) : null;
       if (phoneInput && !phone) throw new HttpError(400, "Enter a valid US mobile number");
+      let optedInPhone: string | null = null;
       await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
         const current = await dependencies.store.getConfig(account.tenantId);
+        const previousPhone = await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary");
+        // A new opt-in (texts were off, or a different number): confirm it by text once.
+        if (form.get("ownerSmsConsent") === "yes" && (current.ownerNotificationRefs.length === 0 || (phone && phone !== previousPhone))) optedInPhone = phone ?? previousPhone;
         if (phone) await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner-primary", phone);
         if (form.get("ownerSmsConsent") === "yes" && !phone && !await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")) throw new HttpError(400, "Add a mobile number for text alerts");
         await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, businessName: data.businessName, timezone: data.timezone, serviceAreaTerms: serviceArea.terms, operationMode: data.operationMode, afterHours: { ...current.afterHours, weekdayStart: data.start, weekdayEnd: data.end }, bookableHours: { ...current.bookableHours, weekdayStart: data.bookStart, weekdayEnd: data.bookEnd, weekends: form.get("weekends") === "on" }, bookingMode: dependencies.env.DIRECT_BOOKING_BETA ? data.bookingMode : "confirm", greeting: data.greeting, recordingDisclosure: form.get("recordingNotice") === "on" ? RECORDING_NOTICE : "", priceSnippets: parseLines(data.prices, 30).map((text, index) => ({ label: `Approved price ${index + 1}`, text })), approvedKnowledge: parseLines(data.answers, 30).map((text, index) => ({ topic: `Approved answer ${index + 1}`, text })), ownerNotificationRefs: form.get("ownerSmsConsent") === "yes" ? ["owner-primary"] : [], ownerTransferNumberRef: "owner-primary", warmTransferEnabled: dependencies.env.WARM_TRANSFER_BETA && form.get("warmTransferEnabled") === "on" });
@@ -1358,6 +1383,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if (form.get("ownerSmsConsent") === "yes") {
         await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner_sms_consent", JSON.stringify({ at: dependencies.clock.now().toISOString(), source: "setup", wording: SMS_CONSENT_VERSION, ip: requestIp(request) }));
       }
+      if (optedInPhone) await queueOwnerOptInConfirmation(account.tenantId, optedInPhone, `owner-optin:${account.tenantId}:${dependencies.clock.now().toISOString()}`);
       return redirect(response, "/app?setup=saved");
     }
     if (member && (url.pathname.startsWith("/app/billing") || url.pathname === "/app/config" || /\/delete$/.test(url.pathname))) throw new HttpError(403, "Only the owner can change billing, shop rules, or delete call records");
@@ -2249,6 +2275,8 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
       if ((action === "STOP" || action === "START") && /^\+1[2-9]\d{9}$/.test(received.data.payload.from.phone_number)) {
         const tenants = await dependencies.store.listTenantIds();
         await Promise.all(tenants.map((tenantId) => dependencies.store.setSmsOptOut(tenantId, received.data.payload.from.phone_number, action === "STOP")));
+        // Re-subscribed: the next owner text tells them how to stop again.
+        if (action === "START") await dependencies.store.resetSmsStopNotice(received.data.payload.from.phone_number);
         log({ level: "info", event: "sms_consent_changed", action, tenantCount: tenants.length });
       }
       return sendJson(response, 200, { received: true });

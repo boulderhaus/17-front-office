@@ -112,7 +112,7 @@ function upcomingBookedCalls(calls: CallRecord[], now: Date, days: number): Call
 function dailySmsBody(tasks: CallbackTask[], appointments: CallRecord[], dashboardUrl: string): string {
   const urgent = tasks.filter((task) => task.priority === "high").length;
   return [
-    "Front Office today",
+    "Front Office: Today",
     `${tasks.length} follow-up${tasks.length === 1 ? "" : "s"}${urgent ? ` (${urgent} urgent)` : ""}`,
     `${appointments.length} appointment${appointments.length === 1 ? "" : "s"} in the next 24 hours`,
     dashboardUrl,
