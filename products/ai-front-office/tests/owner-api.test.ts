@@ -157,9 +157,13 @@ describe("Owner JSON API and React app serving", () => {
     const owner = await signUp("a@synthetic.example");
     await seedCall(owner.tenantId);
     const url = `${baseUrl}/api/app/calls/${CALL_ID}/task`;
+    const before = await store.getCallbackTaskForCall(CALL_ID);
     const done = await fetch(url, json(owner, "POST", { action: "complete" }));
-    expect(await done.json()).toMatchObject({ task: { status: "completed", completionSource: "owner" } });
-    expect((await (await fetch(url, json(owner, "POST", { action: "reopen" }))).json() as { task: { status: string } }).task.status).toBe("open");
+    expect(await done.json()).toMatchObject({ task: { status: "completed", completionSource: "owner", dueAt: before!.dueAt } });
+    // Undo restores the follow-up exactly: open again, same "Call back by" time, no completion left behind.
+    const reopened = await (await fetch(url, json(owner, "POST", { action: "reopen" }))).json() as { task: { status: string; dueAt: string; completedAt: string | null } };
+    expect(reopened.task).toMatchObject({ status: "open", dueAt: before!.dueAt, completedAt: null });
+    expect(await store.getCallbackTaskForCall(CALL_ID)).toMatchObject({ status: "open", dueAt: "2026-01-15T08:05:00.000Z", completedAt: null, completionSource: null });
     expect((await fetch(url, json(owner, "POST", { action: "snooze", minutes: 7 }))).status).toBe(400);
     const snoozed = await (await fetch(url, json(owner, "POST", { action: "snooze", minutes: 240 }))).json() as { task: { status: string; dueAt: string } };
     expect(snoozed.task).toMatchObject({ status: "snoozed", dueAt: "2026-01-15T12:00:00.000Z" });

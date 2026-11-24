@@ -52,13 +52,18 @@ export function ListBox({ children, className }: { children: ReactNode; classNam
   return <div className={cn("divide-y overflow-hidden rounded-xl border bg-card", className)}>{children}</div>
 }
 
-/** On a phone a call opens its own screen; on wide screens it opens in the side panel. */
-export function CallLink({ callId, className, children, ...rest }: { callId: string; className?: string; children: ReactNode; "aria-current"?: boolean; style?: React.CSSProperties }) {
+/**
+ * On a phone a call opens its own screen; on wide screens it opens in the side panel.
+ * `list="all"` marks a link from the "All calls" list (`from=all`), so only the row that was clicked lights up.
+ */
+export function CallLink({ callId, className, children, list, ...rest }: { callId: string; className?: string; children: ReactNode; list?: "all"; "aria-current"?: boolean; style?: React.CSSProperties }) {
   const { base } = useMode()
   const wide = useMediaQuery("(min-width: 1024px)")
   const location = useLocation()
   const params = new URLSearchParams(location.search)
   params.set("call", callId)
+  if (list === "all") params.set("from", "all")
+  else params.delete("from")
   const to = wide ? `${location.pathname}?${params.toString()}` : `${base}/calls/${encodeURIComponent(callId)}`
   return <Link to={to} className={className} {...rest}>{children}</Link>
 }

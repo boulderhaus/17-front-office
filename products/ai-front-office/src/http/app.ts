@@ -1422,7 +1422,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       next = { ...task, status: "completed", completedAt: now.toISOString(), completionSource: "owner", updatedAt: now.toISOString() };
     } else if (action === "reopen") {
       if (task.status !== "completed") throw new HttpError(404, "Completed task not found");
-      next = { ...task, status: "open", dueAt: now.toISOString(), completedAt: null, completionSource: null, updatedAt: now.toISOString() };
+      // Undo puts the follow-up back exactly as it was: Complete never touches dueAt, so its "Call back by" time returns.
+      next = { ...task, status: "open", completedAt: null, completionSource: null, updatedAt: now.toISOString() };
     } else {
       if (task.status === "completed" || task.status === "cancelled") throw new HttpError(404, "Task not found");
       if (minutes === undefined || ![60, 240, 1_440].includes(minutes)) throw new HttpError(400, "Choose a valid reminder time");
