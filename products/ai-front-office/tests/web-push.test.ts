@@ -102,14 +102,14 @@ describe("web push call alerts", () => {
     expect((await listPushSubscriptions(store, "shop")).map((item) => item.endpoint)).toEqual(["https://fcm.googleapis.com/fcm/send/a"]);
   });
 
-  it("retries when any phone failed for a temporary reason, and forgets one that is no longer ours", async () => {
+  it("retries when any phone failed, and keeps a phone the push service refused on credentials (401/403)", async () => {
     const store = new InMemoryStore();
     for (const name of ["a", "b", "c"]) await savePushSubscription(store, "shop", { ...parsePushSubscription(browserSubscription(`https://fcm.googleapis.com/fcm/send/${name}`).json)!, accountId: "owner" }, now.toISOString());
     const status: Record<string, number> = { a: 201, b: 503, c: 403 };
     const fetcher = (async (url: string) => new Response(null, { status: status[url.slice(-1)]! })) as unknown as typeof fetch;
     const sender = new WebPushSender({ store, clock, fetcher, vapid: { ...generateVapidKeys(), subject: "mailto:hello@example.test" } });
     await expect(sender.send(ownerPushNotification({ tenantId: "shop", callId: null, message: { title: "t", body: "b", url: "/app" }, keyBase: "k", now: now.toISOString() }))).rejects.toThrow("1 delivered");
-    expect((await listPushSubscriptions(store, "shop")).map((item) => item.endpoint.slice(-1))).toEqual(["a", "b"]);
+    expect((await listPushSubscriptions(store, "shop")).map((item) => item.endpoint.slice(-1))).toEqual(["a", "b", "c"]);
   });
 
   it("retries when no phone took it, and succeeds quietly when the shop has no phones", async () => {

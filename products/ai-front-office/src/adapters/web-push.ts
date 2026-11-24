@@ -191,8 +191,8 @@ export class WebPushSender implements NotificationPort {
           },
           body: encryptPushPayload(payload, target),
         }), 4_000);
-        // Gone (404/410) or no longer ours (401/403: e.g. keys changed): forget the phone rather than retry forever.
-        if ([401, 403, 404, 410].includes(response.status)) gone.push(target.endpoint);
+        // Only 404/410 mean the phone is gone (RFC 8030). 401/403 are our VAPID credentials: keep the phone, retry.
+        if (response.status === 404 || response.status === 410) gone.push(target.endpoint);
         else if (response.ok) delivered += 1;
         else lastError = `push service HTTP ${response.status}`;
       } catch (error) {
