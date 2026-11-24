@@ -34,6 +34,7 @@ function firstStep(d: ApiDashboard): Step {
 export function StartPage() {
   const { dashboard, reload } = useMode()
   const [params, setParams] = useSearchParams()
+  const navigate = useNavigate()
   const [activation, setActivation] = useState<Activation | "running" | null>(null)
   const started = useRef(false)
   const sessionId = params.get("session_id")
@@ -77,8 +78,9 @@ export function StartPage() {
   const confirming = Boolean(sessionId) && (activation === null || activation === "running")
   const go = (next: Step) => setParams({ step: next })
   const current = STEPS.find((item) => item.id === step)!
-  // A standard back arrow, top-left, on every step that has a step before it in this flow.
-  const back: Step | null = step === "done" ? "forward" : null
+  // A standard back arrow, top-left, on every step after paying: All set goes back to forwarding, and
+  // forwarding (the card is already paid) goes back to Calls, where "Continue setup" brings the owner back.
+  const back: Step | "calls" | null = step === "done" ? "forward" : step === "forward" ? "calls" : null
   const done = step === "done"
 
   return (
@@ -87,7 +89,7 @@ export function StartPage() {
         <div className="mx-auto flex h-14 max-w-xl items-center justify-between gap-3 px-4">
           <span className="flex min-w-0 items-center gap-1.5">
             {back ? (
-              <button type="button" aria-label="Back" onClick={() => go(back)} className="-ml-2 grid size-11 shrink-0 place-items-center rounded-full text-brand-ink hover:bg-brand-ink/5 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"><ArrowLeft className="size-6" /></button>
+              <button type="button" aria-label={back === "calls" ? "Back to Calls" : "Back"} onClick={() => (back === "calls" ? navigate("/app") : go(back))} className="-ml-2 grid size-11 shrink-0 place-items-center rounded-full text-brand-ink hover:bg-brand-ink/5 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"><ArrowLeft className="size-6" /></button>
             ) : null}
             <span className="flex items-center gap-2.5"><BrandMark /><span className="text-lg font-semibold tracking-tight">Front <em className="font-serif italic">Office</em></span></span>
           </span>
