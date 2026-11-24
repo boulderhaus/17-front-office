@@ -50,6 +50,7 @@ let nextRetentionAt = 0;
 let nextSummaryAt = 0;
 let nextGraceAt = 0;
 let nextOverageAt = 0;
+let nextActivationAt = 0;
 const runWorker = async (): Promise<void> => {
   if (workerActive) return;
   workerActive = true;
@@ -96,6 +97,12 @@ const runWorker = async (): Promise<void> => {
       nextGraceAt = Date.now() + 10 * 60_000;
       const grace = await graceLine.runOnce();
       if (grace.reminded + grace.released > 0) logger({ level: "info", event: "grace_line_cycle", ...grace });
+    }
+    if (Date.now() >= nextActivationAt) {
+      // Waiting paid shops go live once prerequisites clear; opted-in owners get the opt-in text once texting is approved.
+      nextActivationAt = Date.now() + 10 * 60_000;
+      const activation = await handler.runActivationJobs();
+      if (activation.activated + activation.blocked + activation.optInConfirmations > 0) logger({ level: "info", event: "activation_cycle", ...activation });
     }
     if (Date.now() >= nextOverageAt) {
       // Hourly: a period closes at most once a month per shop; locked and idempotent across replicas.
