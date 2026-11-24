@@ -5,7 +5,7 @@ import type { Store } from "../ports.js";
  * express consent for that exact number, recorded with time, source and the wording version shown, and
  * stoppable by pressing 9 during a call or in Settings. Only for urgent and life-safety calls.
  */
-export const OWNER_CALL_CONSENT_VERSION = "owner-urgent-calls-2026-11-23";
+export const OWNER_CALL_CONSENT_VERSION = "owner-urgent-calls-2026-11-23b";
 export const OWNER_CALL_CONSENT_LABEL = "Call my mobile with an automated message when a caller has an emergency (optional)";
 /** Shown in full beside the signup box and the Settings switch, so both record the same wording version. */
 export const OWNER_CALL_CONSENT_DETAIL = "By choosing this, you agree that Front Office by Dutchworks LLC may call this number with automated, artificial-voice messages about emergency calls to your business. Not required to sign up. Press 9 during a call, or turn it off in Settings, to stop.";
@@ -29,7 +29,20 @@ async function readConsent(store: Store, tenantId: string): Promise<ConsentRecor
 
 export async function grantOwnerCallConsent(store: Store, tenantId: string, input: { at: string; source: "signup" | "settings"; ip: string | null; phone: string }): Promise<void> {
   const record: ConsentRecord = { at: input.at, source: input.source, wording: OWNER_CALL_CONSENT_VERSION, ip: input.ip, phone: input.phone };
-  await store.saveIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY, JSON.stringify(record));
+  await store.withLock(`owner-call-consent:${tenantId}`, async () => {
+    // A grant it replaces stays on file as proof for the calls already placed under it.
+    const previous = await readConsent(store, tenantId);
+    if (previous) await appendConsentLog(store, tenantId, { grant: previous, revokedAt: input.at, revokeSource: "superseded" });
+    await store.saveIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY, JSON.stringify(record));
+  });
+}
+
+/** Append-only proof of every grant. A log that can't be read is never rewritten (and the change fails). */
+async function appendConsentLog(store: Store, tenantId: string, entry: Record<string, unknown>): Promise<void> {
+  const raw = await store.getIntegrationSecret(tenantId, "notifications", CONSENT_LOG_KEY);
+  const parsed = raw ? JSON.parse(raw) as unknown : [];
+  if (!Array.isArray(parsed)) throw new Error("Owner call consent log is unreadable");
+  await store.saveIntegrationSecret(tenantId, "notifications", CONSENT_LOG_KEY, JSON.stringify([...parsed, entry]));
 }
 
 /** Consent counts only for the number it was given for: a replaced mobile is never called without a new yes. */
@@ -46,16 +59,8 @@ export async function revokeOwnerCallConsent(store: Store, tenantId: string, inp
   return store.withLock(`owner-call-consent:${tenantId}`, async () => {
     const record = await readConsent(store, tenantId);
     if (!record) return false;
-    if (input.before && Date.parse(record.at) >= Date.parse(input.before)) return false;
-    let log: unknown[] = [];
-    try {
-      const raw = await store.getIntegrationSecret(tenantId, "notifications", CONSENT_LOG_KEY);
-      const parsed = raw ? JSON.parse(raw) as unknown : [];
-      log = Array.isArray(parsed) ? parsed : [];
-    } catch {
-      log = [];
-    }
-    await store.saveIntegrationSecret(tenantId, "notifications", CONSENT_LOG_KEY, JSON.stringify([...log, { grant: record, revokedAt: input.at, revokeSource: input.source }].slice(-50)));
+    if (input.before && !Number.isNaN(Date.parse(input.before)) && Date.parse(record.at) >= Date.parse(input.before)) return false;
+    await appendConsentLog(store, tenantId, { grant: record, revokedAt: input.at, revokeSource: input.source });
     await store.deleteIntegrationSecret(tenantId, "notifications", OWNER_CALL_CONSENT_KEY);
     return true;
   });

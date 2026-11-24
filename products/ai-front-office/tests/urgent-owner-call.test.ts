@@ -181,7 +181,7 @@ describe("consent to automated emergency calls", () => {
       return { cookie: response.headers.get("set-cookie")!.split(";")[0]!, tenantId: account.tenantId };
     };
     const yes = await signup("yes@consent.example", { ownerCallConsent: "yes" });
-    expect(JSON.parse((await store.getIntegrationSecret(yes.tenantId, "notifications", OWNER_CALL_CONSENT_KEY))!)).toMatchObject({ source: "signup", wording: "owner-urgent-calls-2026-11-23" });
+    expect(JSON.parse((await store.getIntegrationSecret(yes.tenantId, "notifications", OWNER_CALL_CONSENT_KEY))!)).toMatchObject({ source: "signup", wording: "owner-urgent-calls-2026-11-23b" });
     const no = await signup("no@consent.example", {});
     expect(await store.getIntegrationSecret(no.tenantId, "notifications", OWNER_CALL_CONSENT_KEY)).toBeNull();
     const settings = await (await fetch(`${base}/api/app/settings`, { headers: { cookie: no.cookie } })).json() as { csrf: string; urgentCalls: { available: boolean; on: boolean; disclosure: string } };

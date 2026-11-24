@@ -2416,8 +2416,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         const onOptOut = async () => {
           // Pressed 9: no more automated calls to this owner until they turn them back on in Settings.
           // Only a grant older than this keypress: a redelivered webhook never undoes a later "turn it back on".
-          await revokeOwnerCallConsent(dependencies.store, ownerAlert.tenantId, { at: dependencies.clock.now().toISOString(), source: "keypad", before: envelope.data.occurred_at ?? dependencies.clock.now().toISOString() });
-          log({ level: "info", event: "owner_calls_opted_out", tenantId: ownerAlert.tenantId, source: "keypad" });
+          // Telnyx always stamps occurred_at; without it, stopping wins.
+          const revoked = await revokeOwnerCallConsent(dependencies.store, ownerAlert.tenantId, { at: dependencies.clock.now().toISOString(), source: "keypad", ...(envelope.data.occurred_at ? { before: envelope.data.occurred_at } : {}) });
+          if (revoked) log({ level: "info", event: "owner_calls_opted_out", tenantId: ownerAlert.tenantId, source: "keypad" });
         };
         await continueOwnerAlertCall({ apiKey: dependencies.env.TELNYX_API_KEY, eventType: envelope.data.event_type, eventId: envelope.data.id, callControlId, state: ownerAlert, digits, onOptOut, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })
           .catch((error) => {
