@@ -976,9 +976,19 @@ describe("HTTP boundary", () => {
     const privacyHtml = await privacy.text();
     expect(privacyHtml).toContain("not sold, rented, or shared with third parties or affiliates for marketing");
     expect(privacyHtml).toContain("that call's recording is deleted after the call");
+    // Google OAuth verification: the Limited Use statement linked to Google's policy, the two scopes, revoking, and the providers.
+    const privacyText = privacyHtml.replace(/<[^>]+>/g, "");
+    expect(privacyText).toContain("Call Otto's use and transfer of information received from Google APIs to any other app will adhere to the Google API Services User Data Policy, including the Limited Use requirements.");
+    expect(privacyHtml).toContain('<a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>');
+    for (const phrase of ["calendar.freebusy", "calendar.events", 'href="https://myaccount.google.com/permissions"', "train AI or machine learning models", "encrypted with AES-256"]) {
+      expect(privacyHtml).toContain(phrase);
+    }
+    for (const provider of ["Telnyx", "Stripe", "Resend", "Railway", "PostHog"]) expect(privacyHtml).toContain(`<strong>${provider}</strong>`);
     const terms = await fetch(`${baseUrl}/terms`);
     expect(terms.status).toBe(200);
     const termsHtml = await terms.text();
+    expect(termsHtml).toContain("authorizes Call Otto to check when that calendar is busy and to add booked jobs to it");
+    for (const page of [termsHtml, privacyHtml]) expect(page).not.toMatch(/\s—\s/);
     expect(termsHtml).toContain("solely responsible for giving any notice and obtaining any consent");
     expect(termsHtml).toContain("Reply STOP to opt out or HELP for help");
     expect(termsHtml).toContain("creating an account, activating service, or paying for a subscription");
