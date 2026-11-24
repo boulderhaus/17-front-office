@@ -816,7 +816,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         const link = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/reset?token=${encodeURIComponent(token)}`;
         await dependencies.store.enqueueNotification({
           id: randomUUID(), tenantId: resetAccount.tenantId, callId: null, channel: "email", destinationRef: `email:${resetAccount.email}`,
-          body: formatEmailBody("Reset your Front Office password", `Use this link within 30 minutes to choose a new password:\n\n${link}\n\nIf you didn't ask for this, ignore this email. Your password has not changed.`),
+          body: formatEmailBody("Reset your Call Otto password", `Use this link within 30 minutes to choose a new password:\n\n${link}\n\nIf you didn't ask for this, ignore this email. Your password has not changed.`),
           priority: "high", state: "pending", attempts: 0, nextAttemptAt: now.toISOString(),
           idempotencyKey: `password-reset:${tokenHash}`, providerReceipt: null, lastError: null, createdAt: now.toISOString(), sentAt: null,
         });
@@ -1090,7 +1090,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const number = typeof body.number === "string" ? normalizeUsPhone(body.number) : null;
       if (!number) throw new HttpError(400, "Enter your business phone number, like (941) 555-0123");
       const lineNumber = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number");
-      if (lineNumber && number === lineNumber) throw new HttpError(400, "That’s your Front Office number. Enter the number your customers call today.");
+      if (lineNumber && number === lineNumber) throw new HttpError(400, "That’s your Call Otto number. Enter the number your customers call today.");
       const chosen = body.family === "verizon" || body.family === "gsm" || body.family === "office" ? body.family as CarrierFamily : null;
       const previous = await readForwarding(account.tenantId);
       let carrier: CarrierInfo;
@@ -1117,7 +1117,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
         readForwarding(account.tenantId),
       ]);
-      if (!lineNumber) throw new HttpError(409, "Turn on your Front Office line first.");
+      if (!lineNumber) throw new HttpError(409, "Turn on your Call Otto line first.");
       if (!state.businessNumber) throw new HttpError(409, "Add your business phone number first.");
       if (!limiter.allow(`forwarding-check:${account.tenantId}`, 6, 60 * 60_000)) throw new HttpError(429, "That’s a lot of checks. Please wait a few minutes and try again.");
       const startedAt = dependencies.clock.now().toISOString();
@@ -1155,7 +1155,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
             `Call them back: ${ownerPhone ?? state.businessNumber ?? "no number on file"}`,
             `Business number: ${state.businessNumber ?? "not entered"}`,
             `Carrier: ${state.carrier?.name ?? "unknown"} (${state.carrier?.family ?? "unknown"}, ${state.carrier?.lineType ?? "unknown line type"})`,
-            `Forward to (Front Office number): ${lineNumber ?? "line not turned on yet"}`,
+            `Forward to (Call Otto number): ${lineNumber ?? "line not turned on yet"}`,
             `Account: ${account.email}`,
           ].join("\n")),
           priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
@@ -1631,7 +1631,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         throw new HttpError(409, "Cancel your subscription in Billing first. You can delete your account once it has ended.");
       }
       await pauseLiveRoute(account.tenantId)
-        .catch(() => { throw new HttpError(502, "We couldn't disconnect your Front Office line. Nothing was deleted; please retry."); });
+        .catch(() => { throw new HttpError(502, "We couldn't disconnect your Call Otto line. Nothing was deleted; please retry."); });
       await releaseProvisionedLine(account.tenantId);
       await deletionService.deleteWorkspace(account.tenantId)
         .catch(() => { throw new HttpError(502, "A call recording couldn't be deleted. Nothing else was removed; please retry."); });
@@ -1943,7 +1943,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     } catch (error) {
       if (!(error instanceof HttpError)) throw error;
       if (error.message.startsWith("Live provider prerequisites")) {
-        return { status: "waiting", message: "Your Front Office number is on its way. Phone carriers approve new business lines, which usually takes 1 to 3 business days. Everything else is saved, so keep going. We’ll turn it on the moment it clears." };
+        return { status: "waiting", message: "Your Call Otto number is on its way. Phone carriers approve new business lines, which usually takes 1 to 3 business days. Everything else is saved, so keep going. We’ll turn it on the moment it clears." };
       }
       if (error.message === ASSISTANT_TAKEN) return { status: "failed", message: OWNER_SETUP_STUCK };
       if (error.status === 409) return { status: "blocked", message: `${error.message.replace(/^This shop is missing: /, "Add your ")}. You can do that in Settings.` };
@@ -2020,7 +2020,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         } catch (error) {
           if (error instanceof HttpError) throw error;
           log({ level: "error", event: "line_provisioning_failed", tenantId: account.tenantId, error: safeError(error) });
-          throw new HttpError(502, "We couldn't set up your Front Office number just now. Try again in a minute.");
+          throw new HttpError(502, "We couldn't set up your Call Otto number just now. Try again in a minute.");
         }
       }
 
@@ -2043,7 +2043,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         await liveRoute.setPaused(false)
           .catch((error) => {
             log({ level: "error", event: "go_live_connect_failed", tenantId: account.tenantId, error: safeError(error) });
-            throw new HttpError(502, "We couldn’t connect your Front Office number just now. Try again in a minute.");
+            throw new HttpError(502, "We couldn’t connect your Call Otto number just now. Try again in a minute.");
           });
         await dependencies.store.saveConfig({ ...config, paused: false });
         await dependencies.store.updateOwnerAccountStatus(account.id, "active", now);
@@ -2252,8 +2252,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       await dependencies.store.enqueueNotification({
         id: randomUUID(), tenantId, callId: null, channel: "sms", destinationRef,
         body: grace
-          ? `Front Office is paused: your subscription is ${statusWords}. For the next ${GRACE_DAYS} days calls forwarded to your Front Office line go to voicemail and we text you each message; after that the number stops working. Update billing in your dashboard, or ${lowerFirst(offCode)}`
-          : `Front Office is paused: your subscription is ${statusWords}. Calls forwarded to your Front Office line will not be answered. Update billing in your dashboard, or ${lowerFirst(offCode)}`,
+          ? `Call Otto is paused: your subscription is ${statusWords}. For the next ${GRACE_DAYS} days calls forwarded to your Call Otto line go to voicemail and we text you each message; after that the number stops working. Update billing in your dashboard, or ${lowerFirst(offCode)}`
+          : `Call Otto is paused: your subscription is ${statusWords}. Calls forwarded to your Call Otto line will not be answered. Update billing in your dashboard, or ${lowerFirst(offCode)}`,
         priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
         idempotencyKey: `billing-lapse:${tenantId}:${eventId}:${destinationRef}`,
         providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
@@ -2291,7 +2291,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     for (const destinationRef of config.ownerNotificationRefs) {
       await dependencies.store.enqueueNotification({
         id: randomUUID(), tenantId, callId: null, channel: "sms", destinationRef,
-        body: "Front Office is back on: your payment went through and calls forwarded to your Front Office line are being answered again.",
+        body: "Call Otto is back on: your payment went through and calls forwarded to your Call Otto line are being answered again.",
         priority: "normal", state: "pending", attempts: 0, nextAttemptAt: now,
         idempotencyKey: `billing-restored:${tenantId}:${eventId}:${destinationRef}`,
         providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
@@ -2958,7 +2958,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (!config) return sendJson(response, 200, { received: true, ignored: "unknown_tenant" });
     const caller = describeCaller(form.get("From")?.trim() || null);
     const off = await offInstructionFor(tenantId);
-    const suffix = await graceStartedAt(dependencies.store, tenantId) ? ` Your Front Office plan is paused; ${lowerFirst(off)}` : "";
+    const suffix = await graceStartedAt(dependencies.store, tenantId) ? ` Your Call Otto plan is paused; ${lowerFirst(off)}` : "";
     const fallbackBase = `voicemail-fallback:${tenantId}:${callSid}`;
     // One gate per call: whichever callback arrives first decides whether a no-transcript fallback may exist.
     const firstForCall = await dependencies.store.claimWebhook(fallbackBase);
@@ -2969,7 +2969,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       // Goes out only if the transcript has not arrived (and cancelled it) within a few minutes.
       await queueOwnerMessage(graceContext, {
         tenantId,
-        sms: `Front Office voicemail for ${config.businessName}: ${caller} left you a message we couldn't transcribe. Call them back.${suffix}`,
+        sms: `Call Otto voicemail for ${config.businessName}: ${caller} left you a message we couldn't transcribe. Call them back.${suffix}`,
         emailSubject: `New voicemail for ${config.businessName}`,
         idempotencyBase: fallbackBase,
         sendAfter: new Date(dependencies.clock.now().getTime() + VOICEMAIL_FALLBACK_DELAY_MS),
@@ -2984,7 +2984,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const said = transcript ? `${caller} said: \u201c${transcript}\u201d.` : `${caller} left a message with no words we could make out.`;
     const result = await queueOwnerMessage(graceContext, {
       tenantId,
-      sms: `Front Office voicemail for ${config.businessName}: ${said}${suffix}`,
+      sms: `Call Otto voicemail for ${config.businessName}: ${said}${suffix}`,
       emailSubject: `New voicemail for ${config.businessName}`,
       idempotencyBase: `voicemail:${tenantId}:${callSid}`,
     });

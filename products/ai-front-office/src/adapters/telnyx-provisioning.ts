@@ -42,7 +42,7 @@ export class TelnyxProvisioner {
       body: JSON.stringify({
         ...inherited,
         ...update,
-        name: `Front Office · ${input.businessName}`.slice(0, 120),
+        name: `Call Otto · ${input.businessName}`.slice(0, 120),
       }),
     }));
     const id = typeof created.id === "string" ? created.id : null;
@@ -204,7 +204,7 @@ export async function ensureInboundCallScreening(input: { apiKey: string; phoneN
   return { phoneNumber: input.phoneNumber, numberId: id, current, action: "set" };
 }
 
-/** Carrier codes owners dial on their business phone to forward calls to their Front Office number. */
+/** Carrier codes owners dial on their business phone to forward calls to their Call Otto number. */
 export function forwardingInstructions(frontOfficeNumber: string, mode: "overflow" | "after_hours" | "always"): Array<{ carrier: string; on: string; off: string }> {
   const digits = frontOfficeNumber.replace(/^\+1/, "");
   const missedOnly = mode !== "always";

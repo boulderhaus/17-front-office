@@ -363,7 +363,7 @@ export function CallPanel({ call, task, tz, standalone }: { call: ApiCall | null
       <Card>
         <CardContent className="grid gap-1.5">
           <h2 className="text-lg font-semibold">No calls yet</h2>
-          <p className="text-sm text-muted-foreground">When Front Office answers, the caller, problem and next step show up here.</p>
+          <p className="text-sm text-muted-foreground">When Call Otto answers, the caller, problem and next step show up here.</p>
         </CardContent>
       </Card>
     )

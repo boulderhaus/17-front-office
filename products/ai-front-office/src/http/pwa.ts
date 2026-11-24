@@ -10,7 +10,7 @@ self.addEventListener("push", (event) => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch (error) { data = {}; }
   const url = typeof data.url === "string" && data.url.startsWith("/app") ? data.url : "/app";
-  event.waitUntil(self.registration.showNotification(data.title || "Front Office", {
+  event.waitUntil(self.registration.showNotification(data.title || "Call Otto", {
     body: data.body || "",
     tag: data.tag || undefined,
     renotify: Boolean(data.tag),
@@ -40,8 +40,8 @@ self.addEventListener("notificationclick", (event) => {
 `;
 
 export const WEB_MANIFEST = JSON.stringify({
-  name: "Front Office",
-  short_name: "Front Office",
+  name: "Call Otto",
+  short_name: "Call Otto",
   id: "/app",
   start_url: "/app",
   scope: "/app",

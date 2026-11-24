@@ -12,7 +12,7 @@ const schema = z.object({
   PUBLIC_BASE_URL: z.string().url().default("http://127.0.0.1:8787"),
   DEFAULT_TENANT_ID: z.string().min(1).default("demo"),
   /**
-   * The public demo line (anyone may call it to hear Front Office). It keeps answering outside provider test mode
+   * The public demo line (anyone may call it to hear Call Otto). It keeps answering outside provider test mode
    * without the paid/readiness gate, and never texts, emails or calls anyone. Only a tenant with no owner account
    * qualifies, so a real shop can never be exempted by mistake.
    */
@@ -70,7 +70,7 @@ const schema = z.object({
     z.string().regex(/^\+[1-9]\d{7,14}$/, "FOUNDER_WELCOME_FROM_NUMBER must use E.164 format").optional(),
   ),
   FOUNDER_WELCOME_NAME: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(80).optional()),
-  FOUNDER_WELCOME_TEMPLATE: z.string().max(500).default("Welcome to Front Office. I'm {founder_name}. This is my number if you need anything or have an idea for making this more useful for {business_name}. Reply STOP to opt out."),
+  FOUNDER_WELCOME_TEMPLATE: z.string().max(500).default("Welcome to Call Otto. I'm {founder_name}. This is my number if you need anything or have an idea for making this more useful for {business_name}. Reply STOP to opt out."),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   // A second OAuth client for migrating projects; existing tokens keep their own client.
@@ -131,6 +131,8 @@ const schema = z.object({
   VAPID_SUBJECT: z.preprocess((value) => value === "" ? undefined : value, z.string().regex(/^(mailto:\S+@\S+|https:\/\/\S+)$/).default("mailto:hello@bydutchworks.com")),
   RESEND_API_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("re_").optional()),
   RESEND_FROM_EMAIL: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
+  /** Display name on owner emails: "Call Otto <hello@callotto.co>". No angle brackets or quotes, so it cannot break the header. */
+  RESEND_FROM_NAME: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(60).regex(/^[^<>"\r\n]+$/, "RESEND_FROM_NAME must be plain text").default("Call Otto")),
   // Product analytics + error tracking. Unset = everything off (tests, local).
   POSTHOG_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().regex(/^phc_[A-Za-z0-9_-]{8,}$/, "POSTHOG_KEY must be a PostHog project API key (phc_...)").optional()),
   // Only PostHog Cloud ingestion hosts: the /ingest proxy forwards here, so it must never be arbitrary.

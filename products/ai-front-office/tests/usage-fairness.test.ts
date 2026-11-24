@@ -117,7 +117,7 @@ describe("usage alerts", () => {
       destinationRef: "owner-primary",
       callId: null,
       idempotencyKey: `usage-alert:demo:${periodStart}:75`,
-      body: "Front Office: you've answered 45 of your 60 calls this month. Extra calls are $0.75 each. Change plans in Settings.",
+      body: "Otto: you've answered 45 of your 60 calls this month. Extra calls are $0.75 each. Change plans in Settings.",
     });
     // GSM-7 only (no ¢, no curly quotes), so the text stays one SMS segment.
     expect(alerts[0]!.body).toMatch(/^[A-Za-z0-9 .,:'$]+$/);
@@ -128,7 +128,7 @@ describe("usage alerts", () => {
     alerts = await usageAlerts();
     expect(alerts).toHaveLength(2);
     expect(alerts[1]).toMatchObject({ idempotencyKey: `usage-alert:demo:${periodStart}:100` });
-    expect(alerts[1]!.body).toBe("Front Office: you've answered 60 of your 60 calls this month. Extra calls are $0.75 each. Change plans in Settings.");
+    expect(alerts[1]!.body).toBe("Otto: you've answered 60 of your 60 calls this month. Extra calls are $0.75 each. Change plans in Settings.");
     await finish("over", 600);
     expect(await usageAlerts()).toHaveLength(2);
   });
@@ -163,7 +163,7 @@ describe("usage alerts", () => {
     await finish("b", 60);
     const alerts = await usageAlerts();
     expect(alerts.map((item) => item.idempotencyKey.split(":").at(-1))).toEqual(["90"]);
-    expect(alerts[0]!.body).toBe("Front Office: you've answered 9 of your 10 calls this month. Extra calls are $0.75 each. Change plans in Settings.");
+    expect(alerts[0]!.body).toBe("Otto: you've answered 9 of your 10 calls this month. Extra calls are $0.75 each. Change plans in Settings.");
   });
 
   it("does not double-send when the final webhook is replayed or another replica checks too", async () => {
@@ -212,7 +212,7 @@ describe("usage alerts", () => {
     const alerts = await ctx.usageAlerts();
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toMatchObject({ channel: "email", destinationRef: "email:owner@synthetic.example" });
-    expect(alerts[0]!.body).toContain("Subject: Front Office: you've answered 8 of your 10 calls");
+    expect(alerts[0]!.body).toContain("Subject: Otto: you've answered 8 of your 10 calls");
     expect(alerts[0]!.body).toContain("https://front-office.example/app/settings");
   });
 

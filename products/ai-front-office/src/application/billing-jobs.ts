@@ -277,7 +277,7 @@ export class LeadGuaranteeService {
         if (!await firstPaidAt(this.store, tenantId)) throw new GuaranteeError("We can’t confirm when you were first charged yet. Reply to your receipt and we’ll sort it out.", 409);
         const status = await this.status(tenantId);
         if (!status.complete) throw new GuaranteeError("We couldn’t check every call from your first 30 days. Reply to your receipt and we’ll review it.", 409);
-        if (status.leads > 0) throw new GuaranteeError(`Front Office sent you ${status.leads} real ${status.leads === 1 ? "lead" : "leads"} in your first 30 days, so the lead guarantee doesn’t apply.`, 409);
+        if (status.leads > 0) throw new GuaranteeError(`Call Otto sent you ${status.leads} real ${status.leads === 1 ? "lead" : "leads"} in your first 30 days, so the lead guarantee doesn’t apply.`, 409);
         if (status.state === "watching") throw new GuaranteeError("Your first 30 days aren’t over yet.", 409);
         const allowed = status.state === "eligible" || (by === "admin" && status.state === "closed");
         if (!allowed) throw new GuaranteeError("This shop isn’t eligible for the lead guarantee refund.", 409);

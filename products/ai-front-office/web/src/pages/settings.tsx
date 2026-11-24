@@ -181,7 +181,7 @@ export function SettingsPage() {
     <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
       <form className="grid min-w-0 gap-4" onSubmit={save}>
         <Group title="Answering">
-          <Field label="Front Office is" hint={settings.data.status === "active" ? undefined : "Your line turns on after activation. Until then it stays paused."}>
+          <Field label="Call Otto is" hint={settings.data.status === "active" ? undefined : "Your line turns on after activation. Until then it stays paused."}>
             <select className={selectClass} {...bind("serviceState")}><option value="active">On, answering calls</option><option value="paused">Paused</option></select>
           </Field>
           <Field label="Answer">
@@ -233,11 +233,11 @@ export function SettingsPage() {
           <Toggle id="bookableWeekends" label="Offer weekend appointments" checked={flag("bookableWeekends")} onChange={(value) => set("bookableWeekends", value)} />
           {i.directBookingAvailable ? (
             <Field label="Booking"><select className={selectClass} {...bind("bookingMode")}><option value="confirm">Take the details; I’ll confirm</option><option value="direct">Book open times on my calendar</option></select></Field>
-          ) : <p className="text-[13px] text-muted-foreground">Front Office takes the time the caller wants. You confirm it.</p>}
+          ) : <p className="text-[13px] text-muted-foreground">Call Otto takes the time the caller wants. You confirm it.</p>}
           <Toggle id="requireDiagnosticFeeAcceptance" label="Caller must accept your service-call fee" checked={flag("requireDiagnosticFeeAcceptance")} onChange={(value) => set("requireDiagnosticFeeAcceptance", value)} />
         </Group>
 
-        <Group title="What callers can be told" description="Leave blank and Front Office won’t quote a price; it takes a message.">
+        <Group title="What callers can be told" description="Leave blank and Call Otto won’t quote a price; it takes a message.">
           <Field label="Prices" hint="One per line, “Name: exact wording”"><Textarea rows={3} placeholder="Service call: Our service call is $89." className="bg-card text-[16px] lg:text-sm" {...bind("priceSnippets")} /></Field>
           <Field label="Answers" hint="One per line, “Topic: exact wording”"><Textarea rows={3} placeholder="Brands: We service all major brands." className="bg-card text-[16px] lg:text-sm" {...bind("approvedKnowledge")} /></Field>
         </Group>
@@ -312,7 +312,7 @@ export function SettingsPage() {
               </>
             ) : i.googleAvailable ? (
               <>
-                <p className="text-sm">Connect the calendar your jobs live on so Front Office can offer real open times.</p>
+                <p className="text-sm">Connect the calendar your jobs live on so Call Otto can offer real open times.</p>
                 <Button size="tap" variant="brand" asChild><a href="/app/integrations/google/start">Connect Google Calendar</a></Button>
               </>
             ) : <p className="text-sm text-muted-foreground">Calendar connection isn’t available yet.</p>}

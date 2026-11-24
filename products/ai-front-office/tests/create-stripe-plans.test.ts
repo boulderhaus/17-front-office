@@ -75,11 +75,11 @@ function fakeStripe() {
   return { call, products, prices, coupons, writes, failures };
 }
 
-/** Live Stripe before the split: one "Front Office" product holding all six prices, plus stale products. */
+/** Live Stripe before the split: one "Call Otto" product holding all six prices, plus stale products. */
 function seedOneProductLayout(stripe: ReturnType<typeof fakeStripe>) {
   const setup = planStripeSetup({});
-  stripe.products.push({ id: "prod_old", name: "Front Office", description: null, active: true, metadata: { front_office: "plans" } });
-  stripe.products.push({ id: "prod_legacy_solo", name: "Front Office Solo", description: "old", default_price: "price_legacy49", active: true, metadata: {} });
+  stripe.products.push({ id: "prod_old", name: "Call Otto", description: null, active: true, metadata: { front_office: "plans" } });
+  stripe.products.push({ id: "prod_legacy_solo", name: "Call Otto Solo", description: "old", default_price: "price_legacy49", active: true, metadata: {} });
   stripe.prices.push({ id: "price_legacy49", product: "prod_legacy_solo", unit_amount: 4_900, currency: "usd", recurring: { interval: "month" }, lookup_key: null, active: true, metadata: {} });
   setup.prices.forEach((price, index) => stripe.prices.push({ id: `price_old${index}`, product: "prod_old", unit_amount: price.unitAmount, currency: "usd", recurring: { interval: "month" }, lookup_key: price.lookupKey, active: true, metadata: { plan: price.plan } }));
   stripe.coupons.set("front_office_first_month_50", { id: "front_office_first_month_50", percent_off: 50 });
@@ -89,10 +89,10 @@ describe("scripts/create-stripe-plans.ts four-product layout", () => {
   it("names one product per plan plus Unlimited calls, with short customer-facing descriptions", () => {
     const setup = planStripeSetup({});
     expect(setup.products).toEqual([
-      { key: "solo", name: "Front Office Solo", description: "Up to 60 answered calls a month, then 75¢ per extra call.", image: null },
-      { key: "team", name: "Front Office Team", description: "Up to 250 answered calls a month, then 75¢ per extra call.", image: null },
-      { key: "fleet", name: "Front Office Fleet", description: "Up to 500 answered calls a month, then 75¢ per extra call.", image: null },
-      { key: "unlimited", name: "Unlimited calls", description: "No extra-call charges on your Front Office plan. Fair use: up to 3× your plan’s calls.", image: null },
+      { key: "solo", name: "Call Otto Solo", description: "Up to 60 answered calls a month, then 75¢ per extra call.", image: null },
+      { key: "team", name: "Call Otto Team", description: "Up to 250 answered calls a month, then 75¢ per extra call.", image: null },
+      { key: "fleet", name: "Call Otto Fleet", description: "Up to 500 answered calls a month, then 75¢ per extra call.", image: null },
+      { key: "unlimited", name: "Unlimited calls", description: "No extra-call charges on your Call Otto plan. Fair use: up to 3× your plan’s calls.", image: null },
     ]);
     expect(setup.prices.map((price) => price.product)).toEqual(["solo", "team", "fleet", "unlimited", "unlimited", "unlimited"]);
   });
@@ -115,8 +115,8 @@ describe("scripts/create-stripe-plans.ts four-product layout", () => {
     const first = await reconcileStripePlans(setup, stripe.call, { create: true, log: () => {}, archiveProducts: ["prod_legacy_solo"] });
 
     const byName = Object.fromEntries(stripe.products.filter((item) => item.active).map((item) => [item.name, item]));
-    expect(Object.keys(byName).sort()).toEqual(["Front Office Fleet", "Front Office Solo", "Front Office Team", "Unlimited calls"]);
-    expect(byName["Front Office Solo"]!.id).not.toBe("prod_legacy_solo");
+    expect(Object.keys(byName).sort()).toEqual(["Call Otto Fleet", "Call Otto Solo", "Call Otto Team", "Unlimited calls"]);
+    expect(byName["Call Otto Solo"]!.id).not.toBe("prod_legacy_solo");
     for (const price of setup.prices) {
       const holder = stripe.prices.find((item) => item.lookup_key === price.lookupKey)!;
       expect(holder.active).toBe(true);

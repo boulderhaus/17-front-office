@@ -564,7 +564,7 @@ describe("HTTP boundary", () => {
     const confirmation = [...store.notifications.values()].filter((item) => item.tenantId === account!.tenantId && item.idempotencyKey.startsWith("owner-optin:"));
     expect(confirmation).toHaveLength(1);
     expect(confirmation[0]).toMatchObject({ channel: "sms", destinationRef: "owner-primary", idempotencyKey: `owner-optin:${account!.tenantId}:signup` });
-    expect(confirmation[0]!.body).toBe("Front Office by Dutchworks: You're subscribed to Front Office account notifications. Msg frequency varies. Msg & data rates may apply. Reply HELP for help, STOP to cancel.");
+    expect(confirmation[0]!.body).toBe("Call Otto by Dutchworks: You're subscribed to Call Otto account notifications. Msg frequency varies. Msg & data rates may apply. Reply HELP for help, STOP to cancel.");
 
     const taskCall: CallRecord = {
       id: "11111111-1111-4111-8111-111111111111",
@@ -934,15 +934,15 @@ describe("HTTP boundary", () => {
     // Three plans in plain words, priced by answered calls, with the guarantee and free teammates. Pro is no longer sold.
     for (const item of ["Solo", "Team", "Fleet", "60 answered calls a month, about 2 a day", "250 answered calls a month, about 8 a day", "500 answered calls a month, about 17 a day", "$49.99", "$179.99", "$349.99", "Lead guarantee", "Team members free", "Extra calls are 75¢ each"]) expect(landingHtml).toContain(item);
     expect(landingHtml).not.toContain("125 answered calls a month");
-    expect(landingHtml).toContain("If Front Office doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month.");
+    expect(landingHtml).toContain("If Call Otto doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month.");
     expect(landingHtml).not.toMatch(/connected AI minutes|\/minute/);
     expect(landingHtml).toContain("EXAMPLE CALL");
-    for (const item of ["Phone rings", "Front Office picks up", "What you get on your phone", "New call: Maria", "- AC not cooling", "41 Palm Ave, Sarasota", "Wants someone today", "Call back", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
+    for (const item of ["Phone rings", "Otto picks up", "What you get on your phone", "New call: Maria", "- AC not cooling", "41 Palm Ave, Sarasota", "Wants someone today", "Call back", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
     // The example loops with CSS only and holds still for people who turn motion off.
     expect(landingHtml).toContain("@keyframes demoFrame");
     expect(landingHtml).toMatch(/prefers-reduced-motion:reduce\)\{[^}]*\}[^@]*\.frame\{position:static;opacity:1;animation:none/);
     for (const question of ["Will it sound like a robot?", "Do I keep my number?", "What if it’s an emergency?", "Can I cancel anytime?", "What if I cancel?"]) expect(landingHtml).toContain(question);
-    expect(landingHtml).toContain("Your Front Office number keeps taking messages for 30 days and texts them to you, so no customer hits a dead line. You can export your calls anytime.");
+    expect(landingHtml).toContain("Your Call Otto number keeps taking messages for 30 days and texts them to you, so no customer hits a dead line. You can export your calls anytime.");
     // "Unlimited" only ever appears as the add-on, with its fair-use limit right next to the toggle.
     expect(landingHtml).toContain("Fair use: up to 3× your plan’s calls.");
     expect(landingHtml).not.toMatch(/unlimited (minutes|answering)/i);
@@ -956,7 +956,7 @@ describe("HTTP boundary", () => {
     // 10DLC opt-in: a separate, unchecked, optional box naming the brand and the message type.
     expect(signupPage).toMatch(/<input name="ownerSmsConsent" type="checkbox" value="yes" >/);
     expect(signupPage).not.toContain('name="ownerSmsConsent" type="checkbox" value="yes" required');
-    for (const phrase of ["Send me Front Office account notifications by text (new calls, appointments)", "optional", "you agree to receive SMS account notifications from Front Office by Dutchworks LLC", "Msg frequency varies", "Msg &amp; data rates may apply", "Reply STOP to opt out, HELP for help", "Not required to sign up", "We won’t share mobile info with third parties for marketing", 'href="/terms"', 'href="/privacy"']) {
+    for (const phrase of ["Send me Call Otto account notifications by text (new calls, appointments)", "optional", "you agree to receive SMS account notifications from Call Otto by Dutchworks LLC", "Msg frequency varies", "Msg &amp; data rates may apply", "Reply STOP to opt out, HELP for help", "Not required to sign up", "We won’t share mobile info with third parties for marketing", 'href="/terms"', 'href="/privacy"']) {
       expect(signupPage).toContain(phrase);
     }
     expect(signupPage.slice(signupPage.indexOf('name="ownerSmsConsent"'), signupPage.indexOf("</label>", signupPage.indexOf('name="ownerSmsConsent"')))).not.toMatch(/\balerts?\b/i);
@@ -980,16 +980,16 @@ describe("HTTP boundary", () => {
     expect(termsHtml).toContain("creating an account, activating service, or paying for a subscription");
     expect(termsHtml).not.toContain("By continuing, you consent");
     // Public business details for carrier (10DLC) review: company, business address, phone and email, and nothing personal.
-    const company = "Front Office is a product of Dutchworks LLC, 16192 Coastal Highway, Lewes, DE 19958. Phone <a href=\"tel:+19296108092\">(929) 610-8092</a>, email <a href=\"mailto:hello@bydutchworks.com\">hello@bydutchworks.com</a>.";
+    const company = "Call Otto is a product of Dutchworks LLC, 16192 Coastal Highway, Lewes, DE 19958. Phone <a href=\"tel:+19296108092\">(929) 610-8092</a>, email <a href=\"mailto:hello@bydutchworks.com\">hello@bydutchworks.com</a>.";
     expect(privacyHtml).toContain(`<h2>Who we are</h2><p>${company}</p>`);
     expect(termsHtml).toContain(`<h2>Who we are</h2><p>${company}</p>`);
-    expect(termsHtml).toContain("Front Office, a product of Dutchworks LLC, sends account notifications");
+    expect(termsHtml).toContain("Call Otto, a product of Dutchworks LLC, sends account notifications");
     // Carrier review: "notifications", never "alerts", and a real support contact instead of a placeholder.
     for (const page of [termsHtml, privacyHtml]) {
       expect(page).not.toMatch(/\balerts?\b/i);
       expect(page).not.toContain("supplied during onboarding");
     }
-    expect(termsHtml).toContain('Contact Front Office support at <a href="mailto:hello@bydutchworks.com">hello@bydutchworks.com</a> or <a href="tel:+19296108092">(929) 610-8092</a> for help.');
+    expect(termsHtml).toContain('Contact Call Otto support at <a href="mailto:hello@bydutchworks.com">hello@bydutchworks.com</a> or <a href="tel:+19296108092">(929) 610-8092</a> for help.');
     const simulator = await fetch(`${baseUrl}/admin/simulator`, { headers: { authorization: `Bearer ${adminToken}` } });
     expect(simulator.status).toBe(200);
     expect(await simulator.text()).toContain("Run all 15 launch scenarios");

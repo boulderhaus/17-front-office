@@ -92,7 +92,7 @@ describe("web push call alerts", () => {
       return new Response(null, { status: 201 });
     }) as unknown as typeof fetch;
     const sender = new WebPushSender({ store, clock, fetcher, vapid: { ...generateVapidKeys(), subject: "mailto:hello@example.test" } });
-    const message = ownerCallPushMessage("Front Office: URGENT: gas smell\nNew call: Maria\n- Gas smell in kitchen\n- 41 Palm Ave, Sarasota\n\nCall back: https://x.example/c/abc", "11111111-1111-4111-8111-111111111111", true);
+    const message = ownerCallPushMessage("Otto: URGENT: gas smell\nNew call: Maria\n- Gas smell in kitchen\n- 41 Palm Ave, Sarasota\n\nCall back: https://x.example/c/abc", "11111111-1111-4111-8111-111111111111", true);
     expect(message).toMatchObject({ title: "URGENT: gas smell", body: "New call: Maria · Gas smell in kitchen · 41 Palm Ave, Sarasota", url: "/app/calls/11111111-1111-4111-8111-111111111111" });
     const first = ownerPushNotification({ tenantId: "shop", callId: null, message, keyBase: "k1", now: now.toISOString() });
     const second = ownerPushNotification({ tenantId: "shop", callId: null, message, keyBase: "k2", now: now.toISOString() });

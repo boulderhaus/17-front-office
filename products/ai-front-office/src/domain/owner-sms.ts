@@ -2,11 +2,11 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type { CallRecord } from "./models.js";
 
 /**
- * The owner's new-call text. It names the sender first ("Front Office: "), then short "- " lines that wrap well on a phone, a blank line before the link,
+ * The owner's new-call text. It names the sender first ("Otto: "), then short "- " lines that wrap well on a phone, a blank line before the link,
  * GSM-7 only (no ¢, no curly quotes, no "·") so it stays cheap and renders everywhere, the caller's first name
  * only, and never the caller's phone number (carrier rule): the link opens a page with a big Call button instead.
  *
- *   Front Office: New call: Maria
+ *   Otto: New call: Maria
  *   - AC not cooling
  *   - 41 Palm Ave, Sarasota
  *   - Wants someone today
@@ -14,7 +14,7 @@ import type { CallRecord } from "./models.js";
  *   Call back: https://.../c/...
  *
  * When the AI booked a time, the last bullet is "- Booked tomorrow 10a" and the link reads "Confirmation:".
- * Urgent and emergency calls start with a "Front Office: URGENT: {reason}" line, then "New call: ..." and the same lines.
+ * Urgent and emergency calls start with an "Otto: URGENT: {reason}" line, then "New call: ..." and the same lines.
  * The STOP line is added at send time, only on the first owner text a number ever gets (see withOwnerSmsCompliance).
  */
 export function ownerCallSms(input: { call: Pick<CallRecord, "fields" | "emergency">; urgentReason?: string | null; wants?: string | null; booked?: string | null; link: string }): string {
@@ -33,11 +33,11 @@ export function ownerCallSms(input: { call: Pick<CallRecord, "fields" | "emergen
 }
 
 /** Every owner text names the sender first. */
-export const OWNER_SMS_PREFIX = "Front Office: ";
+export const OWNER_SMS_PREFIX = "Otto: ";
 /** Added as the last line of the first owner text a number ever gets, and of the first one after it re-subscribes. */
 export const OWNER_SMS_STOP_LINE = "Reply STOP to opt out";
 /** Sent once when an owner opts in to texts. Matches the opt-in message registered with the carriers. */
-export const OWNER_SMS_OPT_IN_CONFIRMATION = "Front Office by Dutchworks: You're subscribed to Front Office account notifications. Msg frequency varies. Msg & data rates may apply. Reply HELP for help, STOP to cancel.";
+export const OWNER_SMS_OPT_IN_CONFIRMATION = "Call Otto by Dutchworks: You're subscribed to Call Otto account notifications. Msg frequency varies. Msg & data rates may apply. Reply HELP for help, STOP to cancel.";
 
 /**
  * True when the text already ends with our own opt-out instructions (the STOP line, or the registered opt-in
@@ -48,11 +48,11 @@ export function hasStopLanguage(body: string): boolean {
 }
 
 /**
- * "Front Office: " in front of any owner text that does not already start with the brand. Texts written to open
- * with it ("Front Office is paused: ...", "Front Office voicemail for ...", the opt-in confirmation) stay as written.
+ * "Otto: " in front of any owner text that does not already start with it or the product name. Texts written to open
+ * with it ("Call Otto is paused: ...", "Call Otto voicemail for ...", the opt-in confirmation) stay as written.
  */
 export function brandOwnerSms(body: string): string {
-  return /^Front Office\b/.test(body) ? body : `${OWNER_SMS_PREFIX}${body}`;
+  return /^(Otto:|Call Otto\b)/.test(body) ? body : `${OWNER_SMS_PREFIX}${body}`;
 }
 
 /** The text an owner actually receives: branded, with the STOP line when this text carries the number's opt-out notice. */

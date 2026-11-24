@@ -31,12 +31,17 @@ export class ResendEmailAdapter implements NotificationPort {
   }
 }
 
+/** The From header Resend sends: "Call Otto <hello@callotto.co>". */
+export function resendFrom(name: string, email: string): string {
+  return `${name} <${email}>`;
+}
+
 export function formatEmailBody(subject: string, text: string): string {
   return `Subject: ${subject.trim().slice(0, 160)}\n\n${text.trim()}`;
 }
 
 function parseEmailBody(value: string): { subject: string; text: string } {
   const [first = "", ...rest] = value.split("\n");
-  if (!first.startsWith("Subject: ")) return { subject: "Front Office update", text: value };
-  return { subject: first.slice(9).trim() || "Front Office update", text: rest.join("\n").trimStart() };
+  if (!first.startsWith("Subject: ")) return { subject: "Call Otto update", text: value };
+  return { subject: first.slice(9).trim() || "Call Otto update", text: rest.join("\n").trimStart() };
 }

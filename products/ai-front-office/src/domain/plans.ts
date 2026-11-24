@@ -230,4 +230,4 @@ export function perCall(cents: number): string {
 }
 
 /** The guarantee, word for word, wherever it is shown. */
-export const LEAD_GUARANTEE = "If Front Office doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month.";
+export const LEAD_GUARANTEE = "If Call Otto doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month.";

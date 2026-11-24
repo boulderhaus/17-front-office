@@ -1125,13 +1125,13 @@ function formatSpokenSlots(slots: AvailabilitySlot[], timeZone: string, now: Dat
     .join("; ");
 }
 
-/** Caller lines from a readable transcript ("Caller: …" / "AI assistant: …"), including wrapped continuation lines. */
+/** Caller lines from a readable transcript ("Caller: …" / "Otto: …", or "AI assistant: …" before the rename), including wrapped continuation lines. */
 export function callerSpeech(transcript: string | null): string {
   let speaker: "caller" | "assistant" | null = null;
   const lines: string[] = [];
   for (const line of (transcript ?? "").split("\n")) {
     if (line.startsWith("Caller:")) { speaker = "caller"; lines.push(line.slice("Caller:".length).trim()); continue; }
-    if (line.startsWith("AI assistant:")) { speaker = "assistant"; continue; }
+    if (line.startsWith("Otto:") || line.startsWith("AI assistant:")) { speaker = "assistant"; continue; }
     if (speaker === "caller") lines.push(line.trim());
   }
   return lines.filter(Boolean).join("\n");

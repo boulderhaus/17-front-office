@@ -20,7 +20,7 @@ describe("owner new-call text", () => {
   it("reads in short lines with a blank line before the link, and never includes the caller's number", () => {
     const body = ownerCallSms({ call: { fields, emergency: null }, wants: "Wants someone today", link: "https://front-office.example/c/abc" });
     expect(body).toBe([
-      "Front Office: New call: Maria",
+      "Otto: New call: Maria",
       "- AC not cooling",
       "- 41 Palm Ave, Sarasota",
       "- Wants someone today",
@@ -34,7 +34,7 @@ describe("owner new-call text", () => {
   it("says when the AI booked a time and links the confirmation", () => {
     const body = ownerCallSms({ call: { fields: { ...fields, callerName: "Bob Smith" }, emergency: null }, booked: "tomorrow 10a", link: "https://front-office.example/c/abc" });
     expect(body).toBe([
-      "Front Office: New call: Bob",
+      "Otto: New call: Bob",
       "- AC not cooling",
       "- 41 Palm Ave, Sarasota",
       "- Booked tomorrow 10a",
@@ -46,7 +46,7 @@ describe("owner new-call text", () => {
   it("starts urgent calls with URGENT and the reason, then the caller's first name and the same bullets", () => {
     const emergency: EmergencyDecision = { emergency: true, severity: "urgent", score: 0.9, evidence: ["gas smell"], immediateInstruction: null };
     const body = ownerCallSms({ call: { fields, emergency }, urgentReason: urgentReason({ fields, emergency }, false), wants: "Wants someone today", link: "https://x.example/c/t" });
-    expect(body).toBe(["Front Office: URGENT: gas smell", "New call: Maria", "- AC not cooling", "- 41 Palm Ave, Sarasota", "- Wants someone today", "", "Call back: https://x.example/c/t"].join("\n"));
+    expect(body).toBe(["Otto: URGENT: gas smell", "New call: Maria", "- AC not cooling", "- 41 Palm Ave, Sarasota", "- Wants someone today", "", "Call back: https://x.example/c/t"].join("\n"));
     expect(urgentReason({ fields, emergency: { ...emergency, severity: "life_safety", evidence: ["carbon monoxide"] } }, false)).toBe("safety risk, carbon monoxide");
     expect(urgentReason({ fields, emergency: null }, true)).toBe("caller asked for you");
     expect(urgentReason({ fields, emergency: null }, false)).toBeNull();
@@ -56,7 +56,7 @@ describe("owner new-call text", () => {
     const long = { ...fields, callerName: "Jo", problemDescription: "Upstairs unit blowing warm air since Tuesday, thermostat says “cool” — maybe refrigerant", address: null };
     const body = ownerCallSms({ call: { fields: long, emergency: null }, link: "https://x.example/c/t" });
     const lines = body.split("\n");
-    expect(lines[0]).toBe("Front Office: New call: Jo");
+    expect(lines[0]).toBe("Otto: New call: Jo");
     expect(lines[1]!.length).toBeLessThanOrEqual(42);
     expect(lines[1]).toMatch(/^- .*\.\.\.$/);
     expect(lines.slice(2)).toEqual(["", "Call back: https://x.example/c/t"]);
@@ -102,7 +102,7 @@ describe("owner new-call text, end to end", () => {
     });
     const sms = [...store.notifications.values()].find((item) => item.channel === "sms" && item.callId === call.id)!;
     const lines = sms.body.split("\n");
-    expect(lines.slice(0, 5)).toEqual(["Front Office: New call: Maria", "- AC not cooling", "- 41 Palm Ave, Sarasota", "- Wants someone today", ""]);
+    expect(lines.slice(0, 5)).toEqual(["Otto: New call: Maria", "- AC not cooling", "- 41 Palm Ave, Sarasota", "- Wants someone today", ""]);
     expect(lines[5]).toMatch(/^Call back: https:\/\/front-office\.example\/c\/[A-Za-z0-9_-]{22}\.[0-9a-z]+\.[A-Za-z0-9_-]{22}$/);
     expect(sms.body).not.toMatch(/555.?0142|\+1/);
     expect(sms.body).toMatch(GSM7_ONE_SEGMENT);
@@ -152,7 +152,7 @@ describe("owner lead email", () => {
     expect(emails).toHaveLength(1);
     expect(emails[0]!.destinationRef).toBe("email:owner@example.test");
     const [subject, , ...rest] = emails[0]!.body.split("\n");
-    expect(subject).toBe("Subject: Front Office: New call: Maria");
+    expect(subject).toBe("Subject: Otto: New call: Maria");
     expect(rest.slice(0, 3)).toEqual(["New call: Maria", "- AC not cooling", "- 41 Palm Ave, Sarasota"]);
     expect(emails[0]!.body).toContain("Call back: https://front-office.example/c/");
     expect(emails[0]!.body).toContain("https://front-office.example/app/settings");
