@@ -3050,6 +3050,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (dependencies.env.DEMO_MODE) return;
     const config = await dependencies.store.getConfig(tenantId);
     if (config.paused) throw new HttpError(503, "Service is paused");
+    // The public demo line answers anyone, with or without provider test mode; it never sends (NotificationRouter).
+    if (tenantId === dependencies.env.PUBLIC_DEMO_TENANT_ID && !await dependencies.store.getOwnerAccountByTenant(tenantId)) return;
     if (dependencies.env.PROVIDER_TEST_MODE) return;
     if (tenantId !== dependencies.env.DEFAULT_TENANT_ID) {
       // Voice goes live without carrier texting approval (10DLC): texts are held until it lands (TelnyxSmsAdapter).
