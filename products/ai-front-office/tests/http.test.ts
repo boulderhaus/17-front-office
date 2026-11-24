@@ -747,6 +747,13 @@ describe("HTTP boundary", () => {
       const denied = await fetch(`${baseUrl}${path}`, { method: "POST", headers: { cookie: memberCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }) });
       expect(denied.status).toBe(403);
     }
+    // Removing a teammate drops their Google grant: a suspended member's calendar is never used again.
+    const teammate = await store.getOwnerAccountByEmail("teammate@synthetic.example");
+    await store.saveIntegrationSecret(account!.tenantId, "google", `refresh_token:${teammate!.id}`, "synthetic-refresh-token");
+    expect(await (await fetch(`${baseUrl}/app/team`, { headers: { cookie: memberCookie } })).text()).toContain('href="/privacy#google-calendar"');
+    const removed = await fetch(`${baseUrl}/app/team/remove`, { method: "POST", redirect: "manual", headers: { cookie: ownerCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, accountId: teammate!.id }) });
+    expect(removed.status).toBe(303);
+    expect(await store.getIntegrationSecret(account!.tenantId, "google", `refresh_token:${teammate!.id}`)).toBeNull();
     const setup = await (await fetch(`${baseUrl}/app/setup`, { headers: { cookie: ownerCookie } })).text();
     expect(setup).toContain("Where can you take a job?");
     expect(setup).toContain("Connect Google Calendar");
@@ -980,7 +987,7 @@ describe("HTTP boundary", () => {
     const privacyText = privacyHtml.replace(/<[^>]+>/g, "");
     expect(privacyText).toContain("Call Otto's use and transfer of information received from Google APIs to any other app will adhere to the Google API Services User Data Policy, including the Limited Use requirements.");
     expect(privacyHtml).toContain('<a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>');
-    for (const phrase of ["calendar.freebusy", "calendar.events", 'href="https://myaccount.google.com/permissions"', "train AI or machine learning models", "encrypted with AES-256"]) {
+    for (const phrase of ["calendar.freebusy", "calendar.events", 'href="https://myaccount.google.com/permissions"', "train AI or machine learning models", "encrypted with AES-256", '<h2 id="google-calendar">', "when a teammate is removed", "Call Otto connects to Google over HTTPS"]) {
       expect(privacyHtml).toContain(phrase);
     }
     for (const provider of ["Telnyx", "Stripe", "Resend", "Railway", "PostHog"]) expect(privacyHtml).toContain(`<strong>${provider}</strong>`);

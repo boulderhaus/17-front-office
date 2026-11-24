@@ -54,6 +54,9 @@ export async function teamRoutes(request: IncomingMessage, response: ServerRespo
     const target = await store.getOwnerAccountById(form.get("accountId") ?? "");
     if (!target || target.tenantId !== account.tenantId || target.role !== "member") throw new HttpError(404, "Teammate not found");
     await store.updateOwnerAccountStatus(target.id, "suspended", context.clock.now().toISOString());
+    // A suspended teammate's calendar is never used again, so its Google grant would never hit
+    // invalid_grant and be cleaned up: drop it now (the privacy notice promises this).
+    await store.deleteIntegrationSecret(account.tenantId, "google", `refresh_token:${target.id}`);
     return redirect(response, "/app/team");
   }
   throw new HttpError(404, "Not found");
