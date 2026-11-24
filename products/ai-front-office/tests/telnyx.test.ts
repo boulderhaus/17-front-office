@@ -162,7 +162,7 @@ describe("Telnyx provider boundary", () => {
       apiKey: "synthetic-key",
       fromNumber: "+15555550199",
       resolveDestination: async () => "+15555550100",
-      claimStopNotice: (phone, id) => store.claimSmsStopNotice(phone, id, "2026-11-23T12:00:00.000Z"),
+      claimStopNotice: (phone, id, firstAttempt) => store.claimSmsStopNotice(phone, id, "2026-11-23T12:00:00.000Z", firstAttempt),
       fetcher,
     });
     const [a, b] = [replica(), replica()];
@@ -195,6 +195,35 @@ describe("Telnyx provider boundary", () => {
     ]);
   });
 
+  it("never changes a retry's text, and ignores a caller's own STOP", async () => {
+    const store = new InMemoryStore();
+    const texts: string[] = [];
+    const fetcher = vi.fn(async (_url: string, init: RequestInit) => {
+      texts.push(JSON.parse(String(init.body)).text as string);
+      return jsonResponse({ data: { id: `message-${texts.length}` } });
+    }) as unknown as typeof fetch;
+    const adapter = new TelnyxSmsAdapter({
+      apiKey: "synthetic-key",
+      fromNumber: "+15555550199",
+      resolveDestination: async () => "+15555550100",
+      claimStopNotice: (phone, id, firstAttempt) => store.claimSmsStopNotice(phone, id, "2026-11-23T12:00:00.000Z", firstAttempt),
+      fetcher,
+    });
+    const holder = { ...syntheticNotification(), id: "11111111-1111-4111-8111-111111111111", attempts: 1, body: "New call: Ana" };
+    const loser = { ...syntheticNotification(), id: "22222222-2222-4222-8222-222222222222", attempts: 1, body: "New call: Bo" };
+    await adapter.send(holder);
+    await adapter.send(loser);
+    await store.releaseSmsStopNotice(holder.id); // the holder went dead
+    await adapter.send({ ...loser, attempts: 2 }); // the loser's retry must not take the freed notice
+    await adapter.send({ ...syntheticNotification(), id: "33333333-3333-4333-8333-333333333333", attempts: 1, body: "New call: Cy\n- STOP valve stuck\n\nCall back: https://x.example/c/t" });
+    expect(texts).toEqual([
+      "Front Office: New call: Ana\nReply STOP to opt out",
+      "Front Office: New call: Bo",
+      "Front Office: New call: Bo",
+      "Front Office: New call: Cy\n- STOP valve stuck\n\nCall back: https://x.example/c/t\nReply STOP to opt out",
+    ]);
+  });
+
   it("leaves texts to callers unchanged", async () => {
     const store = new InMemoryStore();
     const fetcher = vi.fn(async () => jsonResponse({ data: { id: "message-caller" } })) as unknown as typeof fetch;
@@ -202,7 +231,7 @@ describe("Telnyx provider boundary", () => {
       apiKey: "synthetic-key",
       fromNumber: "+15555550199",
       resolveDestination: async () => null,
-      claimStopNotice: (phone, id) => store.claimSmsStopNotice(phone, id, "2026-11-23T12:00:00.000Z"),
+      claimStopNotice: (phone, id, firstAttempt) => store.claimSmsStopNotice(phone, id, "2026-11-23T12:00:00.000Z", firstAttempt),
       fetcher,
     });
     await adapter.send({ ...syntheticNotification(), destinationRef: "tel:+15555550101", body: "Suncoast Heating: Your visit is confirmed." });

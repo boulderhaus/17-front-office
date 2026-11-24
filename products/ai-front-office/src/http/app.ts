@@ -511,12 +511,13 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
 
   /**
    * An owner just opted in to texts: the next owner text carries the STOP line again, and once production
-   * messaging is approved they get the registered opt-in confirmation. Never blocks the signup or setup save.
+   * messaging is approved they get the registered opt-in confirmation (a failed enqueue is logged, not fatal).
    */
   async function queueOwnerOptInConfirmation(tenantId: string, phone: string | null, idempotencyKey: string): Promise<void> {
+    // Not swallowed: a stale notice would leave every later text to this number without the STOP line.
+    if (phone) await dependencies.store.resetSmsStopNotice(phone);
+    if (!dependencies.env.TELNYX_MESSAGING_APPROVED) return;
     try {
-      if (phone) await dependencies.store.resetSmsStopNotice(phone);
-      if (!dependencies.env.TELNYX_MESSAGING_APPROVED) return;
       const now = dependencies.clock.now().toISOString();
       await dependencies.store.enqueueNotification({
         id: randomUUID(), tenantId, callId: null, channel: "sms", destinationRef: "owner-primary",

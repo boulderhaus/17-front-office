@@ -320,8 +320,8 @@ export class InMemoryStore implements Store {
     return this.smsOptOuts.get(`${tenantId}:${phone}`) === true;
   }
 
-  async claimSmsStopNotice(phone: string, notificationId: string, _now: string): Promise<boolean> {
-    if (!this.smsStopNotices.has(phone)) this.smsStopNotices.set(phone, notificationId);
+  async claimSmsStopNotice(phone: string, notificationId: string, _now: string, firstAttempt: boolean): Promise<boolean> {
+    if (firstAttempt && !this.smsStopNotices.has(phone)) this.smsStopNotices.set(phone, notificationId);
     return this.smsStopNotices.get(phone) === notificationId;
   }
 

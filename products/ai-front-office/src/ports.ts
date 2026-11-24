@@ -71,10 +71,11 @@ export interface Store {
   setSmsOptOut(tenantId: string, phone: string, optedOut: boolean): Promise<void>;
   isSmsOptedOut(tenantId: string, phone: string): Promise<boolean>;
   /**
-   * Claim this number's one-time STOP notice for a notification. True when this notification holds it (first
-   * claimant, or a retry of it). Atomic across replicas.
+   * This number's one-time STOP notice for a notification: true when this notification holds it. Only a first send
+   * attempt may take a free notice (atomic across replicas); a retry just reads whether it already holds it, so a
+   * retry always sends the same text as its first attempt.
    */
-  claimSmsStopNotice(phone: string, notificationId: string, now: string): Promise<boolean>;
+  claimSmsStopNotice(phone: string, notificationId: string, now: string, firstAttempt: boolean): Promise<boolean>;
   /** A notification that will never be sent gives its STOP notice back, so the next owner text carries it. */
   releaseSmsStopNotice(notificationId: string): Promise<void>;
   /** Forget a number's STOP notice so the next owner text carries it again (after the number re-subscribes). */

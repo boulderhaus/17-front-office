@@ -487,9 +487,9 @@ export class PostgresStore implements Store {
     return result.rows[0]?.opted_out === true;
   }
 
-  async claimSmsStopNotice(phone: string, notificationId: string, now: string): Promise<boolean> {
+  async claimSmsStopNotice(phone: string, notificationId: string, now: string, firstAttempt: boolean): Promise<boolean> {
     const phoneHash = this.cryptoBox.hashLookup(phone);
-    await this.#pool.query(
+    if (firstAttempt) await this.#pool.query(
       "INSERT INTO sms_stop_notices(phone_hash,notification_id,claimed_at) VALUES($1,$2,$3) ON CONFLICT (phone_hash) DO NOTHING",
       [phoneHash, notificationId, now],
     );

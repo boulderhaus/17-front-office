@@ -441,7 +441,7 @@ describe("HTTP boundary", () => {
       method: "POST", headers: signedHeaders(stop, privateKey, clock.now()), body: stop,
     })).status).toBe(200);
     expect(await store.isSmsOptedOut("demo", "+15555550100")).toBe(true);
-    await store.claimSmsStopNotice("+15555550100", "earlier-notification", clock.now().toISOString());
+    await store.claimSmsStopNotice("+15555550100", "earlier-notification", clock.now().toISOString(), true);
     const start = stop.replace('"STOP"', '"START"').replace("event-message-stop", "event-message-start");
     expect((await fetch(`${baseUrl}/webhooks/telnyx`, {
       method: "POST", headers: signedHeaders(start, privateKey, clock.now()), body: start,
@@ -776,7 +776,7 @@ describe("HTTP boundary", () => {
     }) });
     const account = (await store.getOwnerAccountByEmail("optin@synthetic.example"))!;
     const confirmations = () => [...store.notifications.values()].filter((item) => item.tenantId === account.tenantId && item.idempotencyKey.startsWith("owner-optin:"));
-    await store.claimSmsStopNotice("+19415550142", "older-notification", clock.now().toISOString());
+    await store.claimSmsStopNotice("+19415550142", "older-notification", clock.now().toISOString(), true);
     expect((await save({ ownerPhone: "(941) 555-0142", ownerSmsConsent: "yes" })).status).toBe(303);
     expect(confirmations()).toHaveLength(1);
     expect(store.smsStopNotices.has("+19415550142")).toBe(false);

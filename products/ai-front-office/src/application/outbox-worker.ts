@@ -34,11 +34,14 @@ export class OutboxWorker {
       } catch (error) {
         notification.lastError = redactError(error);
         const maxAttempts = notification.priority === "high" ? 12 : 5;
-        if (notification.attempts >= maxAttempts) {
+        // Never sent, never retried: if it held the number's STOP line, the next owner text must carry it instead.
+        // If that hand-back fails, stay in retry (one more attempt, then this again) rather than strand the notice.
+        const released = notification.attempts >= maxAttempts && notification.channel === "sms"
+          ? await this.store.releaseSmsStopNotice(notification.id).then(() => true, () => false)
+          : true;
+        if (notification.attempts >= maxAttempts && released) {
           notification.state = "dead";
           result.dead += 1;
-          // Never sent, never retried: if it held the number's STOP line, the next owner text carries it instead.
-          if (notification.channel === "sms") await this.store.releaseSmsStopNotice(notification.id).catch(() => undefined);
           if (notification.idempotencyKey.startsWith("customer-confirmation:") || notification.idempotencyKey.startsWith("missed-call-text:")) {
             await this.enqueueOwnerFailureAlert(notification);
           }

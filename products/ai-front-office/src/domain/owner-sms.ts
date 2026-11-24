@@ -39,12 +39,18 @@ export const OWNER_SMS_STOP_LINE = "Reply STOP to opt out";
 /** Sent once when an owner opts in to texts. Matches the opt-in message registered with the carriers. */
 export const OWNER_SMS_OPT_IN_CONFIRMATION = "Front Office by Dutchworks: You're subscribed to Front Office account notifications. Msg frequency varies. Msg & data rates may apply. Reply HELP for help, STOP to cancel.";
 
-/** True when the text already tells the reader how to stop texts. */
+/**
+ * True when the text already ends with our own opt-out instructions (the STOP line, or the registered opt-in
+ * confirmation). Only the end counts: a caller's words ("STOP valve stuck") sit mid-text and never do.
+ */
 export function hasStopLanguage(body: string): boolean {
-  return /\bSTOP\b/.test(body);
+  return /(Reply STOP to opt out\.?|STOP to cancel\.)$/.test(body.trimEnd());
 }
 
-/** "Front Office: " in front of any owner text that does not already start with the brand. */
+/**
+ * "Front Office: " in front of any owner text that does not already start with the brand. Texts written to open
+ * with it ("Front Office is paused: ...", "Front Office voicemail for ...", the opt-in confirmation) stay as written.
+ */
 export function brandOwnerSms(body: string): string {
   return /^Front Office\b/.test(body) ? body : `${OWNER_SMS_PREFIX}${body}`;
 }

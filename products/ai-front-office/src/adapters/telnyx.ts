@@ -317,7 +317,7 @@ interface TelnyxSmsOptions {
   allowedDirectDestinations?: ReadonlySet<string>;
   isOptedOut?: (tenantId: string, phone: string) => Promise<boolean>;
   /** Claims a number's one-time "Reply STOP to opt out" line for this notification (see Store.claimSmsStopNotice). */
-  claimStopNotice?: (phone: string, notificationId: string) => Promise<boolean>;
+  claimStopNotice?: (phone: string, notificationId: string, firstAttempt: boolean) => Promise<boolean>;
   webhookUrl?: string;
   fetcher?: typeof fetch;
 }
@@ -341,7 +341,7 @@ export class TelnyxSmsAdapter implements NotificationPort {
     let text = notification.body;
     if (!direct && notification.senderRef !== "founder") {
       const branded = brandOwnerSms(notification.body);
-      const stopNotice = !hasStopLanguage(branded) && this.options.claimStopNotice ? await this.options.claimStopNotice(to, notification.id) : false;
+      const stopNotice = !hasStopLanguage(branded) && this.options.claimStopNotice ? await this.options.claimStopNotice(to, notification.id, notification.attempts <= 1) : false;
       text = withOwnerSmsCompliance(branded, stopNotice);
     }
     const body = {

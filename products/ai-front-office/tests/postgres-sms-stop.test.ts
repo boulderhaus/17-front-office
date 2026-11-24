@@ -17,21 +17,23 @@ function stopNoticeContract(name: string, stores: () => { a: Store; b: Store }) 
       await a.resetSmsStopNotice(phone);
       const ids = Array.from({ length: 10 }, () => randomUUID());
       const now = "2026-11-23T12:00:00.000Z";
-      const claims = await Promise.all(ids.map((id, index) => (index % 2 ? a : b).claimSmsStopNotice(phone, id, now)));
+      const claims = await Promise.all(ids.map((id, index) => (index % 2 ? a : b).claimSmsStopNotice(phone, id, now, true)));
       expect(claims.filter(Boolean)).toHaveLength(1);
       const winner = ids[claims.indexOf(true)]!;
-      expect(await b.claimSmsStopNotice(phone, winner, now)).toBe(true);
-      expect(await a.claimSmsStopNotice(phone, randomUUID(), now)).toBe(false);
+      expect(await b.claimSmsStopNotice(phone, winner, now, true)).toBe(true);
+      expect(await b.claimSmsStopNotice(phone, winner, now, false)).toBe(true); // a retry reads, and still holds it
+      expect(await a.claimSmsStopNotice(phone, randomUUID(), now, true)).toBe(false);
       await b.resetSmsStopNotice(phone);
+      expect(await a.claimSmsStopNotice(phone, randomUUID(), now, false)).toBe(false); // a retry never takes a free notice
       const next = randomUUID();
-      expect(await a.claimSmsStopNotice(phone, next, now)).toBe(true);
-      expect(await b.claimSmsStopNotice(phone, winner, now)).toBe(false);
+      expect(await a.claimSmsStopNotice(phone, next, now, true)).toBe(true);
+      expect(await b.claimSmsStopNotice(phone, winner, now, true)).toBe(false);
       // The holder went dead: the notice goes back, only that holder's.
       await b.releaseSmsStopNotice(winner);
-      expect(await a.claimSmsStopNotice(phone, randomUUID(), now)).toBe(false);
+      expect(await a.claimSmsStopNotice(phone, randomUUID(), now, true)).toBe(false);
       await b.releaseSmsStopNotice(next);
       const after = randomUUID();
-      expect(await a.claimSmsStopNotice(phone, after, now)).toBe(true);
+      expect(await a.claimSmsStopNotice(phone, after, now, true)).toBe(true);
       await a.resetSmsStopNotice(phone);
     });
   });
@@ -47,10 +49,24 @@ describe("outbox dead letters", () => {
       priority: "normal", state: "pending", attempts: 5, nextAttemptAt: "2026-11-23T11:00:00.000Z",
       idempotencyKey: `dead:${id}`, providerReceipt: null, lastError: null, createdAt: "2026-11-23T11:00:00.000Z", sentAt: null,
     });
-    await store.claimSmsStopNotice("+19415550142", id, clock.now().toISOString());
+    await store.claimSmsStopNotice("+19415550142", id, clock.now().toISOString(), true);
     const worker = new OutboxWorker(store, { send: async () => { throw new Error("carrier rejected"); } }, clock);
     expect((await worker.runOnce()).dead).toBe(1);
     expect(store.smsStopNotices.has("+19415550142")).toBe(false);
+  });
+
+  it("keeps retrying instead of going dead when the notice cannot be handed back", async () => {
+    const store = new InMemoryStore();
+    const clock = { now: () => new Date("2026-11-23T12:00:00.000Z") };
+    const id = randomUUID();
+    await store.enqueueNotification({
+      id, tenantId: "demo", callId: null, channel: "sms", destinationRef: "owner-primary", body: "New call: Maria",
+      priority: "normal", state: "pending", attempts: 5, nextAttemptAt: "2026-11-23T11:00:00.000Z",
+      idempotencyKey: `dead:${id}`, providerReceipt: null, lastError: null, createdAt: "2026-11-23T11:00:00.000Z", sentAt: null,
+    });
+    store.releaseSmsStopNotice = async () => { throw new Error("database blip"); };
+    const worker = new OutboxWorker(store, { send: async () => { throw new Error("carrier rejected"); } }, clock);
+    expect(await worker.runOnce()).toMatchObject({ dead: 0, retried: 1 });
   });
 });
 
