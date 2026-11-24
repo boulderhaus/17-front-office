@@ -495,12 +495,13 @@ export class TelnyxAssistantMessenger {
    * "sent" when Telnyx accepted it, "call_ended" when the call is already over, "rejected" for any other 4xx that a
    * retry cannot fix (say the assistant already left after a transfer). Throws on 408, 429, 5xx and network errors.
    */
-  async addSystemMessage(callControlId: string, content: string, commandId: string): Promise<"sent" | "call_ended" | "rejected"> {
+  async addSystemMessage(callControlId: string, content: string, commandId: string, options: { triggerResponse?: boolean } = {}): Promise<"sent" | "call_ended" | "rejected"> {
     const response = await withTimeout(this.fetcher(`https://api.telnyx.com/v2/calls/${encodeURIComponent(callControlId)}/actions/ai_assistant_add_messages`, {
       method: "POST",
       headers: { authorization: `Bearer ${this.apiKey}`, "content-type": "application/json" },
-      // trigger_response stays false: the message applies on the assistant's next natural turn, so it never talks over the caller.
-      body: JSON.stringify({ messages: [{ role: "system", content }], command_id: commandId, trigger_response: false }),
+      // trigger_response false (the default): the message applies on the assistant's next natural turn, so it never talks
+      // over the caller. true starts a turn now, which may interrupt them.
+      body: JSON.stringify({ messages: [{ role: "system", content }], command_id: commandId, trigger_response: options.triggerResponse === true }),
     }), 4_000);
     if (response.ok) return "sent";
     const payload = await response.json().catch(() => ({})) as { errors?: Array<{ code?: unknown }> };

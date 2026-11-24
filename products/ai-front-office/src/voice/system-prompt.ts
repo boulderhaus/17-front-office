@@ -112,14 +112,20 @@ export const WRAP_UP_AFTER_SECONDS = 300;
 export const FINISH_NUDGE_AFTER_SECONDS = 270;
 export const WRAP_UP_NUDGE_AFTER_SECONDS = 330;
 /**
+ * Those two land on the assistant's next natural turn. If the call is still up at 6:30 (the caller has talked
+ * through both), the wrap-up message is sent again and forces a turn: a short interruption beats the 7:00 cut.
+ */
+export const FORCED_WRAP_UP_AFTER_SECONDS = 390;
+/**
  * Backstop only: Telnyx stops the assistant after this many seconds (telephony_settings.time_limit_secs). It sits
  * a minute past the target so a caller hears the wrap-up line, not a dead line.
  */
 export const CALL_TIME_LIMIT_SECONDS = 420;
 
 /** 4:30 system message: close out within a minute. */
-export function buildFinishNudge(): string {
-  return `The call has run four and a half minutes. Wrap it up within one minute: ask no new questions and start no new topics. If you don't have a callback number yet, confirm it. Then save the intake, say exactly "${WRAP_UP_LINE}", and invoke the built-in hangup tool in the same turn.`;
+export function buildFinishNudge(options: { emergency: boolean }): string {
+  const safety = options.emergency ? " Before you close, remind them in one sentence to leave and call 911 if anyone may be in danger." : "";
+  return `The call has run four and a half minutes. Wrap it up within one minute: ask no new questions and start no new topics. If you don't have a callback number yet, confirm it.${safety} Then save the intake, say exactly "${WRAP_UP_LINE}", and invoke the built-in hangup tool in the same turn.`;
 }
 
 /** 5:30 system message: say the wrap-up line on this turn and hang up. */
