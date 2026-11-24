@@ -70,6 +70,16 @@ export interface Store {
   listNotifications(callId: string): Promise<OutboxNotification[]>;
   setSmsOptOut(tenantId: string, phone: string, optedOut: boolean): Promise<void>;
   isSmsOptedOut(tenantId: string, phone: string): Promise<boolean>;
+  /**
+   * This number's one-time STOP notice for a notification: true when this notification holds it. Only a first send
+   * attempt may take a free notice (atomic across replicas); a retry just reads whether it already holds it, so a
+   * retry always sends the same text as its first attempt.
+   */
+  claimSmsStopNotice(phone: string, notificationId: string, now: string, firstAttempt: boolean): Promise<boolean>;
+  /** A notification that will never be sent gives its STOP notice back, so the next owner text carries it. */
+  releaseSmsStopNotice(notificationId: string): Promise<void>;
+  /** Forget a number's STOP notice so the next owner text carries it again (after the number re-subscribes). */
+  resetSmsStopNotice(phone: string): Promise<void>;
   savePilotSignup(signup: PilotSignup): Promise<void>;
   listPilotSignups(limit: number): Promise<PilotSignup[]>;
   createOwnerWorkspace(input: OwnerWorkspaceInput): Promise<boolean>;

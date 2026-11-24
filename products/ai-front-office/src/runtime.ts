@@ -86,6 +86,7 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
         resolveDestination: async (tenantId, reference) =>
           (await store.getIntegrationSecret(tenantId, "notifications", reference)) ?? null,
         isOptedOut: (tenantId, phone) => store.isSmsOptedOut(tenantId, phone),
+        claimStopNotice: (phone, notificationId, firstAttempt) => store.claimSmsStopNotice(phone, notificationId, new Date().toISOString(), firstAttempt),
         webhookUrl: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx`,
         ...(env.PROVIDER_TEST_MODE ? { allowedDirectDestinations: new Set(Object.values(destinations)) } : {}),
       })

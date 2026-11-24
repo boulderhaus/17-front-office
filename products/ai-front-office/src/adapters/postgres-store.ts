@@ -487,6 +487,24 @@ export class PostgresStore implements Store {
     return result.rows[0]?.opted_out === true;
   }
 
+  async claimSmsStopNotice(phone: string, notificationId: string, now: string, firstAttempt: boolean): Promise<boolean> {
+    const phoneHash = this.cryptoBox.hashLookup(phone);
+    if (firstAttempt) await this.#pool.query(
+      "INSERT INTO sms_stop_notices(phone_hash,notification_id,claimed_at) VALUES($1,$2,$3) ON CONFLICT (phone_hash) DO NOTHING",
+      [phoneHash, notificationId, now],
+    );
+    const result = await this.#pool.query("SELECT notification_id FROM sms_stop_notices WHERE phone_hash=$1", [phoneHash]);
+    return result.rows[0]?.notification_id === notificationId;
+  }
+
+  async releaseSmsStopNotice(notificationId: string): Promise<void> {
+    await this.#pool.query("DELETE FROM sms_stop_notices WHERE notification_id=$1", [notificationId]);
+  }
+
+  async resetSmsStopNotice(phone: string): Promise<void> {
+    await this.#pool.query("DELETE FROM sms_stop_notices WHERE phone_hash=$1", [this.cryptoBox.hashLookup(phone)]);
+  }
+
   async savePilotSignup(signup: PilotSignup): Promise<void> {
     await this.#pool.query(
       `INSERT INTO pilot_signups(

@@ -34,7 +34,12 @@ export class OutboxWorker {
       } catch (error) {
         notification.lastError = redactError(error);
         const maxAttempts = notification.priority === "high" ? 12 : 5;
-        if (notification.attempts >= maxAttempts) {
+        // Never sent, never retried: if it held the number's STOP line, the next owner text must carry it instead.
+        // If that hand-back fails, stay in retry (one more attempt, then this again) rather than strand the notice.
+        const released = notification.attempts >= maxAttempts && notification.channel === "sms"
+          ? await this.store.releaseSmsStopNotice(notification.id).then(() => true, () => false)
+          : true;
+        if (notification.attempts >= maxAttempts && released) {
           notification.state = "dead";
           result.dead += 1;
           if (notification.idempotencyKey.startsWith("customer-confirmation:") || notification.idempotencyKey.startsWith("missed-call-text:")) {
@@ -61,7 +66,7 @@ export class OutboxWorker {
     for (const destinationRef of config.ownerNotificationRefs) {
       await this.store.enqueueNotification({
         id: randomUUID(), tenantId: notification.tenantId, callId: notification.callId, channel: "sms", destinationRef,
-        body: `CUSTOMER SMS FAILED\n${call.fields.callerName ?? "Unknown caller"} · ${call.fields.callbackNumber ?? call.fromNumber}\nManual follow-up required.`,
+        body: `Front Office: CUSTOMER SMS FAILED\n${call.fields.callerName ?? "Unknown caller"} - ${call.fields.callbackNumber ?? call.fromNumber}\nManual follow-up required.`,
         priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
         idempotencyKey: `customer-sms-failure:${notification.id}:${destinationRef}`,
         providerReceipt: null, lastError: null, createdAt: now, sentAt: null,

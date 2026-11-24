@@ -237,6 +237,7 @@ describe("three taps to a live line", () => {
     const proof = JSON.parse((await store.getIntegrationSecret(account.tenantId, "notifications", "owner_sms_consent"))!) as { at: string; source: string; wording: string };
     expect(proof).toMatchObject({ at: "2026-11-23T15:00:00.000Z", source: "signup" });
     expect(proof.wording).toMatch(/^\d{4}-\d{2}-\d{2}(\.\d+)?$/);
+    expect([...store.notifications.values()].filter((item) => item.idempotencyKey === `owner-optin:${account.tenantId}:signup`)).toHaveLength(1);
   });
 
   it("charges the full price today, one plan, when no coupon or second price is configured", async () => {

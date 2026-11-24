@@ -441,6 +441,15 @@ describe("HTTP boundary", () => {
       method: "POST", headers: signedHeaders(stop, privateKey, clock.now()), body: stop,
     })).status).toBe(200);
     expect(await store.isSmsOptedOut("demo", "+15555550100")).toBe(true);
+    await store.claimSmsStopNotice("+15555550100", "earlier-notification", clock.now().toISOString(), true);
+    const start = stop.replace('"STOP"', '"START"').replace("event-message-stop", "event-message-start");
+    expect((await fetch(`${baseUrl}/webhooks/telnyx`, {
+      method: "POST", headers: signedHeaders(start, privateKey, clock.now()), body: start,
+    })).status).toBe(200);
+    expect(await store.isSmsOptedOut("demo", "+15555550100")).toBe(false);
+    // Re-subscribed: the next owner text to this number carries the STOP line again.
+    expect(store.smsStopNotices.has("+15555550100")).toBe(false);
+    await store.setSmsOptOut("demo", "+15555550100", true);
 
     await store.saveConfig({ ...await store.getConfig("demo"), maxCallsPerCallerPerDay: 1 });
     const limitedInitialization = JSON.stringify({
@@ -551,6 +560,11 @@ describe("HTTP boundary", () => {
     expect(welcome).toMatchObject({ callId: null, destinationRef: "owner-primary", idempotencyKey: `founder-welcome:${account!.tenantId}` });
     expect(welcome?.body).toContain("Synthetic HVAC");
     expect(welcome?.body).toContain("STOP");
+    // The opt-in is confirmed by text once, with the registered opt-in wording.
+    const confirmation = [...store.notifications.values()].filter((item) => item.tenantId === account!.tenantId && item.idempotencyKey.startsWith("owner-optin:"));
+    expect(confirmation).toHaveLength(1);
+    expect(confirmation[0]).toMatchObject({ channel: "sms", destinationRef: "owner-primary", idempotencyKey: `owner-optin:${account!.tenantId}:signup` });
+    expect(confirmation[0]!.body).toBe("Front Office by Dutchworks: You're subscribed to Front Office account notifications. Msg frequency varies. Msg & data rates may apply. Reply HELP for help, STOP to cancel.");
 
     const taskCall: CallRecord = {
       id: "11111111-1111-4111-8111-111111111111",
@@ -751,6 +765,28 @@ describe("HTTP boundary", () => {
     expect((await store.getConfig(account!.tenantId)).serviceAreaTerms).toEqual(["Sarasota FL", "34236"]);
   });
 
+  it("confirms a setup-page text opt-in once per new opt-in or new number, and resets the STOP line", async () => {
+    const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Air", email: "optin@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
+    const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
+    const page = await (await fetch(`${baseUrl}/app/setup`, { headers: { cookie } })).text();
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
+    const save = (extra: Record<string, string>) => fetch(`${baseUrl}/app/setup`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({
+      csrf, businessName: "Synthetic Air", serviceAreaTerms: "Sarasota FL", timezone: "America/New_York", operationMode: "overflow", start: "17:00", end: "08:00",
+      bookStart: "08:00", bookEnd: "17:00", bookingMode: "confirm", greeting: "Hi, I'm the owner's AI assistant. How can I help?", prices: "", answers: "", disclosureApproved: "yes", ...extra,
+    }) });
+    const account = (await store.getOwnerAccountByEmail("optin@synthetic.example"))!;
+    const confirmations = () => [...store.notifications.values()].filter((item) => item.tenantId === account.tenantId && item.idempotencyKey.startsWith("owner-optin:"));
+    await store.claimSmsStopNotice("+19415550142", "older-notification", clock.now().toISOString(), true);
+    expect((await save({ ownerPhone: "(941) 555-0142", ownerSmsConsent: "yes" })).status).toBe(303);
+    expect(confirmations()).toHaveLength(1);
+    expect(store.smsStopNotices.has("+19415550142")).toBe(false);
+    expect((await save({ ownerSmsConsent: "yes" })).status).toBe(303);
+    expect((await save({ ownerPhone: "(941) 555-0142", ownerSmsConsent: "yes" })).status).toBe(303);
+    expect(confirmations()).toHaveLength(1);
+    expect((await save({ ownerSmsConsent: "" })).status).toBe(303);
+    expect(confirmations()).toHaveLength(1);
+  });
+
   it("keeps direct booking and warm transfer hidden and off for owners until their beta flags are on", async () => {
     const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Air", email: "beta@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
     const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
@@ -946,7 +982,13 @@ describe("HTTP boundary", () => {
     const company = "Front Office is a product of Dutchworks LLC, 16192 Coastal Highway, Lewes, DE 19958. Phone <a href=\"tel:+19296108092\">(929) 610-8092</a>, email <a href=\"mailto:hello@bydutchworks.com\">hello@bydutchworks.com</a>.";
     expect(privacyHtml).toContain(`<h2>Who we are</h2><p>${company}</p>`);
     expect(termsHtml).toContain(`<h2>Who we are</h2><p>${company}</p>`);
-    expect(termsHtml).toContain("Front Office, a product of Dutchworks LLC, sends call alerts");
+    expect(termsHtml).toContain("Front Office, a product of Dutchworks LLC, sends account notifications");
+    // Carrier review: "notifications", never "alerts", and a real support contact instead of a placeholder.
+    for (const page of [termsHtml, privacyHtml]) {
+      expect(page).not.toMatch(/\balerts?\b/i);
+      expect(page).not.toContain("supplied during onboarding");
+    }
+    expect(termsHtml).toContain('Contact Front Office support at <a href="mailto:hello@bydutchworks.com">hello@bydutchworks.com</a> or <a href="tel:+19296108092">(929) 610-8092</a> for help.');
     for (const page of [landingHtml, signupPage]) {
       expect(page).toContain('Dutchworks LLC</a>.<br>16192 Coastal Highway, Lewes, DE 19958<br><a href="tel:+19296108092">(929) 610-8092</a> · <a href="mailto:hello@bydutchworks.com">hello@bydutchworks.com</a>');
     }

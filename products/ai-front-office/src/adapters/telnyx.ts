@@ -3,6 +3,7 @@ import { z } from "zod";
 import { withTimeout } from "../application/retry.js";
 import type { CallSummaryInput, CollectedCallFields, OutboxNotification } from "../domain/models.js";
 import type { NotificationPort } from "../ports.js";
+import { brandOwnerSms, hasStopLanguage, withOwnerSmsCompliance } from "../domain/owner-sms.js";
 
 const toolCallSchema = z.object({
   id: z.string().optional(),
@@ -315,6 +316,8 @@ interface TelnyxSmsOptions {
   resolveDestination: (tenantId: string, reference: string) => Promise<string | null>;
   allowedDirectDestinations?: ReadonlySet<string>;
   isOptedOut?: (tenantId: string, phone: string) => Promise<boolean>;
+  /** Claims a number's one-time "Reply STOP to opt out" line for this notification (see Store.claimSmsStopNotice). */
+  claimStopNotice?: (phone: string, notificationId: string, firstAttempt: boolean) => Promise<boolean>;
   webhookUrl?: string;
   fetcher?: typeof fetch;
 }
@@ -333,10 +336,18 @@ export class TelnyxSmsAdapter implements NotificationPort {
     if (await this.options.isOptedOut?.(notification.tenantId, to)) throw new Error("Destination has opted out of SMS");
     const from = notification.senderRef === "founder" ? this.options.founderFromNumber : this.options.fromNumber;
     if (!from) throw new Error("Founder welcome sender is not configured");
+    // Owner texts (not texts to callers, not the founder's personal note) name Front Office first, and the first
+    // one a number ever gets ends with the STOP line. A text that already has STOP language does not use up the notice.
+    let text = notification.body;
+    if (!direct && notification.senderRef !== "founder") {
+      const branded = brandOwnerSms(notification.body);
+      const stopNotice = !hasStopLanguage(branded) && this.options.claimStopNotice ? await this.options.claimStopNotice(to, notification.id, notification.attempts <= 1) : false;
+      text = withOwnerSmsCompliance(branded, stopNotice);
+    }
     const body = {
       from,
       to,
-      text: notification.body,
+      text,
       ...(this.options.messagingProfileId ? { messaging_profile_id: this.options.messagingProfileId } : {}),
       ...(this.options.webhookUrl ? { webhook_url: this.options.webhookUrl } : {}),
     };

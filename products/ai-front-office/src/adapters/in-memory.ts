@@ -58,6 +58,7 @@ export class InMemoryStore implements Store {
   readonly deletedProviderCalls = new Set<string>();
   readonly integrationSecrets = new Map<string, string>();
   readonly smsOptOuts = new Map<string, boolean>();
+  readonly smsStopNotices = new Map<string, string>();
   readonly pilotSignups = new Map<string, PilotSignup>();
   readonly ownerAccounts = new Map<string, OwnerAccount>();
   readonly providerRoutes = new Map<string, ProviderRoute>();
@@ -317,6 +318,19 @@ export class InMemoryStore implements Store {
 
   async isSmsOptedOut(tenantId: string, phone: string): Promise<boolean> {
     return this.smsOptOuts.get(`${tenantId}:${phone}`) === true;
+  }
+
+  async claimSmsStopNotice(phone: string, notificationId: string, _now: string, firstAttempt: boolean): Promise<boolean> {
+    if (firstAttempt && !this.smsStopNotices.has(phone)) this.smsStopNotices.set(phone, notificationId);
+    return this.smsStopNotices.get(phone) === notificationId;
+  }
+
+  async releaseSmsStopNotice(notificationId: string): Promise<void> {
+    for (const [phone, holder] of this.smsStopNotices) if (holder === notificationId) this.smsStopNotices.delete(phone);
+  }
+
+  async resetSmsStopNotice(phone: string): Promise<void> {
+    this.smsStopNotices.delete(phone);
   }
 
   async savePilotSignup(signup: PilotSignup): Promise<void> {
