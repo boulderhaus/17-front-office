@@ -76,6 +76,10 @@ describe("HTTP boundary", () => {
     expect(mascot.status).toBe(200);
     expect(mascot.headers.get("content-type")).toBe("image/png");
     expect((await mascot.arrayBuffer()).byteLength).toBeGreaterThan(10_000);
+    const stripeImage = await fetch(`${baseUrl}/assets/stripe-product.png`);
+    expect(stripeImage.status).toBe(200);
+    expect(stripeImage.headers.get("content-type")).toBe("image/png");
+    expect((await stripeImage.arrayBuffer()).byteLength).toBeGreaterThan(10_000);
     const signupWizard = await fetch(`${baseUrl}/assets/signup-wizard.js`);
     expect(signupWizard.status).toBe(200);
     expect(signupWizard.headers.get("content-type")).toContain("text/javascript");
