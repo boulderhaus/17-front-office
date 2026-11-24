@@ -63,7 +63,7 @@ describe("public demo line after provider test mode is off", () => {
 
   it("sends nothing from the public demo tenant on any channel", async () => {
     const sender = { send: vi.fn(async () => ({ providerReceipt: "x" })) };
-    const router = new NotificationRouter(sender, sender, sender, sender, new Set(["demo"]));
+    const router = new NotificationRouter(sender, sender, sender, sender, async (tenantId) => tenantId === "demo");
     for (const channel of ["sms", "email", "push", "voice"] as const) {
       await expect(router.send({ id: randomUUID(), tenantId: "demo", callId: null, channel, destinationRef: "owner-primary", body: "x", priority: "high", state: "pending", attempts: 0, nextAttemptAt: now.toISOString(), idempotencyKey: `k-${channel}`, providerReceipt: null, lastError: null, createdAt: now.toISOString(), sentAt: null })).rejects.toBeInstanceOf(NotificationHeldError);
     }

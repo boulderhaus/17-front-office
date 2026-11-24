@@ -112,7 +112,9 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
         ...(env.PROVIDER_TEST_MODE ? { allowedDestinations: new Set(Object.values(destinations)) } : {}),
       })
     : null;
-  const sender = new NotificationRouter(smsSender, emailSender, pushSender, voiceSender, new Set(env.PUBLIC_DEMO_TENANT_ID ? [env.PUBLIC_DEMO_TENANT_ID] : []));
+  // Same rule as the answering exemption: the named demo tenant, and only while no owner account exists for it.
+  const sender = new NotificationRouter(smsSender, emailSender, pushSender, voiceSender,
+    async (tenantId) => tenantId === env.PUBLIC_DEMO_TENANT_ID && !await store.getOwnerAccountByTenant(tenantId));
   return {
     store,
     calendar,
