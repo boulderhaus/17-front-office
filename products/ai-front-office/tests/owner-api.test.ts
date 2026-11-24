@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
+import { TeamService } from "../src/application/team-service.js";
 import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
 import type { CallRecord } from "../src/domain/models.js";
@@ -297,5 +298,25 @@ describe("Owner JSON API and React app serving", () => {
     const crossShop = await realFetch(`${baseUrl}${detail.recordingUrl}`, { headers: { cookie: other.cookie } });
     expect(crossShop.status).toBe(404);
     expect(seen).toHaveLength(3); // no lookup after the 416, and none for the other shop
+  });
+
+  it("keeps a team member out of shop settings: no read, no change", async () => {
+    const owner = await signUp("a@synthetic.example");
+    const account = (await store.getOwnerAccountByEmail("a@synthetic.example"))!;
+    const teams = new TeamService(store, clock);
+    await teams.accept(owner.tenantId, await teams.invite(account, "member@synthetic.example"), "Synthetic Member", "long-password-for-tests");
+    const login = await fetch(`${baseUrl}/login`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "member@synthetic.example", password: "long-password-for-tests" }) });
+    expect(login.status).toBe(303);
+    const cookie = login.headers.get("set-cookie")!.split(";")[0]!;
+    const dashboard = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie } })).json() as { csrf: string; viewer: { role: string } };
+    expect(dashboard.viewer.role).toBe("member");
+    const member = { cookie, csrf: dashboard.csrf };
+    const before = (await store.getConfig(owner.tenantId)).businessName;
+    expect((await fetch(`${baseUrl}/api/app/settings`, { headers: { cookie } })).status).toBe(403);
+    expect((await fetch(`${baseUrl}/api/app/settings`, json(member, "PUT", { businessName: "Changed By Member" }))).status).toBe(403);
+    expect((await store.getConfig(owner.tenantId)).businessName).toBe(before);
+    expect((await fetch(`${baseUrl}/api/app/billing/plan`, json(member, "POST", { plan: "team" }))).status).toBe(403);
+    // The owner still can.
+    expect((await fetch(`${baseUrl}/api/app/settings`, { headers: { cookie: owner.cookie } })).status).toBe(200);
   });
 });

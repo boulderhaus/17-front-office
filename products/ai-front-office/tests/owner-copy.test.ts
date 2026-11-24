@@ -23,7 +23,7 @@ describe("public copy only promises what is true today", () => {
     for (const untrue of ["turns on by itself", "confirm each job by text", "A text for every new lead", "text you the job"]) expect(home).not.toContain(untrue);
     expect(home).toContain("A phone alert for every new lead; texts coming soon");
     const terms = await page("/terms");
-    expect(terms).toContain("Cancel anytime in the app: Settings, then Manage billing or cancel.");
+    expect(terms).toContain("Cancel anytime in the app: Settings → Plan and billing, then Manage billing or cancel.");
     expect(terms).toContain("automated call to the owner mobile number");
     expect(await page("/reset?token=abc")).toContain("mailto:hello@example.test");
     expect(await page("/forgot")).toContain("hello@example.test");

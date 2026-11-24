@@ -29,14 +29,16 @@ const shortTime = (minutes: number) => `${Math.floor(minutes / 60) % 12 || 12}${
 interface Visit { call: ApiCall; day: string; minutes: number; booked: boolean }
 
 export function CalendarPage() {
-  const { dashboard, base } = useMode()
+  const { dashboard, base, member } = useMode()
   const [params, setParams] = useSearchParams()
   const wide = useMediaQuery("(min-width: 1024px)")
+  // A phone opens on one day (a week of columns is too cramped there); a computer opens on the week.
+  const phone = useMediaQuery("(max-width: 767px)")
   const touch = useRef<{ x: number; y: number } | null>(null)
   if (!dashboard) return null
   const d = derive(dashboard)
   const today = dateKey(new Date(d.nowMs), d.tz)
-  const view: View = (["day", "week", "month"] as View[]).find((item) => item === params.get("view")) ?? "week"
+  const view: View = (["day", "week", "month"] as View[]).find((item) => item === params.get("view")) ?? (phone ? "day" : "week")
   const anchor = /^\d{4}-\d{2}-\d{2}$/.test(params.get("date") ?? "") ? params.get("date")! : today
   const selected = params.get("call") ? d.callsById.get(params.get("call")!) ?? null : null
   const visits: Visit[] = dashboard.calls
@@ -80,7 +82,7 @@ export function CalendarPage() {
                   className={cn("h-9 rounded-md px-4 text-[15px] font-semibold capitalize", view === item ? "bg-card shadow-sm ring-1 ring-border" : "text-muted-foreground hover:bg-card/60")}>{item}</button>
               ))}
             </div>
-            <Link to={`${base}/settings/calendar`} className="inline-flex h-11 items-center gap-2 rounded-lg border bg-card px-3 text-[15px] font-semibold hover:bg-muted max-lg:hidden"><Settings2 className="size-4" />Hours and Google Calendar</Link>
+            {!member && <Link to={`${base}/settings/calendar`} className="inline-flex h-11 items-center gap-2 rounded-lg border bg-card px-3 text-[15px] font-semibold hover:bg-muted max-lg:hidden"><Settings2 className="size-4" />Hours and Google Calendar</Link>}
           </div>
         </div>
 
@@ -103,10 +105,10 @@ export function CalendarPage() {
           <span className="inline-flex items-center gap-2"><i className="size-3 rounded-sm bg-emerald-500" />Booked</span>
           <span className="inline-flex items-center gap-2"><i className="size-3 rounded-sm bg-amber-400" />Caller asked for this time. Confirm it.</span>
         </div>
-        <Link to={`${base}/settings/calendar`} className="flex min-h-14 items-center justify-between gap-3 rounded-xl border bg-card px-4 py-2.5 lg:hidden">
+        {!member && <Link to={`${base}/settings/calendar`} className="flex min-h-14 items-center justify-between gap-3 rounded-xl border bg-card px-4 py-2.5 lg:hidden">
           <span className="grid"><strong className="text-base font-semibold">Hours and Google Calendar</strong><span className="text-sm text-muted-foreground">{dashboard.googleConnected ? "Google Calendar connected" : dashboard.googleAvailable ? "Google Calendar not connected" : "Appointment hours and booking"}</span></span>
           <ChevronRight className="size-5 shrink-0 text-muted-foreground" />
-        </Link>
+        </Link>}
       </section>
       {selected && (
         <aside className="max-lg:hidden lg:sticky lg:top-20">

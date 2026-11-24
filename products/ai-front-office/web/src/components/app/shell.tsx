@@ -12,7 +12,7 @@ import { useMode } from "@/lib/mode"
 import { cn } from "@/lib/utils"
 
 function useNav() {
-  const { base, preview, dashboard } = useMode()
+  const { base, preview, member, dashboard } = useMode()
   const attention = dashboard ? derive(dashboard).actionable.length : 0
   return [
     { to: base, label: "Calls", icon: PhoneCall, end: true, badge: attention },
@@ -21,7 +21,7 @@ function useNav() {
     preview
       ? { to: "/signup", label: "Start", icon: Settings2, end: false, badge: 0, external: true }
       : { to: `${base}/settings`, label: "Settings", icon: Settings2, end: false, badge: 0 },
-  ] as Array<{ to: string; label: string; icon: typeof PhoneCall; end: boolean; badge: number; external?: boolean }>
+  ].filter((item) => !(member && item.label === "Settings")) as Array<{ to: string; label: string; icon: typeof PhoneCall; end: boolean; badge: number; external?: boolean }>
 }
 
 const DOT = { on: "bg-emerald-500", pending: "bg-amber-500", paused: "bg-stone-400", warning: "bg-red-600" } as const
@@ -44,23 +44,27 @@ export function AlertsOffNotice({ compact }: { compact?: boolean }) {
  * Phone: a row at the top of Calls when it isn't simply on. Computer: always, at the foot of the sidebar.
  */
 export function LineStatus({ always }: { always?: boolean }) {
-  const { dashboard, preview } = useMode()
+  const { dashboard, preview, member } = useMode()
   if (!dashboard || preview) return null
   const status = coverageStatus(dashboard)
   if (!always && status.tone === "on") return null
   // While setup steps remain, the Finish setup card says what's left; this row would only repeat it.
   if (!always && !dashboard.onboarding.completed && dashboard.viewer.role === "owner") return null
   const to = status.tone === "warning" ? "/app/settings/plan" : status.tone === "paused" ? "/app/settings/answering" : dashboard.onboarding.completed ? "/app/settings/answering" : "/app/start"
-  return (
-    <Link to={to} className={cn("flex items-start gap-2.5 rounded-xl hover:bg-muted/60", always ? "px-2 py-2" : "border bg-card px-4 py-3")}>
+  const body = (
+    <>
       <i className={cn("mt-1.5 size-2.5 shrink-0 rounded-full", DOT[status.tone])} />
       <span className="grid flex-1 gap-0.5">
         <strong className="text-[15px] font-semibold">{status.label}</strong>
         <span className={cn("text-muted-foreground", always ? "text-[13px] leading-snug" : "text-sm")}>{status.detail}</span>
       </span>
-      {!always && <ChevronRight className="mt-1 size-4 shrink-0 text-muted-foreground" />}
-    </Link>
+      {!always && !member && <ChevronRight className="mt-1 size-4 shrink-0 text-muted-foreground" />}
+    </>
   )
+  const frame = cn("flex items-start gap-2.5 rounded-xl", always ? "px-2 py-2" : "border bg-card px-4 py-3")
+  // A team member sees the line's state but has nowhere to go: Settings is the owner's.
+  if (member) return <div className={frame}>{body}</div>
+  return <Link to={to} className={cn(frame, "hover:bg-muted/60")}>{body}</Link>
 }
 
 /**

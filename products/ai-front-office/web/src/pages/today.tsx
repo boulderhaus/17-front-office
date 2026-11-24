@@ -102,7 +102,7 @@ export function TodayPage() {
 
 /** Three numbers, one row, no empty space reserved for a pill. Each one opens where it leads. */
 function Summary({ dashboard }: { dashboard: ApiDashboard }) {
-  const { base, preview } = useMode()
+  const { base, preview, member } = useMode()
   const d = derive(dashboard)
   const usage = dashboard.usage
   const cell = "grid min-h-[84px] content-center gap-1 px-3.5 py-3 hover:bg-muted/60 md:px-5"
@@ -119,12 +119,12 @@ function Summary({ dashboard }: { dashboard: ApiDashboard }) {
           <span className={label}>Booked</span>
           <strong className={number}>{d.booked.length}</strong>
         </Link>
-        <Link to={preview ? `${base}` : `${base}/settings/plan`} className={cell}>
+        <Link to={preview || member ? `${base}` : `${base}/settings/plan`} className={cell}>
           <span className={label}>{usage.unlimited ? "Answered" : "Calls left"}</span>
           <strong className={number}>{usage.unlimited ? d.used : d.remaining}</strong>
         </Link>
       </nav>
-      {usage.extraCalls > 0 && (
+      {usage.extraCalls > 0 && !member && (
         <Link to={`${base}/settings/plan`} className="flex min-h-12 items-center justify-between gap-3 rounded-xl bg-amber-50 px-3.5 py-2.5 text-[15px] text-amber-950 ring-1 ring-amber-200 ring-inset">
           <span><strong className="font-semibold">{usage.extraCalls} extra calls</strong> at {perCall(usage.overageCentsPerCall)}: <span className="tabular">{money(usage.extraCents)}</span> so far</span>
           <span className="flex shrink-0 items-center font-semibold">See plans<ChevronRight className="size-4" /></span>
@@ -287,8 +287,8 @@ function SetupCard({ dashboard }: { dashboard: ApiDashboard }) {
 
 /** Optional, after setup: booked jobs on Google Calendar. Going live never needs it. */
 function CalendarCard({ dashboard }: { dashboard: ApiDashboard }) {
-  const { base } = useMode()
-  if (!dashboard.googleAvailable || dashboard.googleConnected) return null
+  const { base, member } = useMode()
+  if (member || !dashboard.googleAvailable || dashboard.googleConnected) return null
   return (
     <Link to={`${base}/settings/calendar`} className="flex min-h-14 items-center justify-between gap-3 rounded-xl border bg-card px-4 py-3 text-[15px] hover:bg-muted/50">
       <span><strong className="font-semibold">Put jobs on Google Calendar</strong><span className="block text-sm text-muted-foreground">Optional. Confirmed jobs land on your calendar.</span></span>

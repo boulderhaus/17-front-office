@@ -35,7 +35,8 @@ function Loading() {
 function Workspace({ base }: { base: "/app" | "/demo" }) {
   const preview = base === "/demo"
   const dashboard = useApi<ApiDashboard>(preview ? "/api/demo/dashboard" : "/api/app/dashboard")
-  const mode = useMemo<AppMode>(() => ({ base, preview, dashboard: dashboard.data, reload: dashboard.reload }), [base, preview, dashboard.data, dashboard.reload])
+  const member = dashboard.data?.viewer.role === "member"
+  const mode = useMemo<AppMode>(() => ({ base, preview, member, dashboard: dashboard.data, reload: dashboard.reload }), [base, preview, member, dashboard.data, dashboard.reload])
   useEffect(() => identifyOwner(dashboard.data?.analytics), [dashboard.data?.analytics])
   const ready = (node: React.ReactNode) => (dashboard.data ? node : dashboard.error ? <p className="rounded-xl border bg-card p-4">{dashboard.error}</p> : <Loading />)
   return (
@@ -49,7 +50,8 @@ function Workspace({ base }: { base: "/app" | "/demo" }) {
         <Route path="calendar" element={<Screen title="Calendar">{ready(<CalendarPage />)}</Screen>} />
         <Route path="calls/:id" element={<Screen title="Call" back={{ to: base, label: "Calls" }} hideTitle><CallPage /></Screen>} />
         {/* One route for the whole settings area, so an unsaved edit survives moving between its pages. */}
-        {!preview && <Route path="settings/*" element={<SettingsArea />} />}
+        {/* Team members never see Settings: a typed or old link goes home (the server refuses them too). */}
+        {!preview && <Route path="settings/*" element={!dashboard.data ? <Screen title="Settings" callerData={false}>{ready(null)}</Screen> : member ? <Navigate to={base} replace /> : <SettingsArea />} />}
         <Route path="*" element={<Navigate to={base} replace />} />
       </Routes>
     </ModeContext.Provider>
