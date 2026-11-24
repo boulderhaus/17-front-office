@@ -35,7 +35,7 @@ import { isExplicitHumanRequest } from "../domain/human-request.js";
 import { saveAssistantConfig } from "../adapters/assistant-config.js";
 import { DataDeletionService } from "../application/data-deletion.js";
 import { formatEmailBody } from "../adapters/resend.js";
-import { anyGoogleClient, clientForAttempt, clientForNewConnections, encodeGoogleConnection, oauthAttemptKey, type GoogleOAuthClient } from "../adapters/google-oauth-clients.js";
+import { anyGoogleClient, clientForAttempt, clientForNewConnections, encodeGoogleConnection, GOOGLE_CALENDAR_SCOPES, missingCalendarPermissions, oauthAttemptKey, type GoogleOAuthClient } from "../adapters/google-oauth-clients.js";
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
@@ -1652,7 +1652,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         response_type: "code",
         access_type: "offline",
         prompt: "consent",
-        scope: "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.freebusy",
+        scope: GOOGLE_CALENDAR_SCOPES.join(" "),
         state: attempt.state,
         code_challenge: attempt.challenge,
         code_challenge_method: "S256",
@@ -2747,7 +2747,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         response_type: "code",
         access_type: "offline",
         prompt: "consent",
-        scope: "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.freebusy",
+        scope: GOOGLE_CALENDAR_SCOPES.join(" "),
         state: attempt.state,
         code_challenge: attempt.challenge,
         code_challenge_method: "S256",
@@ -3331,8 +3331,17 @@ async function exchangeGoogleCode(env: Environment, client: GoogleOAuthClient, c
       redirect_uri: callback,
     }),
   }), 5_000);
-  const payload = await response.json().catch(() => ({})) as { refresh_token?: string };
+  const payload = await response.json().catch(() => ({})) as { refresh_token?: string; scope?: string };
   if (!response.ok || !payload.refresh_token) throw new HttpError(502, "Google did not return a refresh token; reconnect with consent enabled");
+  if (missingCalendarPermissions(payload.scope).length > 0) {
+    // Don't keep a grant Otto can't use: hand it back to Google, then ask for both boxes.
+    await withTimeout(fetch("https://oauth2.googleapis.com/revoke", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token: payload.refresh_token }),
+    }), 5_000).catch(() => undefined);
+    throw new HttpError(400, "Google Calendar isn't connected. Otto needs both calendar permissions, your busy times and adding events, to book jobs. Connect again and leave both boxes ticked.");
+  }
   return payload.refresh_token;
 }
 

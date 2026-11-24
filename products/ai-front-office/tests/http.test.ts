@@ -987,7 +987,7 @@ describe("HTTP boundary", () => {
     const privacyText = privacyHtml.replace(/<[^>]+>/g, "");
     expect(privacyText).toContain("Call Otto's use and transfer of information received from Google APIs to any other app will adhere to the Google API Services User Data Policy, including the Limited Use requirements.");
     expect(privacyHtml).toContain('<a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>');
-    for (const phrase of ["calendar.freebusy", "calendar.events", 'href="https://myaccount.google.com/permissions"', "train AI or machine learning models", "encrypted with AES-256", '<h2 id="google-calendar">', "when a teammate is removed", "Call Otto connects to Google over HTTPS"]) {
+    for (const phrase of ["calendar.freebusy", "calendar.events.owned", "only when both are allowed", 'href="https://myaccount.google.com/permissions"', "train AI or machine learning models", "encrypted with AES-256", '<h2 id="google-calendar">', "when a teammate is removed", "Call Otto connects to Google over HTTPS"]) {
       expect(privacyHtml).toContain(phrase);
     }
     for (const provider of ["Telnyx", "Stripe", "Resend", "Railway", "PostHog"]) expect(privacyHtml).toContain(`<strong>${provider}</strong>`);
