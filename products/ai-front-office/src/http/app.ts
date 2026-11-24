@@ -17,7 +17,8 @@ import { CallService, ToolWriteInProgressError } from "../application/call-servi
 import { approvedTransferTargets } from "../application/transfer-policy.js";
 import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
-import { renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
+import { CALL_PATH_SCRIPT, renderCallPath, renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
+import { buildCallPath } from "../domain/call-path.js";
 import { chargeSentence, isPaidStatus } from "../domain/billing.js";
 import { currentPlan, hasUnlimitedPrice, introCouponId, knownPlans, legacyPlanPriceIds, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, unlimitedPriceIds, type Plan, type PlanId } from "../domain/plans.js";
 import { GuaranteeError, LeadGuaranteeService, recordFirstPaid, recordUnlimitedObservation, type UnlimitedItem } from "../application/billing-jobs.js";
@@ -587,6 +588,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       response.end(SERVICE_WORKER);
       return;
     }
+    if (method === "GET" && url.pathname === "/app/call-path.js") {
+      response.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=300" });
+      response.end(CALL_PATH_SCRIPT);
+      return;
+    }
     if (method === "GET" && url.pathname === "/app/manifest.webmanifest") {
       response.writeHead(200, { "content-type": "application/manifest+json; charset=utf-8", "cache-control": "public, max-age=3600" });
       response.end(WEB_MANIFEST);
@@ -897,7 +903,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       requireToolCallId(tool, input.provider_call_id);
       const tenantId = await tenantForCall(input.provider_call_id);
       await requireOperational(tenantId);
-      return { ...approvedAnswer(await dependencies.store.getConfig(tenantId), input.kind, input.key), wrap_up: await service.wrapUp(input.provider_call_id) };
+      const answer = approvedAnswer(await dependencies.store.getConfig(tenantId), input.kind, input.key);
+      await service.recordAnswerLookup({ tenantId, providerCallId: input.provider_call_id, kind: input.kind, approved: answer.status === "approved" }).catch(() => undefined);
+      return { ...answer, wrap_up: await service.wrapUp(input.provider_call_id) };
     }
     if (pathname === "/tools/check-service-area") return handleServiceArea(tool);
     if (pathname === "/tools/check-availability") return handleAvailability(tool);
@@ -1732,7 +1740,20 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         dependencies.store.listNotifications(call.id),
       ]);
       const recordingUrl = call.recordingUrl?.startsWith("https://") ? call.recordingUrl.replace("/admin/provider/", "/app/provider/") : null;
-      return sendHtml(response, 200, renderOwnerCallRecord({ account, config, call, booking, callbackTask, notifications, recordingUrl, csrf: session.csrf, canDelete: !member }));
+      const path = buildCallPath({ call, events, booking, now: dependencies.clock.now() });
+      return sendHtml(response, 200, renderOwnerCallRecord({ account, config, call, booking, callbackTask, notifications, recordingUrl, csrf: session.csrf, canDelete: !member, path }));
+    }
+    const callPathMatch = /^\/app\/calls\/([0-9a-f-]+)\/path$/i.exec(url.pathname);
+    if (method === "GET" && callPathMatch?.[1]) {
+      const call = await dependencies.store.getCall(callPathMatch[1]);
+      if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Call not found");
+      const [booking, events] = await Promise.all([
+        dependencies.store.getBookingForCall(call.id),
+        dependencies.store.listToolEvents(call.id),
+      ]);
+      const path = buildCallPath({ call, events, booking, now: dependencies.clock.now() });
+      response.setHeader("cache-control", "no-store");
+      return sendJson(response, 200, { live: path.live, done: path.done, html: renderCallPath(call, path) });
     }
     throw new HttpError(404, "Not found");
   }

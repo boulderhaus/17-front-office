@@ -217,6 +217,13 @@ export class CallService {
   }
 
   /** True once the call passes the soft five-minute limit, unless an emergency or human handoff is under way. */
+  /** A price or policy question the assistant looked up: a checkpoint on the call's path, nothing more. */
+  async recordAnswerLookup(input: { tenantId: string; providerCallId: string; kind: "price" | "answer"; approved: boolean }): Promise<void> {
+    const call = await this.store.getCallByProviderId(input.providerCallId);
+    if (!call || call.tenantId !== input.tenantId) return;
+    await this.audit(call, "answer.lookup", this.clock.now(), "success", { kind: input.kind, approved: input.approved }, null);
+  }
+
   async wrapUp(providerCallId: string): Promise<boolean> {
     const call = await this.store.getCallByProviderId(providerCallId);
     return call ? this.wrapUpFor(call) : false;
@@ -248,6 +255,13 @@ export class CallService {
     const call = emergency.emergency || fields.humanRequested ? withoutSpamMark(updated) : updated;
     input.signal?.throwIfAborted();
     await this.store.saveCall(call);
+    // Which checkpoints this intake covers. Booleans only: the values live on the call record.
+    await this.audit(call, "call.intake", this.clock.now(), "success", {
+      problem: fields.problemDescription.trim().length > 0,
+      name: Boolean(fields.callerName?.trim()),
+      callback: /^\+[1-9]\d{7,14}$/.test(fields.callbackNumber ?? call.fromNumber),
+      address: Boolean(fields.address?.trim()),
+    }, null);
     if (emergency.emergency) await this.queueHumanHandoffClaimed({ tenantId: input.tenantId, providerCallId: input.providerCallId, fromNumber: call.fromNumber, problemDescription: fields.problemDescription, urgent: emergency });
     const missing = [
       !fields.callerName?.trim() ? "caller_name" : null,
@@ -340,8 +354,11 @@ export class CallService {
     llmScore?: number;
     llmReason?: string;
   }): Promise<{ severity: "routine" | "urgent" | "life_safety"; emergency: boolean; instruction: string }> {
+    const started = this.clock.now();
     const config = await this.store.getConfig(input.tenantId);
     const decision = triageEmergency(input.problemDescription, config, input.llmScore, input.llmReason);
+    const triaged = await this.store.getCallByProviderId(input.providerCallId);
+    if (triaged?.tenantId === input.tenantId) await this.audit(triaged, "call.triage", started, "success", { severity: decision.severity, emergency: decision.emergency }, null);
     if (decision.emergency) {
       await this.queueHumanHandoff({
         tenantId: input.tenantId,
@@ -543,6 +560,7 @@ export class CallService {
       updatedAt: now,
     };
     await this.store.saveCall(call);
+    await this.audit(call, "call.handoff", this.clock.now(), "success", { reason: input.urgent ? "emergency" : "explicit_request" }, null);
     await this.ensureCallbackTask(call, config, input.urgent ? `Urgent ${input.urgent.severity} call` : "Caller requested a human", true);
     const handoffBody = ownerCallSms({
       call,
