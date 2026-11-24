@@ -391,7 +391,7 @@ describe("plan changes and the guarantee over HTTP", () => {
 describe("scripts/create-stripe-plans.ts", () => {
   it("plans the monthly prices by lookup key and the 50%-once coupon from the approved defaults", () => {
     const setup = planStripeSetup({});
-    expect(setup.productName).toBe("Front Office");
+    expect(setup.products.map((product) => product.name)).toEqual(["Front Office Solo", "Front Office Team", "Front Office Fleet", "Unlimited calls"]);
     expect(setup.prices.filter((price) => price.kind === "plan").map((price) => [price.envName, price.label, price.unitAmount, price.includedCalls, price.lookupKey])).toEqual([
       ["STRIPE_PRICE_ID_SOLO", "Solo", 4_999, 60, "front_office_solo_4999_monthly"],
       ["STRIPE_PRICE_ID_TEAM", "Team", 17_999, 250, "front_office_team_17999_monthly"],
