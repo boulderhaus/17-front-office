@@ -252,7 +252,7 @@ export class GraceLineService {
       const daysLeft = Math.max(1, Math.ceil((GRACE_DAYS * DAY_MS - elapsed) / DAY_MS));
       const result = await queueOwnerMessage(this.context, {
         tenantId,
-        sms: `Call Otto for ${config.businessName}: in ${daysLeft} days this number stops working and forwarded calls will hit a dead line. Update billing in your dashboard to keep it, or ${lowerFirst(off)}`,
+        sms: `Otto: in ${daysLeft} days your Call Otto number for ${config.businessName} stops working and forwarded calls will hit a dead line. Update billing in your dashboard to keep it, or ${lowerFirst(off)}`,
         emailSubject: `Your Call Otto number stops working in ${daysLeft} days`,
         idempotencyBase: `grace-reminder:${tenantId}:${startedAt}`,
       });
