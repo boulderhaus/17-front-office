@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
+import { CallAlertsCard } from "@/components/app/call-alerts"
 import { api, useApi } from "@/lib/api"
 import { FAIR_USE_LINE, money, perCall } from "@/lib/format"
 import { useMode } from "@/lib/mode"
@@ -228,6 +229,7 @@ export function SettingsPage() {
         </Group>
 
         <Group title="Alerts to your phone">
+          <CallAlertsCard className="p-3.5" />
           <Field label="Mobile number" hint="Emergencies and “call me back” requests are always texted here.">
             <Input type="tel" inputMode="tel" autoComplete="tel" className={fieldClass} placeholder={i.ownerPhoneConfigured ? "Saved. Enter a new number to replace it" : "+1 941 555 0100"} {...bind("ownerPhone")} />
           </Field>

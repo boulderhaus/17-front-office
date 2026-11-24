@@ -27,7 +27,7 @@ server.keepAliveTimeout = 5_000;
 server.maxRequestsPerSocket = 1_000;
 
 const worker = new OutboxWorker(runtime.store, runtime.sender, systemClock);
-const recovery = new CallService(runtime.store, runtime.calendar, systemClock, env.PUBLIC_BASE_URL, { callbackLinkKey: env.SESSION_SIGNING_KEY ?? null, ownerEmailAvailable: Boolean(env.RESEND_API_KEY && env.RESEND_FROM_EMAIL) });
+const recovery = new CallService(runtime.store, runtime.calendar, systemClock, env.PUBLIC_BASE_URL, { callbackLinkKey: env.SESSION_SIGNING_KEY ?? null, ownerEmailAvailable: Boolean(env.RESEND_API_KEY && env.RESEND_FROM_EMAIL), pushAvailable: Boolean(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY) });
 const deletion = new DataDeletionService(
   runtime.store,
   env.TELNYX_API_KEY ? new TelnyxRecordingClient(env.TELNYX_API_KEY) : null,

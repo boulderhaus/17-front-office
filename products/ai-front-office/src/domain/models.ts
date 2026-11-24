@@ -128,7 +128,7 @@ export interface OutboxNotification {
   id: string;
   tenantId: string;
   callId: string | null;
-  channel: "sms" | "email" | "voice";
+  channel: "sms" | "email" | "voice" | "push";
   senderRef?: "default" | "founder";
   destinationRef: string;
   body: string;

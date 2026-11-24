@@ -14,6 +14,7 @@ export type ServerEvent =
   | "owner_signed_up"
   | "go_live_attempted"
   | "go_live_result"
+  | "push_alerts_on"
   | "call_finalized"
   | "checkout_started"
   | "checkout_completed"
