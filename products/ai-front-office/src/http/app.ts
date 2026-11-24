@@ -794,7 +794,7 @@ export function createRequestHandler(dependencies: AppDependencies): RequestList
         });
       }
       // Same answer whether or not the account exists.
-      return sendHtml(response, 200, renderForgotPassword({ emailEnabled, sent: true }));
+      return sendHtml(response, 200, renderForgotPassword({ emailEnabled, sent: true, supportEmail: dependencies.env.SUPPORT_EMAIL ?? null }));
     }
     if (url.pathname === "/reset" && method === "GET") return sendHtml(response, 200, renderResetPassword(url.searchParams.get("token") ?? "", "", dependencies.env.SUPPORT_EMAIL ?? null));
     if (url.pathname === "/reset" && method === "POST") {

@@ -124,7 +124,8 @@ export function renderForgotPassword(input: { sent?: boolean; emailEnabled: bool
     : input.emailEnabled
       ? `<form class="publicform" method="post" action="/forgot"><label>Email<input name="email" type="email" autocomplete="email" required></label><button>Send reset link</button></form>`
       : `<p>Email reset isn’t switched on yet. Contact ${support} from the email on your account and we’ll send you a one-time reset link.</p>`;
-  return publicLayout("Reset password", `<header class="publicnav"><a class="brand smallbrand" href="/"><span>Front</span> Office</a><nav><a href="/login">Sign in</a></nav></header><main class="publicmain formpage"><section class="formintro"><p class="eyebrow">Account</p><h1>Reset your password</h1></section>${input.error ? `<p class="formerror">${escapeHtml(input.error)}</p>` : ""}${body}</main>`);
+  const help = input.supportEmail && (input.sent || input.emailEnabled) ? `<p class="small">Trouble? Email ${support} from the email on your account.</p>` : "";
+  return publicLayout("Reset password", `<header class="publicnav"><a class="brand smallbrand" href="/"><span>Front</span> Office</a><nav><a href="/login">Sign in</a></nav></header><main class="publicmain formpage"><section class="formintro"><p class="eyebrow">Account</p><h1>Reset your password</h1></section>${input.error ? `<p class="formerror">${escapeHtml(input.error)}</p>` : ""}${body}${help}</main>`);
 }
 
 export function renderResetPassword(token: string, error = "", supportEmail: string | null = null): string {

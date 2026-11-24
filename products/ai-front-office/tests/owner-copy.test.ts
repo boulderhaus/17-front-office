@@ -4,6 +4,7 @@ import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
 import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
 import { createRequestHandler } from "../src/http/app.js";
+import { renderForgotPassword } from "../src/admin/render.js";
 
 describe("public copy only promises what is true today", () => {
   let server: Server | null = null;
@@ -26,5 +27,11 @@ describe("public copy only promises what is true today", () => {
     expect(terms).toContain("automated call to the owner mobile number");
     expect(await page("/reset?token=abc")).toContain("mailto:hello@example.test");
     expect(await page("/forgot")).toContain("hello@example.test");
+  });
+
+  it("forgot page shows the support email with email reset on too", () => {
+    expect(renderForgotPassword({ emailEnabled: true, supportEmail: "hello@example.test" })).toContain("mailto:hello@example.test");
+    expect(renderForgotPassword({ emailEnabled: true, sent: true, supportEmail: "hello@example.test" })).toContain("mailto:hello@example.test");
+    expect(renderForgotPassword({ emailEnabled: true })).not.toContain("mailto:");
   });
 });
