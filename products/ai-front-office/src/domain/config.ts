@@ -52,7 +52,7 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     ownerWeeklyEmailEnabled: false,
     ownerDailySmsEnabled: false,
     ownerDailySmsHour: 7,
-    ownerRealtimeSmsEnabled: false,
+    ownerRealtimeSmsEnabled: true,
     maxCallsPerCallerPerDay: 5,
   };
 }

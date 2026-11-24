@@ -3046,6 +3046,8 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams, surface:
     ownerDailySmsEnabled: form.has("ownerDailySmsEnabled"),
     ownerDailySmsHour,
     ownerRealtimeSmsEnabled: form.has("ownerRealtimeSmsEnabled"),
+    // Remember an explicit change, so a later default-on rollout never overrides it.
+    ownerRealtimeSmsSetByOwner: current.ownerRealtimeSmsSetByOwner === true || form.has("ownerRealtimeSmsEnabled") !== current.ownerRealtimeSmsEnabled,
     usageAlertPercent,
     requireDiagnosticFeeAcceptance: form.has("requireDiagnosticFeeAcceptance"),
     // Owners toggle a fixed notice; only the platform admin form may send its own text (single line).

@@ -207,7 +207,10 @@ export interface BusinessConfig {
   ownerWeeklyEmailEnabled: boolean;
   ownerDailySmsEnabled: boolean;
   ownerDailySmsHour: number;
+  /** Texts on every new lead: on by default (the core product), still sent only to numbers the owner consented for. */
   ownerRealtimeSmsEnabled: boolean;
+  /** True once the owner (or admin) changed the lead-texts toggle, so a default-on rollout never overrides their choice. */
+  ownerRealtimeSmsSetByOwner?: boolean;
   maxCallsPerCallerPerDay: number;
 }
 
