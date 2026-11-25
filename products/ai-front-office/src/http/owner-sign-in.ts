@@ -299,8 +299,9 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     if (!limiter.allow(`${ip}:owner-login-link`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
     const form = parseForm(await readBody(request, 4_000));
     const next = safeNext(form.get("next"));
-    const parsed = emailSchema.safeParse(form.get("email") ?? "");
-    if (!parsed.success) return loginPage(request, response, 400, "Enter a valid email.", { errorField: "link", next });
+    const typed = form.get("email") ?? "";
+    const parsed = emailSchema.safeParse(typed);
+    if (!parsed.success) return loginPage(request, response, 400, "Enter an email like you@yourshop.com.", { errorField: "link", next, email: typed.slice(0, 254) });
     const email = parsed.data;
     // Same answer either way; past the per-email limit nothing more is sent.
     if (limiter.allow(`owner-login-link-email:${email}`, 5, 60 * 60_000)) {
@@ -329,12 +330,12 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     if (!limiter.allow(`${ip}:owner-login-link-use`, 20, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
     const form = parseForm(await readBody(request, 4_000));
     const token = form.get("token") ?? "";
-    const expired = (): void => loginPage(request, response, 400, "That link expired or was already used. Send a new one.", { errorField: "link" });
+    const expired = (): void => loginPage(request, response, 400, "That link expired or was already used. Send a new one.", { errorField: "linkToken" });
     if (!LINK_TOKEN.test(token)) return expired();
     // Only the browser that opened the link can use it, so another site can't post its own link here and sign
     // this browser into its shop. The link stays unused, so the owner can still open it again and tap.
     if (!same(readCookie(request, LINK_COOKIE) ?? "", sign("owner-sign-in-link", token))) {
-      return loginPage(request, response, 400, "Open the link from your email again, then tap Sign me in.", { errorField: "link" });
+      return loginPage(request, response, 400, "Open the link from your email again, then tap Sign me in.", { errorField: "linkToken" });
     }
     const email = await store.consumeSignInLink(hashSignInLinkToken(token), clock.now().toISOString());
     if (!email) return expired();
@@ -353,7 +354,7 @@ export function createOwnerSignIn(deps: SignInDependencies) {
         // Opening the link only shows a button (mail scanners open links too); this cookie ties the tap to this browser.
         response.setHeader("set-cookie", linkCookie(sign("owner-sign-in-link", token), LINK_TTL_MS / 1_000));
         sendHtml(response, 200, renderSignInLinkConfirm(token, safeNext(url.searchParams.get("next"))));
-      } else loginPage(request, response, 400, "That link doesn’t work. Send a new one.", { errorField: "link" });
+      } else loginPage(request, response, 400, "That link doesn’t work. Send a new one.", { errorField: "linkToken" });
     } else if (method === "POST" && path === "/login/link") await useLink(request, response, ip);
     else return false;
     return true;
