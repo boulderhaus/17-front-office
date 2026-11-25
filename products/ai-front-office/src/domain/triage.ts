@@ -78,8 +78,12 @@ export function triageEmergency(
       evidence.push(rule.evidence);
     }
   }
+  // Owner and trade phrases match ignoring case, apostrophes and spacing: "won’t close", "won't close"
+  // and "wont close" are the same words.
+  const notes = plainWords(description);
   for (const keyword of config.emergencyKeywords) {
-    if (keyword.trim() !== "" && description.toLowerCase().includes(keyword.toLowerCase())) {
+    const phrase = plainWords(keyword);
+    if (phrase !== "" && notes.includes(phrase)) {
       evidence.push(`configured keyword: ${keyword}`);
       urgentMatches += 1;
     }
@@ -100,4 +104,8 @@ export function triageEmergency(
     evidence: [...new Set(evidence)],
     immediateInstruction: null,
   };
+}
+
+function plainWords(text: string): string {
+  return text.toLowerCase().replace(/['’‘`]/g, "").replace(/\s+/g, " ").trim();
 }

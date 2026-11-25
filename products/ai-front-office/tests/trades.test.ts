@@ -9,21 +9,37 @@ import { renderMarketing } from "../src/admin/marketing.js";
 import { createRequestHandler } from "../src/http/app.js";
 
 describe("trades", () => {
-  it("gives every trade services with a catch-all and urgent words that triage as urgent", () => {
+  it("gives every trade services with a catch-all and specific urgent phrases that triage right", () => {
     expect(new Set(TRADES.map((trade) => trade.key)).size).toBe(TRADES.length);
     for (const trade of TRADES) {
       expect(trade.services.map((service) => service.toLowerCase())).toContain("other");
       expect(trade.urgentWords.length).toBeGreaterThan(1);
       for (const word of trade.urgentWords) {
-        // Matched as plain text against call notes, so no curly apostrophes.
-        expect(word).not.toMatch(/[’‘]/);
         const decision = triageEmergency(`Caller says: ${word} at the house`, { emergencyKeywords: trade.urgentWords, emergencyThreshold: 0.7 });
         expect(decision.emergency, `${trade.key}: ${word}`).toBe(true);
       }
+      // The two shown on the homepage are the trade's own, not the always-on life-safety rules.
+      for (const word of trade.urgentWords.slice(0, 2)) expect(triageEmergency(word, { emergencyKeywords: [], emergencyThreshold: 0.7 }).severity, `${trade.key}: ${word}`).not.toBe("life_safety");
+      // An urgent-sounding homepage call trips its own trade's words; the routine ones are named here.
+      if (trade.call && !["construction", "handyman"].includes(trade.key)) {
+        expect(triageEmergency(trade.call, { emergencyKeywords: trade.urgentWords, emergencyThreshold: 0.7 }).emergency, `${trade.key}: ${trade.call}`).toBe(true);
+      }
     }
-    // Plain substrings: none may fire on an ordinary "not urgent" sentence.
-    for (const calm of ["It's not an emergency, whenever works.", "Small leak, no water damage yet.", "No power issues, just want an outlet added."]) {
-      for (const trade of TRADES) expect(triageEmergency(calm, { emergencyKeywords: trade.urgentWords, emergencyThreshold: 0.7 }).emergency, `${trade.key}: ${calm}`).toBe(false);
+    // Phrases, not bare words: none may page the owner for an ordinary call.
+    const calm = [
+      "It's not an emergency, whenever works.", "Our emergency contact is my wife.", "Small leak, no water damage yet.",
+      "No power issues, just want an outlet added.", "We have no heat pump yet and want a quote.", "We have no water heater, want one installed.",
+      "We have no power outlet in the garage.", "Gutters are dripping a little.", "Can't get in touch with my landlord, can you quote?",
+      "The price came down so we're ready to book.", "Birds nesting in the eaves, routine visit.", "Faucet is dripping in the bathroom.",
+    ];
+    for (const sentence of calm) {
+      // Only the trade phrases are under test here; the built-in rules are covered in triage tests.
+      for (const trade of TRADES) expect(triageEmergency(sentence, { emergencyKeywords: trade.urgentWords, emergencyThreshold: 0.7 }).evidence.filter((item) => item.startsWith("configured keyword")), `${trade.key}: ${sentence}`).toEqual([]);
+    }
+    // Curly, straight or missing apostrophes are the same words.
+    const garage = findTrade("garage")!;
+    for (const note of ["Door won’t close", "door won't close", "DOOR WONT CLOSE", "door will not  close"]) {
+      expect(triageEmergency(note, { emergencyKeywords: garage.urgentWords, emergencyThreshold: 0.7 }).emergency, note).toBe(true);
     }
     expect(findTrade(" Plumbing ")?.key).toBe("plumbing");
     expect(findTrade("submarines")).toBeNull();
@@ -35,7 +51,7 @@ describe("trades", () => {
     expect(html).toContain('id="trades"');
     expect(html).toContain('<a href="#trades">Trades</a>');
     for (const trade of TRADES) expect(html).toContain(`href="/signup?trade=${trade.key}"`);
-    expect(html).toContain("Water heater’s leaking all over the garage.");
+    expect(html).toContain("Sewage is backing up into the tub.");
     expect(html).toContain("<b>Marked urgent</b><span>burst pipe</span><span>sewage</span>");
     expect(html).toContain("<span>won’t close</span>");
     expect(html).toContain("Contractors &#38; remodelers");
