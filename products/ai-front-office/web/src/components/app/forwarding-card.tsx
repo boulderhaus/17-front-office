@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
 import { codeChunks, copyAndOpenPhone, dialHref, dialPlatform, spokenCode, VERIZON_RING_LINE } from "@/lib/dial"
 import { formatPhone } from "@/lib/format"
+import { checkStatus } from "@/lib/line-status"
 import { useMode } from "@/lib/mode"
 import type { ApiDashboard, CarrierFamily, ForwardingPlan } from "@/lib/types"
 import { cn, tapWidth } from "@/lib/utils"
@@ -16,6 +17,8 @@ const ua = typeof navigator === "undefined" ? "" : navigator.userAgent
 const platform = dialPlatform(ua)
 const isAndroid = /Android/i.test(ua)
 const isIphone = platform === "iphone"
+/** A computer is clicked, a phone is tapped. */
+const tapWord = platform === "desktop" ? "Click" : "Tap"
 /** A text link that is a real button: 44px tall, underlined, with a solid focus ring (the default ring is faint). */
 const linkButton = "h-auto min-h-11 w-fit justify-start px-0 text-left text-sm font-semibold whitespace-normal text-brand-ink underline focus-visible:ring-2 focus-visible:ring-brand-ink focus-visible:ring-offset-2"
 
@@ -84,19 +87,30 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
     window.setTimeout(() => codeRef.current?.scrollIntoView({ block: "center", behavior: reduce ? "auto" : "smooth" }), 50)
   }
 
-  const confirmed = Boolean(line.confirmedAt) && (line.check.status === "idle" || line.check.status === "passed")
   const plan = business.plan
+  // A finished test for another choice or code says nothing about today's: it isn't shown (and isn't a failure).
+  const status = checkStatus(line) as Status
+  const confirmed = Boolean(line.confirmedAt) && (status === "idle" || status === "passed")
   const family = business.carrier?.family ?? null
-  const helpAsked = Boolean(line.helpRequestedAt)
+  // "Set it up with me" was tapped in the last day (older requests are done with).
+  const helpAsked = Boolean(line.helpRequestedAt) && Date.parse(dashboard.now) - Date.parse(line.helpRequestedAt!) < 24 * 60 * 60_000
   // The setup call rings for up to 30 s and can run 15 min; show "calling now" for its first 2 minutes, until it ends.
   const helpCalling = Boolean(line.helpCall && !line.helpCall.endedAt) && Date.parse(dashboard.now) - Date.parse(line.helpCall!.startedAt) < 2 * 60_000
-  // Brock's email once it's gone (a missed setup call queues it too); "we'll email you" only when no call was placed.
-  const helpLine = !helpAsked || helpCalling ? null : line.founderEmail ? founderEmailLine(line.founderEmail, dashboard.now) : line.helpCall ? null : "Got it. We’ll email you to set this up."
+  // What really happened: Brock's email once it's gone (a missed setup call queues it too), our team when the request
+  // reached them by email, and otherwise that it didn't go anywhere. Never "we'll email you" when nothing was sent.
+  const helpLine = !helpAsked || helpCalling || line.helpCall ? null
+    : line.founderEmail ? founderEmailLine(line.founderEmail, dashboard.now)
+      : line.helpTeam ? "Got it. We’ll get back to you within one business day."
+        : null
+  const helpFailed = helpAsked && !helpCalling && !line.helpCall && !line.founderEmail && !line.helpTeam
+  // One tap is enough: once it reached someone, the button goes (after a setup call, "Have Otto call me again" stays).
+  const helpDone = Boolean(helpLine)
   const asking = !editing && !business.number && Boolean(business.suggested)
   const startTest = () => void post("check", "/api/app/line/check")
-  const testLabel = line.check.status === "idle" ? "Call me now" : "Test again"
-  const fixOffer = plan ? showFix(line.check.status, plan) : false
-  const changeButton = (label: string) => <button type="button" aria-label="Change your business number" className="font-semibold whitespace-nowrap text-brand-ink underline underline-offset-4 focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-brand-ink focus-visible:outline-none" onClick={() => setEditing(true)}>{label}</button>
+  const cancelTest = () => void post("check", "/api/app/line/check/cancel")
+  const testLabel = status === "idle" ? "Test it" : "Test again"
+  const fixOffer = plan ? showFix(status, plan) : false
+  const changeButton = (label: string) => <button type="button" aria-label="Change your business number" className="inline-flex min-h-11 min-w-11 items-center font-semibold whitespace-nowrap text-brand-ink underline underline-offset-4 focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-brand-ink focus-visible:outline-none" onClick={() => setEditing(true)}>{label}</button>
   const change = changeButton("Change")
   // Office line leaving every call: "forward all calls" goes off in the same website, then calls not answered on.
   const officeLeaving = Boolean(business.update?.leavingEveryCall && plan && !plan.on && plan.family === "office")
@@ -120,17 +134,18 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
           {confirmed && <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 whitespace-nowrap py-1 text-xs font-semibold text-emerald-800"><Check className="size-3.5" />Forwarding works</span>}
         </header>
 
-        {!confirmed && <ModeChoice choice={choice} busy={busy === "mode"} locked={checking} family={family} ringFirstSeconds={business.ringFirstSeconds ?? null} onPick={(next) => void setMode(next)} />}
+        {!confirmed && <ModeChoice choice={choice} busy={busy === "mode"} locked={checking} family={family} ringFirstSeconds={business.ringFirstSeconds ?? null} onPick={(next) => { if (busy !== "mode") void setMode(next) }} />}
 
         {asking ? (
           <div className="grid gap-3 border-t pt-4">
             <p className="text-[17px] leading-snug font-semibold">Is this the number customers call?</p>
             <strong className="tabular text-[28px] leading-tight font-semibold tracking-tight">{formatPhone(business.suggested!)}</strong>
-            <div className="grid gap-2.5 md:flex">
-              <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} disabled={busy === "save"} onClick={() => void post("save", "/api/app/line/business-number", { number: business.suggested })}>
+            {/* Two equal halves of the card on a computer, never wider than it. */}
+            <div className="grid gap-2.5 md:grid-cols-2">
+              <Button size="tap" variant="brand" className="h-14 w-full text-base lg:h-12" disabled={busy === "save"} onClick={() => void post("save", "/api/app/line/business-number", { number: business.suggested })}>
                 {busy === "save" ? <><Loader2 className="motion-safe:animate-spin" />Looking up your phone company…</> : "Yes"}
               </Button>
-              <Button size="tap" variant="outline" className={cn(tapWidth, "h-14 border-2 border-brand-ink bg-card text-base text-brand-ink lg:h-12")} disabled={busy === "save"} onClick={() => setEditing(true)}>No, it’s another number</Button>
+              <Button size="tap" variant="outline" className="h-14 w-full border-2 border-brand-ink bg-card text-base text-brand-ink lg:h-12" disabled={busy === "save"} onClick={() => setEditing(true)}>No, it’s another number</Button>
             </div>
           </div>
         ) : editing ? (
@@ -150,7 +165,7 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
               <div className="grid gap-2 border-t pt-4">
                 <p className="text-[15px] font-semibold">Who’s the phone company for <span className="tabular whitespace-nowrap">{formatPhone(business.number!)}</span>? {change}</p>
                 {business.choices.map((item) => (
-                  <Button key={item.family} type="button" size="tap" variant="outline" className={cn(tapWidth, "h-auto min-h-12 justify-start py-3 text-left whitespace-normal")} disabled={busy === "save"}
+                  <Button key={item.family} type="button" size="tap" variant="outline" className="h-auto min-h-12 w-full justify-start py-3 text-left whitespace-normal" disabled={busy === "save"}
                     onClick={() => void post("save", "/api/app/line/business-number", { number: business.number, family: item.family satisfies CarrierFamily })}>
                     {item.label}
                   </Button>
@@ -164,7 +179,7 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
                   <p className="text-[15px] font-semibold">
                     {plan.on ? "Dial this on " : "For "}<span className="tabular whitespace-nowrap">{formatPhone(business.number!)}</span> · {change}
                   </p>
-                  {business.update?.clearFirst && <ClearFirst code={business.update.clearFirst} />}
+                  {business.update?.clearFirst && <ClearFirst code={business.update.clearFirst} dialLink={business.update.clearFirst === plan.off ? plan.offDialLink : null} />}
                   {plan.on
                     ? <DialCode code={plan.on} dialLink={plan.dialLink} codeRef={codeRef} />
                     : <p className="text-sm">{what}</p>}
@@ -172,24 +187,28 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
 
                 <section className="grid gap-2.5 border-t pt-4" aria-label="Test it">
                   {checking ? (
-                    <p className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-950" role="status">
-                      <Loader2 className="mt-0.5 size-4 shrink-0 motion-safe:animate-spin" />
-                      {line.check.method === "auto"
-                        ? <span><strong>Calling {formatPhone(business.number!)} now{callerId ? <> from <span className="whitespace-nowrap">{callerId}</span></> : null}.</strong> {plan.forwardsAll ? "Your phone shouldn’t ring." : "Tap Decline when it rings."}</span>
-                        : <span>From another phone, call {formatPhone(business.number!)}.{plan.forwardsAll ? " Your phone shouldn’t ring." : " Decline it on your phone."}</span>}
-                    </p>
+                    <div className="grid gap-2">
+                      <p className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-950" role="status">
+                        <Loader2 className="mt-0.5 size-4 shrink-0 motion-safe:animate-spin" />
+                        {line.check.method === "auto"
+                          ? <span><strong>Calling {formatPhone(business.number!)} now{callerId ? <> from <span className="whitespace-nowrap">{callerId}</span></> : null}.</strong> {plan.forwardsAll ? "Your phone shouldn’t ring." : "Tap Decline when it rings."}</span>
+                          // Our call couldn't be placed: say so first, then the one thing to do instead.
+                          : <span>{line.check.autoFailed ? <strong>We couldn’t call you. </strong> : null}Call {formatPhone(business.number!)} from another phone.{plan.forwardsAll ? " Your phone shouldn’t ring." : " Decline it on your phone."}</span>}
+                      </p>
+                      <Button type="button" variant="link" className={linkButton} disabled={busy === "check"} onClick={cancelTest}>Cancel</Button>
+                    </div>
                   ) : (
                     <>
-                      <CheckResult status={line.check.status} plan={plan} />
+                      <CheckResult status={status} plan={plan} />
                       {fixOffer && (
                         <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} disabled={busy === "mode"} onClick={() => void switchToEveryCall()}>
                           {busy === "mode" ? <Loader2 className="motion-safe:animate-spin" /> : null}Switch to Otto answers every call
                         </Button>
                       )}
                       {plan.forwardsAll ? (
-                        <p className="text-[15px] font-semibold">Tap {testLabel}. Your phone won’t ring; you’ll see a green check in a few seconds.</p>
+                        <p className="text-[15px] font-semibold">{tapWord} {testLabel}. Your phone won’t ring; you’ll see a green check in a few seconds.</p>
                       ) : (
-                        <p className="text-[15px] font-semibold">Tap {testLabel}, then tap Decline when it rings.</p>
+                        <p className="text-[15px] font-semibold">{tapWord} {testLabel}, then tap Decline when your phone rings.</p>
                       )}
                       <div className="grid gap-1.5 md:flex md:items-center md:gap-3">
                         <Button size="tap" variant={fixOffer ? "outline" : "brand"} className={cn(tapWidth, "h-14 text-base lg:h-12", fixOffer && "border-2 border-brand-ink bg-card text-brand-ink")} disabled={busy === "check"} onClick={startTest}>
@@ -216,7 +235,7 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
                   <div className="grid gap-2.5 border-t pt-3">
                     {/* Stays until a test passes for today's choice: the owner's choice is the source of truth. */}
                     <p className="text-[15px] font-semibold">{plan.on ? "Dial this once to apply your change" : "Apply your change"}</p>
-                    {business.update.clearFirst && <ClearFirst code={business.update.clearFirst} />}
+                    {business.update.clearFirst && <ClearFirst code={business.update.clearFirst} dialLink={business.update.clearFirst === plan.off ? plan.offDialLink : null} />}
                     {plan.on ? <DialCode code={plan.on} dialLink={plan.dialLink} codeRef={codeRef} /> : <p>{what}</p>}
                     <Button size="tap" variant="outline" className={tapWidth} disabled={busy === "check"} onClick={startTest}>{busy === "check" ? <><Loader2 className="motion-safe:animate-spin" />Starting…</> : "Then test it"}</Button>
                   </div>
@@ -246,9 +265,11 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
                 <span><strong>Otto is calling you now at <span className="whitespace-nowrap">{formatPhone(line.helpCall!.to)}</span>.</strong> Pick up{callerId ? <> (it’s from <span className="whitespace-nowrap">{callerId}</span>)</> : null}.</span>
               </p>
             ) : helpLine ? (
-              <p className="flex items-start gap-2 text-sm"><Check className="mt-0.5 size-4 shrink-0 text-emerald-700" />{helpLine}</p>
+              <p className="flex items-start gap-2 text-sm" role="status"><Check className="mt-0.5 size-4 shrink-0 text-emerald-700" />{helpLine}</p>
+            ) : helpFailed ? (
+              <p className="text-sm" role="status">That didn’t reach us. Please try again.</p>
             ) : null}
-            {!helpCalling && (
+            {!helpCalling && !helpDone && (
               <Button type="button" variant="link" className={linkButton} disabled={busy === "help"} onClick={() => void post("help", "/api/app/line/help", { device: isIphone ? "iphone" : isAndroid ? "android" : "other" })}>
                 <LifeBuoy className="size-4" />{line.helpCall ? "Have Otto call me again" : "Set it up with me"}
               </Button>
@@ -261,9 +282,17 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
   )
 }
 
-/** Leaving every call for ring first: forward-all wins over the ring-first code, so it goes off first. One line. */
-function ClearFirst({ code }: { code: string }) {
-  return <p className="text-sm">First turn off forwarding: dial <code className="rounded bg-muted px-1.5 py-0.5 font-mono font-semibold">{code}</code> and press Call. Then:</p>
+/**
+ * Leaving every call for ring first: forward-all wins over the ring-first code, so it goes off first. Said as a
+ * condition (a new owner who never dialed the every-call code can skip it), with the same one-tap control as the code.
+ */
+function ClearFirst({ code, dialLink }: { code: string; dialLink: string | null }) {
+  return (
+    <div className="grid gap-2 rounded-lg border border-brand-ink/15 bg-muted/40 p-3">
+      <p className="text-sm">Dialed the every-call code before? First dial <code className="rounded bg-card px-1.5 py-0.5 font-mono font-semibold">{code}</code> to clear it. Then the code below.</p>
+      <DialAction code={code} dialLink={dialLink} label={code} />
+    </div>
+  )
 }
 
 /** What Brock's follow-up email actually was: a booking link, or (no calendar connected yet) a note asking for a reply. */
@@ -282,14 +311,15 @@ function ModeChoice({ choice, busy, locked, family, ringFirstSeconds, onPick }: 
   // The business phone may be an iPhone even when this page is open on a computer; Android needs nothing extra.
   const iphoneNote = !isAndroid && family !== "office"
   const options: Array<{ id: Choice; title: string; line: string; note: string | null }> = [
-    // "No phone settings": there's still a code to dial below. An office line is set in a website either way.
-    { id: "always", title: "Otto answers every call", line: family === "office" ? "Otto picks up right away." : "No phone settings to change.", note: "Your phone won’t ring for this number." },
+    // There's still the one code to dial below; nothing else changes on the phone. An office line is set in a website.
+    { id: "always", title: "Otto answers every call", line: family === "office" ? "Otto picks up right away." : "Nothing else to change on your phone.", note: "Your phone won’t ring for this number." },
     // The iPhone step shows once ring first is picked: it's the one thing to do before dialing that code.
     { id: "ring", title: "Ring my phone first", line: `Otto takes the calls you miss${after}`, note: iphoneNote && choice === "ring" ? "iPhone: turn off Live Voicemail first (Settings › Apps › Phone)." : null },
   ]
   return (
-    // Locked while a test call is out: the test proves the code that was on screen when it started.
-    <fieldset className="grid gap-2" disabled={busy || locked}>
+    // Locked while a test call is out: the test proves the code that was on screen when it started. While a pick
+    // saves, the radios stay enabled (aria-busy) so the arrow keys never drop focus to the page.
+    <fieldset className="grid gap-2" disabled={locked} aria-busy={busy || undefined}>
       <legend className="sr-only">How calls to your business number work</legend>
       {options.map((option) => {
         const on = choice === option.id
@@ -322,19 +352,10 @@ function showFix(status: Status, plan: ForwardingPlan): boolean {
 }
 
 /**
- * The code to dial, the way this device can dial it.
- * iPhone: never the code in a tel: link (iOS blocks forwarding links with a "Call Forwarding Link Blocked" alert):
- * one tap copies it and opens the Phone keypad with a bare tel:, and they paste it there (see copyAndOpenPhone).
- * Android (not Firefox): Tap to dial opens the keypad with the code filled in. A computer: a QR code to this page.
+ * The code to dial, the way this device can dial it: the big code, then one action and one line (DialAction).
+ * A computer also gets a QR code that opens the code on the phone, signed in or not.
  */
 function DialCode({ code, dialLink, codeRef }: { code: string; dialLink: string | null; codeRef?: Ref<HTMLDivElement> }) {
-  const href = dialHref(platform, dialLink)
-  // iPhone: "paste" once Phone didn't open from our tap (say how to open it by hand), "type" when the copy failed.
-  const [stayed, setStayed] = useState<"paste" | "type" | null>(null)
-  const copy = () => void navigator.clipboard?.writeText(code).then(
-    () => toast.success(isIphone ? "Copied. In Phone › Keypad, touch and hold above the numbers, tap Paste, then Call." : "Copied. Paste it in your Phone app’s keypad, then tap Call."),
-    () => toast("Type the code into your Phone app’s keypad."),
-  )
   const box = (
     <div ref={codeRef} className="scroll-mt-24 rounded-xl border-2 border-brand-ink bg-brand-yellow px-2 py-3 text-center font-mono text-[17px] leading-snug font-bold select-all min-[400px]:text-xl sm:text-2xl md:max-w-[480px]">
       <span className="sr-only">{spokenCode(code)}</span>
@@ -342,27 +363,40 @@ function DialCode({ code, dialLink, codeRef }: { code: string; dialLink: string 
       <span aria-hidden>{codeChunks(code).map((chunk, index) => <Fragment key={index}>{index ? " " : ""}<span className="whitespace-nowrap">{chunk}</span></Fragment>)}</span>
     </div>
   )
+  return (
+    <div className="grid gap-2.5">
+      {box}
+      <DialAction code={code} dialLink={dialLink} />
+      {platform === "desktop" && <PhoneHandoff />}
+    </div>
+  )
+}
+
+/**
+ * One tap that dials (or copies) a code, and the one line that says what's next.
+ * iPhone: never the code in a tel: link (iOS blocks forwarding links with a "Call Forwarding Link Blocked" alert):
+ * one tap copies it and opens the Phone keypad with a bare tel:, and they paste it there (see copyAndOpenPhone).
+ * Android (not Firefox): Tap to dial opens the keypad with the code filled in. A computer: copy it.
+ * `label`: a short code (##002#) names itself on the button.
+ */
+function DialAction({ code, dialLink, label }: { code: string; dialLink: string | null; label?: string }) {
+  const href = dialHref(platform, dialLink)
+  // iPhone: "type" when the copy failed; otherwise paste.
+  const [stayed, setStayed] = useState<"paste" | "type" | null>(null)
+  const copy = () => void navigator.clipboard?.writeText(code).then(
+    () => toast.success(platform === "desktop" ? "Copied. Scan the QR, or type it on your phone." : "Copied. Paste it in your Phone app’s keypad, then tap Call."),
+    () => toast(platform === "desktop" ? "Type the code on your phone’s keypad." : "Type the code into your Phone app’s keypad."),
+  )
+  const size = label ? "w-full md:w-fit md:min-w-44" : cn(tapWidth, "h-14 text-base lg:h-12")
   if (platform === "desktop") {
-    // A computer can't dial. The QR opens this page on the phone, which shows its own way to dial.
-    const here = typeof window === "undefined" ? "" : `${window.location.origin}${window.location.pathname}${window.location.search}`
-    return (
-      <div className="grid gap-3">
-        {box}
-        <Button size="tap" variant="outline" className={cn(tapWidth, "md:w-fit md:min-w-44")} onClick={copy}><Copy />Copy code</Button>
-        <div className="flex items-center gap-4 rounded-lg border bg-muted/40 p-3 md:max-w-[480px]">
-          <QrCode value={here} size={112} label="QR code that opens this setup page on your phone" />
-          <p className="text-sm font-semibold">Scan to open this on your phone.</p>
-        </div>
-      </div>
-    )
+    return <Button size="tap" variant="outline" className={cn(tapWidth, "md:w-fit md:min-w-44")} onClick={copy}><Copy />{label ? `Copy ${label}` : "Copy code"}</Button>
   }
   if (href) {
     return (
-      <div className="grid gap-2.5">
-        {box}
-        <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} asChild><a href={href}><PhoneForwarded />Tap to dial</a></Button>
-        <p className="text-sm font-medium">Then tap Call.</p>
-      </div>
+      <>
+        <Button size="tap" variant={label ? "outline" : "brand"} className={size} asChild><a href={href}><PhoneForwarded />{label ? `Tap to dial ${label}` : "Tap to dial"}</a></Button>
+        {!label && <p className="text-sm font-medium">Then tap Call.</p>}
+      </>
     )
   }
   if (isIphone) {
@@ -377,19 +411,36 @@ function DialCode({ code, dialLink, codeRef }: { code: string; dialLink: string 
       onStayed: () => setStayed("paste"),
     })
     return (
-      <div className="grid gap-2.5">
-        {box}
-        <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} onClick={copyAndOpen}><Copy />Copy code &amp; open Phone</Button>
-        <p className="text-sm font-medium" role="status">{stayed === "type" ? "Type it in Phone › Keypad and tap Call." : stayed === "paste" ? "Paste it in Phone › Keypad and tap Call." : "Then paste it and tap Call."}</p>
-        <p className="text-[13px] text-muted-foreground">“Link Blocked”? Type it in.</p>
-      </div>
+      <>
+        <Button size="tap" variant={label ? "outline" : "brand"} className={size} onClick={copyAndOpen}><Copy />{label ? `Copy ${label} & open Phone` : "Copy code & open Phone"}</Button>
+        {(!label || stayed) && <p className="text-sm font-medium" role="status">{stayed === "type" ? "Type it in Phone › Keypad and tap Call." : "Paste it in Phone › Keypad and tap Call."}</p>}
+      </>
     )
   }
   return (
-    <div className="grid gap-2.5">
-      {box}
-      <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} onClick={copy}><Copy />Copy code</Button>
-      <p className="text-sm font-medium">Paste it in your Phone app’s keypad and tap Call.</p>
+    <>
+      <Button size="tap" variant={label ? "outline" : "brand"} className={size} onClick={copy}><Copy />{label ? `Copy ${label}` : "Copy code"}</Button>
+      {!label && <p className="text-sm font-medium">Paste it in your Phone app’s keypad and tap Call.</p>}
+    </>
+  )
+}
+
+/**
+ * A computer can't dial. The QR opens a short-lived signed page on the phone that shows this shop's code, with no
+ * sign-in in the way. Asked for when shown, so the link is fresh.
+ */
+function PhoneHandoff() {
+  const [link, setLink] = useState<string | null>(null)
+  useEffect(() => {
+    let live = true
+    void api<{ url: string }>("/api/app/line/handoff", { method: "POST", body: {} }).then((result) => { if (live) setLink(result.url) }).catch(() => undefined)
+    return () => { live = false }
+  }, [])
+  if (!link) return null
+  return (
+    <div className="flex items-center gap-4 rounded-lg border bg-muted/40 p-3 md:max-w-[480px]">
+      <QrCode value={link} size={112} label="QR code that shows this code on your phone" />
+      <p className="text-sm font-semibold">Scan with your phone’s camera to dial it there.</p>
     </div>
   )
 }
@@ -412,7 +463,7 @@ function CheckResult({ status, plan }: { status: Status; plan: ForwardingPlan })
           ? ["Someone picked up the test.", "Test again and tap Decline."]
           : status === "declined"
             ? ["You declined, but it didn’t forward.", redial(plan.family)]
-            : ["The test never reached Otto.", redial(plan.family)]
+            : ["That test didn’t reach Otto.", redial(plan.family)]
   return (
     <div role="alert" className="grid gap-1 rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">
       <strong className="font-semibold">{lines[0]}</strong>

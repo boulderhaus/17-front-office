@@ -17,10 +17,10 @@ export function JobsPage() {
   const d = dashboard ? derive(dashboard) : null
   const rows = (items: Array<Row | null>): Row[] => items.filter((item): item is Row => item !== null)
   const lists: Array<{ id: string; title: string; empty: string; whenLabel: string; rows: Row[] }> = d ? [
-    { id: "reply", title: "Needs reply", whenLabel: "Call back by", empty: "Nobody is waiting on a reply.", rows: rows(d.actionable.map((task) => { const call = d.callsById.get(task.callId); return call ? { call, label: task.priority === "high" ? "Urgent" : call.fields.requestedStart ? "Confirm time" : "Call back", tone: task.priority === "high" ? "danger" : call.fields.requestedStart ? "warn" : "neutral", when: d.due(task) === "Due now" ? "Now" : d.due(task).replace(/^Due /, "") } : null })) },
+    { id: "reply", title: "Needs reply", whenLabel: "Call back by", empty: "Nobody is waiting on a reply.", rows: rows(d.actionable.map((task) => { const call = d.callsById.get(task.callId); return call ? { call, label: task.priority === "high" ? "Urgent" : call.fields.requestedStart ? "Confirm time" : "Call back", tone: task.priority === "high" ? "danger" : call.fields.requestedStart ? "warn" : "neutral", when: d.due(task) === "Due now" ? "Now" : d.due(task).replace(/^Due today /, "Today ").replace(/^Due /, "") } : null })) },
     { id: "waiting", title: "Waiting", whenLabel: "Back on", empty: "Nothing set for later.", rows: rows(d.snoozed.map((task) => { const call = d.callsById.get(task.callId); return call ? { call, label: "Later", tone: "neutral", when: compactDate(task.dueAt, d.tz) } : null })) },
     { id: "booked", title: "Booked", whenLabel: "Visit", empty: "No booked visits in the next 7 days.", rows: d.booked.map((call) => ({ call, label: "Booked", tone: "good" as Tone, when: compactDate(call.fields.requestedStart!, d.tz) })) },
-    { id: "complete", title: "Complete", whenLabel: "Completed", empty: "Nothing completed yet.", rows: rows(d.handled.map((task) => { const call = d.callsById.get(task.callId); return call ? { call, label: "Complete", tone: "neutral", when: compactDate(task.completedAt ?? task.updatedAt, d.tz) } : null })) },
+    { id: "complete", title: "Done", whenLabel: "Done", empty: "Nothing done yet.", rows: rows(d.handled.map((task) => { const call = d.callsById.get(task.callId); return call ? { call, label: "Done", tone: "neutral", when: compactDate(task.completedAt ?? task.updatedAt, d.tz) } : null })) },
   ] : []
   // All: every job once, newest call first, with the status it has in its own list.
   const seen = new Set<string>()
@@ -44,8 +44,7 @@ export function JobsPage() {
               <button key={column.id} role="tab" aria-selected={active} type="button" onClick={() => pick(column.id)}
                 className={cn("grid min-h-16 content-center justify-items-center gap-0.5 rounded-lg px-1 text-center", active ? "bg-card shadow-sm ring-1 ring-border" : "text-muted-foreground hover:bg-card/60")}>
                 <strong className={cn("tabular text-[22px] leading-none font-semibold", active && "text-foreground", column.id === "reply" && column.rows.some((row) => row.tone === "danger") && "text-red-700")}>{column.rows.length}</strong>
-                {/* A narrow strip (a small phone, beside the open job) breaks "Com-plete" at its soft hyphen rather than cutting it. */}
-                <span className="max-w-full text-[13px] leading-tight font-semibold">{column.title.replace("Complete", "Com\u00ADplete")}</span>
+                <span className="max-w-full text-[13px] leading-tight font-semibold">{column.title}</span>
               </button>
             )
           })}
@@ -53,7 +52,8 @@ export function JobsPage() {
         <JobList key={tab.id} tab={tab} selectedId={selected?.id ?? null} />
       </section>
       <aside className="max-lg:hidden lg:sticky lg:top-8">
-        <CallPanel call={selected} task={selected ? d.taskFor(selected.id) : undefined} tz={d.tz} standalone={false} />
+        {/* An empty tab in a shop with calls: nothing to open, and never "No calls yet". */}
+        <CallPanel call={selected} task={selected ? d.taskFor(selected.id) : undefined} tz={d.tz} standalone={false} hasCalls={dashboard.calls.length > 0} />
       </aside>
     </div>
   )

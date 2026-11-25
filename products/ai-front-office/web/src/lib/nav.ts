@@ -23,7 +23,7 @@ export function navEntries(input: { base: string; preview: boolean; member: bool
     { id: "jobs", to: `${base}/jobs`, label: "Jobs", end: false, badge: 0 },
     { id: "calendar", to: `${base}/calendar`, label: "Calendar", end: false, badge: 0 },
     preview
-      ? { id: "start", to: "/signup", label: "Start", end: false, badge: 0, external: true }
+      ? { id: "start", to: "/signup", label: "Set up yours", end: false, badge: 0, external: true }
       : { id: "settings", to: `${base}/settings`, label: "Settings", end: false, badge: 0 },
   ]
   return entries.filter((entry) => !(member && entry.id === "settings"))

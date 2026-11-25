@@ -26,11 +26,12 @@ export interface SectionDef {
   render: () => ReactNode
 }
 
-const MODE_WORDS: Record<string, string> = { always: "Otto answers every call", overflow: "Ring my phone first", after_hours: "After hours" }
+// "After hours" works like ring first (forwarding sends Otto only the calls you miss), so it reads that way.
+const MODE_WORDS: Record<string, string> = { always: "Otto answers every call", overflow: "Ring my phone first", after_hours: "Ring my phone first" }
 
 export const SECTIONS: SectionDef[] = [
   { ...settingsPage("business"), form: true, description: "Name, greeting, where you work and what you fix.", summary: ({ text }) => text("businessName"), render: () => <BusinessSection /> },
-  { ...settingsPage("answering"), form: true, description: "Which calls Call Otto picks up, after hours and emergencies.", summary: ({ text }) => (text("serviceState") === "paused" ? "Paused" : MODE_WORDS[text("operationMode")] ?? "On"), render: () => <AnsweringSection /> },
+  { ...settingsPage("answering"), form: true, description: "Which calls Call Otto picks up, and emergencies.", summary: ({ text }) => (text("serviceState") === "paused" ? "Paused" : MODE_WORDS[text("operationMode")] ?? "On"), render: () => <AnsweringSection /> },
   { ...settingsPage("answers"), form: true, description: "The only prices and facts Call Otto may tell callers.", summary: ({ text }) => { const count = [text("priceSnippets"), text("approvedKnowledge")].join("\n").split("\n").filter((line) => line.trim()).length; return count ? `${count} saved` : "None yet" }, render: () => <AnswersSection /> },
   { ...settingsPage("alerts"), form: true, description: "How we let you know about new calls.", summary: ({ settings }) => (settings.integrations.ownerPhoneConfigured ? "Mobile saved" : "No mobile yet"), render: () => <AlertsSection /> },
   { ...settingsPage("calendar"), form: true, description: "Google Calendar, appointment hours and booking.", summary: ({ settings }) => (settings.integrations.googleConnected ? "Connected" : settings.integrations.googleAvailable ? "Not connected" : "Not available yet"), render: () => <CalendarSection /> },
@@ -206,7 +207,8 @@ function SettingsIndex() {
             <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-secondary text-brand-ink"><item.icon className="size-5" /></span>
             <span className="grid min-w-0 flex-1">
               <span className="text-base font-medium">{item.title}</span>
-              <span className="truncate text-sm text-muted-foreground">{item.summary(context)}</span>
+              {/* The saved value, never an unsaved draft. */}
+              <span className="truncate text-sm text-muted-foreground">{item.summary({ ...context, text: (name) => String(context.settings.values[name] ?? "") })}</span>
             </span>
             <ChevronRight className="size-5 shrink-0 text-muted-foreground" />
           </Link>
@@ -238,10 +240,10 @@ function SectionPage({ section }: { section: SectionDef }) {
   useEffect(() => { window.scrollTo(0, 0) }, [location.pathname])
   const saveButton = (className?: string) => dirty || saving
     ? <Button size="tap" type="submit" className={cn("min-w-36", className)} disabled={saving}>{saving ? "Saving…" : "Save changes"}</Button>
-    : <span className={cn("inline-flex h-12 min-w-36 items-center justify-center gap-1.5 text-[15px] font-medium text-muted-foreground lg:pointer-fine:h-10", className)}><Check className="size-4" />All changes saved</span>
+    : <span className={cn("inline-flex h-12 min-w-36 items-center justify-center gap-1.5 text-[15px] font-medium text-muted-foreground lg:pointer-fine:h-11", className)}><Check className="size-4" />All changes saved</span>
   const body = (
     <>
-      <header className="sticky top-0 z-10 -mx-1 hidden items-center justify-between gap-6 border-b bg-card/95 px-1 py-3 backdrop-blur-md lg:flex">
+      <header className="sticky top-0 z-10 -mx-1 hidden items-center justify-between gap-6 border-b bg-card px-1 py-3 lg:flex">
         <div className="grid gap-0.5">
           <h2 className="text-[22px] font-semibold tracking-tight">{section.title}</h2>
           <p className="text-[15px] text-muted-foreground">{section.description}</p>
@@ -261,7 +263,7 @@ function SectionPage({ section }: { section: SectionDef }) {
     <form className="grid max-w-3xl gap-4" onSubmit={(event) => { event.preventDefault(); void save() }}>
       {body}
       {dirty && (
-        <div className="sticky bottom-0 z-10 -mx-4 flex items-center gap-3 border-t bg-card/95 px-4 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur-md lg:hidden">
+        <div className="sticky bottom-0 z-10 -mx-4 flex items-center gap-3 border-t bg-card px-4 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] lg:hidden">
           <Button type="button" variant="outline" size="tap" className="flex-1" onClick={discard}>Discard</Button>
           {saveButton("flex-[2]")}
         </div>

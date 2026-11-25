@@ -109,14 +109,14 @@ export function renderOwnerApp(input: {
   const banners: string[] = [];
   if (preview) banners.push(`<div class="fo-note"><strong>Read-only demo</strong><span>Synthetic calls only. Real owners can call back, check off, and snooze.</span></div>`);
   if (!preview && input.config.ownerNotificationRefs.length === 0) {
-    banners.push(`<div class="fo-note danger" role="alert"><strong>Urgent alerts are off.</strong><span>Emergencies will only appear here, and your line can’t be turned on until you add a mobile number for alerts.</span><a class="fo-btn small" href="/app/setup">Turn on alerts</a></div>`);
+    banners.push(`<div class="fo-note danger" role="alert"><strong>Urgent alerts are off.</strong><span>Emergencies will only appear here, and your line can’t be turned on until you add a mobile number for alerts.</span><a class="fo-btn small" href="/app/settings/alerts">Turn on alerts</a></div>`);
   }
   if (!preview && input.recentlyCompletedCallId) {
     banners.push(`<div class="fo-note ok" role="status"><strong>Marked handled.</strong><form method="post" action="/app/calls/${encodeURIComponent(input.recentlyCompletedCallId)}/task/reopen">${csrfField}<button class="fo-link">Undo</button></form></div>`);
   }
   const rulesSaved = input.config.serviceAreaTerms.length > 0 && input.config.greeting.trim().length > 0;
   const steps = [
-    { done: rulesSaved, label: "Set your call rules", href: "/app/setup", cta: "Set rules" },
+    { done: rulesSaved, label: "Set your call rules", href: "/app/settings", cta: "Set rules" },
     { done: input.googleConnected, label: "Connect Google Calendar", href: "/app/integrations/google/start", cta: "Connect" },
     { done: paid, label: "Start your plan", href: "", cta: `Start ${money(input.config.flatMonthlyPriceCents)}/mo plan` },
     { done: input.account.status === "active", label: "Get your Call Otto number", href: "#go-live", cta: "Turn on my line" },

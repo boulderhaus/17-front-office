@@ -754,62 +754,69 @@ describe("HTTP boundary", () => {
     const removed = await fetch(`${baseUrl}/app/team/remove`, { method: "POST", redirect: "manual", headers: { cookie: ownerCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, accountId: teammate!.id }) });
     expect(removed.status).toBe(303);
     expect(await store.getIntegrationSecret(account!.tenantId, "google", `refresh_token:${teammate!.id}`)).toBeNull();
-    const setup = await (await fetch(`${baseUrl}/app/setup`, { headers: { cookie: ownerCookie } })).text();
-    expect(setup).toContain("Where can you take a job?");
-    expect(setup).toContain("Connect Google Calendar");
+    // The old setup page is gone: a bookmark lands in Settings.
+    const setup = await fetch(`${baseUrl}/app/setup`, { redirect: "manual", headers: { cookie: ownerCookie } });
+    expect(setup.status).toBe(303);
+    expect(setup.headers.get("location")).toBe("/app/settings");
   });
 
-  it("rejects setup service areas that would never match and saves the parsed terms", async () => {
+  it("no longer saves the old setup page: POST /app/setup changes nothing", async () => {
     const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Air", email: "area@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
     const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
-    const page = await (await fetch(`${baseUrl}/app/setup`, { headers: { cookie } })).text();
-    const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
-    const save = (serviceAreaTerms: string) => fetch(`${baseUrl}/app/setup`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({
-      csrf, businessName: "Synthetic Air", serviceAreaTerms, timezone: "America/New_York", operationMode: "overflow", start: "17:00", end: "08:00",
-      bookStart: "08:00", bookEnd: "17:00", bookingMode: "confirm", greeting: "Hi, I'm the owner's AI assistant. How can I help?", prices: "", answers: "", disclosureApproved: "yes",
-    }) });
-    const rejected = await save("Sarasota, Venice");
-    expect(rejected.status).toBe(400);
-    expect((await rejected.json() as { error: string }).error).toContain("Add a state to: Sarasota, Venice");
-    expect((await save("Sarasota, FL, 34236")).status).toBe(303);
-    const account = await store.getOwnerAccountByEmail("area@synthetic.example");
-    expect((await store.getConfig(account!.tenantId)).serviceAreaTerms).toEqual(["Sarasota FL", "34236"]);
+    const account = (await store.getOwnerAccountByEmail("area@synthetic.example"))!;
+    const before = await store.getConfig(account.tenantId);
+    const posted = await fetch(`${baseUrl}/app/setup`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Renamed", timezone: "America/Chicago", operationMode: "after_hours", ownerSmsConsent: "" }) });
+    expect(posted.status).toBe(405);
+    expect(await store.getConfig(account.tenantId)).toEqual(before);
   });
 
-  it("confirms a setup-page text opt-in once per new opt-in or new number, and resets the STOP line", async () => {
+  it("records text-alert consent from Settings › Alerts like the setup page did, and changes nothing else", async () => {
     const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Air", email: "optin@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
     const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
-    const page = await (await fetch(`${baseUrl}/app/setup`, { headers: { cookie } })).text();
-    const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
-    const save = (extra: Record<string, string>) => fetch(`${baseUrl}/app/setup`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({
-      csrf, businessName: "Synthetic Air", serviceAreaTerms: "Sarasota FL", timezone: "America/New_York", operationMode: "overflow", start: "17:00", end: "08:00",
-      bookStart: "08:00", bookEnd: "17:00", bookingMode: "confirm", greeting: "Hi, I'm the owner's AI assistant. How can I help?", prices: "", answers: "", disclosureApproved: "yes", ...extra,
-    }) });
     const account = (await store.getOwnerAccountByEmail("optin@synthetic.example"))!;
+    // A shop with labelled prices, an Alaska time zone, ring-first mode and warm transfer on: none of it may move.
+    const shaped = { ...(await store.getConfig(account.tenantId)), timezone: "America/Anchorage", operationMode: "overflow" as const, warmTransferEnabled: true, ownerNotificationRefs: [], priceSnippets: [{ label: "Service call", text: "Our service call is $89." }] };
+    await store.saveConfig(shaped);
+    const { csrf } = await (await fetch(`${baseUrl}/api/app/settings`, { headers: { cookie } })).json() as { csrf: string };
+    const texts = (body: Record<string, unknown>) => fetch(`${baseUrl}/api/app/alerts/texts`, { method: "POST", headers: { cookie, "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify(body) });
     const confirmations = () => [...store.notifications.values()].filter((item) => item.tenantId === account.tenantId && item.idempotencyKey.startsWith("owner-optin:"));
+    const dashboard = async () => (await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie } })).json() as { shop: { alertsOn: boolean; textsLive: boolean } }).shop;
+    expect((await dashboard()).alertsOn).toBe(false);
+    // No mobile yet: say so, record nothing.
+    const noPhone = await texts({ on: true });
+    expect(noPhone.status).toBe(400);
+    expect(await store.getIntegrationSecret(account.tenantId, "notifications", "owner_sms_consent")).toBeNull();
     await store.claimSmsStopNotice("+19415550142", "older-notification", clock.now().toISOString(), true);
-    expect((await save({ ownerPhone: "(941) 555-0142", ownerSmsConsent: "yes" })).status).toBe(303);
+    const on = await texts({ on: true, phone: "(941) 555-0142" });
+    expect(on.status).toBe(200);
+    expect((await on.json() as { texts: { on: boolean; mobile: string } }).texts).toMatchObject({ on: true, mobile: "(941) •••-0142" });
+    const proof = JSON.parse((await store.getIntegrationSecret(account.tenantId, "notifications", "owner_sms_consent"))!) as Record<string, string>;
+    expect(proof).toMatchObject({ source: "settings", wording: "2026-11-23.2" });
+    expect(Object.keys(proof).sort()).toEqual(["at", "ip", "source", "wording"]);
+    expect(await store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")).toBe("+19415550142");
     expect(confirmations()).toHaveLength(1);
     expect(store.smsStopNotices.has("+19415550142")).toBe(false);
-    expect((await save({ ownerSmsConsent: "yes" })).status).toBe(303);
-    expect((await save({ ownerPhone: "(941) 555-0142", ownerSmsConsent: "yes" })).status).toBe(303);
+    expect((await dashboard()).alertsOn).toBe(true);
+    // Same number again: no second confirmation.
+    expect((await texts({ on: true })).status).toBe(200);
+    expect((await texts({ on: true, phone: "+19415550142" })).status).toBe(200);
     expect(confirmations()).toHaveLength(1);
-    expect((await save({ ownerSmsConsent: "" })).status).toBe(303);
+    const after = await store.getConfig(account.tenantId);
+    expect(after).toEqual({ ...shaped, ownerNotificationRefs: ["owner-primary"], ownerTransferNumberRef: "owner-primary" });
+    // Off withdraws texts only.
+    expect((await texts({ on: false })).status).toBe(200);
+    expect((await dashboard()).alertsOn).toBe(false);
+    expect(await store.getConfig(account.tenantId)).toEqual({ ...shaped, ownerNotificationRefs: [], ownerTransferNumberRef: "owner-primary" });
     expect(confirmations()).toHaveLength(1);
   });
 
-  it("keeps direct booking and warm transfer hidden and off for owners until their beta flags are on", async () => {
+  it("keeps direct booking and warm transfer off for owners until their beta flags are on", async () => {
     const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Air", email: "beta@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
     const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
-    const page = await (await fetch(`${baseUrl}/app/setup`, { headers: { cookie } })).text();
-    expect(page).not.toContain("warmTransferEnabled");
-    expect(page).not.toContain("Book available times on my calendar");
-    const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
-    const saved = await fetch(`${baseUrl}/app/setup`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({
-      csrf, businessName: "Synthetic Air", serviceAreaTerms: "Sarasota FL", timezone: "America/New_York", operationMode: "overflow", start: "17:00", end: "08:00",
-      bookStart: "08:00", bookEnd: "17:00", bookingMode: "direct", warmTransferEnabled: "on", greeting: "Hi, I'm the owner's AI assistant. How can I help?", prices: "", answers: "", disclosureApproved: "yes",
-    }) });
-    expect(saved.status).toBe(303);
+    const current = await (await fetch(`${baseUrl}/api/app/settings`, { headers: { cookie } })).json() as { csrf: string; values: Record<string, unknown>; integrations: { directBookingAvailable: boolean } };
+    expect(current.integrations.directBookingAvailable).toBe(false);
+    const saved = await fetch(`${baseUrl}/api/app/settings`, { method: "PUT", headers: { cookie, "content-type": "application/json", "x-csrf-token": current.csrf }, body: JSON.stringify({ ...current.values, bookingMode: "direct", warmTransferEnabled: true }) });
+    expect(saved.status).toBe(200);
     const account = await store.getOwnerAccountByEmail("beta@synthetic.example");
     expect(await store.getConfig(account!.tenantId)).toMatchObject({ bookingMode: "confirm", warmTransferEnabled: false });
     const settings = await (await fetch(`${baseUrl}/app/settings`, { headers: { cookie } })).text();
@@ -948,12 +955,16 @@ describe("HTTP boundary", () => {
     expect(landingHtml).toContain("If Call Otto doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month.");
     expect(landingHtml).not.toMatch(/connected AI minutes|\/minute/);
     expect(landingHtml).toContain("EXAMPLE CALL");
-    for (const item of ["Phone rings", "Otto picks up", "What you get on your phone", "New call: Maria", "- AC not cooling", "41 Palm Ave, Sarasota", "Wants someone today", "Call back", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
-    // The example loops with CSS only and holds still for people who turn motion off.
+    for (const item of ["A customer calls", "Otto picks up", "What you get on your phone", "New call: Maria", "- AC not cooling", "41 Palm Ave, Sarasota", "Wants someone today", "Call back", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
+    // The example plays once with CSS only (no endless loop), ends on its last frame, and holds still for people who turn motion off.
     expect(landingHtml).toContain("@keyframes demoFrame");
+    expect(landingHtml).not.toContain("infinite");
+    // Both ways calls can work, never "rings first" as the default.
+    expect(landingText).toContain("Otto answers every call, or only the ones you miss");
+    expect(landingHtml).not.toMatch(/rings first|missed calls ring through|Missed-call and after-hours/);
     expect(landingHtml).toMatch(/prefers-reduced-motion:reduce\)\{[^}]*\}[^@]*\.frame\{position:static;opacity:1;animation:none/);
     for (const question of ["Will it sound like a robot?", "Do I keep my number?", "What if it’s an emergency?", "Can I cancel anytime?", "What if I cancel?"]) expect(landingHtml).toContain(question);
-    expect(landingHtml).toContain("Your Call Otto number keeps taking messages for 30 days and texts them to you, so no customer hits a dead line. You can export your calls anytime.");
+    expect(landingHtml).toContain("Your Call Otto number keeps taking messages for 30 days and sends them to you, so no customer hits a dead line. You can export your calls anytime.");
     // "Unlimited" only ever appears as the add-on, with its fair-use limit right next to the toggle.
     expect(landingHtml).toContain("Fair use: up to 3× your plan’s calls.");
     expect(landingHtml).not.toMatch(/unlimited (minutes|answering)/i);

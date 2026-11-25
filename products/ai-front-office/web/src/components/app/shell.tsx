@@ -48,16 +48,19 @@ function usePath() {
   return useLocation().pathname.replace(/\/$/, "")
 }
 
-/** Text alerts off is a standing state, not news: it lives with the line status, never in the middle of the calls. */
-export function AlertsOffNotice({ compact }: { compact?: boolean }) {
+/**
+ * Text alerts off is a standing state, not news: it lives with the line status, never in the middle of the calls.
+ * Only once texts can be sent at all (textsLive): before that there is nothing to turn on, and Settings › Alerts says
+ * "Texts start once approved". "Turn on" opens the consent box in Settings › Alerts, inside the app.
+ */
+export function AlertsOffNotice({ compact, onNavigate }: { compact?: boolean; onNavigate?: () => void }) {
   const { dashboard, preview } = useMode()
-  if (!dashboard || preview || dashboard.shop.alertsOn || dashboard.viewer.role !== "owner") return null
+  if (!dashboard || preview || !dashboard.shop.textsLive || dashboard.shop.alertsOn || dashboard.viewer.role !== "owner") return null
   return (
-    // /app/setup records the owner's text-message consent, so "Turn on" still goes there.
-    <a href="/app/setup" className={cn("flex items-center gap-2.5 rounded-xl bg-amber-50 text-amber-950 ring-1 ring-amber-200 ring-inset hover:bg-amber-100", compact ? "min-h-11 px-3 text-sm" : "min-h-12 px-3.5 text-[15px]")}>
+    <Link to="/app/settings/alerts#texts" state={JUMP} onClick={onNavigate} className={cn("flex items-center gap-2.5 rounded-xl bg-amber-50 text-amber-950 ring-1 ring-amber-200 ring-inset hover:bg-amber-100", FOCUS_IN, compact ? "min-h-11 px-3 text-sm" : "min-h-12 px-3.5 text-[15px]")}>
       <BellOff className="size-4 shrink-0" />
       <span className="flex-1"><strong className="font-semibold">Text alerts are off.</strong> <span className="underline underline-offset-4">Turn on</span></span>
-    </a>
+    </Link>
   )
 }
 
@@ -73,7 +76,7 @@ export function LineStatus({ always, onNavigate }: { always?: boolean; onNavigat
   if (!always && status.tone === "on") return null
   // While setup steps remain, the Finish setup card says what's left; this row would only repeat it.
   if (!always && !dashboard.onboarding.completed && dashboard.viewer.role === "owner") return null
-  const to = status.tone === "warning" ? "/app/settings/plan" : status.tone === "paused" ? "/app/settings/answering" : dashboard.onboarding.completed ? "/app/settings/answering" : "/app/start"
+  const to = status.to
   const body = (
     <>
       <i className={cn("mt-1.5 size-2.5 shrink-0 rounded-full", DOT[status.tone])} />
@@ -114,7 +117,9 @@ function NavPanel({ drawer, onNavigate }: { drawer?: boolean; onNavigate?: () =>
     scroller.scrollTop += revealDelta(lit.getBoundingClientRect(), scroller.getBoundingClientRect())
   }, [path])
   return (
-    <div ref={panel} className="flex min-h-0 flex-1 flex-col short:overflow-y-auto">
+    // One scroll for the whole menu (list and foot together), with a shadow at the edge that has more: with Settings
+    // open on a short screen, its last pages are a scroll away, never hidden under the line status.
+    <div ref={panel} className="scroll-shade flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">
       <div className="flex items-center gap-1 px-4 pt-4 pb-3">
         <Link to={nav[0]!.to} onClick={onNavigate} className={cn("flex min-h-11 min-w-0 flex-1 items-center gap-2.5 rounded-lg", FOCUS_IN)}>
           <BrandMark />
@@ -129,14 +134,14 @@ function NavPanel({ drawer, onNavigate }: { drawer?: boolean; onNavigate?: () =>
           </SheetClose>
         )}
       </div>
-      <nav ref={list} aria-label="Main" className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 short:flex-none short:overflow-visible">
+      <nav ref={list} aria-label="Main" className="flex-none px-3 pb-3">
         <ul className="grid gap-0.5">
           {nav.map((item) => (item.children
             ? <NavGroup key={item.label} item={item} pages={item.children} onNavigate={onNavigate} />
             : <NavRow key={item.label} item={item} active={navActive(path, item)} onNavigate={onNavigate} />))}
         </ul>
       </nav>
-      <div className="grid gap-2 border-t border-sidebar-border px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+      <div className="mt-auto grid gap-2 border-t border-sidebar-border px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         {preview ? (
           <>
             <a href="/" className={ROW}><ArrowLeft className="size-[18px] shrink-0" strokeWidth={1.75} />Back to site</a>
@@ -145,7 +150,7 @@ function NavPanel({ drawer, onNavigate }: { drawer?: boolean; onNavigate?: () =>
         ) : (
           <>
             <LineStatus always onNavigate={onNavigate} />
-            <AlertsOffNotice compact />
+            <AlertsOffNotice compact onNavigate={onNavigate} />
             <a href="/logout" className={ROW}><LogOut className="size-[18px] shrink-0" strokeWidth={1.75} />Sign out</a>
           </>
         )}
@@ -293,7 +298,7 @@ function TopBar({ back }: { back?: BackLink }) {
   // Going up to the parent (no list behind this page) replaces it, so Back from the parent doesn't return here.
   const goBack = () => ((back?.history ?? backGoes({ key: location.key, state: location.state }) === "history") ? navigate(-1) : navigate(back!.to, { replace: true }))
   return (
-    <header className="pt-safe sticky top-0 z-20 border-b bg-background/95 pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] backdrop-blur-md lg:hidden">
+    <header className="pt-safe sticky top-0 z-20 border-b bg-background pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] lg:hidden">
       <div className="flex h-14 items-center gap-1 px-2">
         <Sheet open={menu} onOpenChange={setMenu}>
           <SheetTrigger asChild>

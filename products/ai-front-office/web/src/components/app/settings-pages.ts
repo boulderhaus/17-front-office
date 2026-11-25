@@ -6,7 +6,7 @@ export const SETTINGS_PAGES = [
   { id: "answering", title: "How calls are answered", icon: PhoneIncoming },
   { id: "answers", title: "Prices and answers", icon: MessageSquareQuote },
   { id: "alerts", title: "Alerts", icon: BellRing },
-  { id: "calendar", title: "Calendar", icon: CalendarDays },
+  { id: "calendar", title: "Hours and Google Calendar", icon: CalendarDays },
   { id: "plan", title: "Plan and billing", icon: CreditCard },
   { id: "team", title: "Team", icon: Users },
   { id: "data", title: "Your data", icon: Database },

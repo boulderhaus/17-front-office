@@ -54,6 +54,17 @@
   if (timezone && !timezone.value) {
     try { timezone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { /* the server falls back to the state's zone */ }
   }
+  // A US mobile reads as (941) 555-0123 while it's typed. Only when typing at the end, so the caret never jumps;
+  // a number with another country code is left as typed. The server checks the number either way.
+  document.querySelectorAll("input[data-phone-mask]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const raw = input.value;
+      if (input.selectionStart !== raw.length || /^\s*\+(?!1)/.test(raw)) return;
+      const digits = raw.replace(/\D/g, "").replace(/^1(?=\d)/, "").slice(0, 10);
+      input.value = digits.length > 6 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : digits.length > 3 ? `(${digits.slice(0, 3)}) ${digits.slice(3)}` : digits;
+    });
+  });
+
   const form = document.querySelector(".publicform");
   const steps = form?.querySelectorAll("fieldset");
   if (!form || !steps || steps.length < 2) return;
@@ -109,4 +120,5 @@
   });
 
   show(0);
+
 })();

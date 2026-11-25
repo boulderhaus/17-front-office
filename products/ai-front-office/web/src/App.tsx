@@ -12,7 +12,7 @@ import { StartPage } from "@/pages/start"
 import { TodayPage } from "@/pages/today"
 import { useApi } from "@/lib/api"
 import { identifyOwner } from "@/lib/analytics"
-import { ModeContext, type AppMode } from "@/lib/mode"
+import { ModeContext, useMediaQuery, type AppMode } from "@/lib/mode"
 import { callBack } from "@/lib/nav"
 import type { ApiDashboard } from "@/lib/types"
 
@@ -72,6 +72,8 @@ function Root() {
 }
 
 function Layout() {
+  const phone = useMediaQuery("(max-width: 1023px)")
+  const toastPosition = phone ? "bottom-center" : "top-center"
   return (
     <TooltipProvider delayDuration={200}>
       <Routes>
@@ -79,7 +81,8 @@ function Layout() {
         <Route path="/app/*" element={<Root />} />
         <Route path="*" element={<Navigate to="/app" replace />} />
       </Routes>
-      <Toaster position="top-center" richColors closeButton />
+      {/* Phones: at the bottom, clear of the header and the menu button. Computers: top centre. */}
+      <Toaster position={toastPosition} richColors closeButton />
     </TooltipProvider>
   )
 }

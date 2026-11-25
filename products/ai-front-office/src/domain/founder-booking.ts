@@ -15,7 +15,7 @@ const SLOT_STEP_MINUTES = 15;
 const SLOTS_PER_DAY = 3;
 const SCAN_DAYS = 21;
 
-export type FounderTokenPurpose = "founder-booking" | "founder-connect";
+export type FounderTokenPurpose = "founder-booking" | "founder-connect" | "dial-handoff";
 
 /** A signed link payload: `base64url(json).hmac`. The purpose is part of the HMAC, so one kind never passes as another. */
 export function signFounderToken(key: string, purpose: FounderTokenPurpose, data: Record<string, unknown>): string {

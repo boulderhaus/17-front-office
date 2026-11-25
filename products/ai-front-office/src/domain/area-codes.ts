@@ -70,3 +70,9 @@ export function timezoneForState(state: string | null): string {
   if (CENTRAL.has(state)) return "America/Chicago";
   return "America/New_York";
 }
+
+/**
+ * States where recording a call needs everyone's OK (all-party consent). A new shop there starts with the recording
+ * notice on. The owner app's hint uses the same list (web/src/lib/recording-hint.ts; a test keeps them equal).
+ */
+export const ALL_PARTY_CONSENT_STATES: ReadonlySet<string> = new Set(["CA", "CT", "DE", "FL", "IL", "MD", "MA", "MI", "MT", "NV", "NH", "OR", "PA", "WA"]);

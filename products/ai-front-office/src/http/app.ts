@@ -16,7 +16,6 @@ import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type Simulation
 import { CallService, ToolWriteInProgressError } from "../application/call-service.js";
 import { approvedTransferTargets } from "../application/transfer-policy.js";
 import { joinTeam, teamRoutes } from "./team-routes.js";
-import { renderQuickSetup } from "../admin/setup.js";
 import { CALL_PATH_SCRIPT, renderCallPath, renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
 import { buildCallPath, type CallPath } from "../domain/call-path.js";
 import { chargeSentence, isPaidStatus } from "../domain/billing.js";
@@ -26,11 +25,14 @@ import { callbackLinkMatches, OWNER_SMS_OPT_IN_CONFIRMATION, readCallbackLinkTok
 import { callsCsv } from "./calls-csv.js";
 import { hoursFromChoice } from "../domain/hours.js";
 import { SMS_CONSENT_VERSION } from "../admin/footer.js";
-import { stateForPhone, timezoneForState } from "../domain/area-codes.js";
+import { renderDialHandoff, renderErrorPage } from "../admin/error-page.js";
+import { dialHandoffToken, readDialHandoffToken } from "../domain/dial-handoff.js";
+
+import { ALL_PARTY_CONSENT_STATES, stateForPhone, timezoneForState } from "../domain/area-codes.js";
 import { MAX_USAGE_ALERT_PERCENT, MIN_USAGE_ALERT_PERCENT, currentBillingPeriod, isValidUsageAlertPercent } from "../domain/usage.js";
 
 export { currentBillingPeriod };
-import { apiCall, apiDashboard, apiSettings, apiTask, settingsForm, type ApiCallDetail, type ApiPlan } from "./owner-api-model.js";
+import { apiCall, apiDashboard, apiSettings, apiTask, maskedPhone, settingsForm, textsOn, type ApiCallDetail, type ApiPlan } from "./owner-api-model.js";
 import { approvedAnswer } from "../domain/approved-answer.js";
 import { isExplicitHumanRequest } from "../domain/human-request.js";
 import { saveAssistantConfig } from "../adapters/assistant-config.js";
@@ -321,7 +323,7 @@ function publicOwnerDemo(now: Date): {
     },
     emergency: { emergency: true, severity: "urgent", score: 0.91, evidence: ["no cooling", "elderly resident"], immediateInstruction: null },
     outcome: "handoff_queued",
-    transcript: "Synthetic demonstration transcript.",
+    transcript: "Otto: Thanks for calling Suncoast Heating. This is Otto. How can I help?\nCaller: Our AC stopped and my mom is home. She's 84 and it's getting hot.\nOtto: I'm sorry. Let's get someone to you fast. What's the address?\nCaller: 100 Bay Street, Sarasota.\nOtto: Is the outdoor unit running at all?\nCaller: No, it's silent.\nOtto: Got it. I'm marking this urgent, and the owner will call you right back at this number.",
     recordingUrl: null,
     consentState: "disclosed",
     billingDisposition: "billable",
@@ -347,7 +349,7 @@ function publicOwnerDemo(now: Date): {
     },
     emergency: { emergency: false, severity: "routine", score: 0.08, evidence: [], immediateInstruction: null },
     outcome: "pending_confirmation",
-    transcript: "Synthetic demonstration transcript.",
+    transcript: "Otto: Thanks for calling Suncoast Heating. This is Otto. How can I help?\nCaller: I'd like a maintenance visit before we leave on a trip.\nOtto: Happy to help. What's the address?\nCaller: 200 Palm Avenue. There's a gate code.\nOtto: When works for you?\nCaller: Tomorrow morning if you can.\nOtto: I've asked for tomorrow at that time. The owner will confirm it with you.",
     recordingUrl: null,
     consentState: "disclosed",
     billingDisposition: "billable",
@@ -373,7 +375,7 @@ function publicOwnerDemo(now: Date): {
     },
     emergency: { emergency: false, severity: "routine", score: 0.05, evidence: [], immediateInstruction: null },
     outcome: "booked",
-    transcript: "Synthetic demonstration transcript.",
+    transcript: "Otto: Thanks for calling Suncoast Heating. This is Otto. How can I help?\nCaller: My thermostat is blank and nothing's coming on.\nOtto: Sorry about that. What's the address?\nCaller: 300 Orange Avenue, Sarasota.\nOtto: I can book you for tomorrow afternoon. Our service call is $89. Does that work?\nCaller: Yes, that works.\nOtto: You're booked. You'll get a confirmation shortly.",
     recordingUrl: null,
     consentState: "disclosed",
     billingDisposition: "billable",
@@ -457,6 +459,15 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       held: await dialsBackToOtto(dependencies.store, tenantId, phone),
     };
   };
+  /** Owner texts: live (carrier approval recorded), on (consent on file and a mobile), and the mobile they go to. */
+  const textsState = async (tenantId: string): Promise<{ live: boolean; on: boolean; mobile: string | null }> => {
+    const [config, consent, phone] = await Promise.all([
+      dependencies.store.getConfig(tenantId),
+      dependencies.store.getIntegrationSecret(tenantId, "notifications", "owner_sms_consent"),
+      dependencies.store.getIntegrationSecret(tenantId, "notifications", "owner-primary"),
+    ]);
+    return { live: dependencies.env.TELNYX_MESSAGING_APPROVED, on: textsOn(config, Boolean(consent)) && Boolean(phone), mobile: phone ? maskedPhone(phone) : null };
+  };
   const recordingClient = dependencies.env.TELNYX_API_KEY ? new TelnyxRecordingClient(dependencies.env.TELNYX_API_KEY, dependencies.fetcher ?? fetch) : null;
   const routingClient = dependencies.env.TELNYX_API_KEY && dependencies.env.TELNYX_FROM_NUMBER && dependencies.env.TELNYX_ASSISTANT_ID
     ? new TelnyxVoiceRoutingClient({ apiKey: dependencies.env.TELNYX_API_KEY, phoneNumber: dependencies.env.TELNYX_FROM_NUMBER, assistantId: dependencies.env.TELNYX_ASSISTANT_ID })
@@ -501,6 +512,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     fieldErrors,
     supportEmail: dependencies.env.SUPPORT_EMAIL ?? null,
     providers: signIn.providersFor(request),
+    emailLink: signIn.loginOptions(request).emailLink === true,
     verified: verifiedSignupEmail(identity),
     chargeNote: stripeClient ? planCharge(plans[0]!) : null,
     plans: stripeClient ? plans.map((plan) => ({ ...plan, chargeNote: planCharge(plan), unlimitedChargeNote: plan.unlimited ? planCharge(plan, undefined, true) : null })) : [],
@@ -521,6 +533,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         telemetry.captureException(error, { route: routeKey(pathname), method: request.method ?? "GET", status, requestId: String(requestId) });
       }
       if (response.headersSent) response.end();
+      else if (wantsPage(request)) sendHtml(response, status, errorPage(status, message, new URL(request.url ?? "/", "http://localhost").pathname));
       else sendJson(response, status, { error: message, request_id: requestId });
     });
   };
@@ -699,7 +712,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     }
     if (method === "GET" && url.pathname === "/") {
       const config = await dependencies.store.getConfig(dependencies.env.DEFAULT_TENANT_ID);
-      return sendHtml(response, 200, analyticsPage(renderLanding(config, undefined, { supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, trialDays: stripeClient ? trialDays : 0, plans })));
+      return sendHtml(response, 200, analyticsPage(renderLanding(config, undefined, { supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, trialDays: stripeClient ? trialDays : 0, plans, textsLive: dependencies.env.TELNYX_MESSAGING_APPROVED })));
     }
     if (method === "GET" && url.pathname.startsWith("/web/assets/")) return serveWebAsset(response, url.pathname.slice("/web/assets/".length));
     if (url.pathname.startsWith("/api/demo/")) return handleDemoApi(request, response, url);
@@ -735,6 +748,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     }
     // The link in Brock's follow-up email: book a 10-minute setup call with him. Signed for this shop, 7 days.
     if (url.pathname === "/book-setup" && (method === "GET" || method === "POST")) return handleFounderBooking(request, response, url);
+    if (method === "GET" && url.pathname.startsWith("/dial/")) return handleDialHandoff(request, response, url);
     if (url.pathname === "/join" && (method === "GET" || method === "POST")) {
       if (!limiter.allow(`${ip}:team-join`, 12, 60 * 60_000)) throw new HttpError(429, "Too many invitation attempts");
       return joinTeam(request, response, url, dependencies);
@@ -815,6 +829,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         flatMonthlyPriceCents: plan.priceCents,
         businessName: parsed.data.businessName,
         greeting: form.has("greeting") ? parsed.data.greeting : `Thanks for calling ${parsed.data.businessName}. How can I help?`,
+        // In a state where recording a call needs everyone's OK (Florida, California...), the notice starts on.
+        recordingDisclosure: ALL_PARTY_CONSENT_STATES.has(serviceAreaState(serviceArea.terms) ?? homeState ?? "") ? RECORDING_NOTICE : "",
         timezone,
         serviceAreaTerms: serviceArea.terms,
         // An explicit list wins; otherwise the picked trade's, then the form defaults.
@@ -1132,7 +1148,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   }
   async function ownerDashboardModel(account: OwnerAccount, csrf: string) {
     const subscription = await dependencies.store.getSubscription(account.tenantId);
-    const [config, calls, tasks, usage, googleConnected, lineNumber, ownerMobile, hoursSetAt, completedAt] = await Promise.all([
+    const [config, calls, tasks, usage, googleConnected, lineNumber, ownerMobile, hoursSetAt, completedAt, smsConsent] = await Promise.all([
       dependencies.store.getConfig(account.tenantId),
       dependencies.store.listCalls(account.tenantId, 50),
       dependencies.store.listCallbackTasks(account.tenantId, 100),
@@ -1142,9 +1158,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary"),
       dependencies.store.getIntegrationSecret(account.tenantId, "onboarding", "hours_set_at"),
       dependencies.store.getIntegrationSecret(account.tenantId, "onboarding", "completed_at"),
+      dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner_sms_consent"),
     ]);
     const model = apiDashboard({
       account, config, calls, tasks, usage, googleConnected, subscription, csrf, lineNumber, ownerMobile,
+      smsConsent: Boolean(smsConsent), textsLive: dependencies.env.TELNYX_MESSAGING_APPROVED, helpTeam: Boolean(dependencies.env.SUPPORT_EMAIL),
       googleAvailable: anyGoogleClient(dependencies.env),
       chargeNote: stripeClient ? planCharge(currentPlan(known, config.planId), config.timezone, config.unlimitedCalls === true) : null,
       plans: apiPlans(config.timezone),
@@ -1199,6 +1217,33 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       }
       log({ level: "info", event: body.on ? "owner_calls_opted_in" : "owner_calls_opted_out", tenantId: account.tenantId, source: "settings" });
       return sendJson(response, 200, { urgentCalls: await urgentCallsState(account.tenantId) });
+    }
+    if (method === "POST" && url.pathname === "/api/app/alerts/texts") {
+      // The text-alert consent box in Settings › Alerts. Records consent exactly as the old setup page did: the
+      // number, owner_sms_consent evidence (time, wording version, IP) and one confirmation text for a new opt-in.
+      // Nothing else about the shop changes.
+      if (!owner) throw new HttpError(403, "Only the owner can change text alerts");
+      const body = await readApiJson(request, session, 1_000) as { on?: unknown; phone?: unknown };
+      if (typeof body.on !== "boolean") throw new HttpError(400, "Say on or off");
+      const phoneInput = typeof body.phone === "string" ? body.phone.trim() : "";
+      const phone = phoneInput ? normalizeUsPhone(phoneInput) : null;
+      if (phoneInput && !phone) throw new HttpError(400, "Enter a valid US mobile number, like (941) 555-0123");
+      let optedInPhone: string | null = null;
+      await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
+        const current = await dependencies.store.getConfig(account.tenantId);
+        const previousPhone = await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary");
+        if (body.on && !phone && !previousPhone) throw new HttpError(400, "Add your mobile number for text alerts");
+        // A new opt-in (texts were off, or a different number): confirm it by text once.
+        if (body.on && (current.ownerNotificationRefs.length === 0 || (phone && phone !== previousPhone))) optedInPhone = phone ?? previousPhone;
+        if (phone) await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner-primary", phone);
+        await dependencies.store.saveConfig({ ...current, ownerNotificationRefs: body.on ? ["owner-primary"] : [], ownerTransferNumberRef: "owner-primary" });
+      });
+      if (body.on) {
+        await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner_sms_consent", JSON.stringify({ at: dependencies.clock.now().toISOString(), source: "settings", wording: SMS_CONSENT_VERSION, ip: requestIp(request) }));
+      }
+      if (optedInPhone) await queueOwnerOptInConfirmation(account.tenantId, optedInPhone, `owner-optin:${account.tenantId}:${dependencies.clock.now().toISOString()}`);
+      log({ level: "info", event: body.on ? "owner_texts_opted_in" : "owner_texts_opted_out", tenantId: account.tenantId, source: "settings" });
+      return sendJson(response, 200, { texts: await textsState(account.tenantId) });
     }
     if (method === "POST" && url.pathname === "/api/app/push/unsubscribe") {
       const body = await readApiJson(request, session, 4_000) as { endpoint?: unknown };
@@ -1258,14 +1303,33 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const from = dependencies.env.TELNYX_FROM_NUMBER;
       let method: "auto" | "manual" = "manual";
       let callControlId: string | null = null;
+      const autoConfigured = Boolean(connectionId && from && dependencies.env.TELNYX_API_KEY && !dependencies.env.PROVIDER_TEST_MODE);
       if (connectionId && from && dependencies.env.TELNYX_API_KEY && !dependencies.env.PROVIDER_TEST_MODE) {
         callControlId = await new TelnyxForwardingClient({ apiKey: dependencies.env.TELNYX_API_KEY, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })
           .placeCheckCall({ connectionId, from, to: state.businessNumber, tenantId: account.tenantId, startedAt, webhookUrl: `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx` })
           .catch((error) => { log({ level: "error", event: "forwarding_check_call_failed", tenantId: account.tenantId, error: safeError(error) }); return null; });
         if (callControlId) method = "auto";
       }
-      await dependencies.store.withLock(`forwarding-check:${account.tenantId}`, () => dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "check", JSON.stringify({ startedAt, method, callControlId, code, choice })));
-      log({ level: "info", event: "forwarding_check_started", tenantId: account.tenantId, method });
+      // autoFailed: we meant to call their phone and couldn't, so the app says why and asks for a call from another phone.
+      const autoFailed = autoConfigured && method === "manual";
+      await dependencies.store.withLock(`forwarding-check:${account.tenantId}`, () => dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "check", JSON.stringify({ startedAt, method, callControlId, code, choice, ...(autoFailed ? { autoFailed: true } : {}) })));
+      log({ level: "info", event: "forwarding_check_started", tenantId: account.tenantId, method, autoFailed });
+      return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    }
+    if (method === "POST" && url.pathname === "/api/app/line/handoff") {
+      // The computer's QR: a fresh 15-minute link that shows the code on a phone that isn't signed in.
+      if (!owner) throw new HttpError(403, "Only the owner can set up call forwarding");
+      await readApiJson(request, session, 1_000);
+      const token = dialHandoffToken(dependencies.env.SESSION_SIGNING_KEY!, account.tenantId, dependencies.clock.now());
+      return sendJson(response, 200, { url: `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/dial/${token}` });
+    }
+    if (method === "POST" && url.pathname === "/api/app/line/check/cancel") {
+      // Cancel on a running test: hang up our call (if it's still ringing) and forget the test, so the card is idle again.
+      if (!owner) throw new HttpError(403, "Only the owner can check call forwarding");
+      await readApiJson(request, session, 1_000);
+      await hangUpLiveCheck(account.tenantId);
+      await dependencies.store.withLock(`forwarding-check:${account.tenantId}`, () => dependencies.store.deleteIntegrationSecret(account.tenantId, "forwarding", "check"));
+      log({ level: "info", event: "forwarding_check_cancelled", tenantId: account.tenantId });
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
     }
     if (method === "POST" && url.pathname === "/api/app/line/mode") {
@@ -1458,6 +1522,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       return sendJson(response, 200, {
         csrf: session.csrf,
         urgentCalls: await urgentCallsState(account.tenantId),
+        texts: await textsState(account.tenantId),
         values: apiSettings(config),
         status: account.status,
         // No password (Google, Microsoft or email link): deleting needs a sign-in from the last 10 minutes instead.
@@ -1479,6 +1544,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           googleAvailable: anyGoogleClient(dependencies.env),
           googleConnected,
           ownerPhoneConfigured: Boolean(ownerPhone),
+          ownerPhoneMasked: ownerPhone ? maskedPhone(ownerPhone) : null,
           weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
           directBookingAvailable: dependencies.env.DIRECT_BOOKING_BETA,
         },
@@ -1553,6 +1619,24 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     throw new HttpError(404, "Not found");
   }
 
+  /** The phone side of the forwarding QR: this shop's code, no sign-in, for 15 minutes. Expired or forged: a page that says so. */
+  async function handleDialHandoff(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    response.setHeader("cache-control", "no-store");
+    response.setHeader("referrer-policy", "no-referrer");
+    const handoff = readDialHandoffToken(dependencies.env.SESSION_SIGNING_KEY!, decodeURIComponent(url.pathname.slice("/dial/".length)), dependencies.clock.now());
+    if (!handoff) return sendHtml(response, 410, renderErrorPage({ status: 410, title: "This code link expired", message: "Scan the QR on your computer again for a fresh one.", back: { href: "/login", label: "Sign in instead" } }));
+    const [config, state, lineNumber] = await Promise.all([
+      dependencies.store.getConfig(handoff.tenantId),
+      readForwarding(handoff.tenantId),
+      dependencies.store.getIntegrationSecret(handoff.tenantId, "telnyx", "inbound_number"),
+    ]);
+    const plan = lineNumber && state.businessNumber && state.carrier && state.carrier.family !== "unknown" ? forwardingPlan(state.carrier.family, lineNumber, config.operationMode, config.answerAfterRings) : null;
+    if (!plan || !state.businessNumber) return sendHtml(response, 409, renderErrorPage({ status: 409, title: "No code yet", message: "Finish the forwarding step on your computer first, then scan again.", back: { href: "/login", label: "Sign in instead" } }));
+    const agent = String(request.headers["user-agent"] ?? "");
+    const device = /iPhone|iPad|iPod/i.test(agent) ? "iphone" : /Android/i.test(agent) && !/Firefox/i.test(agent) ? "android" : "other";
+    return sendHtml(response, 200, renderDialHandoff({ businessNumber: prettyPhone(state.businessNumber) ?? state.businessNumber, code: plan.on, what: plan.what, dialLink: plan.dialLink, device }));
+  }
+
   /** Otto's path for one call, from everything the server recorded about it. The caller checks the tenant. */
   async function callPathFor(call: CallRecord): Promise<CallPath | null> {
     const [booking, callbackTask, notifications, events] = await Promise.all([
@@ -1611,12 +1695,17 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     // Owner call texts and the daily recap are included in every plan: on/off is the owner's choice, never billed.
     if (account.status !== "active") updated.paused = true;
     if (updated.paused !== current.paused) updated.pausedForBilling = false;
-    const ownerPhone = form.get("ownerPhone")?.trim();
-    if (ownerPhone) {
-      if (!/^\+[1-9]\d{7,14}$/.test(ownerPhone)) throw new HttpError(400, "Owner phone must use E.164 format");
+    const ownerPhoneInput = form.get("ownerPhone")?.trim();
+    // A new mobile is just the number: texts to it need the owner's own yes (Settings › Alerts records it). A
+    // different number while texts are on gets the one confirmation text, as a new opt-in does.
+    let newTextNumber: string | null = null;
+    if (ownerPhoneInput) {
+      const ownerPhone = /^\+[1-9]\d{7,14}$/.test(ownerPhoneInput) ? ownerPhoneInput : normalizeUsPhone(ownerPhoneInput);
+      if (!ownerPhone) throw new HttpError(400, "Enter your mobile number, like (941) 555-0123");
+      const previousPhone = await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary");
       await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner-primary", ownerPhone);
-      updated.ownerNotificationRefs = ["owner-primary"];
       updated.ownerTransferNumberRef = "owner-primary";
+      if (current.ownerNotificationRefs.length > 0 && ownerPhone !== previousPhone) newTextNumber = ownerPhone;
     }
     let liveRouteChange: TelnyxVoiceRoutingClient | null = null;
     if (account.status === "active" && updated.paused !== current.paused) {
@@ -1638,6 +1727,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (liveRouteChange) await liveRouteChange.setPaused(current.paused).catch((rollbackError) => log({ level: "error", event: "owner_route_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
       throw error;
     }
+    if (newTextNumber) await queueOwnerOptInConfirmation(account.tenantId, newTextNumber, `owner-optin:${account.tenantId}:${dependencies.clock.now().toISOString()}`);
     });
   }
 
@@ -1675,38 +1765,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     }
     const method = request.method ?? "GET";
     const member = account.role === "member";
+    // The old all-in-one setup page. Its one job left (text-alert consent) lives in Settings › Alerts now.
     if (url.pathname === "/app/setup") {
-      if (member) throw new HttpError(403, "Only the owner can change the shop’s call setup");
-      if (method === "GET") return sendHtml(response, 200, renderQuickSetup(await dependencies.store.getConfig(account.tenantId), session.csrf, await isGoogleConnected(dependencies.env, dependencies.store, account.tenantId), { directBooking: dependencies.env.DIRECT_BOOKING_BETA, warmTransfer: dependencies.env.WARM_TRANSFER_BETA }));
-      if (method !== "POST") throw new HttpError(405, "Method not allowed");
-      const form = parseForm(await readBody(request, 20_000));
-      if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
-      const time = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
-      const parsed = z.object({ businessName: z.string().trim().min(2).max(120), serviceAreaTerms: z.string().trim().min(2).max(800), timezone: z.string(), operationMode: z.enum(["overflow", "after_hours", "always"]), start: time, end: time, bookStart: time, bookEnd: time, bookingMode: z.enum(["confirm", "direct"]), greeting: z.string().trim().min(5).max(500), prices: z.string().max(5000), answers: z.string().max(5000) }).safeParse(Object.fromEntries(form));
-      if (!parsed.success || parsed.data.bookStart >= parsed.data.bookEnd) throw new HttpError(400, "Check the required answers and appointment hours");
-      const data = parsed.data;
-      const serviceArea = normalizeServiceAreaInput(data.serviceAreaTerms);
-      if (serviceArea.errors.length > 0 || serviceArea.terms.length === 0) throw new HttpError(400, serviceAreaMessage(serviceArea.errors));
-      try { new Intl.DateTimeFormat("en-US", { timeZone: data.timezone }).format(); } catch { throw new HttpError(400, "Choose a valid timezone"); }
-      const phoneInput = form.get("ownerPhone")?.trim();
-      const phone = phoneInput ? normalizeUsPhone(phoneInput) : null;
-      if (phoneInput && !phone) throw new HttpError(400, "Enter a valid US mobile number");
-      let optedInPhone: string | null = null;
-      await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
-        const current = await dependencies.store.getConfig(account.tenantId);
-        const previousPhone = await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary");
-        // A new opt-in (texts were off, or a different number): confirm it by text once.
-        if (form.get("ownerSmsConsent") === "yes" && (current.ownerNotificationRefs.length === 0 || (phone && phone !== previousPhone))) optedInPhone = phone ?? previousPhone;
-        if (phone) await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner-primary", phone);
-        if (form.get("ownerSmsConsent") === "yes" && !phone && !await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")) throw new HttpError(400, "Add a mobile number for text alerts");
-        if (data.operationMode !== current.operationMode) await rememberLegacyTestedFor(account.tenantId, current, data.operationMode);
-        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, businessName: data.businessName, timezone: data.timezone, serviceAreaTerms: serviceArea.terms, operationMode: data.operationMode, afterHours: { ...current.afterHours, weekdayStart: data.start, weekdayEnd: data.end }, bookableHours: { ...current.bookableHours, weekdayStart: data.bookStart, weekdayEnd: data.bookEnd, weekends: form.get("weekends") === "on" }, bookingMode: dependencies.env.DIRECT_BOOKING_BETA ? data.bookingMode : "confirm", greeting: data.greeting, recordingDisclosure: form.get("recordingNotice") === "on" ? RECORDING_NOTICE : "", priceSnippets: parseLines(data.prices, 30).map((text, index) => ({ label: `Approved price ${index + 1}`, text })), approvedKnowledge: parseLines(data.answers, 30).map((text, index) => ({ topic: `Approved answer ${index + 1}`, text })), ownerNotificationRefs: form.get("ownerSmsConsent") === "yes" ? ["owner-primary"] : [], ownerTransferNumberRef: "owner-primary", warmTransferEnabled: dependencies.env.WARM_TRANSFER_BETA && form.get("warmTransferEnabled") === "on" });
-      });
-      if (form.get("ownerSmsConsent") === "yes") {
-        await dependencies.store.saveIntegrationSecret(account.tenantId, "notifications", "owner_sms_consent", JSON.stringify({ at: dependencies.clock.now().toISOString(), source: "setup", wording: SMS_CONSENT_VERSION, ip: requestIp(request) }));
-      }
-      if (optedInPhone) await queueOwnerOptInConfirmation(account.tenantId, optedInPhone, `owner-optin:${account.tenantId}:${dependencies.clock.now().toISOString()}`);
-      return redirect(response, "/app?setup=saved");
+      if (method !== "GET") throw member ? new HttpError(403, "Only the owner can change the shop’s call setup") : new HttpError(405, "Method not allowed");
+      return redirect(response, member ? "/app" : "/app/settings");
     }
     if (member && (url.pathname.startsWith("/app/billing") || url.pathname === "/app/config" || /\/delete$/.test(url.pathname))) throw new HttpError(403, "Only the owner can change billing, shop rules, or delete call records");
     if (member && url.pathname === "/app/settings") return redirect(response, "/app/team");
@@ -1767,9 +1829,16 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
       const subscription = await dependencies.store.getSubscription(account.tenantId);
-      if (!stripeClient || !subscription?.providerCustomerId) throw new HttpError(409, "No paid subscription to manage yet");
-      const portalUrl = await stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`)
-        .catch(() => { throw new HttpError(502, "Billing could not be opened. Please retry; your subscription has not changed."); });
+      // A browser goes back to Plan and billing, which says what happened in one line; other clients get the JSON error.
+      if (!stripeClient || !subscription?.providerCustomerId) {
+        if (wantsPage(request)) return redirect(response, "/app/settings/plan?billing=none");
+        throw new HttpError(409, "No paid subscription to manage yet");
+      }
+      const portalUrl = await stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`).catch(() => null);
+      if (!portalUrl) {
+        if (wantsPage(request)) return redirect(response, "/app/settings/plan?billing=unavailable");
+        throw new HttpError(502, "Billing could not be opened. Please retry; your subscription has not changed.");
+      }
       return redirect(response, portalUrl);
     }
     if (method === "POST" && url.pathname === "/app/billing/checkout") {
@@ -2439,7 +2508,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const check = parse<ForwardingCheckRecord>(checkJson);
     return {
       businessNumber, carrier: parse<CarrierInfo>(carrierJson), confirmedAt, testedFor: parseTestedFor(testedForJson),
-      check: check ? { startedAt: check.startedAt, method: check.method, answeredAt: check.answeredAt ?? null, endedAt: check.endedAt ?? null, hangupCause: check.hangupCause ?? null, screenedAt: check.screenedAt ?? null, amdResult: check.amdResult ?? null, code: check.code ?? null, choice: check.choice ?? null } : null,
+      check: check ? { startedAt: check.startedAt, method: check.method, answeredAt: check.answeredAt ?? null, endedAt: check.endedAt ?? null, hangupCause: check.hangupCause ?? null, screenedAt: check.screenedAt ?? null, amdResult: check.amdResult ?? null, code: check.code ?? null, choice: check.choice ?? null, autoFailed: check.autoFailed === true } : null,
       helpRequestedAt,
       helpCall: ((call) => call?.to && call.startedAt ? { to: call.to, startedAt: call.startedAt, endedAt: call.endedAt ?? null } : null)(readSetupCall(setupCallJson)),
       founderEmail,
@@ -4095,4 +4164,21 @@ function serviceAreaState(terms: string[]): string | null {
     if (match) return match[1]!;
   }
   return null;
+}
+
+/** A browser navigation or form post (it asks for HTML), not the app's JSON API, a webhook or a voice tool. */
+function wantsPage(request: IncomingMessage): boolean {
+  const path = new URL(request.url ?? "/", "http://localhost").pathname;
+  if (/^\/(api|webhooks|tools|texml)\//.test(path)) return false;
+  return String(request.headers.accept ?? "").includes("text/html");
+}
+
+/** The error as a page with a way back: Calls for the owner app, the home page anywhere else. */
+function errorPage(status: number, message: string, path: string): string {
+  const inApp = path === "/app" || path.startsWith("/app/");
+  const back = inApp ? { href: "/app", label: "Back to Calls" } : { href: "/", label: "Go to the home page" };
+  if (status === 404) return renderErrorPage({ status, title: "Page not found", message: "This page doesn’t exist, or it moved.", back });
+  if (status >= 500) return renderErrorPage({ status, title: "Something went wrong", message: "Nothing was changed. Please try again in a minute.", back });
+  if (status === 403) return renderErrorPage({ status, title: "You can’t do that here", message: message || "Ask the shop owner.", back });
+  return renderErrorPage({ status, title: "That didn’t work", message: message || "Please try again.", back });
 }
