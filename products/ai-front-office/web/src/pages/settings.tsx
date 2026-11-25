@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { Link, Navigate, useBlocker, useLocation, useParams } from "react-router-dom"
 import { Check, ChevronRight, LogOut, type LucideIcon } from "lucide-react"
 import { toast } from "sonner"
@@ -168,8 +168,12 @@ function LeaveGuard({ dirty }: { dirty: boolean }) {
     window.addEventListener("beforeunload", hold)
     return () => window.removeEventListener("beforeunload", hold)
   }, [dirty])
-  // Saved or discarded some other way while the question was up: nothing is left to lose, so go.
+  // Saved or discarded while the question was up (the dialog's Save and Discard included): nothing is left to lose, so go.
+  // This is the only place that moves on: a second proceed (from a button as well) throws in React Router.
   useEffect(() => { if (blocker.state === "blocked" && !dirty) blocker.proceed() }, [blocker, dirty])
+  // The blocker as it is now, not as it was when Save was tapped: Stay may have closed the question mid-save.
+  const latest = useRef(blocker)
+  useEffect(() => { latest.current = blocker }, [blocker])
   if (!context) return null
   const { save, saving, discard } = context
   return (
@@ -182,8 +186,8 @@ function LeaveGuard({ dirty }: { dirty: boolean }) {
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Stay</AlertDialogCancel>
-          <Button type="button" variant="outline" size="tap" disabled={saving} onClick={() => { discard(); blocker.proceed?.() }}>Discard</Button>
-          <Button type="button" size="tap" disabled={saving} onClick={() => void save().then((saved) => (saved ? blocker.proceed?.() : blocker.reset?.()))}>{saving ? "Saving…" : "Save"}</Button>
+          <Button type="button" variant="outline" size="tap" disabled={saving} onClick={discard}>Discard</Button>
+          <Button type="button" size="tap" disabled={saving} onClick={() => void save().then((saved) => { if (!saved && latest.current.state === "blocked") latest.current.reset?.() })}>{saving ? "Saving…" : "Save"}</Button>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

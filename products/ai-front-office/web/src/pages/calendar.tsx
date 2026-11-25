@@ -7,7 +7,7 @@ import { derive } from "@/lib/derive"
 import { dateKey, timeOnly } from "@/lib/format"
 import { useMediaQuery, useMode } from "@/lib/mode"
 import { JUMP } from "@/lib/nav"
-import { layoutVisits } from "@/lib/calendar-layout"
+import { layoutVisits, VISIT_MIN_SPAN } from "@/lib/calendar-layout"
 import type { ApiCall } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -137,6 +137,8 @@ function DayNumber({ day, today, className }: { day: string; today: boolean; cla
 }
 
 const HOUR = 52
+/** Minutes a Day block needs for its third line, the problem: 68/60 x 52px - 3 = 56px for 8 + 15 + 16.25 + 16.25. */
+const THREE_LINES = 68
 
 /** Day and Week: a time grid like Google Calendar, today's column tinted, a line at the current time. */
 function TimeGrid({ days, today, visits, tz, nowMs, detailed, selectedId, onDay }: { days: string[]; today: string; visits: Visit[]; tz: string; nowMs: number; detailed: boolean; selectedId: string | null; onDay: (day: string) => void }) {
@@ -150,8 +152,15 @@ function TimeGrid({ days, today, visits, tz, nowMs, detailed, selectedId, onDay 
   // A block shows 1.5 hours (1.2 in a phone's week), shorter when the next visit starts sooner; closer visits sit side by side.
   const placed = (day: string) => {
     const mine = shown.filter((visit) => visit.day === day).sort((left, right) => left.minutes - right.minutes)
-    const slots = layoutVisits(mine.map((visit) => visit.minutes), detailed ? 90 : 72, 45)
+    const slots = layoutVisits(mine.map((visit) => visit.minutes), detailed ? 90 : 72, VISIT_MIN_SPAN)
     return mine.map((visit, index) => ({ visit, slot: slots[index]! }))
+  }
+  // A phone's week: side-by-side lanes in a 30-40px column would be slivers, so visits that share the column show as
+  // one block ("+1") that opens the day, where they sit side by side at full width.
+  const shared = (items: ReturnType<typeof placed>) => {
+    const groups = new Map<number, ReturnType<typeof placed>>()
+    for (const item of items) if (!detailed && item.slot.lanes > 1) groups.set(item.slot.group, [...(groups.get(item.slot.group) ?? []), item])
+    return [...groups.values()]
   }
   return (
     <div className="overflow-hidden rounded-xl border bg-card">
@@ -173,19 +182,34 @@ function TimeGrid({ days, today, visits, tz, nowMs, detailed, selectedId, onDay 
             {day === today && nowMinutes >= first * 60 && nowMinutes <= last * 60 && (
               <span aria-hidden className="absolute inset-x-0 z-10 h-0.5 bg-red-600" style={{ top: ((nowMinutes - first * 60) / 60) * HOUR }}><i className="absolute -top-1 -left-1 size-2.5 rounded-full bg-red-600" /></span>
             )}
-            {placed(day).map(({ visit, slot }) => (
+            {/* auto-rows-max: each line keeps its height and a short block clips at its foot, instead of the lines squeezing into each other. */}
+            {placed(day).filter(({ slot }) => detailed || slot.lanes === 1).map(({ visit, slot }) => (
               <CallLink key={visit.call.id} callId={visit.call.id} aria-current={selectedId === visit.call.id}
-                className={cn("absolute z-20 grid content-start overflow-hidden rounded-md border-l-[3px] px-1.5 py-1 text-left leading-tight", visit.booked ? "border-emerald-600 bg-emerald-100 text-emerald-950" : "border-amber-500 bg-amber-100 text-amber-950", selectedId === visit.call.id && "ring-2 ring-brand-ink")}
+                className={cn("absolute z-20 grid auto-rows-max content-start overflow-hidden rounded-md border-l-[3px] px-1.5 py-1 text-left leading-tight", visit.booked ? "border-emerald-600 bg-emerald-100 text-emerald-950" : "border-amber-500 bg-amber-100 text-amber-950", selectedId === visit.call.id && "ring-2 ring-brand-ink")}
                 style={{ top: ((slot.start - first * 60) / 60) * HOUR + 1, height: ((slot.end - slot.start) / 60) * HOUR - 3, left: `calc(${(slot.lane / slot.lanes) * 100}% + 2px)`, width: `calc(${100 / slot.lanes}% - 4px)` }}>
                 <span className="tabular text-[12px] font-semibold">{detailed ? timeOnly(visit.call.fields.requestedStart!, tz) : shortTime(visit.minutes)}</span>
                 {detailed ? (
                   <>
                     <strong className="truncate text-[13px] font-semibold">{visit.call.fields.callerName ?? "Unknown caller"}</strong>
-                    {single && <span className="truncate text-[13px]">{visit.call.fields.problemDescription}</span>}
+                    {single && slot.end - slot.start >= THREE_LINES && <span className="truncate text-[13px]">{visit.call.fields.problemDescription}</span>}
                   </>
                 ) : <span className="truncate text-[11px]">{(visit.call.fields.callerName ?? "Caller").split(" ")[0]}</span>}
               </CallLink>
             ))}
+            {shared(placed(day)).map((group) => {
+              const start = group[0]!.slot.start
+              const end = Math.max(...group.map(({ slot }) => slot.end))
+              const booked = group.every(({ visit }) => visit.booked)
+              return (
+                <button key={group[0]!.visit.call.id} type="button" onClick={() => onDay(day)} aria-label={`${group.length} visits from ${shortTime(start)}. Open ${fmt(day, { weekday: "long", month: "long", day: "numeric" })}`}
+                  className={cn("absolute z-20 grid auto-rows-max content-start overflow-hidden rounded-md border-l-[3px] px-1.5 py-1 text-left leading-tight", booked ? "border-emerald-600 bg-emerald-100 text-emerald-950" : "border-amber-500 bg-amber-100 text-amber-950", group.some(({ visit }) => visit.call.id === selectedId) && "ring-2 ring-brand-ink")}
+                  style={{ top: ((start - first * 60) / 60) * HOUR + 1, height: ((end - start) / 60) * HOUR - 3, left: 2, width: "calc(100% - 4px)" }}>
+                  <span className="tabular text-[12px] font-semibold">{shortTime(start)}</span>
+                  <span className="truncate text-[11px]">{(group[0]!.visit.call.fields.callerName ?? "Caller").split(" ")[0]}</span>
+                  <span className="text-[11px] font-semibold">+{group.length - 1}</span>
+                </button>
+              )
+            })}
           </div>
         ))}
       </div>

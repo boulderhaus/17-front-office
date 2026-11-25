@@ -86,8 +86,9 @@ export function CallPage() {
   }
   return (
     <div className="mx-auto grid max-w-2xl gap-5">
-      {/* Back to the list that opened this call (one step back, so it keeps its place), else to Calls: never out of the app. */}
-      <Button variant="ghost" className="-ml-2 h-11 w-fit text-base max-lg:hidden" onClick={() => (back.history ? navigate(-1) : navigate(back.to))}>← {back.label}</Button>
+      {/* Back to the list that opened this call (one step back, so it keeps its place), else to Calls: never out of the app.
+          Calls replaces the call in history, so Back from Calls doesn't return to it. */}
+      <Button variant="ghost" className="-ml-2 h-11 w-fit text-base max-lg:hidden" onClick={() => (back.history ? navigate(-1) : navigate(back.to, { replace: true }))}>← {back.label}</Button>
       <CallHeader call={call} tone={badge.tone} label={badge.label} />
       <SafetyNote call={call} />
       {spam && <SpamNote />}

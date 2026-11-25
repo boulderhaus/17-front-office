@@ -290,7 +290,8 @@ function TopBar({ back }: { back?: BackLink }) {
   useEffect(() => { if (wide) setMenu(false) }, [wide])
   const attention = dashboard ? derive(dashboard).actionable.length : 0
   const owner = !preview && !member && dashboard?.viewer.role === "owner"
-  const goBack = () => ((back?.history ?? backGoes({ key: location.key, state: location.state }) === "history") ? navigate(-1) : navigate(back!.to))
+  // Going up to the parent (no list behind this page) replaces it, so Back from the parent doesn't return here.
+  const goBack = () => ((back?.history ?? backGoes({ key: location.key, state: location.state }) === "history") ? navigate(-1) : navigate(back!.to, { replace: true }))
   return (
     <header className="pt-safe sticky top-0 z-20 border-b bg-background/95 pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] backdrop-blur-md lg:hidden">
       <div className="flex h-14 items-center gap-1 px-2">
