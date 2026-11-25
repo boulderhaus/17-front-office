@@ -46,6 +46,13 @@ const CUSTOMER_TOOLS = new Set(["call.intake", "call.triage", "call.handoff", "c
 
 /** Calls are cut at seven minutes; one that never reported its end stops showing as live after this. */
 export const CALL_PATH_LIVE_WINDOW_MS = 15 * 60_000;
+/**
+ * After hang-up the server is still writing the outcome, the callback task and the owner's alerts (separate
+ * writes, no transaction). The path stays live this long so the page settles on the finished record.
+ */
+export const CALL_PATH_SETTLE_MS = 20_000;
+/** A booking still being written keeps it live a little longer, never indefinitely. */
+export const CALL_PATH_BOOKING_SETTLE_MS = 120_000;
 
 /** What actually happened to the owner's alerts of one kind: never claim a text that wasn't sent. */
 export type AlertStatus = "sent" | "sending" | "failed" | "not_sent" | "none";
@@ -88,9 +95,10 @@ export function buildCallPath(input: {
   const meta = (event: ToolEvent, key: string): unknown => event.metadata[key];
   const intake = (key: string): ToolEvent | undefined => first((event) => event.tool === "call.intake" && meta(event, key) === true);
   const withinWindow = input.now.getTime() - Date.parse(call.startedAt) < CALL_PATH_LIVE_WINDOW_MS;
-  // Not the outcome (a request for the owner changes it mid-call): the call's end, and a booking still being
-  // written, so the page never settles on a half-finished snapshot.
-  const live = withinWindow && (call.endedAt === null || booking?.status === "checking");
+  // Not the outcome (a request for the owner changes it mid-call): the call's end, plus a short settle so the
+  // page never freezes on a half-written finish.
+  const sinceEnd = call.endedAt === null ? 0 : input.now.getTime() - Date.parse(call.endedAt);
+  const live = withinWindow && (call.endedAt === null || sinceEnd < CALL_PATH_SETTLE_MS || (booking?.status === "checking" && sinceEnd < CALL_PATH_BOOKING_SETTLE_MS));
   const spam = call.billingDisposition === "spam_excluded" || call.outcome === "ignored_spam";
   const emergency = call.emergency?.emergency === true;
   const handedOff = call.outcome === "handoff_queued" || call.fields.humanRequested || emergency;
@@ -155,9 +163,9 @@ export function buildCallPath(input: {
   const bookedAt = book?.completedAt ?? booking?.createdAt ?? null;
   found.push(booking?.status === "confirmed" ? { state: "done", at: booking.writeVerifiedAt ?? bookedAt, note: "Booked on your calendar" }
     : booking?.status === "pending" ? (taskHandled ? { state: "done", at: bookedAt, note: "You handled it" } : { state: "waiting", at: bookedAt, note: "Waiting on your OK" })
-      : booking?.status === "unknown" ? { state: "flagged", at: bookedAt, note: "May be on your calendar, check it" }
+      : booking?.status === "unknown" || (booking?.status === "checking" && !live) ? { state: "flagged", at: bookedAt, note: "May be on your calendar, check it" }
         : booking?.status === "conflict" ? { state: "flagged", at: bookedAt, note: "That time was taken, you pick one" }
-          : handedOff && !booking ? { state: "skipped", at: null, note: "You're calling them back" } : null);
+          : handedOff && !booking ? { state: "skipped", at: null, note: taskHandled ? "You handled it" : "You're calling them back" } : null);
 
   // 9. Recap and the owner's summary: a recap only when Otto captured something, a text only once it was sent.
   const recovered = call.qualityFlags.includes("call_ended_without_final_provider_payload");
@@ -209,8 +217,9 @@ function summaryWords(status: AlertStatus): string {
 function recapLead(call: CallRecord, booking: BookingRecord | null, taskHandled: boolean): string {
   if (booking?.status === "confirmed") return "Booked";
   if (booking?.status === "pending") return taskHandled ? "Handled" : "Waiting on your OK";
-  if (booking?.status === "unknown" || booking?.status === "conflict") return "Check the booking";
+  if (booking?.status === "unknown" || booking?.status === "conflict" || booking?.status === "checking") return "Check the booking";
   if (call.outcome === "handoff_queued") return taskHandled ? "Handled" : "Call them back";
+  if (call.outcome === "pending_confirmation") return taskHandled ? "Handled" : "Needs your OK";
   if (call.outcome === "failed") return "Call dropped";
   return "Done";
 }

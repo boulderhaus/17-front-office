@@ -25,15 +25,23 @@ export function CallPage() {
   const [confirm, setConfirm] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const tz = dashboard?.shop.timezone ?? "America/New_York"
-  const setPath = (path: NonNullable<typeof detail.data>["path"]) => detail.setData((current) => (current ? { ...current, path } : current))
+  const [pathStale, setPathStale] = useState(false)
   useLiveCallPath(
     id,
     !preview && detail.data?.path?.live === true,
-    setPath,
+    // The call rides along, so the header, safety note and facts tick with the path.
+    (path, call) => {
+      setPathStale(false)
+      detail.setData((current) => (current ? { ...current, path, ...(call ? { call } : {}) } : current))
+    },
     () => void detail.reload(),
-    () => detail.setData((current) => (current?.path ? { ...current, path: { ...current.path, live: false } } : current)),
+    () => {
+      setPathStale(true)
+      detail.setData((current) => (current?.path ? { ...current, path: { ...current.path, live: false } } : current))
+    },
   )
-  if (detail.error) return <Card><CardContent className="grid gap-3"><p>{detail.error}</p><Button variant="outline" asChild className="w-fit"><Link to={base}>Back</Link></Button></CardContent></Card>
+  // A failed refresh keeps what's on screen; only a page that never loaded shows the error.
+  if (detail.error && !detail.data) return <Card><CardContent className="grid gap-3"><p>{detail.error}</p><Button variant="outline" asChild className="w-fit"><Link to={base}>Back</Link></Button></CardContent></Card>
   if (!detail.data) return <Card><CardContent className="grid gap-3"><Skeleton className="h-8 w-48" /><Skeleton className="h-5 w-full" /><Skeleton className="h-12 w-full" /><Skeleton className="h-40 w-full" /></CardContent></Card>
   const { call, task, booking } = detail.data
   const life = call.emergency?.severity === "life_safety"
@@ -75,7 +83,7 @@ export function CallPage() {
           <CallHeader call={call} tone={tone} label={label} />
           <SafetyNote call={call} />
           <ContactActions call={call} extra={taskButton} />
-          {detail.data.path && <CallPathCard path={detail.data.path} />}
+          {detail.data.path && <CallPathCard path={detail.data.path} stale={pathStale} onRefresh={() => { setPathStale(false); void detail.reload() }} />}
           <Facts rows={facts} />
           {detail.data.recordingUrl && (
             <div className="ph-no-capture grid gap-2 rounded-xl border bg-secondary/60 p-3">

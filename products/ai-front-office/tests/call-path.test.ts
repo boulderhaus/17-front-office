@@ -82,6 +82,11 @@ describe("Otto's path through a call", () => {
 
     clock.advance(20);
     await service.finalize({ webhookEventId: `end:${id}`, tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", startedAt: "2026-01-15T14:00:00.000Z", endedAt: clock.now().toISOString(), durationSeconds: 83, fields: { ...fields, requestedStart: slots.slots[0]!.start, explicitSlotConfirmation: true }, transcript: "Synthetic transcript", recordingUrl: null, consentState: "disclosed" });
+    // Right after hang-up it stays live briefly while the server finishes writing the outcome and alerts.
+    current = await path();
+    expect(current.live).toBe(true);
+    expect(current.steps.find((step) => step.key === "wrap_up")?.state).toBe("current");
+    clock.advance(21);
     current = await path();
     expect(current.live).toBe(false);
     expect(current.done).toBe(9);
@@ -132,6 +137,7 @@ describe("Otto's path through a call", () => {
     clock.advance(8);
     expect((await service.markSpam({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", category: "robocall", callerQuote: "Press one to lower your rates" })).status).toBe("marked");
     await service.finalize({ webhookEventId: `end:${id}`, tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", startedAt: "2026-01-15T14:00:00.000Z", endedAt: clock.now().toISOString(), durationSeconds: 8, fields: { ...fields, callerName: null, address: null, problemDescription: "" }, transcript: "Press one to lower your rates", recordingUrl: null, consentState: "disclosed" });
+    clock.advance(21);
     expect(await states()).toEqual({ greeting: "done", service_check: "flagged", problem: "skipped", safety: "skipped", caller: "skipped", address: "skipped", times: "skipped", booking: "skipped", wrap_up: "skipped" });
   });
 
@@ -162,6 +168,7 @@ describe("Otto's path through a call", () => {
 
   it("says an emergency was found after the call when nothing caught it live", async () => {
     await service.finalize({ webhookEventId: `end:${id}`, tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", startedAt: "2026-01-15T14:00:00.000Z", endedAt: clock.now().toISOString(), durationSeconds: 60, fields: { ...fields, problemDescription: "Furnace noise, and I smell gas in the kitchen" }, transcript: "Furnace noise, and I smell gas in the kitchen", recordingUrl: null, consentState: "disclosed" });
+    clock.advance(21);
     const safety = (await path()).steps.find((step) => step.key === "safety")!;
     expect(safety.state).toBe("flagged");
     expect(safety.note).toMatch(/^Emergency found after the call, (alert sending|you were alerted)$/);
@@ -177,6 +184,7 @@ describe("Otto's path through a call", () => {
 
   it("doesn't count a transcript as a captured problem on a hang-up, and says when a call dropped", async () => {
     await service.finalize({ webhookEventId: `end:${id}`, tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", startedAt: "2026-01-15T14:00:00.000Z", endedAt: clock.now().toISOString(), durationSeconds: 4, fields: { ...fields, callerName: null, address: null, problemDescription: "Hello?" }, transcript: "Hello?", recordingUrl: null, consentState: "disclosed" });
+    clock.advance(21);
     expect(await states()).toMatchObject({ greeting: "done", service_check: "skipped", problem: "skipped", wrap_up: "skipped" });
   });
 
@@ -213,6 +221,26 @@ describe("Otto's path through a call", () => {
     const now = clock.now().toISOString();
     await store.saveCallbackTask({ id: "77777777-7777-4777-8777-777777777777", tenantId: "demo", callId: call.id, ownerRef: "owner-primary", reason: "Confirm requested appointment", priority: "normal", status: "completed", dueAt: now, completedAt: now, completionSource: "owner", createdAt: now, updatedAt: now });
     expect((await path()).steps.find((step) => step.key === "booking")).toMatchObject({ state: "done", note: "You handled it" });
+  });
+
+  it("shows the handoff handled once the owner marks it handled", async () => {
+    await service.queueHumanHandoff({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", problemDescription: "Wants the owner", reason: "explicit_request" });
+    const call = (await store.getCallByProviderId(id))!;
+    const now = clock.now().toISOString();
+    await store.saveCallbackTask({ id: "66666666-6666-4666-8666-666666666666", tenantId: "demo", callId: call.id, ownerRef: "owner-primary", reason: "Caller requested a human", priority: "high", status: "completed", dueAt: now, completedAt: now, completionSource: "owner", createdAt: now, updatedAt: now });
+    expect((await path()).steps.find((step) => step.key === "booking")?.note).toBe("You handled it");
+  });
+
+  it("never leaves a booking stuck mid-write looking live or done", async () => {
+    const call = (await store.getCallByProviderId(id))!;
+    const now = clock.now().toISOString();
+    await store.saveBooking({ id: "55555555-5555-4555-8555-555555555555", tenantId: "demo", callId: call.id, requestedStart: "2026-01-15T16:00:00.000Z", requestedEnd: null, status: "checking", providerEventId: null, writeVerifiedAt: null, confirmationNotificationId: null, verificationFailures: [], failureReason: null, createdAt: now, updatedAt: now });
+    await store.saveCall({ ...call, endedAt: now, outcome: "pending_confirmation" });
+    expect((await path()).live).toBe(true);
+    clock.advance(121);
+    const settled = await path();
+    expect(settled.live).toBe(false);
+    expect(settled.steps.find((step) => step.key === "booking")).toMatchObject({ state: "flagged", note: "May be on your calendar, check it" });
   });
 
   it("never stores the caller's details on a checkpoint", async () => {
@@ -275,7 +303,9 @@ describe("live path on the owner's call page", () => {
     expect(api.path.steps.find((step) => step.state === "current")?.key).toBe("caller");
     const poll = await fetch(`${baseUrl}/api/app/calls/${call.id}/path`, { headers: { cookie, accept: "application/json" } });
     expect(poll.headers.get("cache-control")).toBe("no-store");
-    expect(((await poll.json()) as { path: { done: number } }).path.done).toBe(4);
+    const polled = (await poll.json()) as { path: { done: number }; call: { id: string } };
+    expect(polled.path.done).toBe(4);
+    expect(polled.call.id).toBe(call.id);
 
     const script = await fetch(`${baseUrl}/app/call-path.js`);
     expect(script.headers.get("content-type")).toContain("javascript");

@@ -578,7 +578,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     response.once("finish", () => {
       log({ level: "info", event: "request_completed", requestId, method, route, status: response.statusCode, latencyMs: Date.now() - started });
     });
-    if (!route.startsWith("webhook") && !route.startsWith("tool:") && !limiter.allow(`${ip}:${route}`, 90, 60_000)) {
+    // The live call path polls every two seconds from every open call page, so several viewers behind one
+    // office IP share this; its real limit is per account and call, in the handler.
+    if (!route.startsWith("webhook") && !route.startsWith("tool:") && !limiter.allow(`${ip}:${route}`, route === "owner:call-path" ? 600 : 90, 60_000)) {
       throw new HttpError(429, "Too many requests");
     }
 
@@ -1354,10 +1356,12 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     }
     const callPathMatch = /^\/api\/app\/calls\/([0-9a-f-]{36})\/path$/i.exec(url.pathname);
     if (callPathMatch?.[1] && method === "GET") {
+      if (!limiter.allow(`call-path:${account.id}:${callPathMatch[1]}`, 90, 60_000)) throw new HttpError(429, "Too many requests");
       const call = await dependencies.store.getCall(callPathMatch[1]);
       if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Call not found");
       response.setHeader("cache-control", "no-store");
-      return sendJson(response, 200, { path: await callPathFor(call) });
+      // The call too, so the header, safety note and facts tick along with the path.
+      return sendJson(response, 200, { path: await callPathFor(call), call: apiCall(call) });
     }
     throw new HttpError(404, "Not found");
   }
@@ -1772,6 +1776,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     }
     const callPathMatch = /^\/app\/calls\/([0-9a-f-]+)\/path$/i.exec(url.pathname);
     if (method === "GET" && callPathMatch?.[1]) {
+      if (!limiter.allow(`call-path:${account.id}:${callPathMatch[1]}`, 90, 60_000)) throw new HttpError(429, "Too many requests");
       const call = await dependencies.store.getCall(callPathMatch[1]);
       if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Call not found");
       const path = await callPathFor(call);
