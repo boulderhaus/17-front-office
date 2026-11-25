@@ -1,3 +1,4 @@
+import { renderOwnerSignup } from "../src/admin/render.js";
 import { createHash, generateKeyPairSync, randomUUID, sign, type KeyObject } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,6 +7,7 @@ import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
 import { createRequestHandler } from "../src/http/app.js";
 import { MICROSOFT_CONSUMER_TENANT, safeNext } from "../src/http/owner-sign-in.js";
+import { TeamService } from "../src/application/team-service.js";
 import { hashOwnerPassword, PASSWORDLESS_HASH, verifyOwnerPassword } from "../src/security/owner-auth.js";
 
 const GOOGLE_CLIENT = "synthetic-google-next-client";
@@ -104,14 +106,20 @@ async function ownerAccount(h: Harness, email: string, passwordHash?: string, em
 }
 
 async function start(h: Harness, provider: "google" | "microsoft", next?: string) {
-  const response = await fetch(`${h.baseUrl}/auth/${provider}${next ? `?next=${encodeURIComponent(next)}` : ""}`, { redirect: "manual" });
+  return startAt(h, `/auth/${provider}${next ? `?next=${encodeURIComponent(next)}` : ""}`);
+}
+
+/** Follows a "Continue with ..." link (its path and query) to the provider. */
+async function startAt(h: Harness, href: string) {
+  const response = await fetch(`${h.baseUrl}${href}`, { redirect: "manual" });
   expect(response.status).toBe(303);
   const location = new URL(response.headers.get("location")!);
   return { location, state: location.searchParams.get("state")!, nonce: location.searchParams.get("nonce")!, cookie: response.headers.get("set-cookie")!.split(";")[0]! };
 }
 
+/** A Google Workspace account on the email's own domain (hd), so Google runs that mailbox. hd: undefined is a plain Google account. */
 function googleClaims(nonce: string, now: number, extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return { iss: "https://accounts.google.com", aud: GOOGLE_CLIENT, azp: GOOGLE_CLIENT, sub: "1029384756", email: "owner@synthetic.example", email_verified: true, name: "Sam Synthetic", nonce, iat: Math.floor(now / 1_000), exp: Math.floor(now / 1_000) + 3_600, ...extra };
+  return { iss: "https://accounts.google.com", aud: GOOGLE_CLIENT, azp: GOOGLE_CLIENT, sub: "1029384756", email: "owner@synthetic.example", email_verified: true, hd: "synthetic.example", name: "Sam Synthetic", nonce, iat: Math.floor(now / 1_000), exp: Math.floor(now / 1_000) + 3_600, ...extra };
 }
 
 function microsoftClaims(nonce: string, now: number, tid: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -322,18 +330,19 @@ describe("Continue with Microsoft", () => {
     expect(await (await fetch(`${withIt.baseUrl}/signup`)).text()).toContain("Continue with Microsoft");
   });
 
-  it("rejects a work-tenant email Microsoft hasn't verified, and accepts personal or domain-verified ones", async () => {
+  it("emails a link for a work-tenant email Microsoft hasn't verified, and accepts personal or domain-verified ones", async () => {
     const h = await harness(microsoftEnv);
     await ownerAccount(h, "owner@synthetic.example");
+    await ownerAccount(h, "owner@outlook.com");
     const work = await start(h, "microsoft");
     expect(work.location.origin + work.location.pathname).toBe("https://login.microsoftonline.com/common/oauth2/v2.0/authorize");
     expect(work.location.searchParams.get("redirect_uri")).toBe(`${BASE}/auth/microsoft/callback`);
     expect(work.location.searchParams.get("scope")).toBe("openid email profile");
     h.claims = microsoftClaims(work.nonce, h.now(), WORK_TENANT);
-    const refused = await finishMicrosoft(h, work);
-    expect(refused.status).toBe(403);
-    expect(cookieOf(refused, "afo_owner")).toBeNull();
-    expect(await refused.text()).toContain("Use the email link instead");
+    const unproved = await finishMicrosoft(h, work);
+    expect(unproved.status).toBe(200);
+    expect(cookieOf(unproved, "afo_owner")).toBeNull();
+    expect(await unproved.text()).toContain("Microsoft can’t vouch for that address, so we emailed you a sign-in link.");
 
     const verifiedDomain = await start(h, "microsoft");
     h.claims = microsoftClaims(verifiedDomain.nonce, h.now(), WORK_TENANT, { xms_edov: true });
@@ -342,7 +351,7 @@ describe("Continue with Microsoft", () => {
     expect(cookieOf(ok, "afo_owner")).toBeTruthy();
 
     const personal = await start(h, "microsoft");
-    h.claims = microsoftClaims(personal.nonce, h.now(), MICROSOFT_CONSUMER_TENANT);
+    h.claims = microsoftClaims(personal.nonce, h.now(), MICROSOFT_CONSUMER_TENANT, { email: "owner@outlook.com" });
     expect(cookieOf(await finishMicrosoft(h, personal), "afo_owner")).toBeTruthy();
 
     const wrongIssuer = await start(h, "microsoft");
@@ -690,5 +699,260 @@ describe("in-app browsers", () => {
     }
     const safari = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1";
     expect(await (await fetch(`${h.baseUrl}/signup`, { headers: { "user-agent": safari } })).text()).toContain("Continue with Google");
+  });
+});
+
+describe("sign-up picks through Google and Microsoft", () => {
+  it("keeps the pricing page's plan, Unlimited and trade through the provider, and drops anything else", async () => {
+    const h = await harness({ MICROSOFT_CLIENT_ID: MICROSOFT_CLIENT, MICROSOFT_CLIENT_SECRET: "synthetic-microsoft-secret" });
+    const page = await (await fetch(`${h.baseUrl}/signup?plan=team&unlimited=1&trade=hvac`)).text();
+    const href = (provider: string): string => [...page.matchAll(/<a class="([a-z]+)" href="([^"]+)"/g)].find((match) => match[1] === provider)![2]!.replaceAll("&amp;", "&");
+    const picks = { plan: "team", unlimited: "1", trade: "hvac" };
+    for (const [provider, email] of [["google", "new-google@synthetic.example"], ["microsoft", "new-microsoft@outlook.com"]] as const) {
+      const link = new URL(href(provider), BASE);
+      expect(link.pathname).toBe(`/auth/${provider}`);
+      expect(Object.fromEntries(link.searchParams)).toEqual(picks);
+      const attempt = await startAt(h, `${link.pathname}${link.search}`);
+      h.claims = provider === "google" ? googleClaims(attempt.nonce, h.now(), { email }) : microsoftClaims(attempt.nonce, h.now(), MICROSOFT_CONSUMER_TENANT, { email });
+      const done = provider === "google" ? await finishGoogle(h, attempt) : await finishMicrosoft(h, attempt);
+      expect(done.status).toBe(303);
+      const landing = new URL(done.headers.get("location")!, BASE);
+      expect(landing.pathname).toBe("/signup");
+      expect(Object.fromEntries(landing.searchParams)).toEqual(picks);
+      const signup = await (await fetch(`${h.baseUrl}${landing.pathname}${landing.search}`, { headers: { cookie: cookieOf(done, "afo_pending_identity")! } })).text();
+      expect(signup).toContain(`value="${email}" readonly`);
+      expect(signup).toContain('<option value="hvac" selected>');
+    }
+    // Picks that aren't real plans or trades never ride along.
+    const junk = await startAt(h, "/auth/google?plan=platinum&unlimited=yes&trade=%3Cscript%3E&next=%2Fapp");
+    h.claims = googleClaims(junk.nonce, h.now(), { email: "junk@synthetic.example" });
+    expect((await finishGoogle(h, junk)).headers.get("location")).toBe("/signup");
+  });
+
+  it("keeps the plan, Unlimited and trade through the emailed link when Google can't vouch for a new address", async () => {
+    const h = await harness();
+    const attempt = await startAt(h, "/auth/google?plan=team&unlimited=1&trade=hvac");
+    h.claims = googleClaims(attempt.nonce, h.now(), { email: "new-person@synthetic.example", hd: undefined });
+    expect((await finishGoogle(h, attempt)).status).toBe(200);
+    const [link] = await queuedLinks(h);
+    const emailed = new URL(link!.url);
+    expect(Object.fromEntries(emailed.searchParams)).toEqual({ token: link!.token, plan: "team", unlimited: "1", trade: "hvac" });
+    const opened = await fetch(`${h.baseUrl}${emailed.pathname}${emailed.search}`);
+    const page = await opened.text();
+    const picks = /name="picks" value="([^"]+)"/.exec(page)![1]!.replaceAll("&amp;", "&");
+    const done = await postLink(h, { token: link!.token, picks }, { cookie: cookieOf(opened, "afo_sign_in_link")! });
+    expect(done.status).toBe(303);
+    const landing = new URL(done.headers.get("location")!, BASE);
+    expect(landing.pathname).toBe("/signup");
+    expect(Object.fromEntries(landing.searchParams)).toEqual({ plan: "team", unlimited: "1", trade: "hvac" });
+    const signup = await (await fetch(`${h.baseUrl}${landing.pathname}${landing.search}`, { headers: { cookie: cookieOf(done, "afo_pending_identity")! } })).text();
+    expect(signup).toContain('value="new-person@synthetic.example" readonly');
+    expect(signup).toContain('<option value="hvac" selected>');
+    // Picks that aren't real plans or trades never ride along, from the link or the form.
+    expect(await (await fetch(`${h.baseUrl}/login/link?token=${link!.token}&plan=platinum&trade=%3Cscript%3E`)).text()).not.toContain('name="picks"');
+    h.store.notifications.clear();
+    const again = await startAt(h, "/auth/google");
+    h.claims = googleClaims(again.nonce, h.now(), { email: "new-person@synthetic.example", hd: undefined });
+    await finishGoogle(h, again);
+    const [second] = await queuedLinks(h);
+    const bind = cookieOf(await fetch(`${h.baseUrl}/login/link?token=${second!.token}`), "afo_sign_in_link")!;
+    expect((await postLink(h, { token: second!.token, picks: "plan=platinum&unlimited=yes" }, { cookie: bind })).headers.get("location")).toBe("/signup");
+  });
+
+  it("keeps the plan, Unlimited and trade through the sign-up page's own email link", async () => {
+    const h = await harness();
+    const body = new URLSearchParams({ email: "fresh@synthetic.example", picks: "plan=team&unlimited=1&trade=hvac" });
+    expect((await fetch(`${h.baseUrl}/login/email`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body })).status).toBe(200);
+    const [link] = await queuedLinks(h);
+    expect(Object.fromEntries(new URL(link!.url).searchParams)).toEqual({ token: link!.token, plan: "team", unlimited: "1", trade: "hvac" });
+    h.store.notifications.clear();
+    const bogus = new URLSearchParams({ email: "other@synthetic.example", picks: "plan=platinum&trade=%3Cscript%3E" });
+    await fetch(`${h.baseUrl}/login/email`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: bogus });
+    const [plain] = await queuedLinks(h);
+    expect(Object.fromEntries(new URL(plain!.url).searchParams)).toEqual({ token: plain!.token });
+    const page = renderOwnerSignup("", { plan: "team", unlimited: "yes", trade: "hvac" }, { emailLink: true, providers: {} });
+    expect(page).toContain('<form class="linkstart" method="post" action="/login/email"><input type="hidden" name="picks" value="plan=team&amp;unlimited=1&amp;trade=hvac">');
+  });
+});
+
+describe("Google and Microsoft only vouch for mail they run", () => {
+  const microsoftEnv = { MICROSOFT_CLIENT_ID: MICROSOFT_CLIENT, MICROSOFT_CLIENT_SECRET: "synthetic-microsoft-secret" };
+
+  it("signs in a Gmail or Workspace address, and emails a link to prove any other address instead of trusting it", async () => {
+    const h = await harness(microsoftEnv);
+    await ownerAccount(h, "owner@synthetic.example");
+    await ownerAccount(h, "sam@gmail.com");
+    await ownerAccount(h, "kim@googlemail.com");
+    await ownerAccount(h, "pat@outlook.com");
+    const google = async (extra: Record<string, unknown>) => {
+      const attempt = await start(h, "google");
+      h.claims = googleClaims(attempt.nonce, h.now(), extra);
+      return finishGoogle(h, attempt);
+    };
+    const microsoft = async (tid: string, extra: Record<string, unknown>) => {
+      const attempt = await start(h, "microsoft");
+      h.claims = microsoftClaims(attempt.nonce, h.now(), tid, extra);
+      return finishMicrosoft(h, attempt);
+    };
+    const expectLinkInstead = async (response: Response, email: string, provider: string) => {
+      expect(response.status).toBe(200);
+      expect(cookieOf(response, "afo_owner")).toBeNull();
+      expect(cookieOf(response, "afo_pending_identity")).toBeNull();
+      const text = await response.text();
+      expect(text).toContain(`${provider} can’t vouch for that address, so we emailed you a sign-in link.`);
+      expect(text).toContain(`<strong>${email}</strong>`);
+      expect((await queuedLinks(h)).map((link) => link.to)).toEqual([email]);
+      h.store.notifications.clear();
+    };
+
+    // A Google account made with someone's work address (no Workspace) may outlive their job there.
+    await expectLinkInstead(await google({ hd: undefined }), "owner@synthetic.example", "Google");
+    await expectLinkInstead(await google({ hd: "other.example" }), "owner@synthetic.example", "Google");
+    await expectLinkInstead(await google({ hd: undefined, email: "new-person@synthetic.example" }), "new-person@synthetic.example", "Google");
+    // Gmail and a Workspace domain are Google's own mail.
+    expect(cookieOf(await google({ hd: undefined, email: "Sam@Gmail.com" }), "afo_owner")).toBeTruthy();
+    expect(cookieOf(await google({ hd: undefined, email: "kim@googlemail.com" }), "afo_owner")).toBeTruthy();
+    expect(cookieOf(await google({ hd: "Synthetic.example" }), "afo_owner")).toBeTruthy();
+    expect(await queuedLinks(h)).toEqual([]);
+
+    // Microsoft: a personal account only for Microsoft's own mail; a work tenant only when it verified the domain.
+    await expectLinkInstead(await microsoft(MICROSOFT_CONSUMER_TENANT, {}), "owner@synthetic.example", "Microsoft");
+    await expectLinkInstead(await microsoft(WORK_TENANT, {}), "owner@synthetic.example", "Microsoft");
+    expect(cookieOf(await microsoft(MICROSOFT_CONSUMER_TENANT, { email: "pat@outlook.com" }), "afo_owner")).toBeTruthy();
+    expect(cookieOf(await microsoft(WORK_TENANT, { xms_edov: true }), "afo_owner")).toBeTruthy();
+    expect(await queuedLinks(h)).toEqual([]);
+
+    // The emailed link is what proves it: tapping it signs the owner in.
+    const proof = await google({ hd: undefined });
+    await proof.text();
+    const [link] = await queuedLinks(h);
+    expect(cookieOf(await useLink(h, link!.token), "afo_owner")).toBeTruthy();
+  });
+
+  it("never counts a plain Google account as proof for a password sign-up, and says so when email is off", async () => {
+    const h = await harness();
+    const squatter = await fetch(`${h.baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Squatter Air", email: "owner@synthetic.example", password: "squatter-password-123" }) });
+    expect(cookieOf(squatter, "afo_owner")).toBeTruthy();
+    const attempt = await start(h, "google");
+    h.claims = googleClaims(attempt.nonce, h.now(), { hd: undefined });
+    expect((await finishGoogle(h, attempt)).status).toBe(200);
+    const account = (await h.store.getOwnerAccountByEmail("owner@synthetic.example"))!;
+    expect(account.emailVerifiedAt).toBeNull();
+    expect(account.passwordHash).not.toBe(PASSWORDLESS_HASH);
+    await new Promise<void>((resolve) => server!.close(() => resolve()));
+    server = null;
+
+    const off = await harness({ RESEND_API_KEY: "", RESEND_FROM_EMAIL: "" });
+    await ownerAccount(off, "owner@synthetic.example");
+    const noEmail = await start(off, "google");
+    off.claims = googleClaims(noEmail.nonce, off.now(), { hd: undefined });
+    const refused = await finishGoogle(off, noEmail);
+    expect(refused.status).toBe(403);
+    expect(cookieOf(refused, "afo_owner")).toBeNull();
+    expect(await refused.text()).toContain("Google can’t vouch for that address. Try another way in.");
+  });
+});
+
+describe("reclaiming an account someone else signed up with", () => {
+  async function squatted(h: Harness, email: string) {
+    const signup = await fetch(`${h.baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Squatter Air", email, password: "squatter-password-123" }) });
+    const squatterCookie = cookieOf(signup, "afo_owner")!;
+    const account = (await h.store.getOwnerAccountByEmail(email))!;
+    expect(account.emailVerifiedAt).toBeNull();
+    // A teammate and an open invitation made before invites needed a proved email.
+    const teams = new TeamService(h.store, { now: () => new Date(h.now()) });
+    const asBefore = { ...account, emailVerifiedAt: new Date(h.now()).toISOString() };
+    await teams.accept(account.tenantId, await teams.invite(asBefore, `crony-${email}`), "Squatter Crony", "crony-password-123456");
+    const openInvite = await teams.invite(asBefore, `later-${email}`);
+    const crony = await fetch(`${h.baseUrl}/login`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: `crony-${email}`, password: "crony-password-123456" }) });
+    const cronyCookie = cookieOf(crony, "afo_owner")!;
+    expect((await fetch(`${h.baseUrl}/api/app/dashboard`, { headers: { cookie: cronyCookie } })).status).toBe(200);
+    expect((await fetch(`${h.baseUrl}/join?shop=${account.tenantId}&token=${openInvite}`)).status).toBe(200);
+    return { account, squatterCookie, cronyCookie, openInvite };
+  }
+
+  it("an owner whose email isn't proved can't invite teammates, and is sent to a password reset, which keeps their password", async () => {
+    const h = await harness();
+    const { account, squatterCookie } = await squatted(h, "owner@synthetic.example");
+    const team = await (await fetch(`${h.baseUrl}/app/team`, { headers: { cookie: squatterCookie } })).text();
+    // No invite form to fail on; the way out is a reset, not an emailed sign-in link (that switches the password off).
+    expect(team).not.toContain('action="/app/team/invite"');
+    expect(team).toContain('First confirm your email: use <a href="/forgot">Forgot your password?</a>');
+    const csrf = /name="csrf" value="([^"]+)"/.exec(team)![1]!;
+    const invite = await fetch(`${h.baseUrl}/app/team/invite`, { method: "POST", headers: { cookie: squatterCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, email: "helper@synthetic.example" }) });
+    expect(invite.status).toBe(403);
+    const message = await invite.text();
+    expect(message).toContain("Confirm your email before inviting a teammate: use “Forgot your password?”");
+    expect(message).not.toContain("sign in with an emailed link");
+
+    const { token, tokenHash } = (await import("../src/security/owner-auth.js")).createPasswordResetToken();
+    await h.store.createPasswordReset(account.id, tokenHash, new Date(h.now() + 30 * 60_000).toISOString());
+    expect((await fetch(`${h.baseUrl}/reset`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token, password: "owner-password-789", confirm: "owner-password-789" }) })).status).toBe(303);
+    const signedIn = await fetch(`${h.baseUrl}/login`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@synthetic.example", password: "owner-password-789" }) });
+    const cookie = cookieOf(signedIn, "afo_owner")!;
+    expect(cookie).toBeTruthy();
+    expect(await (await fetch(`${h.baseUrl}/app/team`, { headers: { cookie } })).text()).toContain('action="/app/team/invite"');
+  });
+
+  it("removes the squatter's teammates and kills their invitations, whether the owner proves it by Google or a reset link", async () => {
+    const h = await harness();
+    const byGoogle = await squatted(h, "owner@synthetic.example");
+    const attempt = await start(h, "google");
+    h.claims = googleClaims(attempt.nonce, h.now());
+    expect(cookieOf(await finishGoogle(h, attempt), "afo_owner")).toBeTruthy();
+
+    const byReset = await squatted(h, "reset@synthetic.example");
+    const { token, tokenHash } = (await import("../src/security/owner-auth.js")).createPasswordResetToken();
+    await h.store.createPasswordReset(byReset.account.id, tokenHash, new Date(h.now() + 30 * 60_000).toISOString());
+    expect((await fetch(`${h.baseUrl}/reset`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token, password: "fresh-password-456", confirm: "fresh-password-456" }) })).status).toBe(303);
+
+    for (const reclaimed of [byGoogle, byReset]) {
+      expect((await fetch(`${h.baseUrl}/api/app/dashboard`, { headers: { cookie: reclaimed.cronyCookie } })).status).toBe(401);
+      const members = (await h.store.listTeamAccounts(reclaimed.account.tenantId)).filter((member) => member.role === "member");
+      expect(members.map((member) => member.status)).toEqual(["suspended"]);
+      expect((await fetch(`${h.baseUrl}/join?shop=${reclaimed.account.tenantId}&token=${reclaimed.openInvite}`)).status).toBe(410);
+    }
+    // The real owner's own invitations work.
+    const owner = { ...(await h.store.getOwnerAccountByEmail("owner@synthetic.example"))! };
+    const fresh = await new TeamService(h.store, { now: () => new Date(h.now()) }).invite(owner, "real-teammate@synthetic.example");
+    expect((await fetch(`${h.baseUrl}/join?shop=${owner.tenantId}&token=${fresh}`)).status).toBe(200);
+  });
+
+  it("a teammate cleanup that fails leaves the email unproved, so the next Google sign-in or reset link runs it again", async () => {
+    const h = await harness();
+    const byGoogle = await squatted(h, "owner@synthetic.example");
+    const byReset = await squatted(h, "reset@synthetic.example");
+    const list = h.store.listTeamAccounts.bind(h.store);
+    let blips = 0;
+    h.store.listTeamAccounts = async (tenantId) => {
+      if (blips > 0) {
+        blips -= 1;
+        throw new Error("database blip");
+      }
+      return list(tenantId);
+    };
+    const google = async () => {
+      const attempt = await start(h, "google");
+      h.claims = googleClaims(attempt.nonce, h.now());
+      return finishGoogle(h, attempt);
+    };
+    const reset = async () => {
+      const { token, tokenHash } = (await import("../src/security/owner-auth.js")).createPasswordResetToken();
+      await h.store.createPasswordReset(byReset.account.id, tokenHash, new Date(h.now() + 30 * 60_000).toISOString());
+      return fetch(`${h.baseUrl}/reset`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token, password: "fresh-password-456", confirm: "fresh-password-456" }) });
+    };
+
+    for (const [reclaimed, prove] of [[byGoogle, google], [byReset, reset]] as const) {
+      blips = 1;
+      expect((await prove()).status).toBe(500);
+      expect((await h.store.getOwnerAccountById(reclaimed.account.id))!.emailVerifiedAt).toBeNull();
+      expect((await fetch(`${h.baseUrl}/api/app/dashboard`, { headers: { cookie: reclaimed.cronyCookie } })).status).toBe(200);
+      // The next proof finds the email still unproved and cleans up.
+      expect((await prove()).status).toBe(303);
+      expect((await h.store.getOwnerAccountById(reclaimed.account.id))!.emailVerifiedAt).toBeTruthy();
+      expect((await fetch(`${h.baseUrl}/api/app/dashboard`, { headers: { cookie: reclaimed.cronyCookie } })).status).toBe(401);
+      expect((await h.store.listTeamAccounts(reclaimed.account.tenantId)).filter((member) => member.role === "member").map((member) => member.status)).toEqual(["suspended"]);
+      expect((await fetch(`${h.baseUrl}/join?shop=${reclaimed.account.tenantId}&token=${reclaimed.openInvite}`)).status).toBe(410);
+    }
   });
 });

@@ -22,7 +22,7 @@ describe.skipIf(!databaseUrl)("PostgreSQL team migration integration", () => {
   it("keeps exactly one owner, admits isolated members, and encrypts their identity", async () => {
     const tenantId = `shop_${randomUUID()}`;
     const now = "2026-01-15T08:00:00.000Z";
-    const owner: OwnerAccount = { id: randomUUID(), tenantId, email: `owner-${randomUUID()}@synthetic.example`, displayName: "Synthetic Owner", passwordHash: "synthetic-password-hash", role: "owner", status: "active", createdAt: now, updatedAt: now };
+    const owner: OwnerAccount = { id: randomUUID(), tenantId, email: `owner-${randomUUID()}@synthetic.example`, displayName: "Synthetic Owner", passwordHash: "synthetic-password-hash", role: "owner", status: "active", emailVerifiedAt: now, createdAt: now, updatedAt: now };
     expect(await store.createOwnerWorkspace({ account: owner, config: createDemoConfig(tenantId), ownerPhone: null })).toBe(true);
     const teams = new TeamService(store, { now: () => new Date(now) });
     const email = `member-${randomUUID()}@synthetic.example`;

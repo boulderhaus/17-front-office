@@ -177,6 +177,16 @@ export class FounderFollowup {
   }
 
   /**
+   * The shop's booked call, if it's still ahead, with its confirmation email queued: a booking whose email didn't
+   * get queued (the outbox failed, or the process stopped) sends it the next time the owner opens the link. Once.
+   */
+  async bookedCall(tenantId: string, facts: FounderBookingFacts): Promise<FounderSlot | null> {
+    const existing = await this.existingBooking(tenantId);
+    if (existing) await this.queueConfirmation(tenantId, existing, facts);
+    return existing;
+  }
+
+  /**
    * Book the picked start: re-check it's open under one lock for all of Brock's calendars, put it on the
    * "book here" calendar, and email the owner a confirmation with a calendar file.
    */
@@ -187,11 +197,17 @@ export class FounderFollowup {
       // A second tap (another time, or the same one on a slow connection) finds the call already booked: show that,
       // never a second event or a second confirmation.
       const existing = await this.existingBooking(tenantId);
-      if (existing) return { status: "booked", slot: existing } as const;
+      if (existing) {
+        await this.queueConfirmation(tenantId, existing, facts);
+        return { status: "booked", slot: existing } as const;
+      }
       const slot = founderSlotAllowed(start, { now: clock.now(), windows: this.windows, timeZone: env.FOUNDER_TIMEZONE });
       if (!slot) return { status: "invalid" } as const;
-      if (!await calendars.isFree(slot, FOUNDER_BUFFER_MINUTES)) return { status: "taken" } as const;
-      const key = `founder-booking:${tenantId}:${slot.start}`;
+      // This shop's own hold never blocks it, and neither does its own event: a booking cut off after Google took
+      // the event (before the shop's record was saved) shows busy with that very event, so it's finished, not refused.
+      const key = bookingKey(tenantId, slot.start);
+      if (!await calendars.isFree(slot, FOUNDER_BUFFER_MINUTES, tenantId) && !await calendars.eventExists(key)) return { status: "taken" } as const;
+      // The event id comes from this key, so a retry of a cut-off booking lands on the same event.
       await calendars.createEvent({
         key, start: slot.start, end: slot.end,
         summary: `Call Otto setup: ${facts.businessName} (10 min)`,
@@ -206,8 +222,24 @@ export class FounderFollowup {
           `Account email: ${facts.email}`,
         ].join("\n"),
       });
-      await calendars.rememberBooked(slot);
+      // The event is on Brock's calendar: the shop's record goes first, so anything that stops after this still
+      // shows the owner their call (and the next open queues the email) instead of a time taken by its own event.
       await store.saveIntegrationSecret(tenantId, PROVIDER, "booking", JSON.stringify(slot));
+      // Holds the time for other shops until Google's busy times show the event; the event itself already does.
+      await calendars.rememberBooked(slot, tenantId).catch((error: unknown) => {
+        log({ level: "error", event: "founder_booking_hold_failed", tenantId, error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });
+      });
+      await this.queueConfirmation(tenantId, slot, facts);
+      log({ level: "info", event: "founder_call_booked", tenantId, start: slot.start });
+      return { status: "booked", slot } as const;
+    });
+  }
+
+  /** The owner's confirmation with a calendar file, queued once per booking. Never throws: the call is booked either way. */
+  private async queueConfirmation(tenantId: string, slot: FounderSlot, facts: FounderBookingFacts): Promise<void> {
+    const { store, clock, log } = this.deps;
+    try {
+      const key = bookingKey(tenantId, slot.start);
       const when = slotFullLabel(slot.start, facts.timezone);
       const message = founderConfirmationEmail({ firstName: ownerFirstName(facts.ownerName), businessName: facts.businessName, when, callNumber: prettyPhone(facts.callNumber) });
       const ics = founderCallIcs({
@@ -222,8 +254,10 @@ export class FounderFollowup {
         priority: "high", state: "pending", attempts: 0, nextAttemptAt: at,
         idempotencyKey: `${key}:confirmation`, providerReceipt: null, lastError: null, createdAt: at, sentAt: null,
       });
-      log({ level: "info", event: "founder_call_booked", tenantId, start: slot.start });
-      return { status: "booked", slot } as const;
-    });
+    } catch (error) {
+      log({ level: "error", event: "founder_confirmation_failed", tenantId, start: slot.start, error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });
+    }
   }
 }
+
+const bookingKey = (tenantId: string, start: string): string => `founder-booking:${tenantId}:${start}`;

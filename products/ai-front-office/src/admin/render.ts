@@ -104,11 +104,16 @@ ${planCss}
     ...SIGNUP_FIELDS.filter((name) => fieldErrors[name]).map((name) => name === "email" && emailTaken ? { message: `${SIGNUP_EMAIL_TAKEN} Sign in instead.`, href: "/login" } : { message: fieldErrors[name]!, field: SIGNUP_FIELD_IDS[name] }),
     ...(error ? [{ message: error }] : []),
   ], !firstBad);
-  const providers = verified ? "" : providerButtons(options.providers ?? {});
+  const linkPicks = new URLSearchParams();
+  if (values.plan) linkPicks.set("plan", values.plan);
+  if (values.unlimited === "yes") linkPicks.set("unlimited", "1");
+  if (values.trade) linkPicks.set("trade", values.trade);
+  const picksField = linkPicks.toString() ? `<input type="hidden" name="picks" value="${escapeHtml(linkPicks.toString())}">` : "";
+  const providers = verified ? "" : providerButtons({ ...options.providers, picks: { plan: values.plan, unlimited: values.unlimited === "yes", trade: values.trade } });
   // Google, Microsoft and an email link, side by side and equally plain (DESIGN: password stays a fallback). The link
   // form sits outside the sign-up form (forms can't nest): its link opens this page again with the email verified.
   const linkStart = !verified && options.emailLink
-    ? `<form class="linkstart" method="post" action="/login/email"><div class="field"><label for="signup-link-email">Email</label><input id="signup-link-email" type="email" name="email" autocomplete="email" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="254" required></div><button>Sign up with an email link</button><p class="hint">No password. The link works once, for 15 minutes.</p></form>`
+    ? `<form class="linkstart" method="post" action="/login/email">${picksField}<div class="field"><label for="signup-link-email">Email</label><input id="signup-link-email" type="email" name="email" autocomplete="email" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="254" required></div><button>Sign up with an email link</button><p class="hint">No password. The link works once, for 15 minutes.</p></form>`
     : "";
   const startBlock = providers || linkStart ? `<div class="publicform signupstart">${providers}${providers && linkStart ? `<p class="ordivider">or</p>` : ""}${linkStart}</div><p class="ordivider">or fill this in</p>` : "";
   // Optional, unchecked, separate from the terms and from paying (10DLC / Telnyx opt-in checklist).
@@ -170,9 +175,16 @@ const GOOGLE_G = `<svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
 /** Microsoft's four-square logo. */
 const MICROSOFT_LOGO = `<svg viewBox="0 0 21 21" aria-hidden="true" focusable="false"><path fill="#f25022" d="M1 1h9v9H1z"/><path fill="#7fba00" d="M11 1h9v9h-9z"/><path fill="#00a4ef" d="M1 11h9v9H1z"/><path fill="#ffb900" d="M11 11h9v9h-9z"/></svg>`;
 
-/** "Continue with Google" / "Continue with Microsoft", in that order; empty when neither is set up. */
-export function providerButtons(options: SignInProviders & { next?: string | null }): string {
-  const query = options.next ? `?next=${encodeURIComponent(options.next)}` : "";
+/**
+ * "Continue with Google" / "Continue with Microsoft", in that order; empty when neither is set up. On sign-up they
+ * carry the pricing page's picks (plan, Unlimited, trade), which the sign-in checks and hands back to sign-up.
+ */
+export function providerButtons(options: SignInProviders & { next?: string | null; picks?: { plan?: string | undefined; unlimited?: boolean; trade?: string | undefined } }): string {
+  const picks = new URLSearchParams();
+  if (options.picks?.plan) picks.set("plan", options.picks.plan);
+  if (options.picks?.unlimited) picks.set("unlimited", "1");
+  if (options.picks?.trade) picks.set("trade", options.picks.trade);
+  const query = options.next ? `?next=${encodeURIComponent(options.next)}` : picks.toString() ? escapeHtml(`?${picks.toString()}`) : "";
   const buttons = `${options.google ? `<a class="google" href="/auth/google${query}">${GOOGLE_G}<span>Continue with Google</span></a>` : ""}${options.microsoft ? `<a class="microsoft" href="/auth/microsoft${query}">${MICROSOFT_LOGO}<span>Continue with Microsoft</span></a>` : ""}`;
   return buttons ? `<div class="idp">${buttons}</div>` : "";
 }
@@ -294,14 +306,16 @@ export function renderOwnerLogin(error = "", options: LoginPageOptions = {}): st
 }
 
 /** After "Email me a sign-in link": the same answer whether or not the email has an account. */
-export function renderSignInLinkSent(email: string): string {
-  return authPage("Check your email", { header: "signup", style: SIGN_IN_STYLE, eyebrow: "Your calls. Your rules.", heading: "Check your email", lede: `<p>We sent a sign-in link to <strong>${escapeHtml(email)}</strong>. It works once, for 15 minutes.</p>`, body: `<p class="authnote">Nothing yet? Check spam, or <a class="textlink" href="/login">send a new link</a>.</p>` });
+/** `note`: one line on why a link went out instead (Google or Microsoft couldn't vouch for the address). */
+export function renderSignInLinkSent(email: string, note?: string): string {
+  return authPage("Check your email", { header: "signup", style: SIGN_IN_STYLE, eyebrow: "Your calls. Your rules.", heading: "Check your email", lede: `${note ? `<p>${escapeHtml(note)}</p>` : ""}<p>We sent a sign-in link to <strong>${escapeHtml(email)}</strong>. It works once, for 15 minutes.</p>`, body: `<p class="authnote">Nothing yet? Check spam, or <a class="textlink" href="/login">send a new link</a>.</p>` });
 }
 
 /** The page behind the emailed link. Signing in takes a tap, so link scanners that open it don't use it up. */
-export function renderSignInLinkConfirm(token: string, next: string | null = null): string {
+export function renderSignInLinkConfirm(token: string, next: string | null = null, picks = ""): string {
   const nextField = next ? `<input type="hidden" name="next" value="${escapeHtml(next)}">` : "";
-  return authPage("Sign in", { header: "signup", style: SIGN_IN_STYLE, eyebrow: "Your calls. Your rules.", heading: "One tap and you’re in.", body: `<form class="publicform signinform" method="post" action="/login/link"><input type="hidden" name="token" value="${escapeHtml(token)}">${nextField}<button>Sign me in</button></form>` });
+  const picksField = picks ? `<input type="hidden" name="picks" value="${escapeHtml(picks)}">` : "";
+  return authPage("Sign in", { header: "signup", style: SIGN_IN_STYLE, eyebrow: "Your calls. Your rules.", heading: "One tap and you’re in.", body: `<form class="publicform signinform" method="post" action="/login/link"><input type="hidden" name="token" value="${escapeHtml(token)}">${nextField}${picksField}<button>Sign me in</button></form>` });
 }
 
 export function renderForgotPassword(input: { sent?: boolean; emailEnabled: boolean; supportEmail?: string | null; error?: string; email?: string }): string {

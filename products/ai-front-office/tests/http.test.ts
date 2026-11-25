@@ -734,7 +734,11 @@ describe("HTTP boundary", () => {
     expect(await (await fetch(`${baseUrl}/demo`)).text()).not.toContain("Urgent alerts are off.");
     const teamPage = await (await fetch(`${baseUrl}/app/team`, { headers: { cookie: ownerCookie } })).text();
     const csrf = /name="csrf" value="([^"]+)"/.exec(teamPage)![1]!;
-    const invite = await fetch(`${baseUrl}/app/team/invite`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, email: "teammate@synthetic.example" }) });
+    const inviteTeammate = () => fetch(`${baseUrl}/app/team/invite`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, email: "teammate@synthetic.example" }) });
+    // A password sign-up proves nothing about the email: inviting waits until the owner proves it.
+    expect((await inviteTeammate()).status).toBe(403);
+    await store.markOwnerEmailVerified(account!.id, new Date().toISOString(), null);
+    const invite = await inviteTeammate();
     expect(invite.status).toBe(200);
     const inviteHtml = await invite.text();
     const link = /href="([^"]+\/join\?shop=[^"]+)"/.exec(inviteHtml)![1]!.replaceAll("&amp;", "&");

@@ -146,7 +146,8 @@ export class FounderCalendars {
   /** Busy blocks from the last busy() read, per account id, so the admin page can show which calendar blocks what. */
   lastBusyByAccount = new Map<string, BusyPeriod[]>();
 
-  async busy(timeMin: string, timeMax: string): Promise<BusyPeriod[]> {
+  /** exceptTenant: that shop's own holds don't count (a booking cut off before it was saved left one behind). */
+  async busy(timeMin: string, timeMax: string, exceptTenant?: string): Promise<BusyPeriod[]> {
     const busy: BusyPeriod[] = [];
     const byAccount = new Map<string, BusyPeriod[]>();
     for (const account of await this.accounts()) {
@@ -172,25 +173,29 @@ export class FounderCalendars {
           busy.push(...(calendar.busy ?? []));
           continue;
         }
-        // A secondary calendar that errors (removed, no access) is skipped. So is a main calendar Google says doesn't
-        // exist (an account with Calendar turned off has nothing to clash with). Anything else fails closed.
-        if (id !== "primary" || (reasons.length > 0 && reasons.every((reason) => reason === "notFound"))) {
-          this.options.log?.({ level: "warn", event: "founder_calendar_skipped", accountId: account.id, calendar: id === "primary" ? "primary" : "secondary", reasons: reasons.join(",") || "missing" });
+        // A secondary calendar that's gone or no longer shared with this account (notFound, forbidden) is skipped. So is
+        // a main calendar Google says doesn't exist (an account with Calendar turned off has nothing to clash with).
+        // Anything else fails closed: a calendar Google can't read right now may hold appointments.
+        const gone = reasons.length > 0 && reasons.every((reason) => reason === "notFound" || (id !== "primary" && reason === "forbidden"));
+        if (gone) {
+          this.options.log?.({ level: "warn", event: "founder_calendar_skipped", accountId: account.id, calendar: id === "primary" ? "primary" : "secondary", reasons: reasons.join(",") });
           continue;
         }
-        throw new FounderCalendarReadError(account.id, label, reasons.length > 0 ? `main calendar: ${reasons.join(", ")}` : "main calendar missing from Google's answer");
+        const which = id === "primary" ? "main calendar" : "another calendar";
+        throw new FounderCalendarReadError(account.id, label, reasons.length > 0 ? `${which}: ${reasons.join(", ")}` : `${which} missing from Google's answer`);
       }
       byAccount.set(account.id, busy.slice(before));
     }
     this.lastBusyByAccount = byAccount;
-    return [...busy, ...await this.booked()];
+    const held = (await this.booked()).filter((item) => !exceptTenant || item.tenantId !== exceptTenant);
+    return [...busy, ...held.map(({ start, end }) => ({ start, end }))];
   }
 
-  /** Setup calls booked through Otto that haven't happened yet. */
-  async booked(): Promise<BusyPeriod[]> {
+  /** Setup calls booked through Otto that haven't happened yet, with the shop each is for (older entries have none). */
+  async booked(): Promise<Array<BusyPeriod & { tenantId?: string }>> {
     const raw = await this.options.store.getIntegrationSecret(PLATFORM_TENANT_ID, FOUNDER_GOOGLE_PROVIDER, BOOKED_KEY);
     try {
-      const list = raw ? JSON.parse(raw) as BusyPeriod[] : [];
+      const list = raw ? JSON.parse(raw) as Array<BusyPeriod & { tenantId?: string }> : [];
       const now = this.options.clock.now().getTime();
       return list.filter((item) => typeof item?.start === "string" && typeof item.end === "string" && Date.parse(item.end) > now);
     } catch {
@@ -199,14 +204,14 @@ export class FounderCalendars {
   }
 
   /** Callers hold the "founder-booking" lock: re-check busy, then this. */
-  async rememberBooked(slot: BusyPeriod): Promise<void> {
-    await this.options.store.saveIntegrationSecret(PLATFORM_TENANT_ID, FOUNDER_GOOGLE_PROVIDER, BOOKED_KEY, JSON.stringify([...await this.booked(), slot]));
+  async rememberBooked(slot: BusyPeriod, tenantId: string): Promise<void> {
+    await this.options.store.saveIntegrationSecret(PLATFORM_TENANT_ID, FOUNDER_GOOGLE_PROVIDER, BOOKED_KEY, JSON.stringify([...await this.booked(), { start: slot.start, end: slot.end, tenantId }]));
   }
 
-  /** True when the slot (with its buffer) is clear on every account and of every call booked here. */
-  async isFree(slot: { start: string; end: string }, bufferMinutes: number): Promise<boolean> {
+  /** True when the slot (with its buffer) is clear on every account and of every call booked here for another shop. */
+  async isFree(slot: { start: string; end: string }, bufferMinutes: number, forTenant?: string): Promise<boolean> {
     const buffer = bufferMinutes * 60_000;
-    const busy = await this.busy(new Date(Date.parse(slot.start) - buffer).toISOString(), new Date(Date.parse(slot.end) + buffer).toISOString());
+    const busy = await this.busy(new Date(Date.parse(slot.start) - buffer).toISOString(), new Date(Date.parse(slot.end) + buffer).toISOString(), forTenant);
     return !overlapsBusy({ start: Date.parse(slot.start), end: Date.parse(slot.end) }, busy, bufferMinutes);
   }
 
@@ -231,6 +236,23 @@ export class FounderCalendars {
     if (response.status === 409) return id;
     if (!response.ok) throw new Error(`Google Calendar insert failed with HTTP ${response.status}`);
     return id;
+  }
+
+  /**
+   * True when the "book here" account's main calendar still has the event made from this key: a booking cut off
+   * after Google took it shows busy with that very event. Throws when Google can't say, rather than guessing.
+   */
+  async eventExists(key: string): Promise<boolean> {
+    const account = (await this.accounts()).find((item) => item.bookHere);
+    if (!account) return false;
+    const accessToken = await this.accessToken(account.id);
+    const response = await withTimeout(this.fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${googleEventId(key)}`, {
+      headers: { authorization: `Bearer ${accessToken}` },
+    }), 5_000);
+    if (response.status === 404 || response.status === 410) return false;
+    if (!response.ok) throw new Error(`Google Calendar read failed with HTTP ${response.status}`);
+    const event = await response.json().catch(() => ({})) as { status?: unknown };
+    return event.status !== "cancelled";
   }
 
   /** Calendars the account owns or has switched on. Google only lists them with a broader grant; else just "primary". */

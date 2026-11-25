@@ -5,8 +5,11 @@ import { clientForNewConnections } from "../adapters/google-oauth-clients.js";
 import { formatEmailBody } from "../adapters/resend.js";
 import { renderOwnerLogin, renderSignInLinkConfirm, renderSignInLinkSent, type LoginPageOptions, type SignInProviders, type VerifiedSignupEmail } from "../admin/render.js";
 import { withTimeout } from "../application/retry.js";
+import { TeamService } from "../application/team-service.js";
 import type { Environment } from "../config/environment.js";
 import type { OwnerAccount } from "../domain/models.js";
+import { normalizePlanId } from "../domain/plans.js";
+import { findTrade } from "../domain/trades.js";
 import type { Clock, Store } from "../ports.js";
 import { createSignInLinkToken, hashSignInLinkToken, isPasswordless, mintOwnerSession, ownerSessionCookie, PASSWORDLESS_HASH, SIGN_IN_LINK_OUTBOX_TENANT } from "../security/owner-auth.js";
 import { HttpError, isCrossSiteFormPost, parseForm, readBody, readCookie, redirect, sendHtml, type RateLimiter } from "./security.js";
@@ -22,6 +25,10 @@ export const GOOGLE_SIGN_IN_CALLBACK = "/app/integrations/google/callback";
 export const MICROSOFT_SIGN_IN_CALLBACK = "/auth/microsoft/callback";
 /** Personal Microsoft accounts: Microsoft verifies the address, unlike a work tenant's admin-set email. */
 export const MICROSOFT_CONSUMER_TENANT = "9188040d-6c67-4c5b-b112-36a304b66dad";
+/** Google's own mail. Any other address on a plain Google account may have changed hands since Google checked it. */
+const GOOGLE_MAIL_DOMAINS = new Set(["gmail.com", "googlemail.com"]);
+/** Microsoft's own mail, for personal Microsoft accounts. Others get the email link (the safe side). */
+const MICROSOFT_MAIL_DOMAINS = new Set(["outlook.com", "hotmail.com", "live.com", "msn.com"]);
 const STATE_PREFIX = "signin.";
 const ATTEMPT_TTL_MS = 10 * 60_000;
 const PENDING_TTL_MS = 30 * 60_000;
@@ -79,6 +86,20 @@ export function isInAppBrowser(userAgent: string | undefined): boolean {
   return /\b(?:FBAN|FBAV|FB_IAB|Instagram|BytedanceWebview)\b|musical_ly|; wv\)/.test(userAgent ?? "");
 }
 
+/**
+ * The pricing page's picks on sign-up (plan, Unlimited, trade) as a query string, real plans and trades only, so
+ * "Continue with Google" on /signup?plan=team lands back on sign-up with Team still picked.
+ */
+export function signupPicks(params: URLSearchParams): string {
+  const picks = new URLSearchParams();
+  const plan = normalizePlanId(params.get("plan"));
+  if (plan) picks.set("plan", plan);
+  if (params.get("unlimited") === "1") picks.set("unlimited", "1");
+  const trade = findTrade(params.get("trade"));
+  if (trade) picks.set("trade", trade.key);
+  return picks.toString();
+}
+
 /** A Google callback that belongs to sign-in (not calendar connect) carries a sign-in state. */
 export function isSignInState(state: string | null): boolean {
   return state?.startsWith(STATE_PREFIX) === true;
@@ -120,8 +141,9 @@ export function createOwnerSignIn(deps: SignInDependencies) {
   const otherWayIn = emailEnabled ? "Use the email link instead." : "Try another way in.";
   const linkCookie = (value: string, maxAgeSeconds: number): string => `${LINK_COOKIE}=${value}; Path=/login/link; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure}`;
 
-  function startAttempt(provider: ProviderConfig, next: string | null): { state: string; nonce: string; challenge: string; cookie: string } {
-    const payload = b64(JSON.stringify({ p: provider.name, r: randomBytes(18).toString("base64url"), x: clock.now().getTime() + ATTEMPT_TTL_MS }));
+  function startAttempt(provider: ProviderConfig, next: string | null, picks: string): { state: string; nonce: string; challenge: string; cookie: string } {
+    // The sign-up picks ride in the signed state; sign-up re-checks them anyway.
+    const payload = b64(JSON.stringify({ p: provider.name, r: randomBytes(18).toString("base64url"), x: clock.now().getTime() + ATTEMPT_TTL_MS, ...(picks ? { k: picks } : {}) }));
     const state = `${STATE_PREFIX}${payload}.${sign(`owner-sign-in:${provider.name}`, payload)}`;
     const verifier = randomBytes(32).toString("base64url");
     const nonce = randomBytes(18).toString("base64url");
@@ -133,16 +155,19 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     };
   }
 
-  /** The verifier, nonce and landing page of an attempt whose state and cookie both check out; null otherwise. */
-  function readAttempt(provider: ProviderConfig, state: string | null, cookie: string | undefined): { verifier: string; nonce: string; next: string | null } | null {
+  /** The verifier, nonce, landing page and sign-up picks of an attempt whose state and cookie both check out; null otherwise. */
+  function readAttempt(provider: ProviderConfig, state: string | null, cookie: string | undefined): { verifier: string; nonce: string; next: string | null; picks: string } | null {
     if (!state?.startsWith(STATE_PREFIX) || !cookie) return null;
     const [payload, signature, extra] = state.slice(STATE_PREFIX.length).split(".");
     if (!payload || !signature || extra !== undefined || !same(signature, sign(`owner-sign-in:${provider.name}`, payload))) return null;
-    const stateData = parseJson(payload) as { p?: unknown; x?: unknown } | null;
+    const stateData = parseJson(payload) as { p?: unknown; x?: unknown; k?: unknown } | null;
     const cookieData = parseJson(cookie) as { s?: unknown; v?: unknown; n?: unknown; next?: unknown } | null;
     if (!stateData || stateData.p !== provider.name || typeof stateData.x !== "number" || stateData.x <= clock.now().getTime()) return null;
     if (!cookieData || typeof cookieData.s !== "string" || !same(cookieData.s, state) || typeof cookieData.v !== "string" || typeof cookieData.n !== "string") return null;
-    return { verifier: cookieData.v, nonce: cookieData.n, next: safeNext(typeof cookieData.next === "string" ? cookieData.next : null) };
+    return {
+      verifier: cookieData.v, nonce: cookieData.n, next: safeNext(typeof cookieData.next === "string" ? cookieData.next : null),
+      picks: typeof stateData.k === "string" ? signupPicks(new URLSearchParams(stateData.k)) : "",
+    };
   }
 
   const clearAttempt = (provider: ProviderConfig): string => `${provider.cookie}=; Path=${provider.cookiePath}; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
@@ -167,7 +192,7 @@ export function createOwnerSignIn(deps: SignInDependencies) {
 
   async function start(provider: ProviderConfig, request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     if (!provider.client) return loginPage(request, response, 404, `${provider.label} sign-in isn’t available right now.`);
-    const attempt = startAttempt(provider, safeNext(url.searchParams.get("next")));
+    const attempt = startAttempt(provider, safeNext(url.searchParams.get("next")), signupPicks(url.searchParams));
     const authorization = new URL(provider.authorizeUrl);
     authorization.search = new URLSearchParams({
       client_id: provider.client.id,
@@ -199,7 +224,9 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     if (!code) return fail(400, "That sign-in expired. Try again.");
     try {
       const claims = await verifyIdToken(provider, provider.client, await exchangeCode(provider, provider.client, code, attempt.verifier), attempt.nonce);
-      return await finish(request, response, trustedIdentity(provider, claims), attempt.next, cookies);
+      const { identity, vouched } = trustedIdentity(provider, claims);
+      if (!vouched) return await proveByEmail(request, response, provider, identity, attempt.next, cookies, attempt.picks);
+      return await finish(request, response, identity, attempt.next, cookies, attempt.picks);
     } catch (error) {
       if (!(error instanceof SignInError)) throw error;
       log({ level: "warn", event: "owner_sign_in_rejected", provider: provider.name, reason: error.reason });
@@ -251,27 +278,54 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     return claims;
   }
 
-  /** The email only when the provider vouches for it; otherwise the email link is the safe way in. */
-  function trustedIdentity(provider: ProviderConfig, claims: Record<string, unknown>): VerifiedIdentity {
+  /**
+   * The email, and whether the provider runs that mailbox today (vouched). Only then does it stand for the account:
+   * Google's email_verified is from when the Google account was made, so for an address outside Gmail or the
+   * account's own Workspace domain (hd), whoever left that job can still sign in with it. A personal Microsoft
+   * account is the same outside Microsoft's mail, and a work tenant's email is whatever its admin typed (nOAuth)
+   * unless the tenant verified the domain (xms_edov). Anything not vouched for gets the email link instead.
+   */
+  function trustedIdentity(provider: ProviderConfig, claims: Record<string, unknown>): { identity: VerifiedIdentity; vouched: boolean } {
     if (provider.name === "google" && claims.email_verified !== true) {
       throw new SignInError(403, `Google hasn’t verified that email. ${otherWayIn}`, "email_unverified");
     }
-    // A work tenant's email is whatever its admin typed (nOAuth): trusted only for personal accounts or a domain-verified email.
-    if (provider.name === "microsoft" && claims.tid !== MICROSOFT_CONSUMER_TENANT && ![true, "true", 1, "1"].includes(claims.xms_edov as never)) {
-      throw new SignInError(403, `We can’t confirm that work email through Microsoft. ${otherWayIn}`, "email_unverified");
-    }
     const email = emailSchema.safeParse(claims.email);
     if (!email.success) throw new SignInError(403, `${provider.label} didn’t share your email. ${otherWayIn}`, "no_email");
+    const domain = email.data.slice(email.data.lastIndexOf("@") + 1);
+    const vouched = provider.name === "google"
+      ? GOOGLE_MAIL_DOMAINS.has(domain) || (typeof claims.hd === "string" && claims.hd.toLowerCase() === domain)
+      : claims.tid === MICROSOFT_CONSUMER_TENANT ? MICROSOFT_MAIL_DOMAINS.has(domain) : [true, "true", 1, "1"].includes(claims.xms_edov as never);
     const name = typeof claims.name === "string" && claims.name.trim().length >= 2 ? claims.name.trim().slice(0, 120) : null;
-    return { provider: provider.name, email: email.data, name };
+    return { identity: { provider: provider.name, email: email.data, name }, vouched };
+  }
+
+  /**
+   * The provider can't vouch for the address: the emailed link proves it, same limits as "Email me a sign-in link".
+   * The link carries the sign-up picks, so a new address still lands on sign-up with its plan.
+   */
+  async function proveByEmail(request: IncomingMessage, response: ServerResponse, provider: ProviderConfig, identity: VerifiedIdentity, next: string | null, cookies: string[], picks: string): Promise<void> {
+    response.setHeader("set-cookie", cookies);
+    log({ level: "info", event: "owner_sign_in_email_check", provider: provider.name });
+    if (!emailEnabled) return loginPage(request, response, 403, `${provider.label} can’t vouch for that address. Try another way in.`);
+    if (limiter.allow(`owner-login-link-email:${identity.email}`, 5, 60 * 60_000)) {
+      const account = await store.getOwnerAccountByEmail(identity.email);
+      if (account?.status !== "suspended") await sendLink(identity.email, account, next, picks);
+    }
+    return sendHtml(response, 200, renderSignInLinkSent(identity.email, `${provider.label} can’t vouch for that address, so we emailed you a sign-in link.`));
   }
 
   /** Same session as a password sign-in for an existing account; a new email goes to sign-up with it confirmed. */
-  async function finish(request: IncomingMessage, response: ServerResponse, identity: VerifiedIdentity, next: string | null, cookies: string[]): Promise<void> {
+  async function finish(request: IncomingMessage, response: ServerResponse, identity: VerifiedIdentity, next: string | null, cookies: string[], picks = ""): Promise<void> {
     let account = await store.getOwnerAccountByEmail(identity.email);
     if (account && account.status !== "suspended" && !account.emailVerifiedAt) {
-      // The first proof that this person controls the email. A password typed at sign-up (maybe by someone else
-      // using their email) stops working and its sessions end. "Forgot your password?" sets a new one.
+      // The first proof that this person controls the email. Whoever signed up with it before (maybe someone else
+      // using their email) loses the teammates and invitation links they made. First, so a failure here leaves the
+      // email unproved and the next sign-in runs it again.
+      if (account.role !== "member") {
+        const removed = await new TeamService(store, clock).reclaim(account.tenantId);
+        log({ level: "info", event: "owner_unproven_team_revoked", method: identity.provider, accountId: account.id, removed });
+      }
+      // A password typed at sign-up stops working and its sessions end. "Forgot your password?" sets a new one.
       const dropPassword = !isPasswordless(account.passwordHash);
       await store.markOwnerEmailVerified(account.id, clock.now().toISOString(), dropPassword ? PASSWORDLESS_HASH : null);
       if (dropPassword) log({ level: "info", event: "owner_unproven_password_dropped", method: identity.provider, accountId: account.id });
@@ -290,7 +344,7 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     cookies.push(pendingIdentityCookie(identity));
     response.setHeader("set-cookie", cookies);
     log({ level: "info", event: "owner_sign_up_identity_verified", method: identity.provider });
-    return redirect(response, "/signup");
+    return redirect(response, picks ? `/signup?${picks}` : "/signup");
   }
 
   async function requestLink(request: IncomingMessage, response: ServerResponse, ip: string): Promise<void> {
@@ -306,17 +360,18 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     // Same answer either way; past the per-email limit nothing more is sent.
     if (limiter.allow(`owner-login-link-email:${email}`, 5, 60 * 60_000)) {
       const account = await store.getOwnerAccountByEmail(email);
-      if (account?.status !== "suspended") await sendLink(email, account, next);
+      // A sign-up started from the pricing page keeps its plan, Unlimited and trade through the link.
+      if (account?.status !== "suspended") await sendLink(email, account, next, signupPicks(new URLSearchParams(form.get("picks") ?? "")));
     }
     return sendHtml(response, 200, renderSignInLinkSent(email));
   }
 
-  async function sendLink(email: string, account: OwnerAccount | null, next: string | null): Promise<void> {
+  async function sendLink(email: string, account: OwnerAccount | null, next: string | null, picks = ""): Promise<void> {
     const { token, tokenHash } = createSignInLinkToken();
     const now = clock.now();
     await store.createSignInLink(tokenHash, email, new Date(now.getTime() + LINK_TTL_MS).toISOString(), now.toISOString());
     // The page they asked from (say, deleting the shop) opens after the tap.
-    const link = `${base}/login/link?token=${encodeURIComponent(token)}${next ? `&next=${encodeURIComponent(next)}` : ""}`;
+    const link = `${base}/login/link?token=${encodeURIComponent(token)}${next ? `&next=${encodeURIComponent(next)}` : ""}${picks ? `&${picks}` : ""}`;
     await store.enqueueNotification({
       id: randomUUID(), tenantId: account?.tenantId ?? SIGN_IN_LINK_OUTBOX_TENANT, callId: null, channel: "email", destinationRef: `email:${email}`,
       body: formatEmailBody("Your Call Otto sign-in link", `Tap this link to sign in to Call Otto. It works once, for 15 minutes:\n\n${link}\n\nIf you didn't ask for this, ignore this email.`),
@@ -339,7 +394,7 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     }
     const email = await store.consumeSignInLink(hashSignInLinkToken(token), clock.now().toISOString());
     if (!email) return expired();
-    return finish(request, response, { provider: "email", email, name: null }, safeNext(form.get("next")), [linkCookie("", 0)]);
+    return finish(request, response, { provider: "email", email, name: null }, safeNext(form.get("next")), [linkCookie("", 0)], signupPicks(new URLSearchParams(form.get("picks") ?? "")));
   }
 
   /** Handles /auth/* and the email-link routes; false for anything else. */
@@ -353,7 +408,7 @@ export function createOwnerSignIn(deps: SignInDependencies) {
       if (LINK_TOKEN.test(token)) {
         // Opening the link only shows a button (mail scanners open links too); this cookie ties the tap to this browser.
         response.setHeader("set-cookie", linkCookie(sign("owner-sign-in-link", token), LINK_TTL_MS / 1_000));
-        sendHtml(response, 200, renderSignInLinkConfirm(token, safeNext(url.searchParams.get("next"))));
+        sendHtml(response, 200, renderSignInLinkConfirm(token, safeNext(url.searchParams.get("next")), signupPicks(url.searchParams)));
       } else loginPage(request, response, 400, "That link doesn’t work. Send a new one.", { errorField: "linkToken" });
     } else if (method === "POST" && path === "/login/link") await useLink(request, response, ip);
     else return false;
