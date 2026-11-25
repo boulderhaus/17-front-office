@@ -1,4 +1,5 @@
 import type { CallPath } from "../domain/call-path.js";
+import { ownerTaskReason } from "../domain/task-reason.js";
 import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
 import { CARRIER_CHOICES, forwardingPlan, type CarrierInfo, type ForwardingPlan } from "../domain/forwarding.js";
 import { isPaidStatus } from "../domain/billing.js";
@@ -134,7 +135,7 @@ export function apiCall(call: CallRecord): ApiCall {
 export function apiTask(task: CallbackTask): ApiTask {
   return {
     callId: task.callId,
-    reason: task.reason,
+    reason: ownerTaskReason(task.reason),
     priority: task.priority,
     status: task.status,
     dueAt: task.dueAt,
