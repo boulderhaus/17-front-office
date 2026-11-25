@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
-import { codeChunks, dialHref, dialPlatform, spokenCode } from "@/lib/dial"
+import { codeChunks, copyAndOpenPhone, dialHref, dialPlatform, spokenCode, VERIZON_RING_LINE } from "@/lib/dial"
 import { formatPhone } from "@/lib/format"
 import { useMode } from "@/lib/mode"
 import type { ApiDashboard, CarrierFamily, ForwardingPlan } from "@/lib/types"
@@ -158,6 +158,7 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
                   <p className="text-[15px] font-semibold">
                     {plan.on ? "Dial this on " : "For "}<span className="tabular whitespace-nowrap">{formatPhone(business.number!)}</span> · {change}
                   </p>
+                  {business.update?.clearFirst && <ClearFirst code={business.update.clearFirst} />}
                   {plan.on
                     ? <DialCode code={plan.on} dialLink={plan.dialLink} codeRef={codeRef} />
                     : <p className="text-sm">{plan.what}</p>}
@@ -198,25 +199,19 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
 
             {confirmed && (
               <div className="grid gap-2 text-sm">
-                {/* Only what a test proved: every call once a forward-all code passed, missed calls and the ring time once
-                    the ring-first code did. Otherwise (a manual test, an office line) only that calls get here. */}
+                {/* Only what the last passed test was set up for: every call, or ring first with today's ring time.
+                    Otherwise (no test recorded, or a change not tested yet) only that calls get here. */}
                 <p>{business.everyCallOn
                   ? `Every call to ${formatPhone(business.number!)} now goes to Otto. Your phone won’t ring for these.`
                   : business.codeApplied
                     ? `Calls you miss on ${formatPhone(business.number!)} now go to Otto.${plan?.ringSeconds ? ` Your phone rings about ${plan.ringSeconds} seconds first.` : ""}`
                     : `Calls to ${formatPhone(business.number!)} now reach Otto.`}</p>
-                {business.update && plan?.on && (
+                {business.update && plan && (
                   <div className="grid gap-2.5 border-t pt-3">
-                    <p className="text-[15px] font-semibold">Dial this once to apply your change</p>
-                    {business.update.missed && (plan.forwardsAll || business.update.clearFirst) && (
-                      <p role="status" className="rounded-md border border-brand-ink/15 bg-accent px-3 py-2.5 text-accent-foreground">
-                        {plan.forwardsAll
-                          ? "That test reached Otto, but your phone rang first, so the new code isn’t on yet."
-                          : "That test reached Otto before your phone rang, so every call still goes to Otto."}
-                      </p>
-                    )}
-                    {business.update.clearFirst && <p>First dial <code className="rounded bg-muted px-1.5 py-0.5 font-mono font-semibold">{business.update.clearFirst}</code> and press Call. Then:</p>}
-                    <DialCode code={plan.on} dialLink={plan.dialLink} codeRef={codeRef} />
+                    {/* Stays until a test passes for today's choice: the owner's choice is the source of truth. */}
+                    <p className="text-[15px] font-semibold">{plan.on ? "Dial this once to apply your change" : "Apply your change"}</p>
+                    {business.update.clearFirst && <ClearFirst code={business.update.clearFirst} />}
+                    {plan.on ? <DialCode code={plan.on} dialLink={plan.dialLink} codeRef={codeRef} /> : <p>{plan.what}</p>}
                     <Button size="tap" variant="outline" className={tapWidth} disabled={busy === "check"} onClick={startTest}>{busy === "check" ? <><Loader2 className="motion-safe:animate-spin" />Starting…</> : "Then test it"}</Button>
                   </div>
                 )}
@@ -260,6 +255,11 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
   )
 }
 
+/** Leaving every call for ring first: forward-all wins over the ring-first code, so it goes off first. One line. */
+function ClearFirst({ code }: { code: string }) {
+  return <p className="text-sm">First turn off forwarding: dial <code className="rounded bg-muted px-1.5 py-0.5 font-mono font-semibold">{code}</code> and press Call. Then:</p>
+}
+
 /** What Brock's follow-up email actually was: a booking link, or (no calendar connected yet) a note asking for a reply. */
 function founderEmailLine(email: { sentAt: string; link: boolean }, now: string): string {
   const just = Date.parse(now) - Date.parse(email.sentAt) < 10 * 60_000 ? "just emailed" : "emailed"
@@ -271,14 +271,15 @@ function founderEmailLine(email: { sentAt: string; link: boolean }, now: string)
  * catch for each is said inline: every call means the phone won't ring, ring first on iPhone needs Live Voicemail off.
  */
 function ModeChoice({ choice, busy, locked, family, ringFirstSeconds, onPick }: { choice: Choice; busy: boolean; locked: boolean; family: CarrierFamily | null; ringFirstSeconds: number | null; onPick: (choice: Choice) => void }) {
-  const after = family === "office" ? "" : family === "verizon" ? " after about 30 seconds" : ringFirstSeconds ? ` after ${ringFirstSeconds} seconds` : " (after 15 seconds; Verizon about 30)"
+  // Verizon's timer is fixed at about 30 seconds: said plainly, since we'd rather they picked up sooner.
+  const after = family === "office" ? "." : family === "verizon" ? `. ${VERIZON_RING_LINE}` : ringFirstSeconds ? ` after ${ringFirstSeconds} seconds.` : " (after 10 seconds; Verizon about 30)."
   // The business phone may be an iPhone even when this page is open on a computer; Android needs nothing extra.
   const iphoneNote = !isAndroid && family !== "office"
   const options: Array<{ id: Choice; title: string; line: string; note: string | null }> = [
     // "No phone settings": there's still a code to dial below. An office line is set in a website either way.
     { id: "always", title: "Otto answers every call", line: family === "office" ? "Otto picks up right away." : "No phone settings to change.", note: "Your phone won’t ring for this number." },
     // The iPhone step shows once ring first is picked: it's the one thing to do before dialing that code.
-    { id: "ring", title: "Ring my phone first", line: `Otto takes the calls you miss${after}.`, note: iphoneNote && choice === "ring" ? "iPhone: turn off Live Voicemail first (Settings › Apps › Phone)." : null },
+    { id: "ring", title: "Ring my phone first", line: `Otto takes the calls you miss${after}`, note: iphoneNote && choice === "ring" ? "iPhone: turn off Live Voicemail first (Settings › Apps › Phone)." : null },
   ]
   return (
     // Locked while a test call is out: the test proves the code that was on screen when it started.
@@ -316,11 +317,14 @@ function showFix(status: Status, plan: ForwardingPlan): boolean {
 
 /**
  * The code to dial, the way this device can dial it.
- * iPhone: never a tel: link (iOS blocks forwarding links with a "Call Forwarding Link Blocked" alert): copy and paste.
+ * iPhone: never the code in a tel: link (iOS blocks forwarding links with a "Call Forwarding Link Blocked" alert):
+ * one tap copies it and opens the Phone keypad with a bare tel:, and they paste it there (see copyAndOpenPhone).
  * Android (not Firefox): Tap to dial opens the keypad with the code filled in. A computer: a QR code to this page.
  */
 function DialCode({ code, dialLink, codeRef }: { code: string; dialLink: string | null; codeRef?: Ref<HTMLDivElement> }) {
   const href = dialHref(platform, dialLink)
+  // iPhone: true once Phone didn't open from our tap, so we say how to open it by hand.
+  const [stayed, setStayed] = useState(false)
   const copy = () => void navigator.clipboard?.writeText(code).then(
     () => toast.success(isIphone ? "Copied. In Phone › Keypad, touch and hold above the numbers, tap Paste, then Call." : "Copied. Paste it in your Phone app’s keypad, then tap Call."),
     () => toast("Type the code into your Phone app’s keypad."),
@@ -355,12 +359,30 @@ function DialCode({ code, dialLink, codeRef }: { code: string; dialLink: string 
       </div>
     )
   }
+  if (isIphone) {
+    // NEEDS A REAL-IPHONE CHECK (bare tel: from Safari): see copyAndOpenPhone.
+    const copyAndOpen = () => copyAndOpenPhone(code, {
+      clipboard: navigator.clipboard,
+      location: window.location,
+      document,
+      setTimeout: (run, ms) => window.setTimeout(run, ms),
+      onCopied: (copied) => { if (copied) toast.success("Copied."); else toast("Type the code into your Phone app’s keypad.") },
+      onStayed: () => setStayed(true),
+    })
+    return (
+      <div className="grid gap-2.5">
+        {box}
+        <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} onClick={copyAndOpen}><Copy />Copy code &amp; open Phone</Button>
+        <p className="text-sm font-medium" role="status">{stayed ? "Paste it in Phone › Keypad and tap Call." : "Then paste it and tap Call."}</p>
+        <p className="text-[13px] text-muted-foreground">“Link Blocked”? Type it in.</p>
+      </div>
+    )
+  }
   return (
     <div className="grid gap-2.5">
       {box}
       <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} onClick={copy}><Copy />Copy code</Button>
-      <p className="text-sm font-medium">{isIphone ? "Paste it in Phone › Keypad and tap Call." : "Paste it in your Phone app’s keypad and tap Call."}</p>
-      {isIphone && <p className="text-[13px] text-muted-foreground">“Link Blocked”? Type it in.</p>}
+      <p className="text-sm font-medium">Paste it in your Phone app’s keypad and tap Call.</p>
     </div>
   )
 }

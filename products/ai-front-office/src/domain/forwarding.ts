@@ -38,8 +38,10 @@ export interface ForwardingPlan {
   confirm: string | null;
 }
 
-/** GSM carriers ring this long before forwarding unless the owner picks another time. */
-export const DEFAULT_RING_SECONDS = 15;
+/** GSM carriers ring this long before forwarding unless the owner picks another time: about 7–12 s to pick up. */
+export const DEFAULT_RING_SECONDS = 10;
+/** New shops' "Ring my phone first" setting: 2 rings ≈ 10 seconds (see ringSeconds). */
+export const DEFAULT_ANSWER_AFTER_RINGS = 2;
 /** Verizon (and Visible) ring about this long before *71 forwards, and nobody can change it. */
 export const VERIZON_RING_SECONDS = 30;
 
@@ -81,31 +83,48 @@ export function isForwardAllCode(code: string | null | undefined): boolean {
   return typeof code === "string" && /^(\*\*21\*|\*72)/.test(code);
 }
 
-/**
- * True when ringing `phone` could land back on this shop's Call Otto line: the owner's business number forwards
- * everything to Otto, so Otto calling it would just be Otto calling Otto. That's the case in "every call" mode (even
- * before the code is dialed) and whenever the last code proven in force is a forward-all one (after switching back
- * to "ring me first" but before dialing the off code).
- */
-export function forwardsBackToOtto(input: { mode: ForwardingMode; businessNumber: string | null; phone: string | null; dialedCode?: string | null }): boolean {
-  if (!input.businessNumber || input.phone !== input.businessNumber) return false;
-  return input.mode === "always" || isForwardAllCode(input.dialedCode);
+/** "Otto answers every call" (forward-all) or "Ring my phone first" (missed calls only, or after hours). */
+export type ForwardingChoice = "every-call" | "ring-first";
+
+export function forwardingChoice(mode: ForwardingMode): ForwardingChoice {
+  return mode === "always" ? "every-call" : "ring-first";
 }
 
-/** A forward-all code sends our test straight to Otto, phone untouched: a pass that took longer means the phone rang first. */
-export const FORWARD_ALL_PASS_MS = 10_000;
-/** Leaving forward-all for "ring me first": a pass this fast means the test never rang the phone, so forward-all is still on. */
-export const RANG_FIRST_MIN_MS = 6_000;
+/**
+ * What the owner was set up for when a test last passed: their choice and the code on screen then. The owner's
+ * choice is the source of truth; we never work out which code is on from how long a test took (a Decline forwards
+ * as fast as forward-all, and a 15 s timer can't be told from a 25 s one).
+ */
+export interface TestedFor {
+  mode: ForwardingChoice;
+  code: string | null;
+  at: string;
+}
+
+export function parseTestedFor(value: string | null | undefined): TestedFor | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<TestedFor> | null;
+    if (!parsed || (parsed.mode !== "every-call" && parsed.mode !== "ring-first")) return null;
+    return { mode: parsed.mode, code: typeof parsed.code === "string" ? parsed.code : null, at: typeof parsed.at === "string" ? parsed.at : "" };
+  } catch {
+    return null;
+  }
+}
 
 /**
- * Which code a passing test proves is in force: the one on screen when the owner started it, if the timing fits
- * that code. Null when it doesn't (the new code wasn't dialed yet), so "Dial this once" stays up.
+ * True when the business number may send every call to Call Otto: "every call" is picked (dialed or not), or the
+ * last passed test was for every call (until a test passes for ring first). Otto never dials it then (setup helper,
+ * urgent owner calls, warm transfers): it would only be Otto calling Otto. Office lines follow the same rule.
  */
-export function codeProvenByTest(input: { code: string | null | undefined; previous: string | null | undefined; passMs: number }): string | null {
-  if (!input.code || !Number.isFinite(input.passMs)) return null;
-  if (isForwardAllCode(input.code)) return input.passMs <= FORWARD_ALL_PASS_MS ? input.code : null;
-  if (isForwardAllCode(input.previous) && input.passMs < RANG_FIRST_MIN_MS) return null;
-  return input.code;
+export function mayForwardAll(input: { mode: ForwardingMode; testedFor?: TestedFor | null }): boolean {
+  return input.mode === "always" || input.testedFor?.mode === "every-call";
+}
+
+/** True when ringing `phone` could land back on this shop's Call Otto line (see mayForwardAll). */
+export function forwardsBackToOtto(input: { mode: ForwardingMode; businessNumber: string | null; phone: string | null; testedFor?: TestedFor | null }): boolean {
+  if (!input.businessNumber || input.phone !== input.businessNumber) return false;
+  return mayForwardAll(input);
 }
 
 /** Families an owner can pick when the lookup is unsure, in the words they'd use. */

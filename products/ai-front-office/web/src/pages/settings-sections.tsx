@@ -12,7 +12,8 @@ import { api } from "@/lib/api"
 import { FAIR_USE_LINE, money, perCall } from "@/lib/format"
 import { useMode } from "@/lib/mode"
 import type { PlanId } from "@/lib/types"
-import { ringChoicesWith } from "@/lib/dial"
+import { ringChoicesWith, VERIZON_RING_LINE } from "@/lib/dial"
+import { pauseHint } from "@/lib/pause-hint"
 import { cn } from "@/lib/utils"
 import { useSettings } from "./settings"
 
@@ -104,19 +105,13 @@ export function BusinessSection() {
 export function AnsweringSection() {
   const { text, flag, set, bind, settings } = useSettings()
   const { dashboard } = useMode()
-  // With every call sent to Otto, pausing (which disconnects the line) leaves callers with nowhere to go.
-  const everyCall = text("operationMode") === "always" || Boolean(dashboard?.line.business.everyCallOn)
-  const off = dashboard?.line.business.plan?.off
-  // Said when they pick Paused, not before: until the code is dialed, pausing stops nothing.
-  const pauseHint = settings.status !== "active"
-    ? "Your line turns on after it’s approved. Until then it stays paused."
-    : everyCall && text("serviceState") === "paused"
-      ? `Otto answers every call, so pausing stops all calls to your business number. Turn forwarding off first${off ? `: dial ${off} on that phone` : " with your phone company"}.`
-      : undefined
+  // Said when they pick Paused, and only when every call may go to Otto (the saved choice or the last passed test).
+  const business = dashboard?.line.business
+  const hint = pauseHint({ active: settings.status === "active", paused: text("serviceState") === "paused", mayForwardAll: Boolean(business?.mayForwardAll), off: business?.plan?.off })
   return (
     <>
       <SettingsCard title="Which calls">
-        <Field label="Call Otto is" hint={pauseHint}>
+        <Field label="Call Otto is" hint={hint}>
           <select className={selectClass} {...bind("serviceState")}><option value="active">On, answering calls</option><option value="paused">Paused</option></select>
         </Field>
         <Pair>
@@ -161,7 +156,7 @@ export function AnsweringSection() {
 function RingFirstField({ rings, onChange, everyCall, family, confirmed }: { rings: number; onChange: (value: string) => void; everyCall: boolean; family: string | null; confirmed: boolean }) {
   const verizon = family === "verizon"
   const choices = ringChoicesWith(rings)
-  const hint = verizon ? "Verizon rings about 30 seconds. They don’t let anyone change that."
+  const hint = verizon ? VERIZON_RING_LINE
     : everyCall ? "Only for Ring my phone first."
     : family === "gsm" && confirmed ? "After you save, dial the new code once to apply it."
     : family === "office" ? "For an office line, set the ring time in your phone company’s website or app."
@@ -171,7 +166,7 @@ function RingFirstField({ rings, onChange, everyCall, family, confirmed }: { rin
       {verizon ? (
         <select className={cn(selectClass, "disabled:cursor-not-allowed disabled:opacity-70")} disabled value="verizon" onChange={() => undefined}><option value="verizon">About 30 seconds (Verizon)</option></select>
       ) : (
-        <select className={cn(selectClass, "disabled:cursor-not-allowed disabled:opacity-70")} name="answerAfterRings" disabled={everyCall} value={String(choices.find((choice) => choice.rings === rings)?.rings ?? 2.5)} onChange={(event) => onChange(event.target.value)}>
+        <select className={cn(selectClass, "disabled:cursor-not-allowed disabled:opacity-70")} name="answerAfterRings" disabled={everyCall} value={String(choices.find((choice) => choice.rings === rings)?.rings ?? 2)} onChange={(event) => onChange(event.target.value)}>
           {choices.map((choice) => <option key={choice.rings} value={String(choice.rings)}>{choice.label}</option>)}
         </select>
       )}

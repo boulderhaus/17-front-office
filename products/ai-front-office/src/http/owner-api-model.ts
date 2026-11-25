@@ -1,7 +1,7 @@
 import type { CallPath } from "../domain/call-path.js";
 import { ownerTaskReason } from "../domain/task-reason.js";
 import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
-import { CARRIER_CHOICES, forwardingPlan, isForwardAllCode, ringFirstSeconds, type CarrierInfo, type ForwardingPlan } from "../domain/forwarding.js";
+import { CARRIER_CHOICES, forwardingChoice, forwardingPlan, mayForwardAll, ringFirstSeconds, type CarrierInfo, type ForwardingChoice, type ForwardingMode, type ForwardingPlan, type TestedFor } from "../domain/forwarding.js";
 import { isPaidStatus } from "../domain/billing.js";
 import { describeHours } from "../domain/hours.js";
 import { fairUseCalls, type PlanId } from "../domain/plans.js";
@@ -51,15 +51,20 @@ export interface ApiDashboard {
     business: {
       number: string | null; carrier: CarrierInfo | null; plan: ForwardingPlan | null; choices: typeof CARRIER_CHOICES; suggested: string | null;
       /**
-       * Forwarding works, but the code for today's settings (ring time, every call) differs from the one a test last
-       * proved: dial plan.on once to apply it, after clearFirst when leaving "every call" for "ring me first".
-       * `missed`: the last test of plan.on reached Otto, but its timing shows the new code isn't on yet.
+       * Today's choice or code (every call, ring first, ring time) differs from what the last passed test was set up
+       * for: dial plan.on once to apply it, after clearFirst (the off code) when leaving every call for ring first.
+       * Stays until a test passes for the new choice.
        */
-      update: { clearFirst: string | null; missed: boolean } | null;
-      /** The last test proved every call goes to Otto (a forward-all code is dialed in). */
+      update: { clearFirst: string | null } | null;
+      /** Forwarding works, and the last passed test was for every call. */
       everyCallOn: boolean;
-      /** The last test proved plan.on itself is dialed in, so its ring time is what the owner gets. */
+      /** Forwarding works, and the last passed test was for today's choice and code, so its ring time is what they get. */
       codeApplied: boolean;
+      /**
+       * Every call is picked, or the last passed test was for every call: calls to the business number may all go to
+       * Otto. Otto never dials that number then, and pausing would leave those calls nowhere to go.
+       */
+      mayForwardAll: boolean;
       /** How long "Ring my phone first" would ring for this carrier (GSM timer, Verizon ~30 s), or null when unknown. */
       ringFirstSeconds: number | null;
     };
@@ -267,19 +272,21 @@ export interface ForwardingCheckRecord {
   screenedAt?: string | null;
   /** Premium AMD's verdict on whatever answered: human_residence, human_business, machine, silence, not_sure... */
   amdResult?: string | null;
-  /** The code on screen when the owner started this test: what a pass proves, if its timing fits. */
+  /** The code on screen when the owner started this test. */
   code?: string | null;
+  /** What the owner picked when they started this test: a pass records it as what they're set up for. */
+  choice?: ForwardingChoice | null;
 }
 
 export interface ForwardingState {
   businessNumber: string | null;
   carrier: CarrierInfo | null;
   confirmedAt: string | null;
-  check: { startedAt: string; method: "auto" | "manual"; answeredAt?: string | null; endedAt?: string | null; hangupCause?: string | null; screenedAt?: string | null; amdResult?: string | null; code?: string | null } | null;
+  check: { startedAt: string; method: "auto" | "manual"; answeredAt?: string | null; endedAt?: string | null; hangupCause?: string | null; screenedAt?: string | null; amdResult?: string | null; code?: string | null; choice?: ForwardingChoice | null } | null;
   helpRequestedAt: string | null;
   helpCall?: { to: string; startedAt: string; endedAt: string | null } | null;
-  /** The code the last passing test proved is in force (see codeProvenByTest). */
-  dialedCode?: string | null;
+  /** What the owner was set up for when a test last passed (see TestedFor). */
+  testedFor?: TestedFor | null;
   founderEmail?: { sentAt: string; link: boolean } | null;
 }
 
@@ -314,10 +321,8 @@ function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "oper
   const status = forwardingCheckStatus(check, confirmedAt, now);
   const answeredAfterSec = check?.answeredAt ? Math.max(0, Math.round((Date.parse(check.answeredAt) - Date.parse(check.startedAt)) / 1_000)) : null;
   const plan = lineNumber && state?.carrier ? forwardingPlan(state.carrier.family, lineNumber, mode, config.answerAfterRings) : null;
-  const dialedCode = state?.dialedCode ?? null;
-  // The last test was of today's code and reached Otto, but too fast or too slow for that code: it isn't dialed yet.
-  const missed = status === "passed" && check?.method === "auto" && Boolean(check.code) && check.code === plan?.on && dialedCode !== plan?.on;
-  const update = forwardingUpdate(plan, confirmedAt, dialedCode) ?? (missed ? { clearFirst: null } : null);
+  const testedFor = state?.testedFor ?? null;
+  const update = forwardingUpdate(plan, mode, testedFor);
   return {
     number: lineNumber,
     mode,
@@ -328,9 +333,10 @@ function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "oper
       plan,
       choices: CARRIER_CHOICES,
       suggested: state?.businessNumber ? null : ownerMobile,
-      update: update && { ...update, missed },
-      everyCallOn: Boolean(confirmedAt) && isForwardAllCode(dialedCode),
-      codeApplied: Boolean(confirmedAt && plan?.on) && dialedCode === plan?.on,
+      update,
+      everyCallOn: Boolean(confirmedAt) && testedFor?.mode === "every-call",
+      codeApplied: Boolean(confirmedAt && plan && testedFor) && !update,
+      mayForwardAll: mayForwardAll({ mode, testedFor }),
       ringFirstSeconds: state?.carrier ? ringFirstSeconds(state.carrier.family, config.answerAfterRings) : null,
     },
     confirmedAt,
@@ -341,11 +347,16 @@ function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "oper
   };
 }
 
-/** Forwarding works with an older code than today's settings call for: what to dial to apply them. */
-export function forwardingUpdate(plan: ForwardingPlan | null, confirmedAt: string | null, dialedCode: string | null): { clearFirst: string | null } | null {
-  if (!confirmedAt || !plan?.on || !dialedCode || dialedCode === plan.on) return null;
-  // Forward-all wins over every conditional code, so leaving it takes the off code first.
-  return { clearFirst: isForwardAllCode(dialedCode) && !plan.forwardsAll ? plan.off : null };
+/**
+ * Today's choice or code differs from what the last passed test was set up for: dial the new code once (office
+ * lines: change it in the phone company's website). Leaving every call for ring first takes the off code first,
+ * since forward-all wins over every conditional code. Never inferred from test timing.
+ */
+export function forwardingUpdate(plan: ForwardingPlan | null, mode: ForwardingMode, testedFor: TestedFor | null): { clearFirst: string | null } | null {
+  if (!plan || !testedFor || plan.family === "unknown") return null;
+  const choice = forwardingChoice(mode);
+  if (testedFor.mode === choice && testedFor.code === plan.on) return null;
+  return { clearFirst: testedFor.mode === "every-call" && choice === "ring-first" ? plan.off : null };
 }
 
 /** The owner settings form as plain values; the client posts the same names back. */

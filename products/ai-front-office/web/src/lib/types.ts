@@ -70,14 +70,16 @@ export interface ApiDashboard {
       /** The owner's mobile from signup, offered as the number customers call. */
       suggested: string | null
       /**
-       * Forwarding works, but today's settings need a new code: dial plan.on once (after clearFirst, if set).
-       * missed: the last test of that code reached Otto, but too fast or too slow for it, so it isn't on yet.
+       * Today's choice or code differs from what the last passed test was for: dial plan.on once (after clearFirst,
+       * the off code, when leaving every call). Stays until a test passes for the new choice.
        */
-      update: { clearFirst: string | null; missed: boolean } | null
-      /** The last test proved every call goes to Call Otto (a forward-all code is dialed in). */
+      update: { clearFirst: string | null } | null
+      /** Forwarding works and the last passed test was for every call. */
       everyCallOn: boolean
-      /** The last test proved plan.on itself is dialed in, so its ring time is real. */
+      /** Forwarding works and the last passed test was for today's choice and code, so its ring time is real. */
       codeApplied: boolean
+      /** Every call is picked, or the last passed test was for every call: all calls to the number may go to Otto. */
+      mayForwardAll: boolean
       /** How long "Ring my phone first" rings for this carrier (GSM timer, Verizon ~30 s), or null when unknown. */
       ringFirstSeconds?: number | null
     }

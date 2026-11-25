@@ -6,6 +6,7 @@ import { forwardingInstructions, NumberUnavailableError, TelnyxProvisioner } fro
 import { loadEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
 import { createRequestHandler } from "../src/http/app.js";
+import { dialsBackToOtto } from "../src/application/forwarding-loop.js";
 
 type Call = { url: string; method: string; body: Record<string, unknown> | null; key: string | undefined };
 
@@ -360,16 +361,16 @@ describe("owner one-tap go-live", () => {
       expect(telnyx.calls.filter((call) => call.url.includes("/number_lookup/"))).toHaveLength(1);
     });
 
-    it("new shops start on every call (**21); Ring my phone first is one code that covers no answer (15 seconds), Decline and no signal", async () => {
+    it("new shops start on every call (**21); Ring my phone first is one code that covers no answer (10 seconds), Decline and no signal", async () => {
       const { api, dashboard } = await liveShop({ carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } } });
       await api("/api/app/line/business-number", { number: "9415550177" });
       const start = (await dashboard()).line as unknown as { mode: string; business: { plan: { on: string; forwardsAll: boolean }; ringFirstSeconds: number | null } };
-      expect(start).toMatchObject({ mode: "always", business: { plan: { on: "**21*19415550123#", forwardsAll: true }, ringFirstSeconds: 15 } });
+      expect(start).toMatchObject({ mode: "always", business: { plan: { on: "**21*19415550123#", forwardsAll: true }, ringFirstSeconds: 10 } });
       expect((await api("/api/app/line/mode", { mode: "overflow" })).status).toBe(200);
       const { plan } = (await dashboard()).line.business;
-      expect(plan?.on).toBe("**004*19415550123**15#");
+      expect(plan?.on).toBe("**004*19415550123**10#");
       expect(plan?.off).toBe("##002#");
-      expect(plan?.dialLink).toBe("tel:%2A%2A004%2A19415550123%2A%2A15%23");
+      expect(plan?.dialLink).toBe("tel:%2A%2A004%2A19415550123%2A%2A10%23");
       // No phone-settings step up front any more.
       expect(plan).not.toHaveProperty("iphoneTip");
     });
@@ -618,7 +619,7 @@ describe("owner one-tap go-live", () => {
       const start = telnyx.calls.find((call) => call.url.endsWith("/actions/ai_assistant_start"));
       const startBody = start?.body as { assistant: { id: string; instructions: string }; greeting: string };
       expect(startBody.greeting).toContain("setup helper");
-      expect(startBody.assistant.instructions).toContain("**004*19415550123**15#");
+      expect(startBody.assistant.instructions).toContain("**004*19415550123**10#");
       expect(startBody.assistant.instructions).toContain("Screen Unknown Callers to Never");
       expect(startBody.assistant.instructions).toContain("Never invent a code");
 
@@ -628,8 +629,9 @@ describe("owner one-tap go-live", () => {
       expect(((await reply.json()) as { dynamic_variables: { call_access: string } }).dynamic_variables.call_access).toBe("forwarding_check");
       expect(await store.listCalls(account.tenantId, 10)).toHaveLength(0);
       expect((await dashboard()).line.confirmedAt).toBeTruthy();
-      // Not a test the owner started: it proves forwarding works, but no particular code.
-      expect(await store.getIntegrationSecret(account.tenantId, "forwarding", "dialed_code")).toBeNull();
+      // Not a test the owner started (and not a call to the business number): it proves forwarding works, but records
+      // no choice.
+      expect(await store.getIntegrationSecret(account.tenantId, "forwarding", "tested_for")).toBeNull();
 
       // A second setup call reuses the one setup assistant.
       expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
@@ -646,66 +648,69 @@ describe("owner one-tap go-live", () => {
       type Line = { mode: string; business: { plan: { on: string; forwardsAll: boolean; ringSeconds: number | null } | null; update: { clearFirst: string | null } | null }; check: { status: string }; confirmedAt: string | null };
       const line = async (made: Awaited<ReturnType<typeof liveShop>>) => ((await (await fetch(`${made.baseUrl}/api/app/dashboard`, { headers: { cookie: made.cookie } })).json()) as { line: Line }).line;
 
-      it("Let Otto answer every call: switches to forward-all (CSRF-checked, saved), shows **21, and the test passes at once", async () => {
+      const testedFor = async (made: Awaited<ReturnType<typeof liveShop>>) => JSON.parse(await made.store.getIntegrationSecret(made.account.tenantId, "forwarding", "tested_for") ?? "null") as { mode: string; code: string | null } | null;
+      const helpDials = (made: Awaited<ReturnType<typeof liveShop>>) => made.telnyx.calls.filter((call) => call.url.endsWith("/v2/calls") && Buffer.from(String((call.body as { client_state?: string }).client_state ?? ""), "base64").toString().startsWith("setup-help:"));
+      const later = (made: Awaited<ReturnType<typeof liveShop>>, seconds: number) => { made.clock.at = new Date(made.clock.at.getTime() + seconds * 1_000); };
+
+      it("Let Otto answer every call: switches to forward-all (CSRF-checked, saved, pushed to the live assistant), shows **21, and the test passes at once", async () => {
         const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } }, ringFirst: true });
-        const { api, store, account, baseUrl, cookie } = made;
+        const { api, store, account, baseUrl, cookie, telnyx } = made;
         await api("/api/app/line/business-number", { number: "9415550177" });
         const forged = await fetch(`${baseUrl}/api/app/line/mode`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ mode: "always" }) });
         expect(forged.status).toBe(403);
         expect((await api("/api/app/line/mode", { mode: "after_hours" })).status).toBe(400);
         expect((await store.getConfig(account.tenantId)).operationMode).not.toBe("always");
 
+        // Like saving settings: the live assistant's config changes too, not just the stored one.
+        const assistantUpdates = () => telnyx.calls.filter((call) => call.method === "POST" && /\/v2\/ai\/assistants\/[^/]+$/.test(call.url));
+        const before = assistantUpdates().length;
         expect((await api("/api/app/line/mode", { mode: "always" })).status).toBe(200);
         expect((await store.getConfig(account.tenantId)).operationMode).toBe("always");
-        expect(await line(made)).toMatchObject({ mode: "always", business: { plan: { on: "**21*19415550123#", forwardsAll: true, ringSeconds: null }, update: null } });
+        expect(assistantUpdates()).toHaveLength(before + 1);
+        expect(await line(made)).toMatchObject({ mode: "always", business: { plan: { on: "**21*19415550123#", forwardsAll: true, ringSeconds: null }, update: null, mayForwardAll: true } });
 
         // Test again: with every call forwarded, our test call lands on Call Otto right away.
         await api("/api/app/line/check");
         expect((await forwarded(made, "always-check")).status).toBe(200);
         expect((await line(made)).check.status).toBe("passed");
-        expect(await store.getIntegrationSecret(account.tenantId, "forwarding", "dialed_code")).toBe("**21*19415550123#");
+        expect(await testedFor(made)).toMatchObject({ mode: "every-call", code: "**21*19415550123#" });
+        expect((await line(made)).business).toMatchObject({ everyCallOn: true, codeApplied: true, mayForwardAll: true });
 
-        expect((await line(made)).business).toMatchObject({ everyCallOn: true, codeApplied: true });
-
-        // Back to "ring me first": the conditional code, after clearing forward-all.
+        // Back to "ring me first": turn forwarding off first, then the ring-first code. Pushed to the assistant too.
         expect((await api("/api/app/line/mode", { mode: "overflow" })).status).toBe(200);
-        expect((await line(made)).business).toMatchObject({ plan: { on: "**004*19415550123**15#", forwardsAll: false }, update: { clearFirst: "##002#", missed: false }, everyCallOn: true });
+        expect(assistantUpdates()).toHaveLength(before + 2);
+        expect((await line(made)).business).toMatchObject({ plan: { on: "**004*19415550123**10#", forwardsAll: false }, update: { clearFirst: "##002#" }, everyCallOn: true, mayForwardAll: true });
 
-        // Tested without dialing anything: forward-all still sends the test straight to Otto. That proves nothing
-        // about the new code, so "Dial this once" stays, and the card still says every call goes to Otto.
-        made.clock.at = new Date(made.clock.at.getTime() + 60_000);
+        // A passing test records what they picked when they started it, however long it took: the owner's choice is
+        // the source of truth, never the timing.
+        later(made, 60);
         await api("/api/app/line/check");
-        made.clock.at = new Date(made.clock.at.getTime() + 2_000);
-        await forwarded(made, "still-all");
-        expect(await store.getIntegrationSecret(account.tenantId, "forwarding", "dialed_code")).toBe("**21*19415550123#");
-        expect((await line(made)).business).toMatchObject({ update: { clearFirst: "##002#", missed: true }, everyCallOn: true, codeApplied: false });
-
-        // Dialed ##002# and the new code: the phone rings first, they tap Decline, and Otto gets it.
-        made.clock.at = new Date(made.clock.at.getTime() + 60_000);
-        await api("/api/app/line/check");
-        made.clock.at = new Date(made.clock.at.getTime() + 9_000);
+        later(made, 2);
         await forwarded(made, "ring-first");
-        expect(await store.getIntegrationSecret(account.tenantId, "forwarding", "dialed_code")).toBe("**004*19415550123**15#");
-        expect((await line(made)).business).toMatchObject({ update: null, everyCallOn: false, codeApplied: true });
+        expect(await testedFor(made)).toMatchObject({ mode: "ring-first", code: "**004*19415550123**10#" });
+        expect((await line(made)).business).toMatchObject({ update: null, everyCallOn: false, codeApplied: true, mayForwardAll: false });
       });
 
-      it("Picked every call but didn't dial it: a test where the phone rang first never claims every call is on", async () => {
+      it("'Dial this once' stays up until a test passes for the new choice", async () => {
         const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } }, ringFirst: true });
-        const { api, store, account } = made;
+        const { api } = made;
         await api("/api/app/line/business-number", { number: "9415550177" });
         await api("/api/app/line/check");
         await forwarded(made, "first-check");
-        expect(await store.getIntegrationSecret(account.tenantId, "forwarding", "dialed_code")).toBe("**004*19415550123**15#");
+        expect(await testedFor(made)).toMatchObject({ mode: "ring-first", code: "**004*19415550123**10#" });
         expect((await api("/api/app/line/mode", { mode: "always" })).status).toBe(200);
-        expect((await line(made)).business).toMatchObject({ plan: { on: "**21*19415550123#" }, update: { clearFirst: null, missed: false }, everyCallOn: false });
-        // The old code still forwards on Decline, 14 seconds in: that's the phone ringing, not **21.
-        made.clock.at = new Date(made.clock.at.getTime() + 60_000);
+        expect((await line(made)).business).toMatchObject({ plan: { on: "**21*19415550123#" }, update: { clearFirst: null }, everyCallOn: false, mayForwardAll: true });
+        // A test that never reaches Otto changes nothing.
+        later(made, 60);
         await api("/api/app/line/check");
-        made.clock.at = new Date(made.clock.at.getTime() + 14_000);
-        await forwarded(made, "rang-first");
-        expect((await line(made)).check.status).toBe("passed");
-        expect(await store.getIntegrationSecret(account.tenantId, "forwarding", "dialed_code")).toBe("**004*19415550123**15#");
-        expect((await line(made)).business).toMatchObject({ update: { clearFirst: null, missed: true }, everyCallOn: false, codeApplied: false });
+        later(made, 120);
+        expect((await line(made)).check.status).toBe("not_reached");
+        expect((await line(made)).business).toMatchObject({ update: { clearFirst: null }, everyCallOn: false });
+        // One that passes, for every call: applied.
+        await api("/api/app/line/check");
+        await forwarded(made, "all-check");
+        expect(await testedFor(made)).toMatchObject({ mode: "every-call", code: "**21*19415550123#" });
+        expect((await line(made)).business).toMatchObject({ update: null, everyCallOn: true, codeApplied: true });
       });
 
       it("after-hours shops that try every call and change their mind go back to after hours", async () => {
@@ -730,93 +735,149 @@ describe("owner one-tap go-live", () => {
         await forwarded(made, "ring-check");
         expect((await line(made)).business.update).toBeNull();
         const settings = await (await fetch(`${baseUrl}/api/app/settings`, { headers: { cookie } })).json() as { csrf: string; values: Record<string, string | boolean> };
-        expect(settings.values.answerAfterRings).toBe("2.5");
+        // New shops ring 10 seconds first.
+        expect(settings.values.answerAfterRings).toBe("2");
         const put = (answerAfterRings: string) => fetch(`${baseUrl}/api/app/settings`, { method: "PUT", headers: { cookie, "content-type": "application/json", "x-csrf-token": settings.csrf }, body: JSON.stringify({ ...settings.values, answerAfterRings }) });
         expect((await put("2.25")).status).toBe(400);
-        // A test started before the change proves the code on screen then, never the one today's settings call for.
-        made.clock.at = new Date(made.clock.at.getTime() + 60_000);
+        // A test started before the change records the code on screen then, never the one today's settings call for.
+        later(made, 60);
         await api("/api/app/line/check");
         expect((await put("4")).status).toBe(200);
         await forwarded(made, "ring-check-old");
-        expect(await made.store.getIntegrationSecret(made.account.tenantId, "forwarding", "dialed_code")).toBe("**004*19415550123**15#");
-        expect((await line(made)).business).toMatchObject({ plan: { on: "**004*19415550123**25#", ringSeconds: 25 }, update: { clearFirst: null, missed: false }, codeApplied: false });
+        expect(await testedFor(made)).toMatchObject({ mode: "ring-first", code: "**004*19415550123**10#" });
+        expect((await line(made)).business).toMatchObject({ plan: { on: "**004*19415550123**25#", ringSeconds: 25 }, update: { clearFirst: null }, codeApplied: false });
         // Dialed and tested: nothing left to apply.
-        made.clock.at = new Date(made.clock.at.getTime() + 60_000);
+        later(made, 60);
         await api("/api/app/line/check");
         await forwarded(made, "ring-check-2");
         expect((await line(made)).business).toMatchObject({ update: null, codeApplied: true });
       });
 
-      it("Set it up with me and urgent calls skip the business number between leaving every call and dialing the off code", async () => {
-        const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection", TELNYX_TEMPLATE_ASSISTANT_ID: "template-assistant" }, carriers: { "+19415550199": { name: "T-Mobile USA", type: "mobile" } } });
-        const { api, store, account, telnyx } = made;
-        const helpDials = () => telnyx.calls.filter((call) => call.url.endsWith("/v2/calls") && Buffer.from(String((call.body as { client_state?: string }).client_state ?? ""), "base64").toString().startsWith("setup-help:"));
+      it("a new business number clears what the old one proved, so it gets the setup steps again", async () => {
+        const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" }, "+19415550188": { name: "T-Mobile USA", type: "mobile" } } });
+        const { api, store, account } = made;
+        await api("/api/app/line/business-number", { number: "9415550177" });
+        await api("/api/app/line/check");
+        await forwarded(made, "old-number");
+        expect((await line(made)).confirmedAt).toBeTruthy();
+        expect(await testedFor(made)).toMatchObject({ mode: "every-call" });
+        // Saving the same number again keeps it all.
+        await api("/api/app/line/business-number", { number: "941-555-0177" });
+        expect((await line(made)).confirmedAt).toBeTruthy();
+        await api("/api/app/line/business-number", { number: "9415550188" });
+        expect(await line(made)).toMatchObject({ confirmedAt: null, check: { status: "idle" }, business: { update: null, everyCallOn: false } });
+        for (const key of ["confirmed_at", "check", "tested_for"]) expect(await store.getIntegrationSecret(account.tenantId, "forwarding", key)).toBeNull();
+      });
+
+      it("office lines: back to ring first keeps Otto off the business number until a ring-first test passes", async () => {
+        const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection", TELNYX_TEMPLATE_ASSISTANT_ID: "template-assistant" }, carriers: { "+19415550199": { name: "Comcast Business", type: "fixed line" } } });
+        const { api, store, account } = made;
         await api("/api/app/line/business-number", { number: "9415550199" });
-        await api("/api/app/line/mode", { mode: "always" });
+        await api("/api/app/line/check");
+        await forwarded(made, "office-all");
+        expect(await testedFor(made)).toEqual(expect.objectContaining({ mode: "every-call", code: null }));
+        await api("/api/app/line/mode", { mode: "overflow" });
+        expect((await line(made)).business).toMatchObject({ plan: { on: null }, update: { clearFirst: null }, mayForwardAll: true });
+        expect(await dialsBackToOtto(store, account.tenantId, "+19415550199")).toBe(true);
+        expect((await api("/api/app/line/help", { device: "other" })).status).toBe(200);
+        expect(helpDials(made)).toHaveLength(0);
+        later(made, 60);
+        await api("/api/app/line/check");
+        await forwarded(made, "office-ring");
+        expect(await dialsBackToOtto(store, account.tenantId, "+19415550199")).toBe(false);
+        expect((await line(made)).business).toMatchObject({ update: null, mayForwardAll: false });
+      });
+
+      it("Set it up with me and urgent calls skip the business number while every call is picked or was last tested", async () => {
+        const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection", TELNYX_TEMPLATE_ASSISTANT_ID: "template-assistant" }, carriers: { "+19415550199": { name: "T-Mobile USA", type: "mobile" } } });
+        const { api, store, account } = made;
+        // The owner's only number is the business number, and every call is picked (the default): never rung.
+        await api("/api/app/line/business-number", { number: "9415550199" });
+        expect((await store.getConfig(account.tenantId)).operationMode).toBe("always");
+        expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+        expect(helpDials(made)).toHaveLength(0);
+        expect(await dialsBackToOtto(store, account.tenantId, "+19415550199")).toBe(true);
         await api("/api/app/line/check");
         await forwarded(made, "all-on");
-        expect(await store.getIntegrationSecret(account.tenantId, "forwarding", "dialed_code")).toBe("**21*19415550123#");
-        // Back to "ring me first", ##002# not dialed yet: the phone still sends everything to Otto.
+        expect(await testedFor(made)).toMatchObject({ mode: "every-call" });
+        // Back to "ring me first", no ring-first test yet: the phone may still send everything to Otto.
         await api("/api/app/line/mode", { mode: "overflow" });
         expect((await store.getConfig(account.tenantId)).operationMode).toBe("overflow");
         expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
-        expect(helpDials()).toHaveLength(0);
-        // Dialed and tested (the phone rang first): now the helper may ring it.
-        made.clock.at = new Date(made.clock.at.getTime() + 60_000);
+        expect(helpDials(made)).toHaveLength(0);
+        expect(await dialsBackToOtto(store, account.tenantId, "+19415550199")).toBe(true);
+        // A ring-first test passed: now the helper and urgent calls may ring it.
+        later(made, 60);
         await api("/api/app/line/check");
-        made.clock.at = new Date(made.clock.at.getTime() + 9_000);
         await forwarded(made, "ring-first-on");
-        expect(await store.getIntegrationSecret(account.tenantId, "forwarding", "dialed_code")).toBe("**004*19415550123**15#");
+        expect(await testedFor(made)).toMatchObject({ mode: "ring-first", code: "**004*19415550123**10#" });
+        expect(await dialsBackToOtto(store, account.tenantId, "+19415550199")).toBe(false);
         expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
-        expect(helpDials().map((call) => (call.body as { to: string }).to)).toEqual(["+19415550199"]);
+        expect(helpDials(made).map((call) => (call.body as { to: string }).to)).toEqual(["+19415550199"]);
       });
 
-      it("Set it up with me rings the business number until a test proves it forwards every call; a call that loops back ends at once", async () => {
-        const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection", TELNYX_TEMPLATE_ASSISTANT_ID: "template-assistant" }, carriers: { "+19415550199": { name: "T-Mobile USA", type: "mobile" }, "+19415550177": { name: "T-Mobile USA", type: "mobile" } } });
-        const { api, store, account, telnyx, baseUrl, privateKey, clock } = made;
-        expect(await store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")).toBe("+19415550199");
-        const helpDials = () => telnyx.calls.filter((call) => call.url.endsWith("/v2/calls") && Buffer.from(String((call.body as { client_state?: string }).client_state ?? ""), "base64").toString().startsWith("setup-help:"));
-        const hangups = () => telnyx.calls.filter((call) => call.url.endsWith("/v2/calls/v3%3Acheck-call/actions/hangup")).length;
-        const arrives = (id: string, from: string) => {
-          const init = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id, occurred_at: clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: from, call_control_id: `v3:${id}`, assistant_id: "assistant-1" } } });
-          return fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, privateKey, clock.now()), body: init });
-        };
-        const setupCall = async () => JSON.parse(await store.getIntegrationSecret(account.tenantId, "forwarding", "setup_call") ?? "null") as { endedAt?: string; hangupCause?: string } | null;
-        // The owner's only number is the business number. Every call is picked (the default), nothing proven yet:
-        // the helper rings it, since nothing says the code is on.
-        await api("/api/app/line/business-number", { number: "9415550199" });
-        await api("/api/app/line/mode", { mode: "always" });
-        expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
-        expect(helpDials().map((call) => (call.body as { to: string }).to)).toEqual(["+19415550199"]);
-        // The code was on after all: the helper's call lands on Otto. Otto ends it (no Otto talking to Otto, no call
-        // record), hangs up the helper's leg, and counts it as forwarding working.
-        const reply = await arrives("help-loop", "+15555550199");
-        expect(((await reply.json()) as { dynamic_variables: { call_access: string } }).dynamic_variables.call_access).toBe("forwarding_check");
-        expect(await setupCall()).toMatchObject({ hangupCause: "forwarded_to_otto" });
-        expect(hangups()).toBe(1);
-        expect((await line(made)).confirmedAt).toBeTruthy();
-        expect(await store.listCalls(account.tenantId, 10)).toHaveLength(0);
-        // Some carriers show the business number as the caller: the same.
-        clock.at = new Date(clock.at.getTime() + 60_000);
-        expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
-        expect(helpDials()).toHaveLength(2);
-        const shown = await arrives("help-loop-2", "+19415550199");
-        expect(((await shown.json()) as { dynamic_variables: { call_access: string } }).dynamic_variables.call_access).toBe("forwarding_check");
-        expect(hangups()).toBe(2);
-        expect(await store.listCalls(account.tenantId, 10)).toHaveLength(0);
-        expect(((await line(made)) as unknown as { helpCall: { endedAt: string | null } }).helpCall.endedAt).toBeTruthy();
-        // A test proves every call is forwarded: never ring that number again.
-        clock.at = new Date(clock.at.getTime() + 60_000);
-        await api("/api/app/line/check");
-        await forwarded(made, "all-on");
-        expect(await store.getIntegrationSecret(account.tenantId, "forwarding", "dialed_code")).toBe("**21*19415550123#");
-        expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
-        expect(helpDials()).toHaveLength(2);
-        expect((await line(made) as unknown as { helpCall: unknown }).helpCall ?? null).toBeNull();
-        // A different business number: the owner's mobile is separate, so the helper calls it.
-        await api("/api/app/line/business-number", { number: "9415550177" });
-        expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
-        expect(helpDials().map((call) => (call.body as { to: string }).to)).toEqual(["+19415550199", "+19415550199", "+19415550199"]);
+      describe("the setup helper's call coming back to Otto", () => {
+        const env = { TELNYX_CHECK_CONNECTION_ID: "check-connection", TELNYX_TEMPLATE_ASSISTANT_ID: "template-assistant", RESEND_API_KEY: "re_synthetic", RESEND_FROM_EMAIL: "alerts@front-office.example" };
+        /** Ring first picked, the owner's only number is the business number, and the helper is ringing it now. */
+        async function ringing() {
+          const made = await liveShop({ env, carriers: { "+19415550199": { name: "T-Mobile USA", type: "mobile" } }, ringFirst: true });
+          await made.api("/api/app/line/business-number", { number: "9415550199" });
+          expect((await made.api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+          expect(helpDials(made).map((call) => (call.body as { to: string }).to)).toEqual(["+19415550199"]);
+          const arrives = async (id: string, from: string) => {
+            const init = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id, occurred_at: made.clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: from, call_control_id: `v3:${id}`, assistant_id: "assistant-1" } } });
+            const reply = await fetch(`${made.baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, made.privateKey, made.clock.now()), body: init });
+            return ((await reply.json()) as { dynamic_variables: { call_access: string } }).dynamic_variables.call_access;
+          };
+          const setupCall = async () => JSON.parse(await made.store.getIntegrationSecret(made.account.tenantId, "forwarding", "setup_call") ?? "null") as { endedAt?: string; hangupCause?: string } | null;
+          const hangups = () => made.telnyx.calls.filter((call) => call.url.endsWith("/v2/calls/v3%3Acheck-call/actions/hangup")).length;
+          const founderEmails = () => [...made.store.notifications.values()].filter((item) => item.senderRef === "founder");
+          return { ...made, arrives, setupCall, hangups, founderEmails };
+        }
+
+        it("back from our own number in seconds: the number forwards everything. Ended, recorded, and never dialed again", async () => {
+          const made = await ringing();
+          later(made, 3);
+          expect(await made.arrives("help-loop", "+15555550199")).toBe("forwarding_check");
+          expect(await made.setupCall()).toMatchObject({ hangupCause: "forwarded_to_otto" });
+          expect(made.hangups()).toBe(1);
+          expect(await made.store.listCalls(made.account.tenantId, 10)).toHaveLength(0);
+          expect(made.founderEmails()).toHaveLength(0);
+          // Recorded like an every-call test: the card says to turn forwarding off first, then dial ring first.
+          expect(await testedFor(made)).toMatchObject({ mode: "every-call", code: "**21*19415550123#" });
+          expect((await line(made)).business).toMatchObject({ update: { clearFirst: "##002#" }, mayForwardAll: true });
+          // "Have Otto call me again" never dials it again.
+          later(made, 60);
+          expect((await made.api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+          expect(helpDials(made)).toHaveLength(1);
+        });
+
+        it("back from our own number after the phone rang: a missed call. Ended so Otto never talks to Otto, and Brock emails", async () => {
+          const made = await ringing();
+          later(made, 14);
+          expect(await made.arrives("help-missed", "+15555550199")).toBe("forwarding_check");
+          expect(await made.setupCall()).toMatchObject({ hangupCause: "no_answer" });
+          expect(made.hangups()).toBe(1);
+          expect(await testedFor(made)).toBeNull();
+          expect((await line(made)).business).toMatchObject({ mayForwardAll: false });
+          expect(made.founderEmails()).toHaveLength(1);
+        });
+
+        it("a call from the business number itself is a real call: never ends the helper, never proves forwarding", async () => {
+          const made = await ringing();
+          later(made, 3);
+          // The owner dialing their Call Otto number from that phone (or a genuine missed call showing it).
+          expect(await made.arrives("owner-dials-otto", "+19415550199")).toBe("allowed");
+          expect(await made.setupCall()).not.toHaveProperty("endedAt");
+          expect(made.hangups()).toBe(0);
+          expect((await line(made)).confirmedAt).toBeNull();
+          expect(await testedFor(made)).toBeNull();
+          // With our automatic test open, the same caller ID is the test coming through (some carriers show it).
+          await made.api("/api/app/line/check");
+          expect(await made.arrives("check-shows-business", "+19415550199")).toBe("forwarding_check");
+          expect((await line(made)).confirmedAt).toBeTruthy();
+          expect(await testedFor(made)).toMatchObject({ mode: "ring-first" });
+        });
       });
     });
 

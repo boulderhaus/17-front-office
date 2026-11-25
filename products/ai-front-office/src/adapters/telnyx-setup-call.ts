@@ -33,6 +33,11 @@ export interface SetupCallFacts {
   ringFirstSeconds?: number | null;
   /** Their last test call was picked up by the phone itself (screening, Live Voicemail, a person). */
   phoneAnswersTest?: boolean;
+  /**
+   * Their last passed test was for every call, so forward-all may still be on: for Ring my phone first they turn
+   * forwarding off first (offCode, or the website for office lines), then set ring first. Forward-all wins otherwise.
+   */
+  everyCallOn?: boolean;
 }
 
 export function setupHelpClientState(tenantId: string): string {
@@ -82,17 +87,21 @@ export function setupInstructions(facts: SetupCallFacts): string {
     steps.push(`Ask which they want, and explain each in one sentence, every call first. Otto answers every call: no phone settings to change, Otto answers right away, and their phone won't ring for calls to this number (calls they make and texts work like before). Ring my phone first: their phone rings${ringFor ? ` for ${ringFor}` : ""} first and Otto takes the calls they miss or decline. ${facts.device === "android" ? "On Android there's nothing else to change." : iphoneFirst} Suggest every call unless they want their phone to ring. Their screen shows both choices at the top, and ${picked} is picked now; if they want the other one, they tap it and the code on screen changes to match.`);
     const codes = [
       everyCallCode ? `For Otto answers every call, the code is ${say(everyCallCode)}.` : "",
-      ringFirstCode ? `For Ring my phone first, the code is ${say(ringFirstCode)}.` : "",
+      ringFirstCode
+        ? facts.everyCallOn && facts.offCode
+          ? `For Ring my phone first, every call is on now, so they first turn forwarding off: dial ${say(facts.offCode)} and press Call. Then they dial the ring-first code, ${say(ringFirstCode)}.`
+          : `For Ring my phone first, the code is ${say(ringFirstCode)}.`
+        : "",
     ].filter(Boolean).join(" ");
     steps.push(`${codes} They dial the one for their choice on the business phone (it's in the yellow box on their screen), then press Call.`);
-    if (facts.device !== "android") steps.push("On iPhone: tap Copy code on their screen, open Phone, then Keypad, touch and hold above the numbers, tap Paste, then tap Call right away. Or type it in. iPhones block forwarding codes sent as links, so never offer to text them a link. If they see \"Call Forwarding Link Blocked\", tell them to close the Phone app and type the code.");
+    if (facts.device !== "android") steps.push("On iPhone: tap Copy code & open Phone on their screen (if the Phone app doesn't open, they open Phone, then Keypad), touch and hold above the numbers, tap Paste, then tap Call right away. Or type it in. iPhones block forwarding codes sent as links, so never offer to text them a link. If they see \"Call Forwarding Link Blocked\", tell them to close the Phone app and type the code.");
     if (facts.device !== "iphone") steps.push("On Android: they tap Tap to dial on their screen. The Phone app opens with the code filled in, and they tap Call. Android may ask them to confirm; that's expected.");
     if (facts.confirm) steps.push(`What they should see or hear: ${facts.confirm}`);
     steps.push(`They can't dial the code while on this call. So once they understand it, tell them to hang up, dial it, then come back to the Call Otto screen and tap Call me now (or Test again). With every call, their phone won't ring, and they'll see a green check in a few seconds. With ring first, they tap Decline when it rings, and they'll see a green check.${facts.ringFirstSeconds ? ` No Decline button? They let it ring (about ${facts.ringFirstSeconds} seconds).` : " No Decline button? They let it ring until it stops."}`);
     steps.push(`${facts.phoneAnswersTest ? "Their last test: their phone picked up our test call by itself. Start with this. " : ""}If the screen says their phone picked up the test itself (Live Voicemail or call screening), carrier forwarding never got a chance. Two fixes: switch to Otto answers every call (tap it on the screen, then dial the new code${everyCallCode ? `, ${say(everyCallCode)}` : ""}), or keep ring first and turn off the phone's own answering, then test again. On iPhone that's Live Voicemail in Settings, then Apps, then Phone, and Screen Unknown Callers set to Never. On Android, automatic call screening in the Phone app's settings.`);
     if (facts.offCode) steps.push(`To turn forwarding off later, they dial ${say(facts.offCode)} on the business phone. With every call, they do that before they ever pause Call Otto, or calls to this number won't go through.`);
   } else if (facts.family === "office") {
-    steps.push(`Their business number is an office or landline phone. Ask which they want, one sentence each, every call first: Otto answers every call (their phones won't ring for this number), or Ring my phone first (Otto takes the calls they miss). Suggest every call unless they want their phones to ring. Forwarding is set in their phone company's website or app: find Call Forwarding, then forward all calls (for every call) or calls not answered, sometimes called no answer (for ring first), to their Call Otto number, ${pretty(facts.ottoNumber)}. You can't see their portal: if they get stuck, say Brock, our founder, will email them a link to book a 10-minute call.`);
+    steps.push(`Their business number is an office or landline phone. Ask which they want, one sentence each, every call first: Otto answers every call (their phones won't ring for this number), or Ring my phone first (Otto takes the calls they miss). Suggest every call unless they want their phones to ring. Forwarding is set in their phone company's website or app: find Call Forwarding, then forward all calls (for every call) or calls not answered, sometimes called no answer (for ring first), to their Call Otto number, ${pretty(facts.ottoNumber)}.${facts.everyCallOn ? " Every call is on now: for Ring my phone first, they turn off forward all calls there first, then set calls not answered." : ""} You can't see their portal: if they get stuck, say Brock, our founder, will email them a link to book a 10-minute call.`);
   } else {
     steps.push("We don't know their phone company yet. Ask which company they pay for this number, then tell them to pick it on the Call Otto screen; the right code shows up there. Don't make up a code.");
   }
