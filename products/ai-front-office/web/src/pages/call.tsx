@@ -89,7 +89,7 @@ export function CallPage() {
       {/* Back to the list that opened this call (one step back, so it keeps its place), else to Calls: never out of the app.
           Calls replaces the call in history, so Back from Calls doesn't return to it. */}
       <Button variant="ghost" className="-ml-2 h-11 w-fit text-base max-lg:hidden" onClick={() => (back.history ? navigate(-1) : navigate(back.to, { replace: true }))}>← {back.label}</Button>
-      <CallHeader call={call} tone={badge.tone} label={badge.label} />
+      <CallHeader page call={call} tone={badge.tone} label={badge.label} />
       <SafetyNote call={call} />
       {spam && <SpamNote />}
       <ActionBar call={call} extra={spam ? [] : tiles(task, () => detail.reload())} reachNote={<CallBackNote call={call} />} />
@@ -120,7 +120,7 @@ export function CallPage() {
         <details className="group rounded-xl border bg-card px-4">
           <summary className="flex min-h-12 cursor-pointer items-center text-[15px] font-semibold text-red-700">Delete this call record</summary>
           <div className="grid gap-3 pb-4">
-            <p className="text-sm text-muted-foreground">This permanently removes the call record, transcript, recording, callback, tool events, notifications, and any customer record whose latest call is this one. Appointments already on your calendar stay on your calendar.</p>
+            <p className="text-sm text-muted-foreground">This permanently removes the call record, transcript, recording, callback, alerts, and any customer record whose latest call is this one. Appointments already on your calendar stay on your calendar.</p>
             <Label className="flex min-h-11 items-center gap-3 text-[15px] font-medium"><Checkbox checked={confirm} onCheckedChange={(value) => setConfirm(value === true)} className="size-5" />I understand this can’t be undone.</Label>
             <Button size="tap" variant="destructive" className="w-full bg-red-600 text-white hover:bg-red-700 md:w-auto" disabled={!confirm || deleting} onClick={() => void remove()}>{deleting ? "Deleting…" : "Delete permanently"}</Button>
           </div>

@@ -1,6 +1,6 @@
-import { useState, type ReactNode } from "react"
-import { Link } from "react-router-dom"
-import { CheckCircle2, Download, ExternalLink, LogOut } from "lucide-react"
+import { useEffect, useState, type ReactNode } from "react"
+import { Link, useLocation, useSearchParams } from "react-router-dom"
+import { CheckCircle2, ChevronRight, Download, Loader2, LogOut } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -14,13 +14,18 @@ import { useMode } from "@/lib/mode"
 import type { PlanId } from "@/lib/types"
 import { ringChoicesWith, VERIZON_RING_LINE } from "@/lib/dial"
 import { pauseHint } from "@/lib/pause-hint"
+import { recordingHint } from "@/lib/recording-hint"
+import { SMS_CONSENT_END, SMS_CONSENT_JOIN, SMS_CONSENT_LEAD, SMS_CONSENT_PRIVACY, SMS_CONSENT_TERMS } from "@/lib/sms-consent"
+import { forwardingOn } from "@/lib/line-status"
+import type { ApiSettings } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { useSettings } from "./settings"
 
 const ZONES: Array<[string, string]> = [["America/New_York", "Eastern"], ["America/Chicago", "Central"], ["America/Denver", "Mountain"], ["America/Phoenix", "Arizona"], ["America/Los_Angeles", "Pacific"], ["America/Anchorage", "Alaska"], ["Pacific/Honolulu", "Hawaii"]]
-const selectClass = "h-12 w-full rounded-lg border border-input bg-card px-3 text-base outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 lg:h-10 lg:text-[15px]"
-const fieldClass = "h-12 bg-card text-base lg:h-10 lg:text-[15px]"
-const areaClass = "bg-card text-base lg:text-[15px]"
+/** Fields read easily (DESIGN): 17px, weight 500, dark ink on white, 48px tall, a solid ink focus edge. */
+const selectClass = "h-12 w-full rounded-lg border border-input bg-card px-3 text-[17px] font-medium text-foreground outline-none focus-visible:border-brand-ink focus-visible:ring-[3px] focus-visible:ring-brand-ink/20"
+const fieldClass = "h-12 bg-card"
+const areaClass = "bg-card"
 /** Card actions: full width on a phone; on a computer every button in a card is the same width, left-aligned. */
 const actionClass = "w-full sm:w-60"
 // The server accepts any whole percent from 50 to 95; 75 (the default) and 90 are the easy picks.
@@ -29,9 +34,9 @@ const OTHER_ALERT_PERCENTS = [50, 55, 60, 65, 70, 80, 85, 95]
 const unique = (list: number[]) => list.filter((value, index, all) => all.indexOf(value) === index).sort((left, right) => left - right)
 
 /** One topic, one card. */
-export function SettingsCard({ title, description, children, danger }: { title: string; description?: ReactNode; children: ReactNode; danger?: boolean }) {
+export function SettingsCard({ title, description, children, danger, id }: { title: string; description?: ReactNode; children: ReactNode; danger?: boolean; id?: string }) {
   return (
-    <section className={cn("grid gap-4 rounded-xl border bg-card p-4 md:p-5", danger && "border-red-200")}>
+    <section id={id} className={cn("grid scroll-mt-24 gap-4 rounded-xl border bg-card p-4 md:p-5", danger && "border-red-200")}>
       <header className="grid gap-1">
         <h3 className={cn("text-[17px] font-semibold", danger && "text-red-700")}>{title}</h3>
         {description && <p className="text-[15px] text-muted-foreground">{description}</p>}
@@ -71,12 +76,22 @@ function Pair({ children }: { children: ReactNode }) {
 /* ---------------------------------------------------------------- Business details */
 
 export function BusinessSection() {
-  const { text, flag, set, bind } = useSettings()
+  const { text, flag, set, bind, settings } = useSettings()
   const zones = ZONES.some(([zone]) => zone === text("timezone")) ? ZONES : [[text("timezone"), text("timezone")] as [string, string], ...ZONES]
+  // Renamed the business while the greeting still says the old name: offer to change it there too, in one tap.
+  const savedName = String(settings.values.businessName ?? "").trim()
+  const newName = text("businessName").trim()
+  const staleGreeting = savedName.length > 1 && newName.length > 1 && newName !== savedName && text("greeting").includes(savedName)
   return (
     <>
       <SettingsCard title="Your business">
         <Field label="Business name"><Input required className={fieldClass} {...bind("businessName")} /></Field>
+        {staleGreeting && (
+          <p role="status" className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-brand-ink/15 bg-accent px-3 py-2 text-sm text-accent-foreground">
+            <span>Your greeting still says “{savedName}”.</span>
+            <button type="button" className="inline-flex min-h-11 items-center font-semibold underline underline-offset-4" onClick={() => set("greeting", text("greeting").split(savedName).join(newName))}>Use “{newName}” there too</button>
+          </p>
+        )}
         <Pair>
           <Field label="Time zone"><select className={selectClass} {...bind("timezone")}>{zones.map(([zone, label]) => <option key={zone} value={zone}>{label}</option>)}</select></Field>
           <Field label="Email callers can write to"><Input type="email" className={fieldClass} placeholder="office@yourshop.com" {...bind("supportEmail")} /></Field>
@@ -85,7 +100,7 @@ export function BusinessSection() {
       <SettingsCard title="Greeting">
         <Field label="What Call Otto says when it picks up"><Textarea required rows={2} className={areaClass} {...bind("greeting")} /></Field>
         <ToggleRow id="recordingNotice" label="Recording notice when a call is put through to you" checked={flag("recordingNotice")} onChange={(value) => set("recordingNotice", value)}
-          hint={flag("recordingNotice") ? "On: you get a transcript only, no audio. Callers put through to you hear the notice first." : "Off: calls are saved with audio and no notice is played. Your state’s rules decide which is right."} />
+          hint={recordingHint(flag("recordingNotice"), text("serviceAreaTerms"))} />
       </SettingsCard>
       <SettingsCard title="Where you work" description="Call Otto checks each caller’s address against this list.">
         <Field label="Cities and ZIP codes" hint="A city with its state, like “Sarasota FL”, or a 5-digit ZIP."><Textarea rows={2} placeholder="Sarasota FL, 34236" className={areaClass} {...bind("serviceAreaTerms")} /></Field>
@@ -103,11 +118,16 @@ export function BusinessSection() {
 /* ---------------------------------------------------------------- How calls are answered */
 
 export function AnsweringSection() {
-  const { text, flag, set, bind, settings } = useSettings()
+  const { text, set, bind, settings } = useSettings()
   const { dashboard } = useMode()
   // Said when they pick Paused, and only when every call may go to Otto (the saved choice or the last passed test).
   const business = dashboard?.line.business
   const hint = pauseHint({ active: settings.status === "active", paused: text("serviceState") === "paused", mayForwardAll: Boolean(business?.mayForwardAll), off: business?.plan?.off })
+  // Two ways calls work. A shop saved as "after hours" works like ring first today (forwarding sends Otto only the
+  // calls nobody picks up, at any hour), so it shows as Ring my phone first.
+  const everyCall = text("operationMode") === "always"
+  const mode = everyCall ? "always" : "overflow"
+  const forwarding = dashboard?.line.number ? (forwardingOn(dashboard.line) ? (dashboard.line.business.update ? "Dial your new code" : "Forwarding works") : "Not on yet") : null
   return (
     <>
       <SettingsCard title="Which calls">
@@ -115,22 +135,25 @@ export function AnsweringSection() {
           <select className={selectClass} {...bind("serviceState")}><option value="active">On, answering calls</option><option value="paused">Paused</option></select>
         </Field>
         <Pair>
-          <Field label="Calls to your business number" hint={text("operationMode") === "always" ? "Your phone won’t ring for this number." : "Otto takes the calls you miss."}><select className={selectClass} {...bind("operationMode")}><option value="always">Otto answers every call</option><option value="overflow">Ring my phone first</option><option value="after_hours">After hours</option></select></Field>
-          <RingFirstField rings={Number(text("answerAfterRings"))} onChange={(value) => set("answerAfterRings", value)} everyCall={text("operationMode") === "always"} family={dashboard?.line.business.carrier?.family ?? null} confirmed={Boolean(dashboard?.line.confirmedAt)} />
+          <Field label="Calls to your business number" hint={everyCall ? "Your phone won’t ring for this number." : "Your phone rings first. Otto takes the calls you miss."}>
+            <select className={selectClass} name="operationMode" value={mode} onChange={(event) => set("operationMode", event.target.value === "overflow" && text("operationMode") === "after_hours" ? "after_hours" : event.target.value)}>
+              <option value="always">Otto answers every call</option><option value="overflow">Ring my phone first</option>
+            </select>
+          </Field>
+          {/* Ring time only matters when the phone rings first. */}
+          {!everyCall && <RingFirstField rings={Number(text("answerAfterRings"))} onChange={(value) => set("answerAfterRings", value)} family={dashboard?.line.business.carrier?.family ?? null} confirmed={Boolean(dashboard?.line.confirmedAt)} />}
         </Pair>
         {dashboard?.line.business.update && (
           <p className="rounded-md border border-brand-ink/15 bg-accent px-3 py-2.5 text-sm text-accent-foreground" role="status">
-            Dial your new code once to apply this. <Link className="font-semibold underline underline-offset-4" to={dashboard.onboarding.completed ? "/app" : "/app/start?step=forward"}>Show me the code</Link>
+            Dial your new code once to apply this. <Link className="inline-flex min-h-11 items-center font-semibold underline underline-offset-4" to="/app/start?step=forward">Show me the code</Link>
           </p>
         )}
-      </SettingsCard>
-      <SettingsCard title="After hours" description="When Call Otto answers every call, even ones you could pick up.">
-        <Pair>
-          <Field label="Starts at"><Input type="time" className={fieldClass} {...bind("weekdayStart")} /></Field>
-          <Field label="Ends at"><Input type="time" className={fieldClass} {...bind("weekdayEnd")} /></Field>
-        </Pair>
-        <ToggleRow id="weekends" label="All weekend" checked={flag("weekends")} onChange={(value) => set("weekends", value)} />
-        <Field label="Holidays" hint="Dates like 2026-12-25, separated by commas."><Input className={fieldClass} placeholder="2026-12-25, 2027-01-01" {...bind("holidayDates")} /></Field>
+        {forwarding && (
+          <Link to="/app/start?step=forward" className="group flex min-h-12 items-center justify-between gap-3 border-t pt-3 text-[15px]">
+            <span className="grid"><strong className="font-semibold group-hover:underline">Your forwarding code</strong><span className="text-sm text-muted-foreground">{forwarding}. See the code, test it, or turn it off.</span></span>
+            <ChevronRight className="size-5 shrink-0 text-muted-foreground" />
+          </Link>
+        )}
       </SettingsCard>
       <SettingsCard title="Emergencies" description="Urgent calls go to the top of Calls.">
         <Field label="Extra emergency words" hint="Separate with commas, like “no heat, water leak”."><Textarea rows={2} className={areaClass} {...bind("emergencyKeywords")} /></Field>
@@ -153,11 +176,10 @@ export function AnsweringSection() {
  * "Ring my phone first", in what the owner gets: the GSM forwarding timer (about 6 s a ring, 5–30 s). Verizon's
  * timer is fixed, and in "every call" mode the phone never rings, so both show it locked with the reason.
  */
-function RingFirstField({ rings, onChange, everyCall, family, confirmed }: { rings: number; onChange: (value: string) => void; everyCall: boolean; family: string | null; confirmed: boolean }) {
+function RingFirstField({ rings, onChange, family, confirmed }: { rings: number; onChange: (value: string) => void; family: string | null; confirmed: boolean }) {
   const verizon = family === "verizon"
   const choices = ringChoicesWith(rings)
   const hint = verizon ? VERIZON_RING_LINE
-    : everyCall ? "Only for Ring my phone first."
     : family === "gsm" && confirmed ? "After you save, dial the new code once to apply it."
     : family === "office" ? "For an office line, set the ring time in your phone company’s website or app."
     : undefined
@@ -166,7 +188,7 @@ function RingFirstField({ rings, onChange, everyCall, family, confirmed }: { rin
       {verizon ? (
         <select className={cn(selectClass, "disabled:cursor-not-allowed disabled:opacity-70")} disabled value="verizon" onChange={() => undefined}><option value="verizon">About 30 seconds (Verizon)</option></select>
       ) : (
-        <select className={cn(selectClass, "disabled:cursor-not-allowed disabled:opacity-70")} name="answerAfterRings" disabled={everyCall} value={String(choices.find((choice) => choice.rings === rings)?.rings ?? 2)} onChange={(event) => onChange(event.target.value)}>
+        <select className={selectClass} name="answerAfterRings" value={String(choices.find((choice) => choice.rings === rings)?.rings ?? 2)} onChange={(event) => onChange(event.target.value)}>
           {choices.map((choice) => <option key={choice.rings} value={String(choice.rings)}>{choice.label}</option>)}
         </select>
       )}
@@ -180,9 +202,9 @@ export function AnswersSection() {
   const { bind } = useSettings()
   return (
     <>
-      <SettingsCard title="Prices and answers" description="Call Otto only says what’s written here. Leave a box empty and it takes a message instead.">
-        <Field label="Prices" hint="One per line, like “Service call: Our service call is $89.”"><Textarea rows={3} placeholder="Service call: Our service call is $89." className={areaClass} {...bind("priceSnippets")} /></Field>
-        <Field label="Answers" hint="One per line, like “Brands: We service all major brands.”"><Textarea rows={3} placeholder="Brands: We service all major brands." className={areaClass} {...bind("approvedKnowledge")} /></Field>
+      <SettingsCard title="What Otto may say" description="Call Otto only says what’s written here. Leave a box empty and it takes a message instead.">
+        <Field label="Prices" hint="One per line: a name, a colon, then the exact words."><Textarea rows={3} placeholder="Service call: Our service call is $89." className={areaClass} {...bind("priceSnippets")} /></Field>
+        <Field label="Answers" hint="One per line, the same way."><Textarea rows={3} placeholder="Brands: We service all major brands." className={areaClass} {...bind("approvedKnowledge")} /></Field>
       </SettingsCard>
     </>
   )
@@ -191,15 +213,74 @@ export function AnswersSection() {
 /* ---------------------------------------------------------------- Alerts */
 
 export function AlertsSection() {
-  const { text, flag, set, bind, settings, urgentBusy, toggleUrgentCalls } = useSettings()
-  const { integrations: i, plan } = settings
+  const { text, flag, set, bind, settings, urgentBusy, toggleUrgentCalls, patchSettings } = useSettings()
+  const { reload: reloadDashboard } = useMode()
+  const { integrations: i } = settings
+  const { hash } = useLocation()
+  // Texts: kept here (not in the form), so turning them on never throws away an unsaved edit on this page.
+  const [texts, setTexts] = useState<NonNullable<ApiSettings["texts"]>>(settings.texts ?? { live: false, on: false, mobile: i.ownerPhoneMasked ?? null })
+  useEffect(() => { if (settings.texts) setTexts(settings.texts) }, [settings.texts])
+  const [textsBusy, setTextsBusy] = useState(false)
+  const [textsError, setTextsError] = useState<string | null>(null)
+  const mobile = texts.mobile ?? i.ownerPhoneMasked ?? null
+  const [editingMobile, setEditingMobile] = useState(!mobile)
+  useEffect(() => { setEditingMobile(!i.ownerPhoneMasked) }, [i.ownerPhoneMasked])
+  // "Turn on" from the banner lands on the consent box.
+  useEffect(() => { if (hash === "#texts") requestAnimationFrame(() => document.getElementById("texts")?.scrollIntoView({ block: "start" })) }, [hash])
+  const toggleTexts = async (on: boolean) => {
+    const typed = text("ownerPhone").trim()
+    setTextsError(null)
+    if (on && !mobile && !typed) {
+      setTextsError("Add your mobile number above first.")
+      setEditingMobile(true)
+      requestAnimationFrame(() => document.getElementById("owner-phone")?.focus())
+      return
+    }
+    setTextsBusy(true)
+    // The box shows the tap at once; it goes back if the server says no.
+    const before = texts
+    setTexts({ ...texts, on })
+    try {
+      const result = await api<{ texts: NonNullable<ApiSettings["texts"]> }>("/api/app/alerts/texts", { method: "POST", body: { on, ...(on && typed ? { phone: typed } : {}) } })
+      setTexts(result.texts)
+      // The saved settings learn it too, so another settings page and back (and the Settings list) show it.
+      patchSettings((current) => ({
+        ...current,
+        texts: result.texts,
+        integrations: { ...current.integrations, ownerPhoneConfigured: current.integrations.ownerPhoneConfigured || Boolean(result.texts.mobile), ownerPhoneMasked: result.texts.mobile ?? current.integrations.ownerPhoneMasked ?? null },
+      }))
+      if (on && typed) { set("ownerPhone", ""); setEditingMobile(false) }
+      await reloadDashboard()
+      toast.success(on ? (result.texts.live ? "Text alerts are on." : "Saved. Texts start once approved.") : "Text alerts are off.")
+    } catch (error) {
+      setTexts(before)
+      setTextsError(error instanceof Error ? error.message : "That didn’t change. Please try again.")
+    } finally {
+      setTextsBusy(false)
+    }
+  }
+  // The text switches work only once texts can send and the owner said yes; until then they read off, with why.
+  const textsReady = texts.live && texts.on
+  const switchHint = (on: string) => (!texts.live ? "Texts start once approved." : !texts.on ? "Check the box above first." : on)
   return (
     <>
       <CallAlertsCard className="p-4 md:p-5" />
       <SettingsCard title="Your mobile">
-        <Field label="Mobile number" hint="Emergency calls (if on) and text alerts (once texts are on) come here.">
-          <Input type="tel" inputMode="tel" autoComplete="tel" className={fieldClass} placeholder={i.ownerPhoneConfigured ? "Saved. Type a new number to replace it" : "+1 941 555 0100"} {...bind("ownerPhone")} />
-        </Field>
+        {mobile && !editingMobile ? (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="grid gap-0.5">
+              <span className="text-[15px] font-medium">Mobile number</span>
+              <strong className="tabular text-[17px] font-semibold">{mobile}</strong>
+              <span className="text-sm text-muted-foreground">Emergency calls (if on) and text alerts come here.</span>
+            </div>
+            <Button type="button" size="tap" variant="outline" onClick={() => { setEditingMobile(true); requestAnimationFrame(() => document.getElementById("owner-phone")?.focus()) }}>Change</Button>
+          </div>
+        ) : (
+          <Field label="Mobile number" hint="Emergency calls (if on) and text alerts come here.">
+            <Input id="owner-phone" type="tel" inputMode="tel" autoComplete="tel" className={fieldClass} placeholder="(941) 555-0100" {...bind("ownerPhone")} />
+          </Field>
+        )}
+        {mobile && editingMobile && <button type="button" className="-mt-2 inline-flex min-h-11 w-fit items-center text-sm font-semibold underline underline-offset-4" onClick={() => { set("ownerPhone", ""); setEditingMobile(false) }}>Keep {mobile}</button>}
         {settings.urgentCalls?.available && (
           <ToggleRow id="urgentCalls" label="Call me about emergencies" checked={settings.urgentCalls.on} disabled={urgentBusy}
             hint={settings.urgentCalls.disclosure}
@@ -210,10 +291,17 @@ export function AlertsSection() {
           <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">Emergency calls paused: this number may send every call to Otto. You still get a push and an email.</p>
         )}
       </SettingsCard>
-      <SettingsCard title="Texts">
-        <ToggleRow id="ownerRealtimeSmsEnabled" label="A text for every new lead" hint="Sent the moment the call ends. Included in every plan." checked={flag("ownerRealtimeSmsEnabled")} onChange={(value) => set("ownerRealtimeSmsEnabled", value)} />
-        <ToggleRow id="ownerDailySmsEnabled" label="Morning recap" hint="Follow-ups and appointments, once a day." checked={flag("ownerDailySmsEnabled")} onChange={(value) => set("ownerDailySmsEnabled", value)} />
-        {flag("ownerDailySmsEnabled") && (
+      <SettingsCard id="texts" title="Texts">
+        {/* The consent box: its words are carrier-reviewed and never change (see lib/sms-consent). */}
+        <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-3">
+          <input id="sms-consent" type="checkbox" checked={texts.on} disabled={textsBusy} aria-describedby={textsError ? "sms-consent-error" : undefined} onChange={(event) => void toggleTexts(event.target.checked)} className="mt-1 size-5 cursor-pointer accent-brand-ink disabled:cursor-wait" />
+          <label htmlFor="sms-consent" className="block cursor-pointer text-[15px] leading-relaxed">{SMS_CONSENT_LEAD}<a className="font-semibold underline underline-offset-4" href={SMS_CONSENT_TERMS.href}>{SMS_CONSENT_TERMS.label}</a>{SMS_CONSENT_JOIN}<a className="font-semibold underline underline-offset-4" href={SMS_CONSENT_PRIVACY.href}>{SMS_CONSENT_PRIVACY.label}</a>{SMS_CONSENT_END}</label>
+        </div>
+        {textsBusy && <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status"><Loader2 className="size-4 motion-safe:animate-spin" />Saving…</p>}
+        {textsError && <p id="sms-consent-error" role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">{textsError}</p>}
+        <ToggleRow id="ownerRealtimeSmsEnabled" label="A text for every new lead" hint={switchHint("Sent the moment the call ends. Included in every plan.")} checked={textsReady && flag("ownerRealtimeSmsEnabled")} disabled={!textsReady} onChange={(value) => set("ownerRealtimeSmsEnabled", value)} />
+        <ToggleRow id="ownerDailySmsEnabled" label="Morning recap" hint={switchHint("Follow-ups and appointments, once a day.")} checked={textsReady && flag("ownerDailySmsEnabled")} disabled={!textsReady} onChange={(value) => set("ownerDailySmsEnabled", value)} />
+        {textsReady && flag("ownerDailySmsEnabled") && (
           <Field label="Recap time" className="sm:max-w-60">
             <select className={selectClass} {...bind("ownerDailySmsHour")}>{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{new Intl.DateTimeFormat("en-US", { hour: "numeric", timeZone: "UTC" }).format(new Date(Date.UTC(2026, 0, 1, hour)))}</option>)}</select>
           </Field>
@@ -221,7 +309,7 @@ export function AlertsSection() {
         {/* Shown only once email can actually be sent: never a switch that says "not available". */}
         {i.weeklyEmailAvailable && <ToggleRow id="ownerWeeklyEmailEnabled" label="Sunday email" hint="Open callbacks and the week ahead." checked={flag("ownerWeeklyEmailEnabled")} onChange={(value) => set("ownerWeeklyEmailEnabled", value)} />}
       </SettingsCard>
-      <SettingsCard title="Running low on calls" description={plan.unlimited && plan.unlimitedOffer ? `One alert when you reach this share of your ${plan.unlimitedOffer.fairUseCalls.toLocaleString("en-US")} fair-use calls, and one if you use them all.` : `One alert when you reach this share of your ${plan.includedCalls} calls, and one if you use them all.`}>
+      <SettingsCard title="Running low on calls" description={settings.plan.unlimited && settings.plan.unlimitedOffer ? `One alert when you reach this share of your ${settings.plan.unlimitedOffer.fairUseCalls.toLocaleString("en-US")} fair-use calls, and one if you use them all.` : `One alert when you reach this share of your ${settings.plan.includedCalls} calls, and one if you use them all.`}>
         <Field label="Alert me" className="sm:max-w-60">
           <select className={selectClass} {...bind("usageAlertPercent")}>
             {EASY_ALERT_PERCENTS.map((percent) => <option key={percent} value={percent}>At {percent}% used</option>)}
@@ -278,10 +366,10 @@ export function CalendarSection() {
         {i.directBookingAvailable ? (
           <Field label="When a caller picks a time"><select className={selectClass} {...bind("bookingMode")}><option value="confirm">Take the details; I’ll confirm</option><option value="direct">Book it on my calendar</option></select></Field>
         ) : <p className="text-sm text-muted-foreground">Call Otto takes the time the caller wants. You confirm it.</p>}
-        <ToggleRow id="requireDiagnosticFeeAcceptance" label="Caller must agree to your service-call fee" hint="Uses the service-call price in How calls are answered." checked={flag("requireDiagnosticFeeAcceptance")} onChange={(value) => set("requireDiagnosticFeeAcceptance", value)} />
+        <ToggleRow id="requireDiagnosticFeeAcceptance" label="Caller must agree to your service-call fee" hint="Uses the service-call price in Prices and answers." checked={flag("requireDiagnosticFeeAcceptance")} onChange={(value) => set("requireDiagnosticFeeAcceptance", value)} />
       </SettingsCard>
       <SettingsCard title="Teammates’ calendars" description="Each teammate connects their own calendar and sets their own hours on the Team page.">
-        <Button size="tap" variant="outline" className={actionClass} asChild><a href="/app/team">Open the Team page<ExternalLink /></a></Button>
+        <Button size="tap" variant="outline" className={actionClass} asChild><a href="/app/team">Open the Team page</a></Button>
       </SettingsCard>
     </>
   )
@@ -306,6 +394,9 @@ export function PlanSection() {
   const [picked, setPicked] = useState<PlanId>(plan.id)
   const [busy, setBusy] = useState(false)
   const [unlimitedBusy, setUnlimitedBusy] = useState(false)
+  // Back from "Manage billing" when it couldn't open: say so here, in one line.
+  const [params] = useSearchParams()
+  const billingNote = params.get("billing") === "none" ? "There’s no paid plan to manage yet." : params.get("billing") === "unavailable" ? "Billing couldn’t open just now. Nothing changed. Try again in a minute." : null
   const choice = plan.plans.find((item) => item.id === picked)
   const usage = dashboard?.usage
   const comp = dashboard?.billing.status === "comp"
@@ -396,6 +487,7 @@ export function PlanSection() {
       {/* A complimentary shop (the Google review account) has no card or Stripe billing to open. */}
       {!comp && (
         <SettingsCard title={plan.paid ? "Card, invoices, cancel" : "Start your plan"} description={plan.paid ? "Opens our billing page (Stripe) to change your card, see invoices or cancel." : "Add a card to start answering calls."}>
+          {billingNote && <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">{billingNote}</p>}
           <form method="post" action={plan.paid ? "/app/billing/portal" : "/app/billing/checkout"}>
             <input type="hidden" name="csrf" value={csrf} />
             <Button size="tap" variant={plan.paid ? "outline" : "brand"} className={actionClass}>{plan.paid ? "Manage billing or cancel" : "Start your plan"}</Button>
@@ -424,7 +516,7 @@ export function TeamSection() {
           </div>
         ))}
       </dl>
-      <Button size="tap" variant="outline" className={actionClass} asChild><a href="/app/team">Invite or manage teammates<ExternalLink /></a></Button>
+      <Button size="tap" variant="outline" className={actionClass} asChild><a href="/app/team">Invite or manage teammates</a></Button>
     </SettingsCard>
   )
 }

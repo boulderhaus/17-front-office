@@ -17,7 +17,7 @@ describe("owner app menu", () => {
 
   it("shows Start (the sign-up page, a full page load) in the demo instead of Settings", () => {
     const entries = navEntries({ base: "/demo", preview: true, member: false, attention: 1 });
-    expect(entries.map((entry) => entry.label)).toEqual(["Calls", "Jobs", "Calendar", "Start"]);
+    expect(entries.map((entry) => entry.label)).toEqual(["Calls", "Jobs", "Calendar", "Set up yours"]);
     expect(entries[3]).toMatchObject({ to: "/signup", external: true });
     expect(entries[0]?.to).toBe("/demo");
   });

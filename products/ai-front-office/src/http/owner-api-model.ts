@@ -6,6 +6,7 @@ import { hasPlanAccess } from "../domain/billing.js";
 import { describeHours } from "../domain/hours.js";
 import { fairUseCalls, type PlanId } from "../domain/plans.js";
 import { extraCalls } from "../domain/usage.js";
+import { COMPANY } from "../admin/footer.js";
 import type { GuaranteeStatus } from "../application/billing-jobs.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, OutboxNotification, OwnerAccount, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 
@@ -79,8 +80,17 @@ export interface ApiDashboard {
       answeredAfterSec: number | null;
       /** The number our test call comes from, so the owner knows which call to let ring. */
       callerId: string | null;
+      /** We tried to call the business phone and couldn't, so this test waits for a call from another phone. */
+      autoFailed: boolean;
+      /** What the owner was set up for when this test started: a result for another choice or code is stale. */
+      choice: ForwardingChoice | null;
+      code: string | null;
     };
     helpRequestedAt: string | null;
+    /** "Set it up with me" reaches our team by email (SUPPORT_EMAIL): only then may the app promise a reply. */
+    helpTeam: boolean;
+    /** Where an owner writes when "Set it up with me" reached no one: the company email published in the footer. */
+    helpEmail: string;
     /** Otto's AI setup helper's last call to the owner: where, when, and when it ended (null while it's still up). */
     helpCall: { to: string; startedAt: string; endedAt: string | null } | null;
     /** Brock's follow-up email in the last 24 hours, and whether it has a booking link (no calendar connected: it asks for a reply). */
@@ -95,7 +105,10 @@ export interface ApiDashboard {
     timezone: string;
     paused: boolean;
     pausedForBilling: boolean;
+    /** The owner said yes to text alerts (consent on file) and texts go to their mobile. */
     alertsOn: boolean;
+    /** Texts can be sent at all (carrier approval is recorded). Until then every text switch waits. */
+    textsLive: boolean;
     rulesSaved: boolean;
     greeting: string;
     hours: string;
@@ -199,11 +212,15 @@ export function apiDashboard(input: {
   guarantee?: GuaranteeStatus | undefined;
   onboarding?: { hoursSet: boolean; completed: boolean } | undefined;
   checkCallerId?: string | null | undefined;
+  /** Consent to owner texts is on file (owner_sms_consent). Without it, texts are off whatever the config says (the SMS sender holds them too). */
+  smsConsent?: boolean | undefined;
+  textsLive?: boolean | undefined;
+  helpTeam?: boolean | undefined;
 }): ApiDashboard {
   const c = input.config;
   const lineNumber = input.lineNumber ?? null;
   return {
-    line: lineModel(lineNumber, c, input.forwarding, input.now, input.account.role === "member" ? null : input.ownerMobile ?? null, input.checkCallerId ?? null),
+    line: { ...lineModel(lineNumber, c, input.forwarding, input.now, input.account.role === "member" ? null : input.ownerMobile ?? null, input.checkCallerId ?? null), helpTeam: input.helpTeam === true, helpEmail: COMPANY.email },
     csrf: input.csrf,
     now: input.now,
     preview: input.preview,
@@ -213,7 +230,8 @@ export function apiDashboard(input: {
       timezone: c.timezone,
       paused: c.paused,
       pausedForBilling: c.pausedForBilling === true,
-      alertsOn: c.ownerNotificationRefs.length > 0,
+      alertsOn: textsOn(c, input.smsConsent === true),
+      textsLive: input.textsLive === true,
       rulesSaved: c.serviceAreaTerms.length > 0 && c.greeting.trim().length > 0,
       greeting: c.greeting,
       hours: describeHours(c.bookableHours),
@@ -278,13 +296,15 @@ export interface ForwardingCheckRecord {
   code?: string | null;
   /** What the owner picked when they started this test: a pass records it as what they're set up for. */
   choice?: ForwardingChoice | null;
+  /** Our call to the business phone couldn't be placed, so the owner calls from another phone instead. */
+  autoFailed?: boolean | null;
 }
 
 export interface ForwardingState {
   businessNumber: string | null;
   carrier: CarrierInfo | null;
   confirmedAt: string | null;
-  check: { startedAt: string; method: "auto" | "manual"; answeredAt?: string | null; endedAt?: string | null; hangupCause?: string | null; screenedAt?: string | null; amdResult?: string | null; code?: string | null; choice?: ForwardingChoice | null } | null;
+  check: { startedAt: string; method: "auto" | "manual"; answeredAt?: string | null; endedAt?: string | null; hangupCause?: string | null; screenedAt?: string | null; amdResult?: string | null; code?: string | null; choice?: ForwardingChoice | null; autoFailed?: boolean | null } | null;
   helpRequestedAt: string | null;
   helpCall?: { to: string; startedAt: string; endedAt: string | null } | null;
   /** What the owner was set up for when a test last passed (see TestedFor). */
@@ -292,8 +312,24 @@ export interface ForwardingState {
   founderEmail?: { sentAt: string; link: boolean } | null;
 }
 
-/** How long a check waits for the forwarded call before saying it didn't reach us (our call rings up to 60 s). */
+/**
+ * How long a check waits for the forwarded call before saying it didn't reach us: our call rings up to 60 s, and a
+ * test from another phone needs time to find that phone and dial (ring first adds up to 30 s of ringing). The server
+ * accepts the forwarded call for this long too, so the card never says "didn't reach Otto" while a pass can still land.
+ */
 export const FORWARDING_CHECK_WINDOW_MS = 100_000;
+
+/** A saved mobile, enough to recognise it: "(941) •••-0177". Never the whole number. */
+export function maskedPhone(e164: string): string {
+  const us = /^\+1(\d{3})\d{3}(\d{4})$/.exec(e164);
+  if (us) return `(${us[1]}) •••-${us[2]}`;
+  return `•••${e164.slice(-4)}`;
+}
+
+/** Owner texts are on only with consent on file and a mobile to send to: the one rule the banner, switches and copy share. */
+export function textsOn(config: Pick<BusinessConfig, "ownerNotificationRefs">, consent: boolean): boolean {
+  return consent && config.ownerNotificationRefs.length > 0;
+}
 /** Picked up sooner than this: the phone itself (a person, a screener). Later: a voicemail. */
 const PHONE_PICKUP_MS = 12_000;
 
@@ -316,7 +352,7 @@ export function forwardingCheckStatus(check: ForwardingState["check"], confirmed
   return "not_reached";
 }
 
-function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "operationMode" | "answerAfterRings">, state: ForwardingState | undefined, now: string, ownerMobile: string | null, checkCallerId: string | null): ApiDashboard["line"] {
+function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "operationMode" | "answerAfterRings">, state: ForwardingState | undefined, now: string, ownerMobile: string | null, checkCallerId: string | null): Omit<ApiDashboard["line"], "helpTeam" | "helpEmail"> {
   const mode = config.operationMode;
   const check = state?.check ?? null;
   const confirmedAt = state?.confirmedAt ?? null;
@@ -342,7 +378,7 @@ function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "oper
       ringFirstSeconds: state?.carrier ? ringFirstSeconds(state.carrier.family, config.answerAfterRings) : null,
     },
     confirmedAt,
-    check: { status, method: check?.method ?? null, startedAt: check?.startedAt ?? null, answeredAfterSec, callerId: checkCallerId },
+    check: { status, method: check?.method ?? null, startedAt: check?.startedAt ?? null, answeredAfterSec, callerId: checkCallerId, autoFailed: check?.autoFailed === true, choice: check?.choice ?? null, code: check?.code ?? null },
     helpRequestedAt: state?.helpRequestedAt ?? null,
     helpCall: state?.helpCall ?? null,
     founderEmail: state?.founderEmail ?? null,

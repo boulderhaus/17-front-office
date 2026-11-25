@@ -91,8 +91,17 @@ export interface ApiDashboard {
       startedAt: string | null
       answeredAfterSec: number | null
       callerId: string | null
+      /** We tried to call the business phone and couldn't: the test waits for a call from another phone. */
+      autoFailed?: boolean
+      /** What the owner was set up for when this test started; a result for another choice or code is stale. */
+      choice?: "every-call" | "ring-first" | null
+      code?: string | null
     }
     helpRequestedAt: string | null
+    /** "Set it up with me" reaches our team by email, so the app may promise a reply. */
+    helpTeam?: boolean
+    /** Where to write when "Set it up with me" reached no one (the company email). */
+    helpEmail?: string
     /** The AI setup helper's last call: endedAt is null while it's still up. */
     helpCall: { to: string; startedAt: string; endedAt: string | null } | null
     /** Brock's follow-up email in the last 24 hours, and whether it has a booking link. */
@@ -107,7 +116,10 @@ export interface ApiDashboard {
     timezone: string
     paused: boolean
     pausedForBilling: boolean
+    /** Consent to text alerts is on file and texts go to the owner's mobile. */
     alertsOn: boolean
+    /** Texts can be sent at all (carrier approval recorded). */
+    textsLive?: boolean
     rulesSaved: boolean
     greeting: string
     hours: string
@@ -191,6 +203,8 @@ export interface ApiSettings {
   /** Automated emergency calls to the owner's mobile: offered, and on only with the owner's recorded consent. */
   /** held: the urgent number may send every call to Otto, so urgent calls to it are skipped (push and email still go). */
   urgentCalls?: { available: boolean; on: boolean; disclosure: string; held?: boolean }
+  /** Owner text alerts: live (approved), on (consent on file), and the saved mobile, masked. */
+  texts?: { live: boolean; on: boolean; mobile: string | null }
   csrf: string
   values: SettingsValues
   status: string
@@ -210,6 +224,8 @@ export interface ApiSettings {
     googleAvailable: boolean
     googleConnected: boolean
     ownerPhoneConfigured: boolean
+    /** The saved mobile, masked: "(941) •••-0177". */
+    ownerPhoneMasked?: string | null
     weeklyEmailAvailable: boolean
     directBookingAvailable: boolean
   }

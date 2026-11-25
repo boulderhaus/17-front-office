@@ -28,7 +28,15 @@ function minutesIn(value: string, tz: string): number {
 /** "9a", "1:30p": fits a seventh of a phone screen. */
 const shortTime = (minutes: number) => `${Math.floor(minutes / 60) % 12 || 12}${minutes % 60 ? `:${String(minutes % 60).padStart(2, "0")}` : ""}${minutes < 720 ? "a" : "p"}`
 
-interface Visit { call: ApiCall; day: string; minutes: number; booked: boolean }
+/** booked: on the calendar. confirm: the caller asked for this time and nobody has called back yet. done: handled. */
+type VisitState = "booked" | "confirm" | "done"
+interface Visit { call: ApiCall; day: string; minutes: number; state: VisitState }
+
+// "Call to confirm" also has a dashed edge, so it differs from booked by shape, not only color.
+const BLOCK: Record<VisitState, string> = { booked: "border-emerald-600 bg-emerald-100 text-emerald-950", confirm: "border-dashed border-amber-600 bg-amber-100 text-amber-950", done: "border-stone-400 bg-stone-100 text-stone-700" }
+/** Not by color alone: a mark before the name says the same thing. */
+const MARK: Record<VisitState, string> = { booked: "✓", confirm: "?", done: "✓" }
+const STATE_WORD: Record<VisitState, string> = { booked: "Booked", confirm: "Call to confirm", done: "Done" }
 
 /** Computer: the page header's one action. A phone shows the same link as a row under the calendar, with Google's state. */
 export function CalendarHeaderActions() {
@@ -49,12 +57,13 @@ export function CalendarPage() {
   if (!dashboard) return null
   const d = derive(dashboard)
   const today = dateKey(new Date(d.nowMs), d.tz)
-  const view: View = (["day", "week", "month"] as View[]).find((item) => item === params.get("view")) ?? (phone ? "day" : "week")
+  // The demo opens on the week, so its visits show on a phone too (its day can be empty).
+  const view: View = (["day", "week", "month"] as View[]).find((item) => item === params.get("view")) ?? (phone && !preview ? "day" : "week")
   const anchor = /^\d{4}-\d{2}-\d{2}$/.test(params.get("date") ?? "") ? params.get("date")! : today
   const selected = params.get("call") ? d.callsById.get(params.get("call")!) ?? null : null
   const visits: Visit[] = dashboard.calls
     .filter((call) => call.fields.requestedStart && call.outcome !== "ignored_spam")
-    .map((call) => ({ call, day: dateKey(new Date(call.fields.requestedStart!), d.tz), minutes: minutesIn(call.fields.requestedStart!, d.tz), booked: call.outcome === "booked" }))
+    .map((call) => ({ call, day: dateKey(new Date(call.fields.requestedStart!), d.tz), minutes: minutesIn(call.fields.requestedStart!, d.tz), state: (call.outcome === "booked" ? "booked" : d.taskFor(call.id)?.status === "completed" ? "done" : "confirm") as VisitState }))
     .sort((left, right) => left.call.fields.requestedStart!.localeCompare(right.call.fields.requestedStart!))
   const go = (next: { view?: View; date?: string }) => {
     const search = new URLSearchParams(params)
@@ -90,8 +99,8 @@ export function CalendarPage() {
             <div role="tablist" aria-label="Calendar view" className="grid grid-cols-3 gap-1 rounded-lg bg-secondary p-1 max-sm:flex-1">
               {(["day", "week", "month"] as View[]).map((item) => (
                 <button key={item} role="tab" aria-selected={view === item} type="button" onClick={() => go({ view: item })}
-                  // 36px to look at, 44px to tap: the hit area reaches into the strip's padding.
-                  className={cn("relative h-9 rounded-md px-4 text-[15px] font-semibold capitalize after:absolute after:inset-x-0 after:-inset-y-1", view === item ? "bg-card shadow-sm ring-1 ring-border" : "text-muted-foreground hover:bg-card/60")}>{item}</button>
+                  // 44px tall: a full-size target, like every other control.
+                  className={cn("h-11 rounded-md px-4 text-[15px] font-semibold capitalize", view === item ? "bg-card shadow-sm ring-1 ring-border" : "text-muted-foreground hover:bg-card/60")}>{item}</button>
               ))}
             </div>
           </div>
@@ -113,8 +122,9 @@ export function CalendarPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-muted-foreground">
-          <span className="inline-flex items-center gap-2"><i className="size-3 rounded-sm bg-emerald-500" />Booked</span>
-          <span className="inline-flex items-center gap-2"><i className="size-3 rounded-sm bg-amber-400" />Caller asked for this time. Confirm it.</span>
+          <span className="inline-flex items-center gap-2"><i aria-hidden className="grid size-4 place-items-center rounded-sm bg-emerald-500 text-[11px] font-bold text-white not-italic">✓</i>Booked</span>
+          <span className="inline-flex items-center gap-2"><i aria-hidden className="grid size-4 place-items-center rounded-sm bg-amber-400 text-[11px] font-bold text-amber-950 not-italic">?</i>Call to confirm, then tap Done</span>
+          {visits.some((visit) => visit.state === "done") && <span className="inline-flex items-center gap-2"><i aria-hidden className="grid size-4 place-items-center rounded-sm bg-stone-300 text-[11px] font-bold text-stone-700 not-italic">✓</i>Done</span>}
         </div>
         {/* A jump into Settings: its "‹ Settings" goes to Settings, not back here. */}
         {!member && !preview && <Link to={`${base}/settings/calendar`} state={JUMP} className="flex min-h-14 items-center justify-between gap-3 rounded-xl border bg-card px-4 py-2.5 lg:hidden">
@@ -185,9 +195,10 @@ function TimeGrid({ days, today, visits, tz, nowMs, detailed, selectedId, onDay 
             {/* auto-rows-max: each line keeps its height and a short block clips at its foot, instead of the lines squeezing into each other. */}
             {placed(day).filter(({ slot }) => detailed || slot.lanes === 1).map(({ visit, slot }) => (
               <CallLink key={visit.call.id} callId={visit.call.id} aria-current={selectedId === visit.call.id}
-                className={cn("absolute z-20 grid auto-rows-max content-start overflow-hidden rounded-md border-l-[3px] px-1.5 py-1 text-left leading-tight", visit.booked ? "border-emerald-600 bg-emerald-100 text-emerald-950" : "border-amber-500 bg-amber-100 text-amber-950", selectedId === visit.call.id && "ring-2 ring-brand-ink")}
+                aria-label={`${visit.call.fields.callerName ?? "Unknown caller"}, ${timeOnly(visit.call.fields.requestedStart!, tz)}, ${STATE_WORD[visit.state]}`}
+                className={cn("absolute z-20 grid auto-rows-max content-start overflow-hidden rounded-md border-l-[3px] px-1.5 py-1 text-left leading-tight", BLOCK[visit.state], selectedId === visit.call.id && "ring-2 ring-brand-ink")}
                 style={{ top: ((slot.start - first * 60) / 60) * HOUR + 1, height: ((slot.end - slot.start) / 60) * HOUR - 3, left: `calc(${(slot.lane / slot.lanes) * 100}% + 2px)`, width: `calc(${100 / slot.lanes}% - 4px)` }}>
-                <span className="tabular text-[12px] font-semibold">{detailed ? timeOnly(visit.call.fields.requestedStart!, tz) : shortTime(visit.minutes)}</span>
+                <span className="tabular truncate text-[12px] font-semibold">{detailed && <span aria-hidden>{MARK[visit.state]} </span>}{detailed ? timeOnly(visit.call.fields.requestedStart!, tz) : shortTime(visit.minutes)}</span>
                 {detailed ? (
                   <>
                     <strong className="truncate text-[13px] font-semibold">{visit.call.fields.callerName ?? "Unknown caller"}</strong>
@@ -199,10 +210,10 @@ function TimeGrid({ days, today, visits, tz, nowMs, detailed, selectedId, onDay 
             {shared(placed(day)).map((group) => {
               const start = group[0]!.slot.start
               const end = Math.max(...group.map(({ slot }) => slot.end))
-              const booked = group.every(({ visit }) => visit.booked)
+              const state: VisitState = group.every(({ visit }) => visit.state === "booked") ? "booked" : group.some(({ visit }) => visit.state === "confirm") ? "confirm" : "done"
               return (
                 <button key={group[0]!.visit.call.id} type="button" onClick={() => onDay(day)} aria-label={`${group.length} visits from ${shortTime(start)}. Open ${fmt(day, { weekday: "long", month: "long", day: "numeric" })}`}
-                  className={cn("absolute z-20 grid auto-rows-max content-start overflow-hidden rounded-md border-l-[3px] px-1.5 py-1 text-left leading-tight", booked ? "border-emerald-600 bg-emerald-100 text-emerald-950" : "border-amber-500 bg-amber-100 text-amber-950", group.some(({ visit }) => visit.call.id === selectedId) && "ring-2 ring-brand-ink")}
+                  className={cn("absolute z-20 grid auto-rows-max content-start overflow-hidden rounded-md border-l-[3px] px-1.5 py-1 text-left leading-tight", BLOCK[state], group.some(({ visit }) => visit.call.id === selectedId) && "ring-2 ring-brand-ink")}
                   style={{ top: ((start - first * 60) / 60) * HOUR + 1, height: ((end - start) / 60) * HOUR - 3, left: 2, width: "calc(100% - 4px)" }}>
                   <span className="tabular text-[12px] font-semibold">{shortTime(start)}</span>
                   <span className="truncate text-[11px]">{(group[0]!.visit.call.fields.callerName ?? "Caller").split(" ")[0]}</span>
@@ -236,12 +247,14 @@ function MonthGrid({ anchor, today, visits, wide, onDay, selectedId }: { anchor:
         </button>
         {wide ? items.slice(0, 3).map((visit) => (
           <CallLink key={visit.call.id} callId={visit.call.id} aria-current={selectedId === visit.call.id}
-            className={cn("truncate rounded px-1.5 py-0.5 text-[12px] font-medium", visit.booked ? "bg-emerald-100 text-emerald-950" : "bg-amber-100 text-amber-950", selectedId === visit.call.id && "ring-2 ring-brand-ink")}>
-            {visit.call.fields.callerName ?? "Caller"}
+            aria-label={`${visit.call.fields.callerName ?? "Caller"}, ${STATE_WORD[visit.state]}`}
+            className={cn("truncate rounded px-1.5 py-0.5 text-[12px] font-medium", BLOCK[visit.state], selectedId === visit.call.id && "ring-2 ring-brand-ink")}>
+            <span aria-hidden>{MARK[visit.state]} </span>{visit.call.fields.callerName ?? "Caller"}
           </CallLink>
         )) : items.length > 0 && (
-          <button type="button" onClick={() => onDay(day)} className="flex flex-wrap justify-center gap-1" aria-label={`${items.length} visits`}>
-            {items.slice(0, 3).map((visit) => <i key={visit.call.id} className={cn("size-2 rounded-full", visit.booked ? "bg-emerald-600" : "bg-amber-500")} />)}
+          <button type="button" onClick={() => onDay(day)} className="flex flex-wrap justify-center gap-1" aria-label={`${items.length} visits: ${items.map((visit) => STATE_WORD[visit.state]).join(", ")}`}>
+            {/* Shape as well as color: booked is a filled dot, "call to confirm" a ring, done a grey dot. */}
+            {items.slice(0, 3).map((visit) => <i key={visit.call.id} className={cn("size-2.5 rounded-full", visit.state === "booked" ? "bg-emerald-600" : visit.state === "confirm" ? "border-2 border-amber-600 bg-transparent" : "bg-stone-400")} />)}
           </button>
         )}
         {wide && items.length > 3 && <button type="button" onClick={() => onDay(day)} className="text-left text-[12px] font-semibold text-muted-foreground">{items.length - 3} more</button>}

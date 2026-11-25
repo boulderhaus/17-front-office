@@ -10,6 +10,7 @@ import { Switch } from "@/components/ui/switch"
 import { api } from "@/lib/api"
 import { FAIR_USE_LINE, formatPhone, LEAD_GUARANTEE, money, perCall } from "@/lib/format"
 import { useMode } from "@/lib/mode"
+import { forwardingOn } from "@/lib/line-status"
 import type { Activation, ApiDashboard, PlanId } from "@/lib/types"
 import { cn, tapWidth } from "@/lib/utils"
 
@@ -64,6 +65,9 @@ export function StartPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dashboard])
   useEffect(() => { document.title = "Set up · Call Otto" }, [])
+  // Each step opens at its heading, never at the old step's scroll position (under the sticky header).
+  const stepParam = params.get("step")
+  useEffect(() => { window.scrollTo(0, 0) }, [stepParam])
   // Pin the step once paid, so a background refresh (e.g. forwarding just confirmed) never jumps the screen.
   useEffect(() => {
     if (!dashboard?.paid || params.get("step")) return
@@ -83,12 +87,11 @@ export function StartPage() {
   // forwarding (the card is already paid) goes back to Calls, where "Continue setup" brings the owner back.
   const back: Step | "calls" | null = step === "done" ? "forward" : step === "forward" ? "calls" : null
   // "All set" only once calls really reach Call Otto (or the line is still waiting on approval).
-  const forwardingOn = Boolean(dashboard.line.confirmedAt) && ["idle", "passed", "calling"].includes(dashboard.line.check.status)
-  const done = step === "done" && (forwardingOn || !dashboard.line.number)
+  const done = step === "done" && (forwardingOn(dashboard.line) || !dashboard.line.number)
 
   return (
     <div className="min-h-svh bg-brand-paper">
-      <header className="pt-safe sticky top-0 z-20 border-b bg-brand-paper/95 backdrop-blur-md">
+      <header className="pt-safe sticky top-0 z-20 border-b bg-brand-paper">
         <div className="mx-auto flex h-14 max-w-xl items-center justify-between gap-3 px-4">
           <span className="flex min-w-0 items-center gap-1.5">
             {back ? (
@@ -103,7 +106,8 @@ export function StartPage() {
             {done ? <><span className="grid size-[18px] place-items-center rounded-full bg-emerald-600 text-white"><Check className="size-3" strokeWidth={3.5} /></span>All set</> : step === "done" ? `Step ${STEP_COUNT} of ${STEP_COUNT} · Forwarding not on yet` : `Step ${current.n} of ${STEP_COUNT} · ${current.label}`}
           </span>
           <ol className="grid grid-cols-3 gap-1.5" aria-hidden>
-            {Array.from({ length: STEP_COUNT }, (_, index) => index + 1).map((n) => <li key={n} className={cn("h-1.5 rounded-full", done ? "bg-emerald-600" : n <= current.n ? "bg-brand-ink" : "bg-brand-ink/15")} />)}
+            {/* "Forwarding not on yet" never sits next to a full bar: step 3 isn't done. */}
+            {Array.from({ length: STEP_COUNT }, (_, index) => index + 1).map((n) => <li key={n} className={cn("h-1.5 rounded-full", done ? "bg-emerald-600" : n < current.n || (n === current.n && step !== "done") ? "bg-brand-ink" : "bg-brand-ink/15")} />)}
           </ol>
         </div>
       </header>
@@ -207,6 +211,11 @@ function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDa
           <p className="text-[13px] text-muted-foreground">Secure checkout by Stripe. We never see your card number. Team members are free.</p>
         </CardContent>
       </Card>
+      {/* Never a dead end: look around first, or leave. */}
+      <nav aria-label="Leave setup" className="flex flex-wrap items-center gap-x-6 px-1">
+        <Link to="/app" className="inline-flex min-h-11 items-center text-[15px] font-semibold text-brand-ink underline underline-offset-4">Not now</Link>
+        <a href="/logout" className="inline-flex min-h-11 items-center text-[15px] font-semibold text-brand-ink underline underline-offset-4">Sign out</a>
+      </nav>
     </>
   )
 }
@@ -275,15 +284,14 @@ function DoneStep({ dashboard, activation, toForward }: { dashboard: ApiDashboar
   }
   const waiting = !dashboard.line.number
   // Skipped forwarding (or the last test failed): the line answers, but no missed call reaches it yet. Say so.
-  const forwarding = Boolean(dashboard.line.confirmedAt) && ["idle", "passed", "calling"].includes(dashboard.line.check.status)
-  const notForwarding = !waiting && !forwarding
+  const notForwarding = !waiting && !forwardingOn(dashboard.line)
   const trialEnds = dashboard.billing.trialEndsAt
     ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: dashboard.shop.timezone }).format(new Date(dashboard.billing.trialEndsAt))
     : null
   const rows: Array<{ icon: typeof Phone; label: string; value: ReactNode }> = [
     { icon: Phone, label: "Your line", value: waiting ? (activation !== "running" && activation?.status === "waiting" ? "On its way: carriers usually approve it in 1 to 3 business days" : "Turning on") : formatPhone(dashboard.line.number!) },
     { icon: MessageSquareText, label: "It answers", value: `“${dashboard.shop.greeting}”` },
-    { icon: CalendarClock, label: "Jobs", value: <>{dashboard.shop.hours}. Callers pick a time; you confirm it. <Link className="font-semibold whitespace-nowrap text-brand-ink underline underline-offset-4" to="/app/settings">Change hours</Link></> },
+    { icon: CalendarClock, label: "Jobs", value: <>{dashboard.shop.hours}. Callers pick a time; you confirm it. <Link className="py-3 font-semibold whitespace-nowrap text-brand-ink underline underline-offset-4" to="/app/settings/calendar">Change hours</Link></> },
     ...(trialEnds ? [{ icon: CheckCircle2, label: "Free trial", value: `Free until ${trialEnds}, then ${money(dashboard.shop.flatMonthlyPriceCents)}/month` }] : []),
   ]
   return (
@@ -314,8 +322,9 @@ function DoneStep({ dashboard, activation, toForward }: { dashboard: ApiDashboar
         </CardContent>
       </Card>
       <CallAlertsCard />
-      <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} disabled={busy} onClick={() => void finish()}>{busy ? <Loader2 className="animate-spin" /> : null}See my calls<ArrowRight /></Button>
-      <p className="text-sm text-muted-foreground">Change your greeting, service area or hours anytime in <Link className="font-semibold underline underline-offset-4" to="/app/settings">Settings</Link>.</p>
+      {/* With forwarding off, "Turn on forwarding" above is the one main button; this one steps back. */}
+      <Button size="tap" variant={notForwarding ? "outline" : "brand"} className={cn(tapWidth, "h-14 text-base lg:h-12", notForwarding && "border-2 border-brand-ink bg-card text-brand-ink")} disabled={busy} onClick={() => void finish()}>{busy ? <Loader2 className="animate-spin" /> : null}See my calls<ArrowRight /></Button>
+      <p className="text-sm text-muted-foreground">Change your greeting, service area or hours anytime in <Link className="py-3 font-semibold underline underline-offset-4" to="/app/settings">Settings</Link>.</p>
     </>
   )
 }

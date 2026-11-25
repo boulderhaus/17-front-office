@@ -1,7 +1,6 @@
 import { shopActivationBlockers } from "../src/application/readiness.js";
 import { isExplicitHumanRequest } from "../src/domain/human-request.js";
 import { RateLimiter } from "../src/http/security.js";
-import { renderQuickSetup } from "../src/admin/setup.js";
 import { currentBillingPeriod } from "../src/http/app.js";
 import { describe, expect, it } from "vitest";
 import { createDemoConfig, evaluateServiceArea, isCoverageActive, normalizeServiceAreaInput } from "../src/domain/config.js";
@@ -285,16 +284,6 @@ describe("service area input", () => {
   it("still covers a normal address for a city-and-state term", () => {
     const config = { ...createDemoConfig(), serviceAreaTerms: normalizeServiceAreaInput("Sarasota, FL").terms };
     expect(evaluateServiceArea("100 Bay St, Sarasota, FL 34236", config).status).toBe("covered");
-  });
-});
-
-describe("owner setup beta controls", () => {
-  it("shows direct booking and warm transfer only when their flags are on", () => {
-    const hidden = renderQuickSetup(createDemoConfig(), "csrf", false);
-    expect(hidden).not.toContain("warmTransferEnabled");
-    const shown = renderQuickSetup(createDemoConfig(), "csrf", false, { directBooking: true, warmTransfer: true });
-    expect(shown).toContain("Book available times on my calendar");
-    expect(shown).toContain("warmTransferEnabled");
   });
 });
 

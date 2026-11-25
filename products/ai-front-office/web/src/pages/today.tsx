@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react"
 import { Link, Navigate, useLocation, useNavigate, useSearchParams } from "react-router-dom"
-import { ArrowRight, Check, ChevronRight, Clock, Loader2, MapPin, Phone, RotateCcw } from "lucide-react"
+import { ArrowRight, Check, ChevronRight, Clock, Loader2, MapPin, Phone, PhoneForwarded, RotateCcw } from "lucide-react"
 import { toast } from "sonner"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -10,12 +10,11 @@ import { CallLink, Empty, ListBox, MoreLink, Muted, SectionTitle, ToneBadge, use
 import { ActionBar, CallBackNote, CallHeader, callLabel, Facts, phoneFact, SafetyNote, SpamNote, Transcript, type Action } from "@/components/app/call-parts"
 import { AlertsOffNotice, LineStatus } from "@/components/app/shell"
 import { api } from "@/lib/api"
-import { derive, shortAddress, urgency } from "@/lib/derive"
+import { derive, forwardingOn, shortAddress, urgency } from "@/lib/derive"
 import { allCallsRowSelected, attentionRowSelected, nextOpenCall, PANEL_EDGE, panelSearch, revealDelta, ROW_FOCUS, rowShowsDone, SELECTED_ROW, stillOpenCalls } from "@/lib/selection"
 import { createTaskGate, QUIET_MS, runTaskAction, type TaskAction, type TaskDeps, type TaskMoves } from "@/lib/task-action"
 import { compactDate, dateKey, money, perCall, timeOnly } from "@/lib/format"
 import { useMediaQuery, useMode } from "@/lib/mode"
-import { ForwardingCard } from "@/components/app/forwarding-card"
 import type { ApiCall, ApiDashboard, ApiTask } from "@/lib/types"
 import { cn, tapWidth } from "@/lib/utils"
 import { callOrigin, JUMP } from "@/lib/nav"
@@ -96,11 +95,9 @@ export function TodayPage() {
             <AlertDescription>Synthetic calls only. Real owners can call back, check off, and snooze.</AlertDescription>
           </Alert>
         )}
-        <div className="grid gap-2.5 empty:hidden lg:hidden"><LineStatus /><AlertsOffNotice /></div>
         {owner && <GuaranteeCard dashboard={dashboard} />}
         {owner && <SetupCard dashboard={dashboard} />}
-        {owner && dashboard.onboarding.completed && dashboard.viewer.status === "active" && dashboard.line.number && <ForwardingCard dashboard={dashboard} />}
-        <Summary dashboard={dashboard} />
+        {/* Callers first: the line's state is one row under them, never a screen of setup above them. */}
         <section aria-labelledby="attention" className="grid gap-2.5 scroll-mt-20" id="attention-list">
           <SectionTitle id="attention" title="Needs your attention" count={d.actionable.length} urgent={d.urgentCount > 0} />
           {d.actionable.length ? (
@@ -109,6 +106,18 @@ export function TodayPage() {
             <Empty image title="You’re all caught up." text="Emergencies, callbacks and times to confirm show up here the moment a call ends." />
           )}
         </section>
+        {/* Forwarding not on (or a new code to dial): one titled row to its own screen. Otherwise the line's state
+            on a phone (a computer has it in the side menu). Never both: they'd say the same thing. */}
+        {owner && dashboard.onboarding.completed && dashboard.viewer.status === "active" && dashboard.line.number && (!forwardingOn(dashboard.line) || dashboard.line.business.update) ? (
+          <div className="grid gap-2.5">
+            <ForwardingRow dashboard={dashboard} />
+            <div className="lg:hidden empty:hidden"><AlertsOffNotice /></div>
+          </div>
+        ) : (
+          // A computer has these in the side menu: nothing here, not even an empty gap.
+          <div className="grid gap-2.5 empty:hidden lg:hidden"><LineStatus /><AlertsOffNotice /></div>
+        )}
+        <Summary dashboard={dashboard} />
         <ComingUp dashboard={dashboard} />
         <AllCalls dashboard={dashboard} panelId={wide ? panelCall?.id ?? null : null} from={from} waiting={waiting} />
         {owner && dashboard.onboarding.completed && <CalendarCard dashboard={dashboard} />}
@@ -140,10 +149,19 @@ function Summary({ dashboard }: { dashboard: ApiDashboard }) {
           <span className={label}>Booked</span>
           <strong className={number}>{d.booked.length}</strong>
         </Link>
-        <Link to={preview || member ? `${base}` : `${base}/settings/plan`} state={preview || member ? undefined : JUMP} className={cell}>
-          <span className={label}>{usage.unlimited ? "Answered" : "Calls left"}</span>
-          <strong className={number}>{usage.unlimited ? d.used : d.remaining}</strong>
-        </Link>
+        {/* Nowhere to go in the demo or for a teammate (Plan is the owner's): plain text, saying out of how many. */}
+        {preview || member ? (
+          <div className={cn(cell, "hover:bg-transparent")}>
+            <span className={label}>{usage.unlimited ? "Answered" : "Calls left"}</span>
+            <strong className={number}>{usage.unlimited ? d.used : d.remaining}</strong>
+            {!usage.unlimited && <span className="text-[13px] text-muted-foreground">of {d.included}</span>}
+          </div>
+        ) : (
+          <Link to={`${base}/settings/plan`} state={JUMP} className={cell}>
+            <span className={label}>{usage.unlimited ? "Answered" : "Calls left"}</span>
+            <strong className={number}>{usage.unlimited ? d.used : d.remaining}</strong>
+          </Link>
+        )}
       </nav>
       {usage.extraCalls > 0 && !member && (
         <Link to={`${base}/settings/plan`} state={JUMP} className="flex min-h-12 items-center justify-between gap-3 rounded-xl bg-amber-50 px-3.5 py-2.5 text-[15px] text-amber-950 ring-1 ring-amber-200 ring-inset">
@@ -178,7 +196,8 @@ function TaskRow({ task, call, due, selected, open, wide }: { task: ApiTask; cal
       </span>
       <span className="line-clamp-2 text-[15px] text-foreground/90">{call?.fields.problemDescription || task.reason}</span>
       <span className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
-        <Meta icon={<Clock />}><span className={cn(due === "Due now" && badge.tone === "danger" && "font-semibold text-red-700")}>{due === "Due now" ? "Call back now" : due.replace(/^Due/, "Call back by")}</span></Meta>
+        {/* Urgent always reads "Call back now", at least as strong as a routine call that's due. */}
+        <Meta icon={<Clock />}><span className={cn(badge.tone === "danger" && "font-semibold text-red-700")}>{due === "Due now" || badge.tone === "danger" ? "Call back now" : due.startsWith("Due today ") ? `Call back today by ${due.slice("Due today ".length)}` : due.replace(/^Due/, "Call back by")}</span></Meta>
         {address && <Meta icon={<MapPin />}>{address}</Meta>}
       </span>
     </>
@@ -211,7 +230,10 @@ function TaskRow({ task, call, due, selected, open, wide }: { task: ApiTask; cal
           The demo has no Done or Later: Call and Details share the row. */}
       <div className={cn("grid gap-2 [&>*]:px-2", preview ? "grid-cols-2 @[20rem]:grid-cols-[minmax(0,1.5fr)_minmax(0,2fr)]" : "grid-cols-2 *:first:col-span-2 @[20rem]:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1fr)] @[20rem]:*:first:col-span-1")}>
         {call?.phone && call.outcome !== "ignored_spam"
-          ? <Button size="tap" className="w-full" asChild><a href={`tel:${call.phone}`}><Phone /><span className="truncate">{callLabel(call)}</span></a></Button>
+          ? preview
+            // The demo's numbers are made up: never dial one.
+            ? <Button size="tap" className="w-full" onClick={() => toast(`In your account, this calls ${call.fields.callerName?.split(" ")[0] ?? "the caller"} from your phone.`)}><Phone /><span className="truncate">{callLabel(call)}</span></Button>
+            : <Button size="tap" className="w-full" asChild><a href={`tel:${call.phone}`}><Phone /><span className="truncate">{callLabel(call)}</span></a></Button>
           : <Button size="tap" className="w-full" asChild><CallLink callId={task.callId}>Open</CallLink></Button>}
         {preview ? (
           <Button size="tap" variant="outline" className="w-full" asChild><CallLink callId={task.callId}>Details</CallLink></Button>
@@ -239,7 +261,7 @@ function ComingUp({ dashboard }: { dashboard: ApiDashboard }) {
     <section className="grid gap-2.5">
       <SectionTitle title="Coming up" count={d.upcoming.length} action={<MoreLink to={`${base}/calendar`}>Calendar</MoreLink>} />
       {d.upcoming.length ? (
-        <ListBox>{d.upcoming.slice(0, 3).map((call) => <VisitRow key={call.id} call={call} tz={d.tz} nowMs={d.nowMs} />)}</ListBox>
+        <ListBox>{d.upcoming.slice(0, 3).map((call) => <VisitRow key={call.id} call={call} tz={d.tz} nowMs={d.nowMs} done={d.taskFor(call.id)?.status === "completed"} />)}</ListBox>
       ) : (
         <ListBox><Muted>Nothing booked or requested in the next 7 days.</Muted></ListBox>
       )}
@@ -258,7 +280,8 @@ export function DateTile({ value, tz, nowMs }: { value: string; tz: string; nowM
   )
 }
 
-function VisitRow({ call, tz, nowMs }: { call: ApiCall; tz: string; nowMs: number }) {
+/** done: the owner already marked it Done (called to confirm), so it no longer asks for a confirmation. */
+function VisitRow({ call, tz, nowMs, done }: { call: ApiCall; tz: string; nowMs: number; done: boolean }) {
   const booked = call.outcome === "booked"
   return (
     <CallLink callId={call.id} className="flex min-h-16 items-center gap-3 px-4 py-2.5 hover:bg-muted/50">
@@ -267,7 +290,7 @@ function VisitRow({ call, tz, nowMs }: { call: ApiCall; tz: string; nowMs: numbe
         <strong className="tabular text-base font-semibold">{timeOnly(call.fields.requestedStart!, tz)}</strong>
         <span className="truncate text-[15px] text-muted-foreground">{call.fields.callerName ?? "Unknown caller"}</span>
       </span>
-      <ToneBadge tone={booked ? "good" : "warn"}>{booked ? "Booked" : "Confirm time"}</ToneBadge>
+      <ToneBadge tone={booked ? "good" : done ? "neutral" : "warn"}>{booked ? "Booked" : done ? "Done" : "Confirm time"}</ToneBadge>
     </CallLink>
   )
 }
@@ -302,6 +325,23 @@ export function CallRow({ call, task, tz, selected, list }: { call: ApiCall; tas
         <ChevronRight className="size-4 text-muted-foreground lg:hidden" />
       </span>
     </CallLink>
+  )
+}
+
+/** Forwarding isn't on yet (or a changed choice needs its new code): one row that opens the forwarding screen. */
+function ForwardingRow({ dashboard }: { dashboard: ApiDashboard }) {
+  const update = forwardingOn(dashboard.line) && dashboard.line.business.update
+  return (
+    <Link to="/app/start?step=forward" className="flex min-h-14 items-center justify-between gap-3 rounded-xl bg-amber-50 px-4 py-3 text-amber-950 ring-1 ring-amber-200 ring-inset hover:bg-amber-100">
+      <span className="flex min-w-0 items-center gap-2.5">
+        <PhoneForwarded className="size-5 shrink-0" />
+        <span className="grid min-w-0">
+          <strong className="text-[15px] font-semibold">{update ? "Dial your new code" : "Forwarding isn’t on"}</strong>
+          <span className="text-sm">{update ? "Your change is on once you dial it." : "Otto won’t get calls until it is."}</span>
+        </span>
+      </span>
+      <span className="flex shrink-0 items-center text-[15px] font-semibold">{update ? "Show code" : "Finish"}<ChevronRight className="size-4" /></span>
+    </Link>
   )
 }
 
@@ -394,7 +434,7 @@ function revealLitRow() {
  * With `next` (Calls), Done or Later on a wide screen moves the panel to the next caller; Undo brings it back.
  * `linked` (Calls only) ties the panel to the lit row: the matching ink left edge and the yellow header band.
  */
-export function CallPanel({ call, task, tz, standalone, next, linked = false, caughtUp = false }: { call: ApiCall | null; task: ApiTask | undefined; tz: string; standalone: boolean; next?: (doneId: string) => string | null; linked?: boolean; caughtUp?: boolean }) {
+export function CallPanel({ call, task, tz, standalone, next, linked = false, caughtUp = false, hasCalls = false }: { call: ApiCall | null; task: ApiTask | undefined; tz: string; standalone: boolean; next?: (doneId: string) => string | null; linked?: boolean; caughtUp?: boolean; hasCalls?: boolean }) {
   const { base, preview } = useMode()
   const tiles = useTaskTiles()
   const wide = useMediaQuery("(min-width: 1024px)")
@@ -418,6 +458,16 @@ export function CallPanel({ call, task, tz, standalone, next, linked = false, ca
           <CardContent className="grid gap-1.5">
             <h2 className="text-lg font-semibold">You’re all caught up.</h2>
             <p className="text-[15px] text-muted-foreground">Emergencies, callbacks and times to confirm show up here the moment a call ends.</p>
+          </CardContent>
+        </Card>
+      )
+    }
+    if (hasCalls) {
+      return (
+        <Card>
+          <CardContent className="grid gap-1.5">
+            <h2 className="text-lg font-semibold">Pick a job</h2>
+            <p className="text-[15px] text-muted-foreground">Nothing in this list right now. Pick another tab to see its jobs.</p>
           </CardContent>
         </Card>
       )
