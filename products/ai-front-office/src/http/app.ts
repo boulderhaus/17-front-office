@@ -40,6 +40,7 @@ import { anyGoogleClient, clientForAttempt, clientForNewConnections, encodeGoogl
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
+import { findTrade } from "../domain/trades.js";
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import type { OwnerSession } from "../security/owner-auth.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
@@ -191,6 +192,8 @@ const ownerSignupSchema = z.object({
   bookableWeekdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("17:00"),
   serviceCategories: z.string().trim().min(2).max(800).default("HVAC repair, HVAC maintenance"),
   emergencyKeywords: z.string().trim().min(2).max(800).default("gas smell, carbon monoxide, no heat, frozen pipes"),
+  // Picks the starting services and urgent words below; unknown or missing keeps the defaults.
+  trade: z.string().trim().max(40).optional(),
   weekends: z.string().optional(),
   ownerSmsConsent: z.literal("yes").optional(),
   ownerCallConsent: z.literal("yes").optional(),
@@ -671,6 +674,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (url.searchParams.get("unlimited") === "1") preset.unlimited = "yes";
       const presetPlan = normalizePlanId(url.searchParams.get("plan"));
       if (presetPlan && plans.some((plan) => plan.id === presetPlan)) preset.plan = presetPlan;
+      const presetTrade = findTrade(url.searchParams.get("trade"));
+      if (presetTrade) preset.trade = presetTrade.key;
       return sendHtml(response, 200, analyticsPage(signupPage("", preset)));
     }
     if (method === "POST" && url.pathname === "/signup") {
@@ -715,6 +720,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (serviceArea.errors.length > 0) return sendHtml(response, 400, signupPage(serviceAreaMessage(serviceArea.errors), values));
       // The plan picked above the button; Solo when nothing was sent.
       const plan = pickPlan(plans, form.get("plan"));
+      const trade = findTrade(parsed.data.trade);
       const config: BusinessConfig = {
         ...createDemoConfig(tenantId),
         paused: true,
@@ -728,8 +734,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         greeting: form.has("greeting") ? parsed.data.greeting : `Thanks for calling ${parsed.data.businessName}. How can I help?`,
         timezone,
         serviceAreaTerms: serviceArea.terms,
-        emergencyKeywords: splitList(parsed.data.emergencyKeywords),
-        serviceCategories: splitList(parsed.data.serviceCategories),
+        // An explicit list wins; otherwise the picked trade's, then the form defaults.
+        emergencyKeywords: !form.has("emergencyKeywords") && trade ? [...trade.urgentWords] : splitList(parsed.data.emergencyKeywords),
+        serviceCategories: !form.has("serviceCategories") && trade ? [...trade.services] : splitList(parsed.data.serviceCategories),
         requireDiagnosticFeeAcceptance: false,
         operationMode: parsed.data.operationMode,
         ownerNotificationRefs: parsed.data.ownerSmsConsent === "yes" ? ["owner-primary"] : [],
