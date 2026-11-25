@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Link, useNavigate, useParams } from "react-router-dom"
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom"
 import { Play } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -14,6 +14,7 @@ import { api, useApi } from "@/lib/api"
 import { urgency } from "@/lib/derive"
 import { compactDate, notificationWords, outcomeWords } from "@/lib/format"
 import { useMode } from "@/lib/mode"
+import { callBack } from "@/lib/nav"
 import type { ApiCallDetail } from "@/lib/types"
 
 function minutes(seconds: number | null): string {
@@ -26,6 +27,8 @@ export function CallPage() {
   const { id = "" } = useParams()
   const { base, preview, dashboard, reload } = useMode()
   const navigate = useNavigate()
+  const location = useLocation()
+  const back = callBack({ key: location.key, state: location.state, base })
   const tiles = useTaskTiles()
   const detail = useApi<ApiCallDetail & { csrf?: string }>(`/api/${preview ? "demo" : "app"}/calls/${encodeURIComponent(id)}`)
   const [confirm, setConfirm] = useState(false)
@@ -83,7 +86,8 @@ export function CallPage() {
   }
   return (
     <div className="mx-auto grid max-w-2xl gap-5">
-      <Button variant="ghost" className="-ml-2 h-11 w-fit text-base max-lg:hidden" onClick={() => (window.history.length > 1 ? navigate(-1) : navigate(base))}>← Back</Button>
+      {/* Back to the list that opened this call (one step back, so it keeps its place), else to Calls: never out of the app. */}
+      <Button variant="ghost" className="-ml-2 h-11 w-fit text-base max-lg:hidden" onClick={() => (back.history ? navigate(-1) : navigate(back.to))}>← {back.label}</Button>
       <CallHeader call={call} tone={badge.tone} label={badge.label} />
       <SafetyNote call={call} />
       {spam && <SpamNote />}
