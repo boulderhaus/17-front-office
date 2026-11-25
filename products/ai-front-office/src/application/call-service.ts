@@ -216,6 +216,13 @@ export class CallService {
     });
   }
 
+  /** A price or policy question the assistant looked up: a checkpoint on the call's path, nothing more. */
+  async recordAnswerLookup(input: { tenantId: string; providerCallId: string; kind: "price" | "answer"; approved: boolean }): Promise<void> {
+    const call = await this.store.getCallByProviderId(input.providerCallId).catch(() => null);
+    if (!call || call.tenantId !== input.tenantId) return;
+    await this.checkpoint(call, "answer.lookup", this.clock.now(), { kind: input.kind, approved: input.approved });
+  }
+
   /** True once the call passes the soft five-minute limit, unless an emergency or human handoff is under way. */
   async wrapUp(providerCallId: string): Promise<boolean> {
     const call = await this.store.getCallByProviderId(providerCallId);
@@ -249,6 +256,13 @@ export class CallService {
     input.signal?.throwIfAborted();
     await this.store.saveCall(call);
     if (emergency.emergency) await this.queueHumanHandoffClaimed({ tenantId: input.tenantId, providerCallId: input.providerCallId, fromNumber: call.fromNumber, problemDescription: fields.problemDescription, urgent: emergency });
+    // Which checkpoints this intake covers, after any alert. Booleans only: the values live on the call record.
+    await this.checkpoint(call, "call.intake", this.clock.now(), {
+      problem: fields.problemDescription.trim().length > 0,
+      name: Boolean(fields.callerName?.trim()),
+      callback: /^\+[1-9]\d{7,14}$/.test(fields.callbackNumber ?? call.fromNumber),
+      address: Boolean(fields.address?.trim()),
+    });
     const missing = [
       !fields.callerName?.trim() ? "caller_name" : null,
       !/^\+[1-9]\d{7,14}$/.test(fields.callbackNumber ?? call.fromNumber) ? "callback_number" : null,
@@ -340,6 +354,7 @@ export class CallService {
     llmScore?: number;
     llmReason?: string;
   }): Promise<{ severity: "routine" | "urgent" | "life_safety"; emergency: boolean; instruction: string }> {
+    const started = this.clock.now();
     const config = await this.store.getConfig(input.tenantId);
     const decision = triageEmergency(input.problemDescription, config, input.llmScore, input.llmReason);
     if (decision.emergency) {
@@ -352,6 +367,8 @@ export class CallService {
         urgent: decision,
       });
     }
+    const triaged = await this.store.getCallByProviderId(input.providerCallId).catch(() => null);
+    if (triaged?.tenantId === input.tenantId) await this.checkpoint(triaged, "call.triage", started, { severity: decision.severity, emergency: decision.emergency });
     return {
       severity: decision.severity,
       emergency: decision.emergency,
@@ -514,6 +531,8 @@ export class CallService {
     callerName?: string;
     problemDescription?: string;
     urgent?: EmergencyDecision;
+    /** Why request_human was called; only labels the call-path checkpoint. */
+    reason?: "explicit_request" | "emergency";
   }): Promise<{ status: "handoff_queued"; transferAvailable: boolean; message: string }> {
     await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
     return this.store.withLock(`call:${input.providerCallId}`, () => this.queueHumanHandoffClaimed(input));
@@ -570,6 +589,7 @@ export class CallService {
         sentAt: null,
       });
     }
+    await this.checkpoint(call, "call.handoff", this.clock.now(), { reason: input.reason ?? (input.urgent ? "emergency" : "explicit_request") });
     // Provider-native transfer is intentionally disabled until the server can
     // authorize the exact destination and call-control action itself.
     const transferAvailable = false;
@@ -974,7 +994,14 @@ export class CallService {
       updatedAt: now,
     };
     await this.store.saveCall(call);
+    // Marks the call as one with a recorded path (older calls have none to show).
+    await this.checkpoint(call, "call.start", this.clock.now(), {});
     return call;
+  }
+
+  /** A call-path checkpoint. Display only: a failed write must never block a tool reply or an owner alert. */
+  private async checkpoint(call: CallRecord, tool: string, started: Date, metadata: Record<string, unknown>): Promise<void> {
+    await this.audit(call, tool, started, "success", metadata, null).catch(() => undefined);
   }
 
   private async audit(

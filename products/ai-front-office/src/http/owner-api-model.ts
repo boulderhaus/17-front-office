@@ -1,3 +1,4 @@
+import type { CallPath } from "../domain/call-path.js";
 import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
 import { CARRIER_CHOICES, forwardingPlan, type CarrierInfo, type ForwardingPlan } from "../domain/forwarding.js";
 import { isPaidStatus } from "../domain/billing.js";
@@ -103,6 +104,8 @@ export interface ApiCallDetail {
   task: ApiTask | null;
   alerts: Array<{ priority: OutboxNotification["priority"]; state: OutboxNotification["state"] }>;
   canDelete: boolean;
+  /** Otto's path through the call; null for calls from before paths were recorded, and in the demo. */
+  path: CallPath | null;
 }
 
 export function apiCall(call: CallRecord): ApiCall {

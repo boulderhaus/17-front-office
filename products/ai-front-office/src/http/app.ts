@@ -17,7 +17,8 @@ import { CallService, ToolWriteInProgressError } from "../application/call-servi
 import { approvedTransferTargets } from "../application/transfer-policy.js";
 import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
-import { renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
+import { CALL_PATH_SCRIPT, renderCallPath, renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
+import { buildCallPath, type CallPath } from "../domain/call-path.js";
 import { chargeSentence, isPaidStatus } from "../domain/billing.js";
 import { currentPlan, hasUnlimitedPrice, introCouponId, knownPlans, legacyPlanPriceIds, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, unlimitedPriceIds, type Plan, type PlanId } from "../domain/plans.js";
 import { GuaranteeError, LeadGuaranteeService, recordFirstPaid, recordUnlimitedObservation, type UnlimitedItem } from "../application/billing-jobs.js";
@@ -577,7 +578,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     response.once("finish", () => {
       log({ level: "info", event: "request_completed", requestId, method, route, status: response.statusCode, latencyMs: Date.now() - started });
     });
-    if (!route.startsWith("webhook") && !route.startsWith("tool:") && !limiter.allow(`${ip}:${route}`, 90, 60_000)) {
+    // The live call path polls every two seconds from every open call page, so several viewers behind one
+    // office IP share this; its real limit is per account and call, in the handler.
+    if (!route.startsWith("webhook") && !route.startsWith("tool:") && !limiter.allow(`${ip}:${route}`, route === "owner:call-path" ? 600 : 90, 60_000)) {
       throw new HttpError(429, "Too many requests");
     }
 
@@ -585,6 +588,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       // Allowed to cover /app itself (the Calls screen), not only /app/..., so a tap can move an open app window.
       response.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "service-worker-allowed": "/app" });
       response.end(SERVICE_WORKER);
+      return;
+    }
+    if (method === "GET" && url.pathname === "/app/call-path.js") {
+      response.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=300" });
+      response.end(CALL_PATH_SCRIPT);
       return;
     }
     if (method === "GET" && url.pathname === "/app/manifest.webmanifest") {
@@ -897,7 +905,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       requireToolCallId(tool, input.provider_call_id);
       const tenantId = await tenantForCall(input.provider_call_id);
       await requireOperational(tenantId);
-      return { ...approvedAnswer(await dependencies.store.getConfig(tenantId), input.kind, input.key), wrap_up: await service.wrapUp(input.provider_call_id) };
+      const answer = approvedAnswer(await dependencies.store.getConfig(tenantId), input.kind, input.key);
+      await service.recordAnswerLookup({ tenantId, providerCallId: input.provider_call_id, kind: input.kind, approved: answer.status === "approved" });
+      return { ...answer, wrap_up: await service.wrapUp(input.provider_call_id) };
     }
     if (pathname === "/tools/check-service-area") return handleServiceArea(tool);
     if (pathname === "/tools/check-availability") return handleAvailability(tool);
@@ -1327,10 +1337,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (callMatch?.[1] && method === "GET") {
       const call = await dependencies.store.getCall(callMatch[1]);
       if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Call not found");
-      const [booking, task, notifications] = await Promise.all([
+      const [booking, task, notifications, events] = await Promise.all([
         dependencies.store.getBookingForCall(call.id),
         dependencies.store.getCallbackTaskForCall(call.id),
         dependencies.store.listNotifications(call.id),
+        dependencies.store.listToolEvents(call.id),
       ]);
       const detail: ApiCallDetail = {
         call: apiCall(call),
@@ -1339,10 +1350,38 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         task: task && task.tenantId === account.tenantId ? apiTask(task) : null,
         alerts: notifications.filter((item) => item.channel === "sms" && item.tenantId === account.tenantId).map((item) => ({ priority: item.priority, state: item.state })),
         canDelete: owner,
+        path: buildCallPath({ call, events, booking, callbackTask: task?.tenantId === account.tenantId ? task : null, notifications: notifications.filter((item) => item.tenantId === account.tenantId), now: dependencies.clock.now() }),
       };
       return sendJson(response, 200, detail);
     }
+    const callPathMatch = /^\/api\/app\/calls\/([0-9a-f-]{36})\/path$/i.exec(url.pathname);
+    if (callPathMatch?.[1] && method === "GET") {
+      if (!limiter.allow(`call-path:${account.id}:${callPathMatch[1]}`, 90, 60_000)) throw new HttpError(429, "Too many requests");
+      const call = await dependencies.store.getCall(callPathMatch[1]);
+      if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Call not found");
+      response.setHeader("cache-control", "no-store");
+      // The call too, so the header, safety note and facts tick along with the path.
+      return sendJson(response, 200, { path: await callPathFor(call), call: apiCall(call) });
+    }
     throw new HttpError(404, "Not found");
+  }
+
+  /** Otto's path for one call, from everything the server recorded about it. The caller checks the tenant. */
+  async function callPathFor(call: CallRecord): Promise<CallPath | null> {
+    const [booking, callbackTask, notifications, events] = await Promise.all([
+      dependencies.store.getBookingForCall(call.id),
+      dependencies.store.getCallbackTaskForCall(call.id),
+      dependencies.store.listNotifications(call.id),
+      dependencies.store.listToolEvents(call.id),
+    ]);
+    return buildCallPath({
+      call,
+      events: events.filter((item) => item.tenantId === call.tenantId),
+      booking: booking?.tenantId === call.tenantId ? booking : null,
+      callbackTask: callbackTask?.tenantId === call.tenantId ? callbackTask : null,
+      notifications: notifications.filter((item) => item.tenantId === call.tenantId),
+      now: dependencies.clock.now(),
+    });
   }
   async function handleDemoApi(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     if ((request.method ?? "GET") !== "GET") throw new HttpError(405, "The demo is read-only");
@@ -1354,7 +1393,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const call = callMatch?.[1] ? demo.calls.find((item) => item.id === callMatch[1]) : undefined;
     if (!call) throw new HttpError(404, "Not found");
     const task = demo.tasks.find((item) => item.callId === call.id);
-    const detail: ApiCallDetail = { call: apiCall(call), recordingUrl: null, booking: null, task: task ? apiTask(task) : null, alerts: [], canDelete: false };
+    const detail: ApiCallDetail = { call: apiCall(call), recordingUrl: null, booking: null, task: task ? apiTask(task) : null, alerts: [], canDelete: false, path: null };
     return sendJson(response, 200, detail);
   }
 
@@ -1732,7 +1771,17 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         dependencies.store.listNotifications(call.id),
       ]);
       const recordingUrl = call.recordingUrl?.startsWith("https://") ? call.recordingUrl.replace("/admin/provider/", "/app/provider/") : null;
-      return sendHtml(response, 200, renderOwnerCallRecord({ account, config, call, booking, callbackTask, notifications, recordingUrl, csrf: session.csrf, canDelete: !member }));
+      const path = buildCallPath({ call, events, booking, callbackTask, notifications, now: dependencies.clock.now() });
+      return sendHtml(response, 200, renderOwnerCallRecord({ account, config, call, booking, callbackTask, notifications, recordingUrl, csrf: session.csrf, canDelete: !member, path }));
+    }
+    const callPathMatch = /^\/app\/calls\/([0-9a-f-]+)\/path$/i.exec(url.pathname);
+    if (method === "GET" && callPathMatch?.[1]) {
+      if (!limiter.allow(`call-path:${account.id}:${callPathMatch[1]}`, 90, 60_000)) throw new HttpError(429, "Too many requests");
+      const call = await dependencies.store.getCall(callPathMatch[1]);
+      if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Call not found");
+      const path = await callPathFor(call);
+      response.setHeader("cache-control", "no-store");
+      return sendJson(response, 200, path ? { live: path.live, done: path.done, html: renderCallPath(call.id, path) } : { live: false, done: 0, html: "" });
     }
     throw new HttpError(404, "Not found");
   }
@@ -2668,6 +2717,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       fromNumber: input.from_number,
       ...(input.caller_name === undefined ? {} : { callerName: input.caller_name }),
       ...(input.problem_description === undefined ? {} : { problemDescription: input.problem_description }),
+      reason: input.reason,
     });
     const config = await dependencies.store.getConfig(tenantId);
     const call = await dependencies.store.getCallByProviderId(input.provider_call_id);
@@ -3121,6 +3171,8 @@ function routeKey(pathname: string): string {
   if (pathname.startsWith("/tools/")) return `tool:${pathname.slice(7)}`;
   if (pathname.startsWith("/admin/calls/")) return "admin:call";
   if (pathname.startsWith("/c/")) return "callback-link";
+  // The live path polls every two seconds; its own bucket keeps it from starving the call page's actions.
+  if (/^\/(?:api\/)?app\/calls\/[^/]+\/path$/.test(pathname)) return "owner:call-path";
   if (pathname.startsWith("/app/calls/")) return "owner:call";
   if (pathname.startsWith("/app/provider/")) return "owner:recording";
   if (pathname.startsWith("/api/app/")) return "owner:api";
