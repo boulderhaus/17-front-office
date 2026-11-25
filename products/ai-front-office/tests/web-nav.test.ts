@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { backGoes, JUMP, navActive, navEntries, swipeCloses } from "../web/src/lib/nav.js";
+import { backGoes, callBack, callOrigin, JUMP, leavesSettings, navActive, navEntries, swipeCloses } from "../web/src/lib/nav.js";
 
 const labels = (input: { base: string; preview: boolean; member: boolean; attention: number }) => navEntries(input).map((entry) => entry.label);
 
@@ -57,5 +57,40 @@ describe("the top bar's back button", () => {
 
   it("goes to the parent on a deep link, the first page of the visit", () => {
     expect(backGoes({ key: "default", state: null })).toBe("parent");
+  });
+});
+
+describe("a call's back button", () => {
+  const opened = (pathname: string, search = "") => ({ key: "k3", state: { origin: callOrigin({ base: "/app", pathname, search }) }, base: "/app" });
+
+  it("goes back to Jobs, by name, when Jobs opened the call", () => {
+    expect(callBack(opened("/app/jobs", "?tab=all"))).toEqual({ to: "/app/jobs?tab=all", label: "Jobs", history: true });
+  });
+
+  it("goes back to Calls when Calls opened the call, whatever page came before Calls", () => {
+    expect(callBack(opened("/app"))).toEqual({ to: "/app", label: "Calls", history: true });
+    expect(callBack(opened("/app/calendar", "?view=day"))).toMatchObject({ label: "Calendar", history: true });
+  });
+
+  it("names the demo's lists the same way", () => {
+    expect(callOrigin({ base: "/demo", pathname: "/demo/jobs", search: "" }).label).toBe("Jobs");
+    expect(callOrigin({ base: "/demo", pathname: "/demo", search: "" }).label).toBe("Calls");
+  });
+
+  it("goes to Calls on a deep link, a text alert or a link with no list behind it", () => {
+    expect(callBack({ key: "default", state: null, base: "/app" })).toEqual({ to: "/app", label: "Calls", history: false });
+    expect(callBack({ key: "k4", state: null, base: "/demo" })).toEqual({ to: "/demo", label: "Calls", history: false });
+    expect(callBack({ key: "default", state: { origin: { to: "/app/jobs", label: "Jobs" } }, base: "/app" })).toMatchObject({ label: "Calls", history: false });
+    expect(callBack({ key: "k5", state: { origin: { to: 5 } }, base: "/app" })).toMatchObject({ label: "Calls", history: false });
+  });
+});
+
+describe("unsaved settings", () => {
+  it("only asks when the owner leaves the settings area", () => {
+    expect(leavesSettings({ pathname: "/app/settings/alerts" })).toBe(false);
+    expect(leavesSettings({ pathname: "/app/settings" })).toBe(false);
+    expect(leavesSettings({ pathname: "/app/jobs" })).toBe(true);
+    expect(leavesSettings({ pathname: "/app" })).toBe(true);
+    expect(leavesSettings({ pathname: "/app/settingsx" })).toBe(true);
   });
 });

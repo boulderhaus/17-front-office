@@ -21,7 +21,7 @@ const buttonVariants = cva(
         brand: "bg-brand-yellow text-brand-ink font-semibold shadow-[0_1px_0_rgba(11,37,69,.25)] hover:brightness-95",
       },
       size: {
-        tap: "h-12 gap-2 px-4 text-[15px] font-semibold lg:h-10 lg:text-sm [&_svg:not([class*='size-'])]:size-4.5",
+        tap: "h-12 gap-2 px-4 text-[15px] font-semibold lg:pointer-fine:h-10 lg:pointer-fine:text-sm [&_svg:not([class*='size-'])]:size-4.5",
         default:
           "h-8 gap-1.5 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2",
         xs: "h-6 gap-1 rounded-[min(var(--radius-md),10px)] px-2 text-xs in-data-[slot=button-group]:rounded-lg has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 [&_svg:not([class*='size-'])]:size-3",

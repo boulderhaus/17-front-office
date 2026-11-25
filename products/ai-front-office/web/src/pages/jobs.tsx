@@ -44,7 +44,8 @@ export function JobsPage() {
               <button key={column.id} role="tab" aria-selected={active} type="button" onClick={() => pick(column.id)}
                 className={cn("grid min-h-16 content-center justify-items-center gap-0.5 rounded-lg px-1 text-center", active ? "bg-card shadow-sm ring-1 ring-border" : "text-muted-foreground hover:bg-card/60")}>
                 <strong className={cn("tabular text-[22px] leading-none font-semibold", active && "text-foreground", column.id === "reply" && column.rows.some((row) => row.tone === "danger") && "text-red-700")}>{column.rows.length}</strong>
-                <span className="text-[13px] leading-tight font-semibold">{column.title}</span>
+                {/* A narrow strip (a small phone, beside the open job) breaks "Com-plete" at its soft hyphen rather than cutting it. */}
+                <span className="max-w-full text-[13px] leading-tight font-semibold">{column.title.replace("Complete", "Com\u00ADplete")}</span>
               </button>
             )
           })}
@@ -63,17 +64,18 @@ function JobList({ tab, selectedId }: { tab: { empty: string; whenLabel: string;
   if (tab.rows.length === 0) return <ListBox><Muted>{tab.empty}</Muted></ListBox>
   return (
     <>
-      <ListBox>
-        <div className="hidden grid-cols-[minmax(0,10rem)_minmax(0,1fr)_7.5rem_8.5rem] gap-4 bg-muted/60 px-4 py-2.5 text-[13px] font-semibold text-muted-foreground md:grid">
+      {/* The table's columns need about 40rem; narrower (a phone, or beside the open job) each job is a two-line row. */}
+      <ListBox className="@container">
+        <div className="hidden grid-cols-[minmax(0,10rem)_minmax(0,1fr)_7.5rem_8.5rem] gap-4 bg-muted/60 px-4 py-2.5 text-[13px] font-semibold text-muted-foreground @[40rem]:grid">
           <span>Caller</span><span>Problem</span><span>Status</span><span className="text-right">{tab.whenLabel}</span>
         </div>
         {page.map((row) => (
           <CallLink key={row.call.id} callId={row.call.id} aria-current={selectedId === row.call.id}
-            className={cn("grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-0.5 px-4 py-3 hover:bg-muted/50 md:grid-cols-[minmax(0,10rem)_minmax(0,1fr)_7.5rem_8.5rem] md:gap-4", selectedId === row.call.id && "bg-accent hover:bg-accent")}>
+            className={cn("grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-0.5 px-4 py-3 hover:bg-muted/50 @[40rem]:grid-cols-[minmax(0,10rem)_minmax(0,1fr)_7.5rem_8.5rem] @[40rem]:gap-4", selectedId === row.call.id && "bg-accent hover:bg-accent")}>
             <strong className="truncate text-base font-semibold">{row.call.fields.callerName ?? "Unknown caller"}</strong>
-            <span className="order-3 truncate text-[15px] text-muted-foreground md:order-none">{row.call.fields.problemDescription || "No summary"}</span>
-            <span className="order-2 justify-self-end md:order-none md:justify-self-start"><ToneBadge tone={row.tone}>{row.label}</ToneBadge></span>
-            <span className="order-4 flex items-center justify-end gap-1 text-right text-sm text-muted-foreground md:order-none">
+            <span className="order-3 truncate text-[15px] text-muted-foreground @[40rem]:order-none">{row.call.fields.problemDescription || "No summary"}</span>
+            <span className="order-2 justify-self-end @[40rem]:order-none @[40rem]:justify-self-start"><ToneBadge tone={row.tone}>{row.label}</ToneBadge></span>
+            <span className="order-4 flex items-center justify-end gap-1 text-right text-sm text-muted-foreground @[40rem]:order-none">
               <span className="tabular">{row.when}</span><ChevronRight className="size-4 lg:hidden" />
             </span>
           </CallLink>

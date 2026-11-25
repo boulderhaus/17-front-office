@@ -276,7 +276,7 @@ function AccountMenu() {
  * The menu opens a drawer from the left; choosing a page, Close, Esc, a tap on the dimmed page or a swipe left closes it.
  * Focus: on opening, the page you're on; after choosing a page, that page's content; otherwise back to the menu button.
  */
-function TopBar({ back }: { back?: { to: string; label: string } }) {
+function TopBar({ back }: { back?: BackLink }) {
   const { base, preview, member, dashboard } = useMode()
   const location = useLocation()
   const navigate = useNavigate()
@@ -290,7 +290,8 @@ function TopBar({ back }: { back?: { to: string; label: string } }) {
   useEffect(() => { if (wide) setMenu(false) }, [wide])
   const attention = dashboard ? derive(dashboard).actionable.length : 0
   const owner = !preview && !member && dashboard?.viewer.role === "owner"
-  const goBack = () => (backGoes({ key: location.key, state: location.state }) === "history" ? navigate(-1) : navigate(back!.to))
+  // Going up to the parent (no list behind this page) replaces it, so Back from the parent doesn't return here.
+  const goBack = () => ((back?.history ?? backGoes({ key: location.key, state: location.state }) === "history") ? navigate(-1) : navigate(back!.to, { replace: true }))
   return (
     <header className="pt-safe sticky top-0 z-20 border-b bg-background/95 pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)] backdrop-blur-md lg:hidden">
       <div className="flex h-14 items-center gap-1 px-2">
@@ -353,6 +354,9 @@ function TopBar({ back }: { back?: { to: string; label: string } }) {
   )
 }
 
+/** A sub-page's "‹ Calls". `history`: whether it steps back in history; left out, the generic rule (backGoes) decides. */
+export interface BackLink { to: string; label: string; history?: boolean }
+
 /** A page's header: the title, one grey line on what the page is for, and its actions (right on a computer, under on a phone). */
 function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
   return (
@@ -370,7 +374,7 @@ function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: st
  * title: the page's name, at the top of the page. subtitle and actions: see PageHeader.
  * back: a sub-page (a call, a settings page) shows "‹ Calls" in the phone's top bar beside the menu button.
  */
-export function AppShell({ title, subtitle, actions, back, hideTitle, children }: { title: string; subtitle?: string; actions?: ReactNode; back?: { to: string; label: string }; hideTitle?: boolean; children: ReactNode }) {
+export function AppShell({ title, subtitle, actions, back, hideTitle, children }: { title: string; subtitle?: string; actions?: ReactNode; back?: BackLink; hideTitle?: boolean; children: ReactNode }) {
   useEffect(() => { document.title = `${title} · Call Otto` }, [title])
   const location = useLocation()
   // A new page whose link went away with the old one (Settings from the menu, a call from the list) leaves focus

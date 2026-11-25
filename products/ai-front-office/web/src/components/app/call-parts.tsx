@@ -94,12 +94,12 @@ export function ActionBar({ call, extra = [], reachNote }: { call: ApiCall; extr
   actions.push(...extra)
   if (!actions.length) return null
   const focus = "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-ink"
-  // Status buttons: the tap size (48px) on a phone, 40px with a mouse.
+  // Status buttons: the tap size (48px) on a phone or tablet, 40px with a mouse on a wide screen.
   const tile = (action: Action) => action.group === "status" ? cn(
     "inline-flex items-center justify-center transition-colors [&_svg]:size-4",
     action.menu
-      ? "h-12 gap-1.5 rounded-lg px-3 text-[15px] font-semibold text-muted-foreground hover:bg-muted hover:text-foreground lg:h-10"
-      : "h-12 gap-2 rounded-lg border border-muted-foreground bg-card px-4 text-[15px] font-semibold hover:bg-muted lg:h-10",
+      ? "h-12 gap-1.5 rounded-lg px-3 text-[15px] font-semibold text-muted-foreground hover:bg-muted hover:text-foreground lg:pointer-fine:h-10"
+      : "h-12 gap-2 rounded-lg border border-muted-foreground bg-card px-4 text-[15px] font-semibold hover:bg-muted lg:pointer-fine:h-10",
     focus,
     action.disabled && "pointer-events-none opacity-50",
   ) : cn(
