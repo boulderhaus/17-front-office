@@ -157,6 +157,14 @@ export class FounderFollowup {
     return founderSlots({ now, windows: this.windows, timeZone: this.deps.env.FOUNDER_TIMEZONE, busy });
   }
 
+  /** Open times overall, and how many each account would leave open on its own (0 = that calendar blocks everything). */
+  async openSlotsByAccount(): Promise<{ all: FounderSlot[]; perAccount: Record<string, number> }> {
+    const now = this.deps.clock.now();
+    const all = await this.openSlots();
+    const perAccount = Object.fromEntries([...this.deps.calendars.lastBusyByAccount].map(([id, busy]) => [id, founderSlots({ now, windows: this.windows, timeZone: this.deps.env.FOUNDER_TIMEZONE, busy }).length]));
+    return { all, perAccount };
+  }
+
   /** The shop's booked call, if it's still ahead. */
   async existingBooking(tenantId: string): Promise<FounderSlot | null> {
     const raw = await this.deps.store.getIntegrationSecret(tenantId, PROVIDER, "booking");
