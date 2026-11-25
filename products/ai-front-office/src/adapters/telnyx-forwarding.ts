@@ -58,10 +58,11 @@ export class TelnyxForwardingClient {
   }
 
   /** Say something on our check call, so whoever picked it up hears what it is instead of dead air. */
-  async speak(callControlId: string, text: string, commandId: string): Promise<void> {
+  async speak(callControlId: string, text: string, commandId: string, clientState: string | null = null): Promise<void> {
     await this.request(`/calls/${encodeURIComponent(callControlId)}/actions/speak`, {
       method: "POST",
-      body: JSON.stringify({ payload: text, voice: "AWS.Polly.Joanna", language: "en-US", command_id: commandId }),
+      // Keep the check's client_state on the speak, so its later webhooks still route to the check.
+      body: JSON.stringify({ payload: text, voice: "AWS.Polly.Joanna", language: "en-US", command_id: commandId, ...(clientState ? { client_state: clientState } : {}) }),
     }, [404, 422]);
   }
 

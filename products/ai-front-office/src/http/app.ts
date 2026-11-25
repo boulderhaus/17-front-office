@@ -1149,7 +1149,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           .catch((error) => { log({ level: "error", event: "forwarding_check_call_failed", tenantId: account.tenantId, error: safeError(error) }); return null; });
         if (callControlId) method = "auto";
       }
-      await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "check", JSON.stringify({ startedAt, method, callControlId }));
+      await dependencies.store.withLock(`forwarding-check:${account.tenantId}`, () => dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "check", JSON.stringify({ startedAt, method, callControlId })));
       log({ level: "info", event: "forwarding_check_started", tenantId: account.tenantId, method });
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
     }
@@ -2261,6 +2261,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
    * picked up tells the owner what went wrong (their phone or a screener vs. their voicemail).
    */
   async function continueForwardingCheck(tenantId: string, envelope: ReturnType<typeof parseTelnyxEnvelope>): Promise<void> {
+    // One check record per shop, written by the check endpoint and by each of these steps: never interleave.
+    await dependencies.store.withLock(`forwarding-check:${tenantId}`, () => continueForwardingCheckLocked(tenantId, envelope));
+  }
+
+  async function continueForwardingCheckLocked(tenantId: string, envelope: ReturnType<typeof parseTelnyxEnvelope>): Promise<void> {
     const callControlId = envelope.data.payload.call_control_id;
     if (typeof callControlId !== "string") return;
     let check: ForwardingCheckRecord | null = null;
@@ -2276,7 +2281,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (!check.answeredAt) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check", JSON.stringify({ ...check, answeredAt: at }));
       const confirmedAt = await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "confirmed_at");
       if (confirmedAt && confirmedAt >= check.startedAt) return;
-      await client?.speak(callControlId, FORWARDING_CHECK_SPEECH, `check-speak:${envelope.data.id}`);
+      await client?.speak(callControlId, FORWARDING_CHECK_SPEECH, `check-speak:${envelope.data.id}`, typeof envelope.data.payload.client_state === "string" ? envelope.data.payload.client_state : null);
       log({ level: "info", event: "forwarding_check_answered_by_phone", tenantId, afterMs: Date.parse(at) - Date.parse(check.startedAt) });
     } else if (type === "call.speak.ended") {
       await client?.hangUp(callControlId);
