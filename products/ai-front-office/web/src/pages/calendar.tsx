@@ -28,6 +28,14 @@ const shortTime = (minutes: number) => `${Math.floor(minutes / 60) % 12 || 12}${
 
 interface Visit { call: ApiCall; day: string; minutes: number; booked: boolean }
 
+/** Computer: the page header's one action. A phone shows the same link as a row under the calendar, with Google's state. */
+export function CalendarHeaderActions() {
+  const { base, member } = useMode()
+  const wide = useMediaQuery("(min-width: 1024px)")
+  if (member || !wide) return null
+  return <Link to={`${base}/settings/calendar`} className="inline-flex h-11 items-center gap-2 rounded-lg border bg-card px-3 text-[15px] font-semibold hover:bg-muted"><Settings2 className="size-4" />Hours and Google Calendar</Link>
+}
+
 export function CalendarPage() {
   const { dashboard, base, member } = useMode()
   const [params, setParams] = useSearchParams()
@@ -82,7 +90,6 @@ export function CalendarPage() {
                   className={cn("h-9 rounded-md px-4 text-[15px] font-semibold capitalize", view === item ? "bg-card shadow-sm ring-1 ring-border" : "text-muted-foreground hover:bg-card/60")}>{item}</button>
               ))}
             </div>
-            {!member && <Link to={`${base}/settings/calendar`} className="inline-flex h-11 items-center gap-2 rounded-lg border bg-card px-3 text-[15px] font-semibold hover:bg-muted max-lg:hidden"><Settings2 className="size-4" />Hours and Google Calendar</Link>}
           </div>
         </div>
 
@@ -111,7 +118,7 @@ export function CalendarPage() {
         </Link>}
       </section>
       {selected && (
-        <aside className="max-lg:hidden lg:sticky lg:top-20">
+        <aside className="max-lg:hidden lg:sticky lg:top-8">
           <div className="mb-2 flex justify-end"><button type="button" onClick={close} className="inline-flex h-10 items-center gap-1.5 rounded-lg px-3 text-[15px] font-semibold hover:bg-muted"><X className="size-4" />Close</button></div>
           <CallPanel call={selected} task={d.taskFor(selected.id)} tz={d.tz} standalone={false} />
         </aside>

@@ -51,7 +51,7 @@ export function JobsPage() {
         </div>
         <JobList key={tab.id} tab={tab} selectedId={selected?.id ?? null} />
       </section>
-      <aside className="max-lg:hidden lg:sticky lg:top-20">
+      <aside className="max-lg:hidden lg:sticky lg:top-8">
         <CallPanel call={selected} task={selected ? d.taskFor(selected.id) : undefined} tz={d.tz} standalone={false} />
       </aside>
     </div>

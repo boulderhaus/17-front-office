@@ -1,22 +1,23 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
-import { Link, Navigate, NavLink, useLocation, useParams } from "react-router-dom"
-import { BellRing, CalendarDays, Check, ChevronRight, MessageSquareQuote, CreditCard, Database, LogOut, PhoneIncoming, Store, Users } from "lucide-react"
+import { Link, Navigate, useLocation, useParams } from "react-router-dom"
+import { Check, ChevronRight, LogOut, type LucideIcon } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { AppShell } from "@/components/app/shell"
+import { settingsPage } from "@/components/app/settings-pages"
 import { api, useApi } from "@/lib/api"
 import { useMediaQuery, useMode } from "@/lib/mode"
 import type { ApiSettings, SettingsValues } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { AlertsSection, AnsweringSection, AnswersSection, BusinessSection, CalendarSection, DataSection, PlanSection, TeamSection } from "./settings-sections"
 
-/** Every setting lives on one of these pages: a short list on a phone, a left menu on a computer. */
+/** Every setting lives on one of these pages: a short list on a phone, under Settings in the side menu on a computer. */
 export interface SectionDef {
   id: string
   title: string
   description: string
-  icon: typeof Store
+  icon: LucideIcon
   /** Has fields that save with the Save button (the rest act on their own). */
   form: boolean
   summary: (context: SettingsContextValue) => string
@@ -26,14 +27,14 @@ export interface SectionDef {
 const MODE_WORDS: Record<string, string> = { overflow: "Calls you miss", after_hours: "After hours", always: "Every call" }
 
 export const SECTIONS: SectionDef[] = [
-  { id: "business", title: "Business details", icon: Store, form: true, description: "Name, greeting, where you work and what you fix.", summary: ({ text }) => text("businessName"), render: () => <BusinessSection /> },
-  { id: "answering", title: "How calls are answered", icon: PhoneIncoming, form: true, description: "Which calls Call Otto picks up, after hours and emergencies.", summary: ({ text }) => (text("serviceState") === "paused" ? "Paused" : MODE_WORDS[text("operationMode")] ?? "On"), render: () => <AnsweringSection /> },
-  { id: "answers", title: "Prices and answers", icon: MessageSquareQuote, form: true, description: "The only prices and facts Call Otto may tell callers.", summary: ({ text }) => { const count = [text("priceSnippets"), text("approvedKnowledge")].join("\n").split("\n").filter((line) => line.trim()).length; return count ? `${count} saved` : "None yet" }, render: () => <AnswersSection /> },
-  { id: "alerts", title: "Alerts", icon: BellRing, form: true, description: "How we let you know about new calls.", summary: ({ settings }) => (settings.integrations.ownerPhoneConfigured ? "Mobile saved" : "No mobile yet"), render: () => <AlertsSection /> },
-  { id: "calendar", title: "Calendar", icon: CalendarDays, form: true, description: "Google Calendar, appointment hours and booking.", summary: ({ settings }) => (settings.integrations.googleConnected ? "Connected" : settings.integrations.googleAvailable ? "Not connected" : "Not available yet"), render: () => <CalendarSection /> },
-  { id: "plan", title: "Plan and billing", icon: CreditCard, form: false, description: "Your plan, your card, invoices, cancel.", summary: ({ settings }) => settings.plan.label, render: () => <PlanSection /> },
-  { id: "team", title: "Team", icon: Users, form: false, description: "People who work your calls with you.", summary: () => "Invite people", render: () => <TeamSection /> },
-  { id: "data", title: "Your data", icon: Database, form: true, description: "Downloads, how long calls are kept, sign out, delete.", summary: ({ text }) => `${text("dataRetentionDays")} days`, render: () => <DataSection /> },
+  { ...settingsPage("business"), form: true, description: "Name, greeting, where you work and what you fix.", summary: ({ text }) => text("businessName"), render: () => <BusinessSection /> },
+  { ...settingsPage("answering"), form: true, description: "Which calls Call Otto picks up, after hours and emergencies.", summary: ({ text }) => (text("serviceState") === "paused" ? "Paused" : MODE_WORDS[text("operationMode")] ?? "On"), render: () => <AnsweringSection /> },
+  { ...settingsPage("answers"), form: true, description: "The only prices and facts Call Otto may tell callers.", summary: ({ text }) => { const count = [text("priceSnippets"), text("approvedKnowledge")].join("\n").split("\n").filter((line) => line.trim()).length; return count ? `${count} saved` : "None yet" }, render: () => <AnswersSection /> },
+  { ...settingsPage("alerts"), form: true, description: "How we let you know about new calls.", summary: ({ settings }) => (settings.integrations.ownerPhoneConfigured ? "Mobile saved" : "No mobile yet"), render: () => <AlertsSection /> },
+  { ...settingsPage("calendar"), form: true, description: "Google Calendar, appointment hours and booking.", summary: ({ settings }) => (settings.integrations.googleConnected ? "Connected" : settings.integrations.googleAvailable ? "Not connected" : "Not available yet"), render: () => <CalendarSection /> },
+  { ...settingsPage("plan"), form: false, description: "Your plan, your card, invoices, cancel.", summary: ({ settings }) => settings.plan.label, render: () => <PlanSection /> },
+  { ...settingsPage("team"), form: false, description: "People who work your calls with you.", summary: () => "Invite people", render: () => <TeamSection /> },
+  { ...settingsPage("data"), form: true, description: "Downloads, how long calls are kept, sign out, delete.", summary: ({ text }) => `${text("dataRetentionDays")} days`, render: () => <DataSection /> },
 ]
 // Old links and the status pill used these ids.
 const ALIASES: Record<string, string> = { shop: "business", area: "business", appointments: "calendar", emergencies: "answering" }
@@ -132,26 +133,11 @@ export function SettingsArea() {
     : section ? <SectionPage section={section} /> : <SettingsIndex />
   return (
     <AppShell title={section && !wide ? section.title : "Settings"} back={section ? { to: "/app/settings", label: "Settings" } : undefined}>
+      {/* Wide screens: the pages are listed under Settings in the side menu, so the chosen page has the full width. */}
       <SettingsContext.Provider value={context}>
-        <div className="grid gap-8 lg:grid-cols-[232px_minmax(0,1fr)] lg:items-start">
-          {context && <SideMenu />}
-          <div className="min-w-0">{body}</div>
-        </div>
+        <div className="min-w-0">{body}</div>
       </SettingsContext.Provider>
     </AppShell>
-  )
-}
-
-/** Wide screens: the settings menu on the left, the chosen page on the right. */
-function SideMenu() {
-  return (
-    <nav aria-label="Settings" className="sticky top-20 hidden gap-0.5 lg:grid">
-      {SECTIONS.map((item) => (
-        <NavLink key={item.id} to={`/app/settings/${item.id}`} className={({ isActive }) => cn("flex min-h-11 items-center gap-2.5 rounded-lg px-3 text-[15px] hover:bg-muted", isActive ? "bg-secondary font-semibold text-foreground" : "text-foreground/80")}>
-          <item.icon className="size-[18px] shrink-0" />{item.title}
-        </NavLink>
-      ))}
-    </nav>
   )
 }
 
@@ -191,7 +177,7 @@ function UnsavedBar() {
 /**
  * Save: on a computer it sits top right in the page's own sticky header, always in view and disabled until
  * something changes (Stripe and Vercel put it with the content it saves, never floating mid-screen).
- * On a phone it is a bar pinned above the tabs, shown only while there is something to save.
+ * On a phone it is a bar pinned to the bottom of the screen, shown only while there is something to save.
  */
 function SectionPage({ section }: { section: SectionDef }) {
   const { save, saving, dirty, discard } = useSettings()
@@ -202,7 +188,7 @@ function SectionPage({ section }: { section: SectionDef }) {
     : <span className={cn("inline-flex h-12 min-w-36 items-center justify-center gap-1.5 text-[15px] font-medium text-muted-foreground lg:h-10", className)}><Check className="size-4" />All changes saved</span>
   const body = (
     <>
-      <header className="sticky top-14 z-10 -mx-1 hidden items-center justify-between gap-6 border-b bg-card/95 px-1 py-3 backdrop-blur-md lg:flex">
+      <header className="sticky top-0 z-10 -mx-1 hidden items-center justify-between gap-6 border-b bg-card/95 px-1 py-3 backdrop-blur-md lg:flex">
         <div className="grid gap-0.5">
           <h2 className="text-[22px] font-semibold tracking-tight">{section.title}</h2>
           <p className="text-[15px] text-muted-foreground">{section.description}</p>
@@ -223,7 +209,7 @@ function SectionPage({ section }: { section: SectionDef }) {
     <form className="grid max-w-3xl gap-4" onSubmit={(event) => { event.preventDefault(); void save() }}>
       {body}
       {dirty && (
-        <div className="sticky bottom-[calc(76px+env(safe-area-inset-bottom))] z-10 -mx-4 flex items-center gap-3 border-t bg-card/95 px-4 py-3 backdrop-blur-md lg:hidden">
+        <div className="sticky bottom-0 z-10 -mx-4 flex items-center gap-3 border-t bg-card/95 px-4 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur-md lg:hidden">
           <Button type="button" variant="outline" size="tap" className="flex-1" onClick={discard}>Discard</Button>
           {saveButton("flex-[2]")}
         </div>

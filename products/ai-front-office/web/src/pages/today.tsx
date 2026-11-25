@@ -112,7 +112,7 @@ export function TodayPage() {
         <AllCalls dashboard={dashboard} panelId={wide ? panelCall?.id ?? null : null} from={from} waiting={waiting} />
         {owner && dashboard.onboarding.completed && <CalendarCard dashboard={dashboard} />}
       </div>
-      <aside className={cn("lg:sticky lg:top-20", !selected && "max-lg:hidden")}>
+      <aside className={cn("lg:sticky lg:top-8", !selected && "max-lg:hidden")}>
         <CallPanel call={panelCall} task={panelCall ? d.taskFor(panelCall.id) : undefined} tz={d.tz} standalone={Boolean(selected)} linked caughtUp={caughtUp}
           next={(doneId) => nextOpenCall(d.actionable.map((task) => task.callId), stillOpenCalls(dashboard.calls, (callId) => d.taskFor(callId)?.status), doneId)} />
       </aside>
@@ -447,7 +447,7 @@ export function CallPanel({ call, task, tz, standalone, next, linked = false, ca
     settle: () => requestAnimationFrame(() => requestAnimationFrame(revealLitRow)),
   } : undefined
   return (
-    <section id="detail" aria-label="Open call" tabIndex={linked ? -1 : undefined} className={cn("grid gap-4 rounded-xl border bg-card p-4 lg:max-h-[calc(100dvh-7rem)] lg:overflow-y-auto lg:p-5", linked && cn(PANEL_EDGE, "outline-none"))}>
+    <section id="detail" aria-label="Open call" tabIndex={linked ? -1 : undefined} className={cn("grid gap-4 rounded-xl border bg-card p-4 lg:max-h-[calc(100dvh-4rem)] lg:overflow-y-auto lg:p-5", linked && cn(PANEL_EDGE, "outline-none"))}>
       {standalone && <Button variant="ghost" className="-ml-2 h-11 w-fit text-base lg:hidden" asChild><Link to={base}>← Calls</Link></Button>}
       {linked ? (
         // The same yellow as the lit row: the header band names the caller whose row is lit.
