@@ -299,8 +299,9 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     if (!limiter.allow(`${ip}:owner-login-link`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
     const form = parseForm(await readBody(request, 4_000));
     const next = safeNext(form.get("next"));
-    const parsed = emailSchema.safeParse(form.get("email") ?? "");
-    if (!parsed.success) return loginPage(request, response, 400, "Enter a valid email.", { errorField: "link", next });
+    const typed = form.get("email") ?? "";
+    const parsed = emailSchema.safeParse(typed);
+    if (!parsed.success) return loginPage(request, response, 400, "Enter an email like you@yourshop.com.", { errorField: "link", next, email: typed.slice(0, 254) });
     const email = parsed.data;
     // Same answer either way; past the per-email limit nothing more is sent.
     if (limiter.allow(`owner-login-link-email:${email}`, 5, 60 * 60_000)) {

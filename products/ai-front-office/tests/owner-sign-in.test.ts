@@ -464,10 +464,18 @@ describe("sign-in page", () => {
     const h = await harness();
     const page = await (await fetch(`${h.baseUrl}/login`)).text();
     expect(page).toContain('<label for="link-email">');
-    expect(page).toMatch(/id="link-email" name="email" type="email" autocomplete="email" inputmode="email"/);
+    expect(page).toMatch(/id="link-email" name="email" type="email" autocomplete="username" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false"/);
     expect(page).toMatch(/id="password" name="password" type="password" autocomplete="current-password"/);
     expect(page).toContain('<a href="/forgot">Forgot your password?</a>');
-    expect(page).toMatch(/\.publicform input,[^{]*\{[^}]*font:400 17px[^}]*ui-sans-serif/);
+    expect(page).toMatch(/\.publicform input,[^{]*\{[^}]*font:500 18px[^}]*ui-sans-serif/);
+    // White on the strong red passes 4.5:1 (the brand red didn't); every control gets a visible focus ring.
+    expect(page).toContain("--red-strong:#b42318");
+    expect(page).toMatch(/\.publicform button\{background:var\(--red-strong\);color:white\}/);
+    expect(page).toMatch(/\.publicform select:focus-visible\{outline:3px solid var\(--field-ink\)/);
+    expect(page).toContain('<meta name="theme-color" content="#f1efe7">');
+    expect(page).toContain('<h1>Sign in</h1>');
+    expect(page).toContain('<div class="pwfield"><input id="password"');
+    expect(page).toContain('New to Call Otto? <a class="textlink" href="/signup">Get started</a>');
     expect(page).toContain("--field-ink:#0a2540");
     expect(page).toContain('fill="#4285F4"');
     const wrong = await (await fetch(`${h.baseUrl}/login`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "nobody@synthetic.example", password: "wrong-password" }) })).text();
@@ -475,6 +483,36 @@ describe("sign-in page", () => {
     expect(wrong).toContain('<a href="#password-email">Email or password is incorrect.</a>');
     expect(wrong).toMatch(/id="password-email"[^>]*aria-invalid="true" aria-describedby="login-error"/);
     expect(wrong).toContain('<details class="pwd" open>');
+    // The typed email stays, the password field takes focus, and the problem also sits right under it.
+    expect(wrong).toMatch(/id="password-email"[^>]*value="nobody@synthetic\.example"/);
+    expect(wrong).toMatch(/id="password" [^>]*aria-describedby="login-field-error" autofocus>/);
+    expect(wrong).toContain('<span class="fielderror" id="login-field-error">Email or password is incorrect.</span>');
+  });
+
+  it("keeps a mistyped email on the link form and points at the fix", async () => {
+    const h = await harness();
+    const response = await requestLink(h, "owner@synthetic");
+    expect(response.status).toBe(400);
+    const page = await response.text();
+    expect(page).toMatch(/id="link-email" [^>]*value="owner@synthetic" required aria-invalid="true" aria-describedby="login-field-error" autofocus>/);
+    expect(page).toContain('<a href="#link-email">Enter an email like you@yourshop.com.</a>');
+  });
+
+  it("forgot and reset pages: kept email, errors on the field, focus on the field to fix", async () => {
+    const h = await harness();
+    const forgot = await fetch(`${h.baseUrl}/forgot`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@synthetic" }) });
+    expect(forgot.status).toBe(400);
+    const forgotPage = await forgot.text();
+    expect(forgotPage).toContain('<div class="formerror" role="alert" id="forgot-error"><p><a href="#forgot-email">Enter the email on your account, like you@yourshop.com.</a></p></div>');
+    expect(forgotPage).toMatch(/<input name="email" id="forgot-email" [^>]*autocomplete="username" value="owner@synthetic" required aria-describedby="forgot-email-error" aria-invalid="true" autofocus>/);
+    expect(forgotPage).toContain('<a class="textlink" href="/login">Back to sign in</a>');
+    const reset = (password: string, confirm: string) => fetch(`${h.baseUrl}/reset`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token: "synthetic-token", password, confirm }) });
+    const short = await (await reset("short", "short")).text();
+    expect(short).toMatch(/<input name="password" id="reset-password" [^>]*aria-describedby="reset-password-error" aria-invalid="true" autofocus>/);
+    expect(short).toContain('<span class="fielderror" id="reset-password-error">Make your password at least 12 characters.</span>');
+    const mismatch = await (await reset("long-password-one", "long-password-two")).text();
+    expect(mismatch).toMatch(/<input name="confirm" id="reset-confirm" [^>]*aria-invalid="true" autofocus>/);
+    expect(mismatch).toContain("The two passwords don&#39;t match. Type the same one twice.");
   });
 });
 

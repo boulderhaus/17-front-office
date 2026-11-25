@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { renderAdminResetLink, renderCallbackLink, renderForgotPassword, renderResetPassword, renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms } from "../admin/render.js";
+import { renderAdminResetLink, renderCallbackLink, renderForgotPassword, renderResetPassword, renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms, type SignupFieldErrors } from "../admin/render.js";
 import { buildActivationReport, shopActivationBlockers, type ActivationReport } from "../application/readiness.js";
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService, ToolWriteInProgressError } from "../application/call-service.js";
@@ -484,7 +484,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     overageCentsPerCall: plan.overageCentsPerCall, blurb: plan.blurb, who: plan.who, chargeNote: planCharge(plan, timezone),
     unlimited: plan.unlimited ? { addOnCents: plan.unlimited.addOnCents, priceCents: plan.unlimited.priceCents, firstMonthCents: plan.unlimited.firstMonthCents, fairUseCalls: plan.unlimited.fairUseCalls, chargeNote: planCharge(plan, timezone, true) } : null,
   })) : [];
-  const signupPage = (request: IncomingMessage, error = "", values: Record<string, string> = {}, identity: VerifiedIdentity | null = null): string => renderOwnerSignup(error, values, {
+  const signupPage = (request: IncomingMessage, error = "", values: Record<string, string> = {}, identity: VerifiedIdentity | null = null, fieldErrors: SignupFieldErrors = {}): string => renderOwnerSignup(error, values, {
+    fieldErrors,
     supportEmail: dependencies.env.SUPPORT_EMAIL ?? null,
     providers: signIn.providersFor(request),
     verified: verifiedSignupEmail(identity),
@@ -751,13 +752,13 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         delete values.password;
       }
       const parsed = ownerSignupSchema.safeParse(values);
-      if (!parsed.success || (!identity && !parsed.data.password)) return sendHtml(response, 400, signupPage(request, identity ? "Check every required field." : "Check every required field and use a password with at least 12 characters.", values, identity));
+      // Every problem at once, each under its own field and naming the fix.
+      const fieldErrors = signupFieldErrors(parsed.success ? [] : parsed.error.issues, values, identity !== null);
+      if (!parsed.success || Object.keys(fieldErrors).length > 0) {
+        return sendHtml(response, 400, signupPage(request, Object.keys(fieldErrors).length > 0 ? "" : "Check the form and try again.", values, identity, fieldErrors));
+      }
       const phoneInput = parsed.data.phone?.trim() ?? "";
       const phone = phoneInput ? normalizeUsPhone(phoneInput) : null;
-      if (phoneInput && !phone) return sendHtml(response, 400, signupPage(request, "Enter a valid US mobile number.", values, identity));
-      if ((parsed.data.ownerSmsConsent === "yes" || parsed.data.founderSmsConsent === "yes") && !phone) {
-        return sendHtml(response, 400, signupPage(request, "Add a valid US mobile number to receive text messages.", values, identity));
-      }
       // Defaults from the owner's mobile: their state is the starting service area and timezone.
       // The browser's timezone wins when the page sent one. Both are refined later in Settings.
       const homeState = stateForPhone(phone);
@@ -825,7 +826,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         },
       };
       const created = await dependencies.store.createOwnerWorkspace({ account, config, ownerPhone: phone });
-      if (!created) return sendHtml(response, 409, signupPage(request, "That email already has an account. Sign in instead.", values, identity));
+      if (!created) return sendHtml(response, 409, signupPage(request, "", values, identity, { email: "That email already has an account. Sign in instead." }));
       if (parsed.data.founderSmsConsent === "yes") {
         const welcomeConfigured = dependencies.env.FOUNDER_WELCOME_ENABLED
           && dependencies.env.TELNYX_MESSAGING_APPROVED
@@ -899,8 +900,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (method === "GET") return sendHtml(response, 200, renderForgotPassword({ emailEnabled, supportEmail: dependencies.env.SUPPORT_EMAIL ?? null }));
       if (!emailEnabled) return sendHtml(response, 200, renderForgotPassword({ emailEnabled, supportEmail: dependencies.env.SUPPORT_EMAIL ?? null }));
       if (!limiter.allow(`${ip}:forgot`, 5, 60 * 60_000)) throw new HttpError(429, "Too many reset requests");
-      const parsed = z.object({ email: z.string().trim().toLowerCase().email().max(254) }).safeParse(Object.fromEntries(parseForm(await readBody(request, 4_000)).entries()));
-      if (!parsed.success) return sendHtml(response, 400, renderForgotPassword({ emailEnabled, supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, error: "Enter the email on your account." }));
+      const typed = parseForm(await readBody(request, 4_000)).get("email") ?? "";
+      const parsed = z.object({ email: z.string().trim().toLowerCase().email().max(254) }).safeParse({ email: typed });
+      if (!parsed.success) return sendHtml(response, 400, renderForgotPassword({ emailEnabled, supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, error: "Enter the email on your account, like you@yourshop.com.", email: typed.slice(0, 254) }));
       const resetAccount = limiter.allow(`forgot-email:${parsed.data.email}`, 3, 60 * 60_000) ? await dependencies.store.getOwnerAccountByEmail(parsed.data.email) : null;
       if (resetAccount && resetAccount.status !== "suspended") {
         const { token, tokenHash } = createPasswordResetToken();
@@ -923,8 +925,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const form = parseForm(await readBody(request, 4_000));
       const token = form.get("token") ?? "";
       const password = form.get("password") ?? "";
-      if (password.length < 12 || password.length > 200) return sendHtml(response, 400, renderResetPassword(token, "Use at least 12 characters.", dependencies.env.SUPPORT_EMAIL ?? null));
-      if (password !== form.get("confirm")) return sendHtml(response, 400, renderResetPassword(token, "The two passwords don't match.", dependencies.env.SUPPORT_EMAIL ?? null));
+      if (password.length < 12 || password.length > 200) return sendHtml(response, 400, renderResetPassword(token, "Make your password at least 12 characters.", dependencies.env.SUPPORT_EMAIL ?? null, "password"));
+      if (password !== form.get("confirm")) return sendHtml(response, 400, renderResetPassword(token, "The two passwords don't match. Type the same one twice.", dependencies.env.SUPPORT_EMAIL ?? null, "confirm"));
       const accountId = token ? await dependencies.store.consumePasswordReset(hashPasswordResetToken(token), dependencies.clock.now().toISOString()) : null;
       if (!accountId) return sendHtml(response, 400, renderForgotPassword({ emailEnabled: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL), supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, error: "That reset link is expired or already used. Ask for a new one." }));
       await dependencies.store.updateOwnerPassword(accountId, await hashOwnerPassword(password), dependencies.clock.now().toISOString());
@@ -3712,6 +3714,19 @@ function timingSafeEqualBuffers(left: Buffer, right: Buffer): boolean {
 
 /** The short optional notice an owner can switch on in setup. */
 const RECORDING_NOTICE = TRANSFER_RECORDING_NOTICE;
+
+/** Sign-up problems by field, each naming the fix. The schema's issues plus the checks it can't make (phone, password). */
+function signupFieldErrors(issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey> }>, values: Record<string, string>, verified: boolean): SignupFieldErrors {
+  const errors: SignupFieldErrors = {};
+  const bad = new Set(issues.map((issue) => issue.path[0]));
+  if (bad.has("businessName")) errors.businessName = "Enter your shop name.";
+  const phoneInput = (values.phone ?? "").trim();
+  if (bad.has("phone") || (phoneInput && !normalizeUsPhone(phoneInput))) errors.phone = "Enter a 10-digit US mobile number.";
+  else if (!phoneInput && (values.ownerSmsConsent === "yes" || values.founderSmsConsent === "yes")) errors.phone = "Add your mobile number to get texts.";
+  if (bad.has("email")) errors.email = "Enter an email like you@yourshop.com.";
+  if (!verified && (bad.has("password") || !values.password)) errors.password = "Make your password at least 12 characters.";
+  return errors;
+}
 
 function serviceAreaMessage(errors: string[]): string {
   return errors.length > 0

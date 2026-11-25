@@ -1,4 +1,44 @@
 (() => {
+  // Show/Hide on every password field (here, not inline, to keep the strict CSP). Hidden again on submit.
+  document.querySelectorAll(".publicform .pwfield input").forEach((input) => {
+    if (!input.id) return;
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "pwtoggle";
+    toggle.setAttribute("aria-controls", input.id);
+    const word = document.createTextNode("Show");
+    const rest = document.createElement("span");
+    rest.className = "vh";
+    rest.textContent = " password";
+    toggle.append(word, rest);
+    const set = (shown) => {
+      input.type = shown ? "text" : "password";
+      word.textContent = shown ? "Hide" : "Show";
+    };
+    toggle.addEventListener("click", () => set(input.type === "password"));
+    input.form?.addEventListener("submit", () => set(false));
+    input.after(toggle);
+  });
+
+  // One tap sends a form once: later taps do nothing while it's on its way.
+  document.querySelectorAll("form.publicform, .publicform form").forEach((formElement) => {
+    formElement.addEventListener("submit", (event) => {
+      if (formElement.dataset.busy) {
+        event.preventDefault();
+        return;
+      }
+      formElement.dataset.busy = "1";
+      event.submitter?.setAttribute("aria-busy", "true");
+    });
+  });
+  // Coming back with the Back button shows the form ready again.
+  window.addEventListener("pageshow", () => {
+    document.querySelectorAll("form[data-busy]").forEach((formElement) => {
+      delete formElement.dataset.busy;
+      formElement.querySelectorAll('[aria-busy="true"]').forEach((button) => button.removeAttribute("aria-busy"));
+    });
+  });
+
   // Signup: send the browser's timezone so the shop's hours start out right.
   const timezone = document.querySelector('.publicform input[name="timezone"]');
   if (timezone && !timezone.value) {
