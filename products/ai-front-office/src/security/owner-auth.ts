@@ -21,6 +21,21 @@ export async function hashOwnerPassword(password: string): Promise<string> {
   return `scrypt-v1:${salt.toString("base64url")}:${derived.toString("base64url")}`;
 }
 
+/**
+ * Stored instead of a hash for accounts made with Google, Microsoft or an email link. It is not a
+ * scrypt-v1 value, so verifyOwnerPassword can never match it; "Forgot your password?" sets a real one.
+ */
+export const PASSWORDLESS_HASH = "passwordless-v1";
+
+export function hasUsablePassword(encoded: string): boolean {
+  return encoded.startsWith("scrypt-v1:");
+}
+
+/** Made without a password. Anything else (even an unreadable hash) keeps asking for the password. */
+export function isPasswordless(encoded: string): boolean {
+  return encoded === PASSWORDLESS_HASH;
+}
+
 export async function verifyOwnerPassword(password: string, encoded: string): Promise<boolean> {
   const [version, saltText, hashText] = encoded.split(":");
   if (version !== "scrypt-v1" || !saltText || !hashText) return false;
@@ -58,6 +73,11 @@ export function verifyOwnerSession(value: string | undefined, secret: string, no
   }
 }
 
+/** When this session was signed in (sessions last a fixed time, so it follows from the expiry). */
+export function ownerSessionIssuedAt(session: Pick<OwnerSession, "expiresAt">): number {
+  return session.expiresAt - SESSION_TTL_SECONDS * 1_000;
+}
+
 export function ownerSessionCookie(session: string, secure: boolean): string {
   return `afo_owner=${encodeURIComponent(session)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_SECONDS}${secure ? "; Secure" : ""}`;
 }
@@ -92,4 +112,14 @@ export function createPasswordResetToken(): { token: string; tokenHash: string }
 
 export function hashPasswordResetToken(token: string): string {
   return createHash("sha256").update(`password-reset:${token}`).digest("hex");
+}
+
+/** A single-use email sign-in link token, and the hash that is stored. Only the hash is persisted. */
+export function createSignInLinkToken(): { token: string; tokenHash: string } {
+  const token = randomBytes(32).toString("base64url");
+  return { token, tokenHash: hashSignInLinkToken(token) };
+}
+
+export function hashSignInLinkToken(token: string): string {
+  return createHash("sha256").update(`owner-sign-in:${token}`).digest("hex");
 }

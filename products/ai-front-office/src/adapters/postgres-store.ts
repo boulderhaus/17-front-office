@@ -660,6 +660,20 @@ export class PostgresStore implements Store {
     return result.rows.map((row) => mapBooking(row as Row));
   }
 
+  async createSignInLink(tokenHash: string, email: string, expiresAt: string, now: string): Promise<void> {
+    // Spent and expired links are kept a day at most; the email inside is encrypted either way.
+    await this.#pool.query("DELETE FROM owner_sign_in_tokens WHERE expires_at < $1::timestamptz - interval '1 day'", [now]);
+    await this.#pool.query("INSERT INTO owner_sign_in_tokens(token_hash,email_ciphertext,expires_at,created_at) VALUES($1,$2,$3,$4)", [tokenHash, this.cryptoBox.encrypt(email.trim().toLowerCase()), expiresAt, now]);
+  }
+
+  async consumeSignInLink(tokenHash: string, now: string): Promise<string | null> {
+    const result = await this.#pool.query(
+      "UPDATE owner_sign_in_tokens SET used_at=$2 WHERE token_hash=$1 AND used_at IS NULL AND expires_at > $2 RETURNING email_ciphertext",
+      [tokenHash, now],
+    );
+    return result.rows[0] ? this.cryptoBox.decrypt(String(result.rows[0].email_ciphertext)) : null;
+  }
+
   async revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void> {
     await this.#pool.query("UPDATE owner_accounts SET session_version=session_version+1, updated_at=$2 WHERE id=$1", [accountId, updatedAt]);
   }

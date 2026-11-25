@@ -173,6 +173,8 @@ export interface ApiSettings {
   csrf: string
   values: SettingsValues
   status: string
+  /** No password on the account (Google, Microsoft or email link): deleting needs a sign-in from the last 10 minutes. */
+  signIn?: { hasPassword: boolean; recent: boolean }
   businessName: string
   /** This shop's id, for its own calls export. */
   shopId: string

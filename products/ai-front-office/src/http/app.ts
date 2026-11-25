@@ -43,7 +43,8 @@ import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js
 import { findTrade } from "../domain/trades.js";
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import type { OwnerSession } from "../security/owner-auth.js";
-import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
+import { clearOwnerSessionCookie, createPasswordResetToken, hasUsablePassword, hashOwnerPassword, isPasswordless, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, ownerSessionIssuedAt, PASSWORDLESS_HASH, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
+import { createOwnerSignIn, GOOGLE_SIGN_IN_CALLBACK, isSignInState, safeNext, verifiedSignupEmail, type VerifiedIdentity } from "./owner-sign-in.js";
 import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
 import { MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_ROUTES, toolFailure, toolLimitReached, withinToolBudget, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
 import { callScreeningSetting, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
@@ -181,7 +182,8 @@ const ownerSignupSchema = z.object({
   displayName: z.string().trim().min(2).max(120).default("Shop owner"),
   businessName: z.string().trim().min(2).max(120).default("Your service business"),
   email: z.string().trim().toLowerCase().email().max(254),
-  password: z.string().min(12).max(200),
+  // Required unless Google, Microsoft or an email link already verified the email (checked in the handler).
+  password: z.string().min(12).max(200).optional(),
   phone: z.string().trim().max(30).optional(),
   timezone: z.string().trim().max(100).optional(),
   serviceAreaTerms: z.string().trim().max(800).default(""),
@@ -409,6 +411,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
   const limiter = new RateLimiter();
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));
+  const signIn = createOwnerSignIn({ env: dependencies.env, store: dependencies.store, clock: dependencies.clock, fetcher: (input, init) => (dependencies.fetcher ?? globalThis.fetch)(input, init), limiter, log });
+  /** A passwordless account re-confirms risky changes by having signed in within this long. */
+  const RECENT_SIGN_IN_MS = 10 * 60_000;
+  const signedInRecently = (session: OwnerSession): boolean => dependencies.clock.now().getTime() - ownerSessionIssuedAt(session) <= RECENT_SIGN_IN_MS;
   const telemetry = dependencies.telemetry ?? noopTelemetry;
   const graceContext: GraceContext = { store: dependencies.store, env: dependencies.env, clock: dependencies.clock, fetcher: dependencies.fetcher, log };
   const analyticsPage = (html: string, loader = true): string => injectAnalytics(html, { key: dependencies.env.POSTHOG_KEY, ingestionHost: dependencies.env.POSTHOG_HOST, loader });
@@ -432,8 +438,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     overageCentsPerCall: plan.overageCentsPerCall, blurb: plan.blurb, who: plan.who, chargeNote: planCharge(plan, timezone),
     unlimited: plan.unlimited ? { addOnCents: plan.unlimited.addOnCents, priceCents: plan.unlimited.priceCents, firstMonthCents: plan.unlimited.firstMonthCents, fairUseCalls: plan.unlimited.fairUseCalls, chargeNote: planCharge(plan, timezone, true) } : null,
   })) : [];
-  const signupPage = (error = "", values: Record<string, string> = {}): string => renderOwnerSignup(error, values, {
+  const signupPage = (error = "", values: Record<string, string> = {}, identity: VerifiedIdentity | null = null): string => renderOwnerSignup(error, values, {
     supportEmail: dependencies.env.SUPPORT_EMAIL ?? null,
+    providers: signIn.providers,
+    verified: verifiedSignupEmail(identity),
     chargeNote: stripeClient ? planCharge(plans[0]!) : null,
     plans: stripeClient ? plans.map((plan) => ({ ...plan, chargeNote: planCharge(plan), unlimitedChargeNote: plan.unlimited ? planCharge(plan, undefined, true) : null })) : [],
   });
@@ -670,6 +678,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       return joinTeam(request, response, url, dependencies);
     }
     if (method === "GET" && url.pathname === "/signup") {
+      if (url.searchParams.get("fresh") === "1") {
+        response.setHeader("set-cookie", signIn.clearPendingIdentity());
+        return redirect(response, "/signup");
+      }
       // The pricing page's picks carry over: ?unlimited=1 and ?plan=team preselect the form.
       const preset: Record<string, string> = {};
       if (url.searchParams.get("unlimited") === "1") preset.unlimited = "yes";
@@ -677,20 +689,26 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (presetPlan && plans.some((plan) => plan.id === presetPlan)) preset.plan = presetPlan;
       const presetTrade = findTrade(url.searchParams.get("trade"));
       if (presetTrade) preset.trade = presetTrade.key;
-      return sendHtml(response, 200, analyticsPage(signupPage("", preset)));
+      return sendHtml(response, 200, analyticsPage(signupPage("", preset, signIn.pendingIdentity(request))));
     }
     if (method === "POST" && url.pathname === "/signup") {
       if (!limiter.allow(`${ip}:owner-signup`, 5, 60 * 60_000)) throw new HttpError(429, "Too many signup attempts from this connection");
       const form = parseForm(await readBody(request, 48_000));
-      if (form.get("faxNumber")?.trim()) return sendHtml(response, 200, signupPage());
+      // Google, Microsoft or an email link verified this email: it is the account email, and no password is set.
+      const identity = signIn.pendingIdentity(request);
+      if (form.get("faxNumber")?.trim()) return sendHtml(response, 200, signupPage("", {}, identity));
       const values = Object.fromEntries(form.entries());
+      if (identity) {
+        values.email = identity.email;
+        delete values.password;
+      }
       const parsed = ownerSignupSchema.safeParse(values);
-      if (!parsed.success) return sendHtml(response, 400, signupPage("Check every required field and use a password with at least 12 characters.", values));
+      if (!parsed.success || (!identity && !parsed.data.password)) return sendHtml(response, 400, signupPage(identity ? "Check every required field." : "Check every required field and use a password with at least 12 characters.", values, identity));
       const phoneInput = parsed.data.phone?.trim() ?? "";
       const phone = phoneInput ? normalizeUsPhone(phoneInput) : null;
-      if (phoneInput && !phone) return sendHtml(response, 400, signupPage("Enter a valid US mobile number.", values));
+      if (phoneInput && !phone) return sendHtml(response, 400, signupPage("Enter a valid US mobile number.", values, identity));
       if ((parsed.data.ownerSmsConsent === "yes" || parsed.data.founderSmsConsent === "yes") && !phone) {
-        return sendHtml(response, 400, signupPage("Add a valid US mobile number to receive text messages.", values));
+        return sendHtml(response, 400, signupPage("Add a valid US mobile number to receive text messages.", values, identity));
       }
       // Defaults from the owner's mobile: their state is the starting service area and timezone.
       // The browser's timezone wins when the page sent one. Both are refined later in Settings.
@@ -710,15 +728,15 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         id: randomUUID(),
         tenantId,
         email: parsed.data.email,
-        displayName: parsed.data.displayName,
-        passwordHash: await hashOwnerPassword(parsed.data.password),
+        displayName: identity?.name && !form.has("displayName") ? identity.name : parsed.data.displayName,
+        passwordHash: identity || !parsed.data.password ? PASSWORDLESS_HASH : await hashOwnerPassword(parsed.data.password),
         status: "pending_activation",
         createdAt: now,
         updatedAt: now,
       };
       const splitList = (value: string): string[] => value.split(",").map((item) => item.trim()).filter(Boolean).slice(0, 100);
       const serviceArea = normalizeServiceAreaInput(parsed.data.serviceAreaTerms || homeState || "");
-      if (serviceArea.errors.length > 0) return sendHtml(response, 400, signupPage(serviceAreaMessage(serviceArea.errors), values));
+      if (serviceArea.errors.length > 0) return sendHtml(response, 400, signupPage(serviceAreaMessage(serviceArea.errors), values, identity));
       // The plan picked above the button; Solo when nothing was sent.
       const plan = pickPlan(plans, form.get("plan"));
       const trade = findTrade(parsed.data.trade);
@@ -757,7 +775,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         },
       };
       const created = await dependencies.store.createOwnerWorkspace({ account, config, ownerPhone: phone });
-      if (!created) return sendHtml(response, 409, signupPage("That email already has an account. Sign in instead.", values));
+      if (!created) return sendHtml(response, 409, signupPage("That email already has an account. Sign in instead.", values, identity));
       if (parsed.data.founderSmsConsent === "yes") {
         const welcomeConfigured = dependencies.env.FOUNDER_WELCOME_ENABLED
           && dependencies.env.TELNYX_MESSAGING_APPROVED
@@ -790,8 +808,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         await queueOwnerOptInConfirmation(tenantId, phone!, `owner-optin:${tenantId}:signup`);
       }
       const session = mintOwnerSession(account, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
-      response.setHeader("set-cookie", ownerSessionCookie(session, dependencies.env.NODE_ENV === "production"));
-      log({ level: "info", event: "owner_workspace_created", accountId: account.id, tenantId });
+      const sessionCookie = ownerSessionCookie(session, dependencies.env.NODE_ENV === "production");
+      response.setHeader("set-cookie", identity ? [sessionCookie, signIn.clearPendingIdentity()] : sessionCookie);
+      log({ level: "info", event: "owner_workspace_created", accountId: account.id, tenantId, ...(identity ? { signInMethod: identity.provider } : {}) });
       telemetry.capture("owner_signed_up", account.id, tenantId, { operation_mode: config.operationMode });
       // Straight to the card: one tap from "Continue" to Stripe. If Stripe is slow, the next screen has the button.
       if (stripeClient) {
@@ -803,20 +822,26 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       }
       return redirect(response, "/app/start");
     }
-    if (method === "GET" && url.pathname === "/login") return sendHtml(response, 200, renderOwnerLogin());
+    if (method === "GET" && url.pathname === "/login") return sendHtml(response, 200, renderOwnerLogin("", signIn.loginOptions({ next: safeNext(url.searchParams.get("next")) })));
     if (method === "POST" && url.pathname === "/login") {
       if (!limiter.allow(`${ip}:owner-login`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
-      const parsed = ownerLoginSchema.safeParse(Object.fromEntries(parseForm(await readBody(request, 16_000)).entries()));
-      if (!parsed.success) return sendHtml(response, 400, renderOwnerLogin("Enter a valid email and password."));
+      const form = parseForm(await readBody(request, 16_000));
+      const next = safeNext(form.get("next"));
+      const parsed = ownerLoginSchema.safeParse({ email: form.get("email") ?? "", password: form.get("password") ?? "" });
+      if (!parsed.success) return sendHtml(response, 400, renderOwnerLogin("Enter a valid email and password.", signIn.loginOptions({ errorField: "password", email: form.get("email") ?? "", next })));
       // Per-account limit so guesses spread across many addresses still stop.
       if (!limiter.allow(`owner-login-email:${parsed.data.email}`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
       const account = await dependencies.store.getOwnerAccountByEmail(parsed.data.email);
-      const valid = await verifyOwnerPassword(parsed.data.password, account?.passwordHash ?? await dummyOwnerPasswordHash);
-      if (!account || !valid || account.status === "suspended") return sendHtml(response, 401, renderOwnerLogin("Email or password is incorrect."));
+      // An account made with Google, Microsoft or an email link has no password: no password ever matches it,
+      // and it takes as long to say so as for a wrong password.
+      const passwordHash = account && hasUsablePassword(account.passwordHash) ? account.passwordHash : null;
+      const valid = await verifyOwnerPassword(parsed.data.password, passwordHash ?? await dummyOwnerPasswordHash) && passwordHash !== null;
+      if (!account || !valid || account.status === "suspended") return sendHtml(response, 401, renderOwnerLogin("Email or password is incorrect.", signIn.loginOptions({ errorField: "password", email: parsed.data.email, next })));
       const session = mintOwnerSession(account, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
       response.setHeader("set-cookie", ownerSessionCookie(session, dependencies.env.NODE_ENV === "production"));
-      return redirect(response, "/app");
+      return redirect(response, next ?? "/app");
     }
+    if (await signIn.route(request, response, url, method, ip)) return;
     if (url.pathname === "/forgot" && (method === "GET" || method === "POST")) {
       const emailEnabled = Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL);
       if (method === "GET") return sendHtml(response, 200, renderForgotPassword({ emailEnabled, supportEmail: dependencies.env.SUPPORT_EMAIL ?? null }));
@@ -859,6 +884,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/");
     }
+    // Google sign-in returns to the calendar-connect callback (its one registered redirect URI); its signed state routes it here.
+    if (method === "GET" && url.pathname === GOOGLE_SIGN_IN_CALLBACK && isSignInState(url.searchParams.get("state"))) return signIn.googleCallback(request, response, url);
     if (url.pathname.startsWith("/app")) return handleOwner(request, response, url);
     // Retire the old qualification form without breaking saved links.
     if (url.pathname === "/start") return redirect(response, "/signup");
@@ -1297,6 +1324,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         urgentCalls: await urgentCallsState(account.tenantId),
         values: apiSettings(config),
         status: account.status,
+        // No password (Google, Microsoft or email link): deleting needs a sign-in from the last 10 minutes instead.
+        signIn: { hasPassword: !isPasswordless(account.passwordHash), recent: signedInRecently(session) },
         businessName: config.businessName,
         shopId: account.tenantId,
         plan: (() => {
@@ -1635,6 +1664,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         subscription: await dependencies.store.getSubscription(account.tenantId),
         csrf: session.csrf,
         saved: url.searchParams.get("saved") === "1",
+        recentSignIn: signedInRecently(session),
         integrations: {
           googleAvailable: anyGoogleClient(dependencies.env),
           googleConnected,
@@ -1688,7 +1718,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
       if (form.get("confirm")?.trim().toLowerCase() !== "delete") throw new HttpError(400, "Type DELETE to confirm");
-      if (!await verifyOwnerPassword(form.get("password") ?? "", account.passwordHash)) throw new HttpError(403, "Password is incorrect");
+      // No password on the account (Google, Microsoft or email link): a sign-in in the last 10 minutes stands in for it.
+      if (isPasswordless(account.passwordHash)) {
+        if (!signedInRecently(session)) throw new HttpError(403, "For your safety, sign in again, then delete within 10 minutes.");
+      } else if (!await verifyOwnerPassword(form.get("password") ?? "", account.passwordHash)) throw new HttpError(403, "Password is incorrect");
       const subscription = await dependencies.store.getSubscription(account.tenantId);
       // Only once billing has fully ended: anything but a cancelled subscription may still charge.
       if (subscription?.providerSubscriptionId && subscription.status !== "canceled") {

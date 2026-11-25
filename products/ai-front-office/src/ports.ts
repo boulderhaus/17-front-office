@@ -97,6 +97,10 @@ export interface Store {
   /** Replace the password, revoke every existing session, and void every outstanding reset link. */
   updateOwnerPassword(accountId: string, passwordHash: string, updatedAt: string): Promise<void>;
   revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void>;
+  /** Store a hashed single-use email sign-in link. The email may have no account yet (the link then opens sign-up). */
+  createSignInLink(tokenHash: string, email: string, expiresAt: string, now: string): Promise<void>;
+  /** Atomically mark an unexpired, unused sign-in link used; returns its email or null. */
+  consumeSignInLink(tokenHash: string, now: string): Promise<string | null>;
   getUsageSummary(tenantId: string, periodStart: string, periodEnd: string): Promise<UsageSummary>;
   saveProviderRoute(route: ProviderRoute): Promise<void>;
   getProviderRoute(provider: ProviderRoute["provider"], externalId: string): Promise<ProviderRoute | null>;

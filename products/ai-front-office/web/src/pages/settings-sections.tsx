@@ -401,6 +401,9 @@ function DownloadRow({ title, text, href }: { title: string; text: string; href:
 export function DataSection() {
   const { settings, text, bind } = useSettings()
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // Signed up with Google, Microsoft or an email link: no password to type, a fresh sign-in instead.
+  const hasPassword = settings.signIn?.hasPassword ?? true
+  const needsFreshSignIn = !hasPassword && !settings.signIn?.recent
   return (
     <>
       <SettingsCard title="Download your data" description="Files save straight to this phone or computer. Nothing is emailed.">
@@ -426,12 +429,17 @@ export function DataSection() {
       <SettingsCard danger title="Delete your account" description="Cancel your plan first. This disconnects your line and deletes every call, transcript, recording, follow-up and setting. Jobs on your calendar stay there.">
         {!confirmDelete ? (
           <Button size="tap" variant="outline" className={cn(actionClass, "border-red-200 text-red-700 hover:bg-red-50")} type="button" onClick={() => setConfirmDelete(true)}>Delete my account…</Button>
+        ) : needsFreshSignIn ? (
+          <div className="grid gap-3">
+            <p className="text-[15px]">For your safety, sign in again first. Then you have 10 minutes to delete.</p>
+            <Button size="tap" variant="outline" className={actionClass} asChild><a href="/login?next=%2Fapp%2Fsettings%2Fdata">Sign in again</a></Button>
+          </div>
         ) : (
           <form method="post" action="/app/account/delete" className="grid gap-4">
             <input type="hidden" name="csrf" value={settings.csrf} />
             <Pair>
               <Field label="Type DELETE"><Input name="confirm" autoComplete="off" required className={fieldClass} /></Field>
-              <Field label="Your password"><Input name="password" type="password" autoComplete="current-password" required className={fieldClass} /></Field>
+              {hasPassword ? <Field label="Your password"><Input name="password" type="password" autoComplete="current-password" required className={fieldClass} /></Field> : null}
             </Pair>
             <Button size="tap" className={cn(actionClass, "bg-red-600 text-white hover:bg-red-700")}>Delete my account for good</Button>
           </form>

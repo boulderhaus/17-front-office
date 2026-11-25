@@ -411,6 +411,20 @@ export class InMemoryStore implements Store {
     return [...this.bookings.values()].filter((booking) => booking.tenantId === tenantId).map((booking) => structuredClone(booking));
   }
 
+  readonly signInLinks = new Map<string, { email: string; expiresAt: string; usedAt: string | null }>();
+
+  async createSignInLink(tokenHash: string, email: string, expiresAt: string, now: string): Promise<void> {
+    for (const [hash, link] of this.signInLinks) if (link.expiresAt < now) this.signInLinks.delete(hash);
+    this.signInLinks.set(tokenHash, { email: email.trim().toLowerCase(), expiresAt, usedAt: null });
+  }
+
+  async consumeSignInLink(tokenHash: string, now: string): Promise<string | null> {
+    const link = this.signInLinks.get(tokenHash);
+    if (!link || link.usedAt || link.expiresAt <= now) return null;
+    link.usedAt = now;
+    return link.email;
+  }
+
   async revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void> {
     const account = this.ownerAccounts.get(accountId);
     if (account) this.ownerAccounts.set(accountId, { ...account, sessionVersion: (account.sessionVersion ?? 0) + 1, updatedAt });
