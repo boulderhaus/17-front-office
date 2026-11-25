@@ -68,6 +68,10 @@ export interface FounderCalendarsView {
   windows: string;
   timeZone: string;
   preview: FounderSlot[] | null;
+  /** Which account couldn't be read, when that's why there's no preview. */
+  readError?: string | null | undefined;
+  /** How many open times each account leaves on its own; 0 means that calendar blocks every booking. */
+  perAccount?: Record<string, number> | undefined;
   notice?: string | undefined;
   error?: string | undefined;
 }
@@ -84,10 +88,10 @@ export function renderFounderCalendars(view: FounderCalendarsView): string {
       const book = account.bookHere
         ? `<span class="pill">Takes bookings</span>`
         : `<form method="post" action="/admin/founder-calendars/book-here">${hidden}<input type="hidden" name="account" value="${escapeHtml(account.id)}"><button>Book here</button></form>`;
-      return `<tr><td>${escapeHtml(account.email ? maskEmail(account.email) : "Google account")}<br><span class="small">Busy times from: ${escapeHtml(checks)}</span></td><td>${book}</td><td><form method="post" action="/admin/founder-calendars/disconnect">${hidden}<input type="hidden" name="account" value="${escapeHtml(account.id)}"><button class="dangerbutton">Disconnect</button></form></td></tr>`;
+      return `<tr><td>${escapeHtml(account.email ? maskEmail(account.email) : "Google account")}<br><span class="small">Busy times from: ${escapeHtml(checks)}</span>${view.perAccount?.[account.id] === 0 ? `<br><span class="small"><strong>This calendar is busy across all your booking hours, so it blocks every booking.</strong></span>` : ""}</td><td>${book}</td><td><form method="post" action="/admin/founder-calendars/disconnect">${hidden}<input type="hidden" name="account" value="${escapeHtml(account.id)}"><button class="dangerbutton">Disconnect</button></form></td></tr>`;
     }).join("");
   const preview = view.preview === null
-    ? `<p class="small">Couldn't read the calendars just now.</p>`
+    ? `<p class="small">${escapeHtml(view.readError ?? "Couldn't read the calendars just now.")}</p>`
     : view.preview.length === 0
       ? `<p class="small">${view.accounts.length === 0 ? "Connect a calendar to see open times." : "Nothing open in the next five business days."}</p>`
       : `<ul>${view.preview.slice(0, 9).map((slot) => `<li>${escapeHtml(slotFullLabel(slot.start, view.timeZone))}</li>`).join("")}</ul>`;
