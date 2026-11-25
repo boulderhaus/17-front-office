@@ -48,7 +48,7 @@ describe("Otto's path through a call", () => {
 
   async function path() {
     const call = (await store.getCallByProviderId(id))!;
-    return buildCallPath({ call, events: await store.listToolEvents(call.id), booking: await store.getBookingForCall(call.id), notifications: await store.listNotifications(call.id), now: clock.now() });
+    return buildCallPath({ call, events: await store.listToolEvents(call.id), booking: await store.getBookingForCall(call.id), callbackTask: await store.getCallbackTaskForCall(call.id), notifications: await store.listNotifications(call.id), now: clock.now() })!;
   }
   const states = async () => Object.fromEntries((await path()).steps.map((step) => [step.key, step.state]));
 
@@ -105,22 +105,27 @@ describe("Otto's path through a call", () => {
     expect(current.live).toBe(true);
     expect(current.steps.find((step) => step.key === "booking")).toMatchObject({ state: "skipped", note: "You're calling them back" });
     expect(current.steps.find((step) => step.key === "times")?.state).toBe("skipped");
-    expect(current.steps.find((step) => step.state === "current")?.key).toBe("safety");
+    // The problem only counts once Otto saved it with save_intake or triage.
+    expect(current.steps.find((step) => step.state === "current")?.key).toBe("problem");
   });
 
   it("flags an emergency at the safety check", async () => {
     await service.triageCall({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", problemDescription: "I smell gas in the basement" });
     const safety = (await path()).steps.find((step) => step.key === "safety");
-    expect(safety).toMatchObject({ state: "flagged", note: "Emergency: told to get safe, alert sending" });
+    expect(safety).toMatchObject({ state: "flagged", note: "Emergency, alert sending" });
 
     // Once the alert really went out, it says so; if it failed, it says that instead.
     const call = (await store.getCallByProviderId(id))!;
     const alerts = (await store.listNotifications(call.id)).filter((item) => item.idempotencyKey.startsWith("human-handoff:"));
     expect(alerts.length).toBeGreaterThan(0);
     for (const alert of alerts) await store.saveNotification({ ...alert, state: "delivered" });
-    expect((await path()).steps.find((step) => step.key === "safety")?.note).toBe("Emergency: told to get safe, you were alerted");
+    expect((await path()).steps.find((step) => step.key === "safety")?.note).toBe("Emergency, you were alerted");
     for (const alert of alerts) await store.saveNotification({ ...alert, state: "dead" });
-    expect((await path()).steps.find((step) => step.key === "safety")?.note).toBe("Emergency: told to get safe, alert didn't go through");
+    expect((await path()).steps.find((step) => step.key === "safety")?.note).toBe("Emergency, alert didn't go through");
+
+    // request_human with reason=emergency after triage is the same emergency, not the caller asking for the owner.
+    await service.queueHumanHandoff({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", reason: "emergency" });
+    expect((await path()).extras).toEqual([]);
   });
 
   it("stops at the service check for a robocall and marks the rest skipped once it ends", async () => {
@@ -153,6 +158,61 @@ describe("Otto's path through a call", () => {
     await service.recordAnswerLookup({ tenantId: "demo", providerCallId: id, kind: "price", approved: false });
     const call = (await store.getCallByProviderId(id))!;
     expect((await store.listNotifications(call.id)).some((item) => item.idempotencyKey.startsWith("human-handoff:") && item.priority === "high")).toBe(true);
+  });
+
+  it("says an emergency was found after the call when nothing caught it live", async () => {
+    await service.finalize({ webhookEventId: `end:${id}`, tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", startedAt: "2026-01-15T14:00:00.000Z", endedAt: clock.now().toISOString(), durationSeconds: 60, fields: { ...fields, problemDescription: "Furnace noise, and I smell gas in the kitchen" }, transcript: "Furnace noise, and I smell gas in the kitchen", recordingUrl: null, consentState: "disclosed" });
+    const safety = (await path()).steps.find((step) => step.key === "safety")!;
+    expect(safety.state).toBe("flagged");
+    expect(safety.note).toMatch(/^Emergency found after the call, (alert sending|you were alerted)$/);
+  });
+
+  it("takes the area and times notes from the latest check", async () => {
+    await service.saveIntake({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", fields: { problemDescription: fields.problemDescription } });
+    expect((await service.checkServiceArea({ tenantId: "demo", providerCallId: id, address: "100 Main St, Shelbyville" })).status).toBe("outside");
+    clock.advance(5);
+    expect((await service.checkServiceArea({ tenantId: "demo", providerCallId: id, address: fields.address! })).status).toBe("covered");
+    expect((await path()).steps.find((step) => step.key === "address")?.note).toBe("In your area");
+  });
+
+  it("doesn't count a transcript as a captured problem on a hang-up, and says when a call dropped", async () => {
+    await service.finalize({ webhookEventId: `end:${id}`, tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", startedAt: "2026-01-15T14:00:00.000Z", endedAt: clock.now().toISOString(), durationSeconds: 4, fields: { ...fields, callerName: null, address: null, problemDescription: "Hello?" }, transcript: "Hello?", recordingUrl: null, consentState: "disclosed" });
+    expect(await states()).toMatchObject({ greeting: "done", service_check: "skipped", problem: "skipped", wrap_up: "skipped" });
+  });
+
+  it("flags a call that dropped without its final report", async () => {
+    await service.saveIntake({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", fields: { problemDescription: fields.problemDescription } });
+    clock.advance(40 * 60);
+    expect(await service.recoverStaleCalls("demo")).toBe(1);
+    expect((await path()).steps.find((step) => step.key === "wrap_up")).toMatchObject({ state: "flagged" });
+    expect((await path()).steps.find((step) => step.key === "wrap_up")?.note).toMatch(/^Call dropped, /);
+  });
+
+  it("shows no path for calls from before paths were recorded", async () => {
+    const call = (await store.getCallByProviderId(id))!;
+    const events = (await store.listToolEvents(call.id)).filter((event) => event.tool !== "call.start");
+    expect(buildCallPath({ call, events, booking: null, notifications: [], now: clock.now() })).toBeNull();
+  });
+
+  it("never counts a push that reached no device as an alert", async () => {
+    await service.triageCall({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", problemDescription: "I smell gas in the basement" });
+    const call = (await store.getCallByProviderId(id))!;
+    const now = clock.now().toISOString();
+    for (const alert of await store.listNotifications(call.id)) await store.saveNotification({ ...alert, state: "dead" });
+    await store.enqueueNotification({ id: "99999999-9999-4999-8999-999999999999", tenantId: "demo", callId: call.id, channel: "push", destinationRef: "push", body: "x", priority: "high", state: "sent", attempts: 1, nextAttemptAt: now, idempotencyKey: `human-handoff:${call.id}:push`, providerReceipt: "push:x:none", lastError: null, createdAt: now, sentAt: now });
+    expect((await path()).steps.find((step) => step.key === "safety")?.note).toBe("Emergency, alert didn't go through");
+  });
+
+  it("shows a pending booking as handled once the owner marks it handled", async () => {
+    await store.saveConfig({ ...createDemoConfig(), ownerRealtimeSmsEnabled: true, bookingMode: "confirm" });
+    await service.saveIntake({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", fields });
+    const slots = await service.checkAvailability({ tenantId: "demo", providerCallId: id, windowStart: "2026-01-15T15:00:00.000Z", windowEnd: "2026-01-15T18:00:00.000Z" });
+    await service.bookConfirmedSlot({ tenantId: "demo", providerCallId: id, slotStart: slots.slots[0]!.start, callerName: "Test Caller", callbackNumber: "+15555550100", address: fields.address!, serviceCategory: "HVAC maintenance", problemDescription: fields.problemDescription, explicitConfirmation: true, diagnosticFeeAccepted: true });
+    const call = (await store.getCallByProviderId(id))!;
+    expect((await path()).steps.find((step) => step.key === "booking")?.state).toBe("waiting");
+    const now = clock.now().toISOString();
+    await store.saveCallbackTask({ id: "77777777-7777-4777-8777-777777777777", tenantId: "demo", callId: call.id, ownerRef: "owner-primary", reason: "Confirm requested appointment", priority: "normal", status: "completed", dueAt: now, completedAt: now, completionSource: "owner", createdAt: now, updatedAt: now });
+    expect((await path()).steps.find((step) => step.key === "booking")).toMatchObject({ state: "done", note: "You handled it" });
   });
 
   it("never stores the caller's details on a checkpoint", async () => {
@@ -209,6 +269,14 @@ describe("live path on the owner's call page", () => {
     expect(body).toMatchObject({ live: true, done: 4 });
     expect(body.html).toContain('class="current"');
 
+    // The owner app (React) gets the same path from the API, and polls its own route.
+    const api = await (await fetch(`${baseUrl}/api/app/calls/${call.id}`, { headers: { cookie, accept: "application/json" } })).json() as { path: { live: boolean; done: number; steps: Array<{ key: string; state: string }> } };
+    expect(api.path).toMatchObject({ live: true, done: 4 });
+    expect(api.path.steps.find((step) => step.state === "current")?.key).toBe("caller");
+    const poll = await fetch(`${baseUrl}/api/app/calls/${call.id}/path`, { headers: { cookie, accept: "application/json" } });
+    expect(poll.headers.get("cache-control")).toBe("no-store");
+    expect(((await poll.json()) as { path: { done: number } }).path.done).toBe(4);
+
     const script = await fetch(`${baseUrl}/app/call-path.js`);
     expect(script.headers.get("content-type")).toContain("javascript");
     expect(await script.text()).toContain("data-live-path");
@@ -218,5 +286,6 @@ describe("live path on the owner's call page", () => {
     const other = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Other Plumbing", email: "other@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
     const otherCookie = other.headers.get("set-cookie")!.split(";")[0]!;
     expect((await fetch(`${baseUrl}/app/calls/${call.id}/path`, { headers: { cookie: otherCookie } })).status).toBe(404);
+    expect((await fetch(`${baseUrl}/api/app/calls/${call.id}/path`, { headers: { cookie: otherCookie, accept: "application/json" } })).status).toBe(404);
   });
 });

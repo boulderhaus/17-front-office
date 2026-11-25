@@ -531,6 +531,8 @@ export class CallService {
     callerName?: string;
     problemDescription?: string;
     urgent?: EmergencyDecision;
+    /** Why request_human was called; only labels the call-path checkpoint. */
+    reason?: "explicit_request" | "emergency";
   }): Promise<{ status: "handoff_queued"; transferAvailable: boolean; message: string }> {
     await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
     return this.store.withLock(`call:${input.providerCallId}`, () => this.queueHumanHandoffClaimed(input));
@@ -587,7 +589,7 @@ export class CallService {
         sentAt: null,
       });
     }
-    await this.checkpoint(call, "call.handoff", this.clock.now(), { reason: input.urgent ? "emergency" : "explicit_request" });
+    await this.checkpoint(call, "call.handoff", this.clock.now(), { reason: input.reason ?? (input.urgent ? "emergency" : "explicit_request") });
     // Provider-native transfer is intentionally disabled until the server can
     // authorize the exact destination and call-control action itself.
     const transferAvailable = false;
@@ -992,6 +994,8 @@ export class CallService {
       updatedAt: now,
     };
     await this.store.saveCall(call);
+    // Marks the call as one with a recorded path (older calls have none to show).
+    await this.checkpoint(call, "call.start", this.clock.now(), {});
     return call;
   }
 

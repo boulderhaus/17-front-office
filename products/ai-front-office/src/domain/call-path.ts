@@ -1,8 +1,8 @@
-import type { BookingRecord, CallRecord, OutboxNotification, ToolEvent } from "./models.js";
+import type { BookingRecord, CallbackTask, CallRecord, OutboxNotification, ToolEvent } from "./models.js";
 
 /**
  * Otto's path through a call: the checkpoints every service call walks, each checked off from what the
- * server actually recorded (tool events, the call record, the booking and the owner's alerts), never from
+ * server actually recorded (tool events, the booking, the callback task and the owner's alerts), never from
  * what the model says it did. The owner watches it tick live on the call page and reads it afterwards to
  * see what was skipped.
  */
@@ -26,6 +26,7 @@ export interface CallPath {
   live: boolean;
   /** Checkpoints reached (done, waiting or flagged). */
   done: number;
+  startedAt: string;
 }
 
 export const CALL_PATH_LABELS: Readonly<Record<CallPathStepKey, string>> = {
@@ -46,15 +47,19 @@ const CUSTOMER_TOOLS = new Set(["call.intake", "call.triage", "call.handoff", "c
 /** Calls are cut at seven minutes; one that never reported its end stops showing as live after this. */
 export const CALL_PATH_LIVE_WINDOW_MS = 15 * 60_000;
 
-const E164 = /^\+[1-9]\d{7,14}$/;
-
 /** What actually happened to the owner's alerts of one kind: never claim a text that wasn't sent. */
 export type AlertStatus = "sent" | "sending" | "failed" | "not_sent" | "none";
+
+function reachedOwner(item: OutboxNotification): boolean {
+  if (item.state !== "sent" && item.state !== "delivered" && item.state !== "delivery_unconfirmed") return false;
+  // A push to zero devices "sends" but reaches nobody.
+  return !(item.channel === "push" && /:(?:0|none)$/.test(item.providerReceipt ?? ""));
+}
 
 export function ownerAlertStatus(notifications: OutboxNotification[], prefixes: readonly string[]): AlertStatus {
   const mine = notifications.filter((item) => prefixes.some((prefix) => item.idempotencyKey.startsWith(`${prefix}:`)));
   if (mine.length === 0) return "none";
-  if (mine.some((item) => item.state === "sent" || item.state === "delivered" || item.state === "delivery_unconfirmed")) return "sent";
+  if (mine.some(reachedOwner)) return "sent";
   if (mine.some((item) => item.state === "pending" || item.state === "sending" || item.state === "retry")) return "sending";
   if (mine.some((item) => item.state === "delivery_failed" || item.state === "dead")) return "failed";
   return "not_sent";
@@ -69,21 +74,29 @@ export function buildCallPath(input: {
   call: CallRecord;
   events: ToolEvent[];
   booking: BookingRecord | null;
+  callbackTask?: CallbackTask | null;
   notifications: OutboxNotification[];
   now: Date;
-}): CallPath {
+}): CallPath | null {
   const { call, booking } = input;
+  // Calls from before checkpoints were recorded have no path: showing every step skipped would be untrue.
+  if (!input.events.some((event) => event.tool === "call.start")) return null;
   const events = [...input.events].sort((left, right) => Date.parse(left.completedAt) - Date.parse(right.completedAt));
   const first = (match: (event: ToolEvent) => boolean): ToolEvent | undefined => events.find(match);
+  const last = (match: (event: ToolEvent) => boolean): ToolEvent | undefined => [...events].reverse().find(match);
   const ok = (event: ToolEvent): boolean => event.result === "success";
   const meta = (event: ToolEvent, key: string): unknown => event.metadata[key];
   const intake = (key: string): ToolEvent | undefined => first((event) => event.tool === "call.intake" && meta(event, key) === true);
-  // Not the outcome: a request for the owner changes it mid-call. Only the call's end does.
-  const live = call.endedAt === null && input.now.getTime() - Date.parse(call.startedAt) < CALL_PATH_LIVE_WINDOW_MS;
+  const withinWindow = input.now.getTime() - Date.parse(call.startedAt) < CALL_PATH_LIVE_WINDOW_MS;
+  // Not the outcome (a request for the owner changes it mid-call): the call's end, and a booking still being
+  // written, so the page never settles on a half-finished snapshot.
+  const live = withinWindow && (call.endedAt === null || booking?.status === "checking");
   const spam = call.billingDisposition === "spam_excluded" || call.outcome === "ignored_spam";
   const emergency = call.emergency?.emergency === true;
   const handedOff = call.outcome === "handoff_queued" || call.fields.humanRequested || emergency;
+  const taskHandled = input.callbackTask?.status === "completed";
   const liveAlert = ownerAlertStatus(input.notifications, LIVE_ALERT_KEYS);
+  const summary = ownerAlertStatus(input.notifications, SUMMARY_ALERT_KEYS);
   type Found = { state: "done" | "waiting" | "flagged" | "skipped"; at: string | null; note: string | null } | null;
   const found: Found[] = [];
 
@@ -95,64 +108,73 @@ export function buildCallPath(input: {
   const customer = first((event) => CUSTOMER_TOOLS.has(event.tool) && ok(event));
   found.push(spam
     ? { state: "flagged", at: spamEvent?.completedAt ?? null, note: "Not a service call, so Otto ended it" }
-    : customer ? { state: "done", at: customer.completedAt, note: null }
-      : call.fields.problemDescription.trim() ? { state: "done", at: null, note: null } : null);
+    : customer ? { state: "done", at: customer.completedAt, note: null } : null);
 
-  // 3. The problem.
+  // 3. The problem, once Otto saved it (the transcript alone isn't proof).
   const problem = first((event) => (event.tool === "call.intake" && meta(event, "problem") === true) || event.tool === "call.triage");
-  found.push(problem ? { state: "done", at: problem.completedAt, note: null } : call.fields.problemDescription.trim() ? { state: "done", at: null, note: null } : null);
+  found.push(problem ? { state: "done", at: problem.completedAt, note: null } : null);
 
   // 4. Safety check: the server's triage rules run on every intake and on triage_call; emergencies flagged.
   const triage = first((event) => event.tool === "call.triage") ?? (call.emergency ? intake("problem") : undefined);
-  const emergencyAt = first((event) => event.tool === "call.handoff" && meta(event, "reason") === "emergency")?.completedAt ?? triage?.completedAt ?? null;
-  found.push(emergency
-    ? { state: "flagged", at: emergencyAt, note: `${call.emergency?.severity === "life_safety" ? "Emergency: told to get safe" : "Urgent"}, ${alertWords(liveAlert, "alert")}` }
-    : triage ? { state: "done", at: triage.completedAt, note: "No emergency" } : null);
+  const caughtLive = first((event) => (event.tool === "call.triage" && meta(event, "emergency") === true) || (event.tool === "call.handoff" && meta(event, "reason") === "emergency"));
+  if (emergency) {
+    const kind = call.emergency?.severity === "life_safety" ? "Emergency" : "Urgent";
+    const alert = liveAlert === "none" ? summary : liveAlert;
+    found.push(caughtLive
+      ? { state: "flagged", at: caughtLive.completedAt, note: `${kind}, ${alertWords(alert, "alert")}` }
+      : { state: "flagged", at: call.endedAt, note: `${kind} found after the call, ${alertWords(alert, "alert")}` });
+  } else {
+    found.push(triage ? { state: "done", at: triage.completedAt, note: "No emergency" } : null);
+  }
 
   // 5. Name and callback number (the caller ID counts once the caller says it's the best number).
   const caller = first((event) => event.tool === "call.intake" && meta(event, "name") === true && meta(event, "callback") === true);
-  const hasName = Boolean(call.fields.callerName?.trim());
-  const hasNumber = E164.test(call.fields.callbackNumber ?? call.fromNumber);
+  const named = intake("name");
+  const numbered = intake("callback");
   found.push(caller ? { state: "done", at: caller.completedAt, note: null }
-    : hasName && hasNumber ? { state: "done", at: null, note: null }
-      : live ? null
-        : hasName || hasNumber ? { state: "skipped", at: null, note: hasName ? "Got the name, no callback number" : "Got the number, no name" } : null);
+    : live ? null
+      : named || numbered ? { state: "skipped", at: null, note: named ? "Got the name, no callback number" : "Got the number, no name" } : null);
 
-  // 6. Address, checked against the service area.
-  const coverage = first((event) => event.tool === "coverage.check" && ok(event));
+  // 6. Address, checked against the service area. The note follows the latest check (a corrected address).
+  const coverage = (event: ToolEvent): boolean => event.tool === "coverage.check" && ok(event) && meta(event, "status") !== "incomplete";
+  const firstCoverage = first(coverage);
+  const lastCoverage = last(coverage);
   const addressTaken = intake("address");
-  found.push(coverage
-    ? { state: "done", at: coverage.completedAt, note: meta(coverage, "status") === "covered" ? "In your area" : "You confirm the area" }
-    : addressTaken ? { state: "done", at: addressTaken.completedAt, note: "Address taken" }
-      : call.fields.address?.trim() ? { state: "done", at: null, note: "Address taken" } : null);
+  found.push(firstCoverage && lastCoverage
+    ? { state: "done", at: firstCoverage.completedAt, note: coverageWords(meta(lastCoverage, "status")) }
+    : addressTaken ? { state: "done", at: addressTaken.completedAt, note: "Address taken" } : null);
 
   // 7 and 8. Open times and the booking, unless the call went to the owner instead.
-  const times = first((event) => event.tool === "calendar.availability" && ok(event));
-  const offered = times ? Number(meta(times, "count") ?? 0) : 0;
+  const availability = (event: ToolEvent): boolean => event.tool === "calendar.availability" && ok(event);
+  const firstTimes = first(availability);
+  const lastTimes = last(availability);
+  const offered = lastTimes ? Number(meta(lastTimes, "count") ?? 0) : 0;
   const book = first((event) => event.tool === "calendar.book");
-  const toOwner = handedOff && !booking && !times;
-  found.push(times ? { state: "done", at: times.completedAt, note: offered > 0 ? `Offered ${offered} time${offered === 1 ? "" : "s"}` : "No open times" }
-    : toOwner ? { state: "skipped", at: null, note: null } : null);
-  found.push(booking?.status === "confirmed"
-    ? { state: "done", at: booking.writeVerifiedAt ?? book?.completedAt ?? booking.updatedAt, note: "Booked on your calendar" }
-    : booking?.status === "pending" ? { state: "waiting", at: book?.completedAt ?? booking.createdAt, note: "Waiting on your OK" }
-      : booking && booking.status !== "checking" ? { state: "flagged", at: book?.completedAt ?? booking.updatedAt, note: "Couldn't book it, you confirm the time" }
-        : handedOff && !booking ? { state: "skipped", at: null, note: "You're calling them back" } : null);
+  found.push(firstTimes ? { state: "done", at: firstTimes.completedAt, note: offered > 0 ? `Offered ${offered} time${offered === 1 ? "" : "s"}` : "No open times" }
+    : handedOff && !booking ? { state: "skipped", at: null, note: null } : null);
+  const bookedAt = book?.completedAt ?? booking?.createdAt ?? null;
+  found.push(booking?.status === "confirmed" ? { state: "done", at: booking.writeVerifiedAt ?? bookedAt, note: "Booked on your calendar" }
+    : booking?.status === "pending" ? (taskHandled ? { state: "done", at: bookedAt, note: "You handled it" } : { state: "waiting", at: bookedAt, note: "Waiting on your OK" })
+      : booking?.status === "unknown" ? { state: "flagged", at: bookedAt, note: "May be on your calendar, check it" }
+        : booking?.status === "conflict" ? { state: "flagged", at: bookedAt, note: "That time was taken, you pick one" }
+          : handedOff && !booking ? { state: "skipped", at: null, note: "You're calling them back" } : null);
 
-  // 9. Recap and the owner's summary, only claimed once it was sent.
-  found.push(call.endedAt === null ? null
-    : spam ? { state: "skipped", at: null, note: null }
-      : wrapUp(call, ownerAlertStatus(input.notifications, SUMMARY_ALERT_KEYS)));
+  // 9. Recap and the owner's summary: a recap only when Otto captured something, a text only once it was sent.
+  const recovered = call.qualityFlags.includes("call_ended_without_final_provider_payload");
+  const captured = events.some((event) => event.tool === "call.intake");
+  found.push(call.endedAt === null || live ? null
+    : recovered ? { state: "flagged", at: call.endedAt, note: `Call dropped, ${summaryWords(summary)}` }
+      : !captured ? { state: "skipped", at: null, note: summary === "none" ? null : `Nothing to recap, ${summaryWords(summary)}` }
+        : { state: summary === "failed" ? "flagged" : "done", at: call.endedAt, note: `${recapLead(call, booking, taskHandled)}, ${summaryWords(summary)}` });
 
   const keys = Object.keys(CALL_PATH_LABELS) as CallPathStepKey[];
-  // A spam call ends at the service check: nothing after it is pending.
-  const stopAfter = spam ? 1 : keys.length;
   // While the call is live, the first open checkpoint is where Otto is now.
   const currentIndex = live && !spam ? found.findIndex((item) => item === null) : -1;
   const steps: CallPathStep[] = keys.map((key, index) => {
-    const item = found[index] ?? null;
+    // A spam call ends at the service check: nothing after it happened.
+    const item = spam && index > 1 ? null : found[index] ?? null;
     if (item) return { key, label: CALL_PATH_LABELS[key], ...item };
-    const state: CallPathState = index > stopAfter ? "skipped" : index === currentIndex ? "current" : live ? "todo" : "skipped";
+    const state: CallPathState = spam && index > 1 ? "skipped" : index === currentIndex ? "current" : live ? "todo" : "skipped";
     return { key, label: CALL_PATH_LABELS[key], state, at: null, note: null };
   });
 
@@ -161,7 +183,13 @@ export function buildCallPath(input: {
   const extras: Array<CallPathStep<CallPathExtraKey>> = [];
   if (price) extras.push({ key: "price_question", label: "Price question", state: "done", at: price.completedAt, note: meta(price, "approved") === true ? "Gave your approved price" : "No approved price, took a message" });
   if (ownerAsk) extras.push({ key: "owner_request", label: "Asked for you", state: liveAlert === "failed" ? "flagged" : "done", at: ownerAsk.completedAt, note: alertWords(liveAlert, "callback alert") });
-  return { steps, extras, live, done: steps.filter((step) => step.state === "done" || step.state === "waiting" || step.state === "flagged").length };
+  return { steps, extras, live, done: steps.filter((step) => step.state === "done" || step.state === "waiting" || step.state === "flagged").length, startedAt: call.startedAt };
+}
+
+function coverageWords(status: unknown): string {
+  if (status === "covered") return "In your area";
+  if (status === "outside") return "Outside your area, your call";
+  return "You confirm the area";
 }
 
 function alertWords(status: AlertStatus, what: string): string {
@@ -171,9 +199,18 @@ function alertWords(status: AlertStatus, what: string): string {
   return "no alert went out";
 }
 
-function wrapUp(call: CallRecord, summary: AlertStatus): { state: "done" | "flagged"; at: string | null; note: string } {
-  const lead = call.outcome === "booked" ? "Booked" : call.outcome === "pending_confirmation" ? "Waiting on your OK" : call.outcome === "handoff_queued" ? "Call them back" : call.outcome === "failed" ? "Call dropped" : "Done";
-  if (summary === "failed") return { state: "flagged", at: call.endedAt, note: `${lead}. Your summary didn't go through` };
-  const tail = summary === "sent" ? "summary sent" : summary === "sending" ? "summary sending" : "summary is here";
-  return { state: "done", at: call.endedAt, note: `${lead}, ${tail}` };
+function summaryWords(status: AlertStatus): string {
+  if (status === "sent") return "summary sent";
+  if (status === "sending") return "summary sending";
+  if (status === "failed") return "summary didn't go through";
+  return "summary is here";
+}
+
+function recapLead(call: CallRecord, booking: BookingRecord | null, taskHandled: boolean): string {
+  if (booking?.status === "confirmed") return "Booked";
+  if (booking?.status === "pending") return taskHandled ? "Handled" : "Waiting on your OK";
+  if (booking?.status === "unknown" || booking?.status === "conflict") return "Check the booking";
+  if (call.outcome === "handoff_queued") return taskHandled ? "Handled" : "Call them back";
+  if (call.outcome === "failed") return "Call dropped";
+  return "Done";
 }

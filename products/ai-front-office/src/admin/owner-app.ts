@@ -225,7 +225,7 @@ export function renderOwnerCallRecord(input: {
   recordingUrl: string | null;
   csrf: string;
   canDelete: boolean;
-  path: CallPath;
+  path: CallPath | null;
 }): string {
   const call = input.call;
   const tz = input.config.timezone;
@@ -250,7 +250,7 @@ export function renderOwnerCallRecord(input: {
     ...(task ? [["Follow-up", `${task.reason} · ${task.status === "completed" ? "handled" : `due ${compactDate(task.dueAt, tz)}`}`] as [string, string]] : []),
   ];
   const alerts = input.notifications.filter((item) => item.channel === "sms").map((item) => `<li><span>${item.priority === "high" ? "Urgent text" : "Text"}</span><span>${e(notificationWords(item.state))}</span></li>`).join("");
-  const body = `<section class="fo-card fo-detail standalone"><a class="fo-back" href="/app">${ownerIcon("back")}Back</a><div class="fo-detail-head"><div><h2>${e(call.fields.callerName ?? "Unknown caller")}</h2><p>${e(call.fields.problemDescription || "No problem summary captured")}</p></div><span class="fo-pill ${call.emergency?.emergency ? "danger" : call.outcome === "booked" ? "good" : ""}">${e(call.emergency?.severity === "life_safety" ? "Emergency" : call.emergency?.emergency ? "Urgent" : outcomeWords(call.outcome))}</span></div>${call.emergency?.immediateInstruction ? `<p class="fo-safety">${ownerIcon("alert")}${e(call.emergency.immediateInstruction)}</p>` : ""}<div class="fo-detail-actions">${phone ? `<a class="fo-btn" href="tel:${e(phone)}">${ownerIcon("phone")}Call back</a><a class="fo-ghost" href="sms:${e(phone)}">Text</a>` : ""}${address ? `<a class="fo-ghost" href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(address)}" target="_blank" rel="noreferrer">${ownerIcon("map")}Map</a>` : ""}${taskActions}</div>${renderCallPath(call, input.path)}<dl class="fo-facts">${facts.map(([key, value]) => `<div><dt>${e(key)}</dt><dd>${e(value)}</dd></div>`).join("")}</dl>${input.recordingUrl ? `<a class="fo-ghost wide" href="${e(input.recordingUrl)}" rel="noreferrer">${ownerIcon("play")}Play recording</a>` : ""}<details class="fo-transcript" open><summary>Read the call</summary><p>${e(call.transcript ?? "Transcript unavailable")}</p></details>${alerts ? `<h3>Alerts sent</h3><ul class="fo-alerts">${alerts}</ul>` : ""}</section>${input.canDelete ? `<details class="fo-card fo-danger-zone"><summary>Delete this call record</summary><form method="post" action="/app/calls/${encodeURIComponent(call.id)}/delete">${csrfField}<p>This permanently removes the call record, transcript, recording, callback, tool events, notifications, and any customer record whose latest call is this one. Appointments already on your calendar stay on your calendar.</p><label class="fo-check"><input name="confirm" type="checkbox" value="delete" required> I understand this can’t be undone.</label><button class="fo-btn danger">Delete permanently</button></form></details>` : ""}`;
+  const body = `<section class="fo-card fo-detail standalone"><a class="fo-back" href="/app">${ownerIcon("back")}Back</a><div class="fo-detail-head"><div><h2>${e(call.fields.callerName ?? "Unknown caller")}</h2><p>${e(call.fields.problemDescription || "No problem summary captured")}</p></div><span class="fo-pill ${call.emergency?.emergency ? "danger" : call.outcome === "booked" ? "good" : ""}">${e(call.emergency?.severity === "life_safety" ? "Emergency" : call.emergency?.emergency ? "Urgent" : outcomeWords(call.outcome))}</span></div>${call.emergency?.immediateInstruction ? `<p class="fo-safety">${ownerIcon("alert")}${e(call.emergency.immediateInstruction)}</p>` : ""}<div class="fo-detail-actions">${phone ? `<a class="fo-btn" href="tel:${e(phone)}">${ownerIcon("phone")}Call back</a><a class="fo-ghost" href="sms:${e(phone)}">Text</a>` : ""}${address ? `<a class="fo-ghost" href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(address)}" target="_blank" rel="noreferrer">${ownerIcon("map")}Map</a>` : ""}${taskActions}</div>${input.path ? renderCallPath(call.id, input.path) : ""}<dl class="fo-facts">${facts.map(([key, value]) => `<div><dt>${e(key)}</dt><dd>${e(value)}</dd></div>`).join("")}</dl>${input.recordingUrl ? `<a class="fo-ghost wide" href="${e(input.recordingUrl)}" rel="noreferrer">${ownerIcon("play")}Play recording</a>` : ""}<details class="fo-transcript" open><summary>Read the call</summary><p>${e(call.transcript ?? "Transcript unavailable")}</p></details>${alerts ? `<h3>Alerts sent</h3><ul class="fo-alerts">${alerts}</ul>` : ""}</section>${input.canDelete ? `<details class="fo-card fo-danger-zone"><summary>Delete this call record</summary><form method="post" action="/app/calls/${encodeURIComponent(call.id)}/delete">${csrfField}<p>This permanently removes the call record, transcript, recording, callback, tool events, notifications, and any customer record whose latest call is this one. Appointments already on your calendar stay on your calendar.</p><label class="fo-check"><input name="confirm" type="checkbox" value="delete" required> I understand this can’t be undone.</label><button class="fo-btn danger">Delete permanently</button></form></details>` : ""}`;
   return ownerShell({
     title: "Call",
     view: "call",
@@ -266,10 +266,9 @@ export function renderOwnerCallRecord(input: {
  * Otto's path through the call: every checkpoint, checked off as the server records it. While the call is
  * live, /app/call-path.js swaps in a fresh copy every two seconds so the owner watches it tick.
  */
-export function renderCallPath(call: Pick<CallRecord, "id" | "startedAt">, path: CallPath): string {
-  const callId = call.id;
+export function renderCallPath(callId: string, path: CallPath): string {
   const clock = (at: string): string => {
-    const seconds = Math.max(0, Math.round((Date.parse(at) - Date.parse(call.startedAt)) / 1000));
+    const seconds = Math.max(0, Math.round((Date.parse(at) - Date.parse(path.startedAt)) / 1000));
     return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
   };
   const mark: Record<CallPathStep["state"], string> = { done: ownerIcon("check"), waiting: ownerIcon("clock"), flagged: ownerIcon("alert"), current: "<i></i>", todo: "", skipped: "" };
@@ -300,7 +299,11 @@ export const CALL_PATH_SCRIPT = `(() => {
     if (document.hidden) return;
     try {
       const response = await fetch(current.getAttribute("data-live-path"), { credentials: "same-origin", cache: "no-store" });
-      if (response.status >= 400 && response.status < 500) return stop("Refresh for the latest");
+      if (response.status === 401 || response.status === 403 || response.status === 404) return stop("Refresh for the latest");
+      if (response.status === 429) {
+        const wait = Number(response.headers.get("retry-after"));
+        return schedule(Number.isFinite(wait) && wait > 0 ? wait * 1000 : 10000);
+      }
       if (!response.ok) throw new Error(String(response.status));
       const data = await response.json();
       failures = 0;
@@ -548,6 +551,7 @@ button{font:inherit;cursor:pointer}svg{width:20px;height:20px;flex:none}
 .fo-path li.flagged .fo-path-mark{background:var(--red);border-color:var(--red);color:#fff}
 .fo-path li.waiting .fo-path-mark{background:var(--amber);border-color:var(--amber);color:#fff}
 .fo-path li.current{background:#f1f4e0}.fo-path li.current .fo-path-mark{border-color:var(--ink)}
+.fo-path:not(.live) li.current{background:none}.fo-path:not(.live) li.current .fo-path-mark i{animation:none;background:var(--muted)}
 .fo-path li.skipped .fo-path-text,.fo-path li.todo .fo-path-text{color:var(--muted)}.fo-path li.skipped strong{font-weight:600}
 .fo-path-text{display:grid;min-width:0}.fo-path-text strong{font-size:14px}.fo-path-text small{font-size:12px;color:var(--muted)}
 .fo-path-time{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}

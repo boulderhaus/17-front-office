@@ -18,7 +18,7 @@ import { approvedTransferTargets } from "../application/transfer-policy.js";
 import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
 import { CALL_PATH_SCRIPT, renderCallPath, renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
-import { buildCallPath } from "../domain/call-path.js";
+import { buildCallPath, type CallPath } from "../domain/call-path.js";
 import { chargeSentence, isPaidStatus } from "../domain/billing.js";
 import { currentPlan, hasUnlimitedPrice, introCouponId, knownPlans, legacyPlanPriceIds, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, unlimitedPriceIds, type Plan, type PlanId } from "../domain/plans.js";
 import { GuaranteeError, LeadGuaranteeService, recordFirstPaid, recordUnlimitedObservation, type UnlimitedItem } from "../application/billing-jobs.js";
@@ -1335,10 +1335,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (callMatch?.[1] && method === "GET") {
       const call = await dependencies.store.getCall(callMatch[1]);
       if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Call not found");
-      const [booking, task, notifications] = await Promise.all([
+      const [booking, task, notifications, events] = await Promise.all([
         dependencies.store.getBookingForCall(call.id),
         dependencies.store.getCallbackTaskForCall(call.id),
         dependencies.store.listNotifications(call.id),
+        dependencies.store.listToolEvents(call.id),
       ]);
       const detail: ApiCallDetail = {
         call: apiCall(call),
@@ -1347,10 +1348,36 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         task: task && task.tenantId === account.tenantId ? apiTask(task) : null,
         alerts: notifications.filter((item) => item.channel === "sms" && item.tenantId === account.tenantId).map((item) => ({ priority: item.priority, state: item.state })),
         canDelete: owner,
+        path: buildCallPath({ call, events, booking, callbackTask: task?.tenantId === account.tenantId ? task : null, notifications: notifications.filter((item) => item.tenantId === account.tenantId), now: dependencies.clock.now() }),
       };
       return sendJson(response, 200, detail);
     }
+    const callPathMatch = /^\/api\/app\/calls\/([0-9a-f-]{36})\/path$/i.exec(url.pathname);
+    if (callPathMatch?.[1] && method === "GET") {
+      const call = await dependencies.store.getCall(callPathMatch[1]);
+      if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Call not found");
+      response.setHeader("cache-control", "no-store");
+      return sendJson(response, 200, { path: await callPathFor(call) });
+    }
     throw new HttpError(404, "Not found");
+  }
+
+  /** Otto's path for one call, from everything the server recorded about it. The caller checks the tenant. */
+  async function callPathFor(call: CallRecord): Promise<CallPath | null> {
+    const [booking, callbackTask, notifications, events] = await Promise.all([
+      dependencies.store.getBookingForCall(call.id),
+      dependencies.store.getCallbackTaskForCall(call.id),
+      dependencies.store.listNotifications(call.id),
+      dependencies.store.listToolEvents(call.id),
+    ]);
+    return buildCallPath({
+      call,
+      events: events.filter((item) => item.tenantId === call.tenantId),
+      booking: booking?.tenantId === call.tenantId ? booking : null,
+      callbackTask: callbackTask?.tenantId === call.tenantId ? callbackTask : null,
+      notifications: notifications.filter((item) => item.tenantId === call.tenantId),
+      now: dependencies.clock.now(),
+    });
   }
   async function handleDemoApi(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     if ((request.method ?? "GET") !== "GET") throw new HttpError(405, "The demo is read-only");
@@ -1362,7 +1389,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const call = callMatch?.[1] ? demo.calls.find((item) => item.id === callMatch[1]) : undefined;
     if (!call) throw new HttpError(404, "Not found");
     const task = demo.tasks.find((item) => item.callId === call.id);
-    const detail: ApiCallDetail = { call: apiCall(call), recordingUrl: null, booking: null, task: task ? apiTask(task) : null, alerts: [], canDelete: false };
+    const detail: ApiCallDetail = { call: apiCall(call), recordingUrl: null, booking: null, task: task ? apiTask(task) : null, alerts: [], canDelete: false, path: null };
     return sendJson(response, 200, detail);
   }
 
@@ -1740,21 +1767,16 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         dependencies.store.listNotifications(call.id),
       ]);
       const recordingUrl = call.recordingUrl?.startsWith("https://") ? call.recordingUrl.replace("/admin/provider/", "/app/provider/") : null;
-      const path = buildCallPath({ call, events, booking, notifications, now: dependencies.clock.now() });
+      const path = buildCallPath({ call, events, booking, callbackTask, notifications, now: dependencies.clock.now() });
       return sendHtml(response, 200, renderOwnerCallRecord({ account, config, call, booking, callbackTask, notifications, recordingUrl, csrf: session.csrf, canDelete: !member, path }));
     }
     const callPathMatch = /^\/app\/calls\/([0-9a-f-]+)\/path$/i.exec(url.pathname);
     if (method === "GET" && callPathMatch?.[1]) {
       const call = await dependencies.store.getCall(callPathMatch[1]);
       if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Call not found");
-      const [booking, events, notifications] = await Promise.all([
-        dependencies.store.getBookingForCall(call.id),
-        dependencies.store.listToolEvents(call.id),
-        dependencies.store.listNotifications(call.id),
-      ]);
-      const path = buildCallPath({ call, events, booking, notifications, now: dependencies.clock.now() });
+      const path = await callPathFor(call);
       response.setHeader("cache-control", "no-store");
-      return sendJson(response, 200, { live: path.live, done: path.done, html: renderCallPath(call, path) });
+      return sendJson(response, 200, path ? { live: path.live, done: path.done, html: renderCallPath(call.id, path) } : { live: false, done: 0, html: "" });
     }
     throw new HttpError(404, "Not found");
   }
@@ -2690,6 +2712,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       fromNumber: input.from_number,
       ...(input.caller_name === undefined ? {} : { callerName: input.caller_name }),
       ...(input.problem_description === undefined ? {} : { problemDescription: input.problem_description }),
+      reason: input.reason,
     });
     const config = await dependencies.store.getConfig(tenantId);
     const call = await dependencies.store.getCallByProviderId(input.provider_call_id);
@@ -3144,7 +3167,7 @@ function routeKey(pathname: string): string {
   if (pathname.startsWith("/admin/calls/")) return "admin:call";
   if (pathname.startsWith("/c/")) return "callback-link";
   // The live path polls every two seconds; its own bucket keeps it from starving the call page's actions.
-  if (/^\/app\/calls\/[^/]+\/path$/.test(pathname)) return "owner:call-path";
+  if (/^\/(?:api\/)?app\/calls\/[^/]+\/path$/.test(pathname)) return "owner:call-path";
   if (pathname.startsWith("/app/calls/")) return "owner:call";
   if (pathname.startsWith("/app/provider/")) return "owner:recording";
   if (pathname.startsWith("/api/app/")) return "owner:api";

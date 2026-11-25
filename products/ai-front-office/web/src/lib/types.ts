@@ -135,6 +135,26 @@ export interface ApiCallDetail {
   task: ApiTask | null
   alerts: Array<{ priority: "normal" | "high"; state: string }>
   canDelete: boolean
+  /** Otto's path through the call; null for calls from before paths were recorded, and in the demo. */
+  path?: ApiCallPath | null
+}
+
+export type ApiCallPathState = "done" | "waiting" | "flagged" | "current" | "todo" | "skipped"
+
+export interface ApiCallPathStep {
+  key: string
+  label: string
+  state: ApiCallPathState
+  at: string | null
+  note: string | null
+}
+
+export interface ApiCallPath {
+  steps: ApiCallPathStep[]
+  extras: ApiCallPathStep[]
+  live: boolean
+  done: number
+  startedAt: string
 }
 
 export type SettingsValues = Record<string, string | boolean>

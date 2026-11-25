@@ -8,6 +8,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import { CallHeader, ContactActions, Facts, phoneFact, SafetyNote } from "@/components/app/call-parts"
+import { CallPathCard, useLiveCallPath } from "@/components/app/call-path"
 import { useTaskActions } from "./today"
 import { api, useApi } from "@/lib/api"
 import { urgency } from "@/lib/derive"
@@ -24,6 +25,14 @@ export function CallPage() {
   const [confirm, setConfirm] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const tz = dashboard?.shop.timezone ?? "America/New_York"
+  const setPath = (path: NonNullable<typeof detail.data>["path"]) => detail.setData((current) => (current ? { ...current, path } : current))
+  useLiveCallPath(
+    id,
+    !preview && detail.data?.path?.live === true,
+    setPath,
+    () => void detail.reload(),
+    () => detail.setData((current) => (current?.path ? { ...current, path: { ...current.path, live: false } } : current)),
+  )
   if (detail.error) return <Card><CardContent className="grid gap-3"><p>{detail.error}</p><Button variant="outline" asChild className="w-fit"><Link to={base}>Back</Link></Button></CardContent></Card>
   if (!detail.data) return <Card><CardContent className="grid gap-3"><Skeleton className="h-8 w-48" /><Skeleton className="h-5 w-full" /><Skeleton className="h-12 w-full" /><Skeleton className="h-40 w-full" /></CardContent></Card>
   const { call, task, booking } = detail.data
@@ -66,6 +75,7 @@ export function CallPage() {
           <CallHeader call={call} tone={tone} label={label} />
           <SafetyNote call={call} />
           <ContactActions call={call} extra={taskButton} />
+          {detail.data.path && <CallPathCard path={detail.data.path} />}
           <Facts rows={facts} />
           {detail.data.recordingUrl && (
             <div className="ph-no-capture grid gap-2 rounded-xl border bg-secondary/60 p-3">
