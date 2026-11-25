@@ -30,14 +30,15 @@ interface Visit { call: ApiCall; day: string; minutes: number; booked: boolean }
 
 /** Computer: the page header's one action. A phone shows the same link as a row under the calendar, with Google's state. */
 export function CalendarHeaderActions() {
-  const { base, member } = useMode()
+  const { base, member, preview, dashboard } = useMode()
   const wide = useMediaQuery("(min-width: 1024px)")
-  if (member || !wide) return null
+  // Not until the dashboard says who is looking (a team member never gets a Settings link), and not in the demo (no Settings there).
+  if (!dashboard || member || preview || !wide) return null
   return <Link to={`${base}/settings/calendar`} className="inline-flex h-11 items-center gap-2 rounded-lg border bg-card px-3 text-[15px] font-semibold hover:bg-muted"><Settings2 className="size-4" />Hours and Google Calendar</Link>
 }
 
 export function CalendarPage() {
-  const { dashboard, base, member } = useMode()
+  const { dashboard, base, member, preview } = useMode()
   const [params, setParams] = useSearchParams()
   const wide = useMediaQuery("(min-width: 1024px)")
   // A phone opens on one day (a week of columns is too cramped there); a computer opens on the week.
@@ -112,7 +113,7 @@ export function CalendarPage() {
           <span className="inline-flex items-center gap-2"><i className="size-3 rounded-sm bg-emerald-500" />Booked</span>
           <span className="inline-flex items-center gap-2"><i className="size-3 rounded-sm bg-amber-400" />Caller asked for this time. Confirm it.</span>
         </div>
-        {!member && <Link to={`${base}/settings/calendar`} className="flex min-h-14 items-center justify-between gap-3 rounded-xl border bg-card px-4 py-2.5 lg:hidden">
+        {!member && !preview && <Link to={`${base}/settings/calendar`} className="flex min-h-14 items-center justify-between gap-3 rounded-xl border bg-card px-4 py-2.5 lg:hidden">
           <span className="grid"><strong className="text-base font-semibold">Hours and Google Calendar</strong><span className="text-sm text-muted-foreground">{dashboard.googleConnected ? "Google Calendar connected" : dashboard.googleAvailable ? "Google Calendar not connected" : "Appointment hours and booking"}</span></span>
           <ChevronRight className="size-5 shrink-0 text-muted-foreground" />
         </Link>}

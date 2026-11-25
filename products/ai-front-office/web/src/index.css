@@ -4,6 +4,8 @@
 @import "@fontsource-variable/geist";
 
 @custom-variant dark (&:is(.dark *));
+/* A short screen (a phone on its side, a small laptop): the whole menu scrolls as one, so its foot never squeezes the list. */
+@custom-variant short (@media (max-height: 600px));
 
 @theme inline {
     --font-heading: var(--font-sans);

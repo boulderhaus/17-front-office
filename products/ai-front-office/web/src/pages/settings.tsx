@@ -132,7 +132,12 @@ export function SettingsArea() {
     : !context ? <div className="grid gap-3">{[0, 1, 2, 3].map((key) => <Skeleton key={key} className="h-14 w-full rounded-xl" />)}</div>
     : section ? <SectionPage section={section} /> : <SettingsIndex />
   return (
-    <AppShell title={section && !wide ? section.title : "Settings"} back={section ? { to: "/app/settings", label: "Settings" } : undefined}>
+    <AppShell
+      title={section && !wide ? section.title : "Settings"}
+      // Phone: the page's one grey line sits under its title, like Calls, Jobs and Calendar (a computer has it in the sticky header).
+      subtitle={section && !wide ? section.description : undefined}
+      back={section ? { to: "/app/settings", label: "Settings" } : undefined}
+    >
       {/* Wide screens: the pages are listed under Settings in the side menu, so the chosen page has the full width. */}
       <SettingsContext.Provider value={context}>
         <div className="min-w-0">{body}</div>
@@ -200,7 +205,6 @@ function SectionPage({ section }: { section: SectionDef }) {
           </div>
         )}
       </header>
-      <p className="text-[15px] text-muted-foreground lg:hidden">{section.description}</p>
       {section.render()}
     </>
   )
