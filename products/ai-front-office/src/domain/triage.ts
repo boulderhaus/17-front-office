@@ -78,12 +78,11 @@ export function triageEmergency(
       evidence.push(rule.evidence);
     }
   }
-  // Owner and trade phrases match ignoring case, apostrophes and spacing: "won’t close", "won't close"
-  // and "wont close" are the same words.
+  // Owner and trade phrases: whole words, any case or apostrophes, and never when negated ("no flooding").
   const notes = plainWords(description);
   for (const keyword of config.emergencyKeywords) {
     const phrase = plainWords(keyword);
-    if (phrase !== "" && notes.includes(phrase)) {
+    if (phrase !== "" && saidPlainly(notes, phrase)) {
       evidence.push(`configured keyword: ${keyword}`);
       urgentMatches += 1;
     }
@@ -106,6 +105,36 @@ export function triageEmergency(
   };
 }
 
+/**
+ * Lowercase words that read the same however they were typed: contractions opened ("roof's" is
+ * "roof is"), other apostrophes and hyphens dropped ("won’t", "wont"; "break-in", "break in"),
+ * and the filler "is"/"are" removed, so "the roof's leaking" and "roof is leaking" match. Clause
+ * punctuation stays for the negation check.
+ */
 function plainWords(text: string): string {
-  return text.toLowerCase().replace(/['’‘`]/g, "").replace(/\s+/g, " ").trim();
+  return text.toLowerCase()
+    .replace(/(\w)['’]s\b/g, "$1 is")
+    .replace(/(\w)['’]re\b/g, "$1 are")
+    .replace(/['’‘`]/g, "")
+    .replace(/[-‐‑–—_/]/g, " ")
+    .replace(/\b(?:is|are)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const KEYWORD_NEGATION = /(?:^|\s)(?:no|not|never|without|nothing|dont|doesnt|didnt|isnt|wasnt|arent|werent|cant|cannot|couldnt|wont|havent|hasnt)\s+(?:\S+\s+)?$/;
+
+/**
+ * A configured phrase said as whole words (an owner's stem like "leak" also covers "leaks",
+ * "leaked", "leaking"; "power out" never matches "power outlet") and not negated in its own clause
+ * within one word ("no flooding", "isn't sparking"). Any one plain mention counts.
+ */
+function saidPlainly(notes: string, phrase: string): boolean {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`(?<![a-z0-9])${escaped}(?:s|es|ed|ing)?(?![a-z0-9])`, "g");
+  for (const match of notes.matchAll(pattern)) {
+    const clause = notes.slice(0, match.index).split(/[.,;:!?\n]/).at(-1) ?? "";
+    if (!KEYWORD_NEGATION.test(clause)) return true;
+  }
+  return false;
 }

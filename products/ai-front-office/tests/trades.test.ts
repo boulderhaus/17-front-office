@@ -9,10 +9,11 @@ import { renderMarketing } from "../src/admin/marketing.js";
 import { createRequestHandler } from "../src/http/app.js";
 
 describe("trades", () => {
-  it("gives every trade services with a catch-all and specific urgent phrases that triage right", () => {
+  it("gives every trade its services (no bookable catch-all) and specific urgent phrases that triage right", () => {
     expect(new Set(TRADES.map((trade) => trade.key)).size).toBe(TRADES.length);
     for (const trade of TRADES) {
-      expect(trade.services.map((service) => service.toLowerCase())).toContain("other");
+      // "other" is the agent's unsure fallback; it must never become a bookable category.
+      expect(trade.services.map((service) => service.toLowerCase())).not.toContain("other");
       expect(trade.urgentWords.length).toBeGreaterThan(1);
       for (const word of trade.urgentWords) {
         const decision = triageEmergency(`Caller says: ${word} at the house`, { emergencyKeywords: trade.urgentWords, emergencyThreshold: 0.7 });
@@ -25,17 +26,48 @@ describe("trades", () => {
         expect(triageEmergency(trade.call, { emergencyKeywords: trade.urgentWords, emergencyThreshold: 0.7 }).emergency, `${trade.key}: ${trade.call}`).toBe(true);
       }
     }
-    // Phrases, not bare words: none may page the owner for an ordinary call.
+    // Phrases, not bare words, and never negated: none may page the owner for an ordinary call.
     const calm = [
       "It's not an emergency, whenever works.", "Our emergency contact is my wife.", "Small leak, no water damage yet.",
       "No power issues, just want an outlet added.", "We have no heat pump yet and want a quote.", "We have no water heater, want one installed.",
       "We have no power outlet in the garage.", "Gutters are dripping a little.", "Can't get in touch with my landlord, can you quote?",
       "The price came down so we're ready to book.", "Birds nesting in the eaves, routine visit.", "Faucet is dripping in the bathroom.",
+      "No flooding, just a slow drain.", "Slow kitchen drain. Not flooding, whenever works this week.", "Dishwasher not draining, no flooding.",
+      "Gas dryer not heating. Caller confirmed no gas smell.", "No sparking, outlet is just dead.", "No sparking, just want two outlets added.",
+      "I'm not locked out, I just want my locks rekeyed.", "Wants a keypad lock so the kids don't get locked out again.",
+      "Kitchen remodel quote; inspector found no structural damage.", "Small ceiling stain, no water coming in right now.",
+      "Wants a quote to replace the sewage ejector pump.", "Wants a backwater valve installed to prevent basement flooding.",
+      "Wants the oak trimmed back from the power line along the driveway.", "Need branches trimmed back from the power lines, whenever.",
+      "Wasp nest under the deck, next week is fine.", "Hornets nest up in the oak out back, schedule whenever.", "Want a quote to spray for hornets next week, no rush.",
+      "Need a broken window pane replaced.", "Wants the drywall patched where there was a water leak last year.", "Back door won't lock right.",
+      "Need a broken spring replaced on the garage door.", "Wants a quote on a standby generator; they lost power for three days last winter.",
+      "Heat output seems low in the back bedroom.", "Mold inspection, there was standing water last month.", "Need the dead tree taken down before winter.",
     ];
     for (const sentence of calm) {
       // Only the trade phrases are under test here; the built-in rules are covered in triage tests.
       for (const trade of TRADES) expect(triageEmergency(sentence, { emergencyKeywords: trade.urgentWords, emergencyThreshold: 0.7 }).evidence.filter((item) => item.startsWith("configured keyword")), `${trade.key}: ${sentence}`).toEqual([]);
     }
+    // Real emergencies the way callers say them: contractions, "is" dropped, one word or two.
+    const urgent: Record<string, string[]> = {
+      hvac: ["Our heat went out last night and it's freezing.", "Caller has frozen pipes in the crawlspace.", "Furnace stopped working and it's 50 degrees in the house.", "There's no heat in the house."],
+      plumbing: ["Caller has frozen pipes in the crawlspace and no water to the kitchen.", "Toilet is overflowing and won't stop.", "Sewer is backing up into the basement floor drain.", "The water heater burst in the garage.", "I can't shut the water off."],
+      electrical: ["The power's out in half the house.", "My son got shocked by the outlet and it's hot to the touch.", "Outlet is sparking."],
+      roofing: ["The roof's leaking into the kids' bedroom.", "Water's coming in through the ceiling.", "Shingles blew off in the storm and we need a tarp on tonight.", "Active leak during the storm, water dripping into the bedroom."],
+      restoration: ["My basement is underwater.", "There's water everywhere in the basement.", "There are two inches of water in the basement."],
+      garage: ["Door won't close and it's getting dark.", "The garage door is stuck open."],
+      landscaping: ["A tree fell on the house.", "Power lines down across the yard."],
+      pest: ["There's a snake in the house.", "Bees are in the house and my daughter got stung."],
+      locksmith: ["Someone broke in last night.", "Residential lockout, caller waiting outside.", "Locked my keys in the car with the engine running.", "Need help after a break in, the door was kicked in."],
+      appliance: ["Washing machine overflowed and water is all over the laundry room.", "Refrigerator stopped cooling and all the food's going bad."],
+    };
+    for (const [key, sentences] of Object.entries(urgent)) {
+      const trade = findTrade(key)!;
+      for (const sentence of sentences) expect(triageEmergency(sentence, { emergencyKeywords: trade.urgentWords, emergencyThreshold: 0.7 }).evidence.some((item) => item.startsWith("configured keyword")), `${key}: ${sentence}`).toBe(true);
+    }
+    // An owner's own stem still covers its forms, but a phrase never runs into a longer word.
+    expect(triageEmergency("Basement is flooding", { emergencyKeywords: ["flood"], emergencyThreshold: 0.7 }).emergency).toBe(true);
+    expect(triageEmergency("Pipe leaked overnight", { emergencyKeywords: ["leak"], emergencyThreshold: 0.7 }).emergency).toBe(true);
+    expect(triageEmergency("Wants a power outage plan", { emergencyKeywords: ["power out"], emergencyThreshold: 0.7 }).emergency).toBe(false);
     // Curly, straight or missing apostrophes are the same words.
     const garage = findTrade("garage")!;
     for (const note of ["Door won’t close", "door won't close", "DOOR WONT CLOSE", "door will not  close"]) {
@@ -49,10 +81,14 @@ describe("trades", () => {
   it("puts every trade on the homepage, each linking to signup with it picked", () => {
     const html = renderMarketing(createDemoConfig(), []);
     expect(html).toContain('id="trades"');
-    expect(html).toContain('<a href="#trades">Trades</a>');
+    // "Why Call Otto" stays first: tablet widths hide the first nav link, and Trades must stay visible.
+    expect(html).toContain('<nav aria-label="Main"><a href="#compare">Why Call Otto</a><a href="#trades">Trades</a>');
+    expect(html).not.toContain("get started\"");
+    expect(html).toContain("Water damage &#38; mold");
+    expect(html).not.toMatch(/fire restoration|Fire and smoke/i);
     for (const trade of TRADES) expect(html).toContain(`href="/signup?trade=${trade.key}"`);
     expect(html).toContain("Sewage is backing up into the tub.");
-    expect(html).toContain("<b>Marked urgent</b><span>burst pipe</span><span>sewage</span>");
+    expect(html).toContain("<b>Urgent if they say</b><span>burst pipe</span><span>sewage is backing up</span>");
     expect(html).toContain("<span>won’t close</span>");
     expect(html).toContain("Contractors &#38; remodelers");
     // Strict CSP: icons are inline SVG, never a script.
