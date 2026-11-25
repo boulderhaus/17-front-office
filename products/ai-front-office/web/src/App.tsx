@@ -4,7 +4,7 @@ import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Skeleton } from "@/components/ui/skeleton"
 import { AppShell } from "@/components/app/shell"
-import { CalendarPage } from "@/pages/calendar"
+import { CalendarHeaderActions, CalendarPage } from "@/pages/calendar"
 import { CallPage } from "@/pages/call"
 import { JobsPage } from "@/pages/jobs"
 import { SettingsArea } from "@/pages/settings"
@@ -19,8 +19,8 @@ import type { ApiDashboard } from "@/lib/types"
  * Screens that show callers' names, numbers, addresses, transcripts or recordings are
  * `ph-no-capture`: session replay records a blank box and autocapture ignores them.
  */
-function Screen({ title, children, callerData = true, back, hideTitle }: { title: string; children: React.ReactNode; callerData?: boolean; back?: { to: string; label: string }; hideTitle?: boolean }) {
-  return <AppShell title={title} back={back} hideTitle={hideTitle}>{callerData ? <div className="ph-no-capture">{children}</div> : children}</AppShell>
+function Screen({ title, subtitle, actions, children, callerData = true, back, hideTitle }: { title: string; subtitle?: string; actions?: React.ReactNode; children: React.ReactNode; callerData?: boolean; back?: { to: string; label: string }; hideTitle?: boolean }) {
+  return <AppShell title={title} subtitle={subtitle} actions={actions} back={back} hideTitle={hideTitle}>{callerData ? <div className="ph-no-capture">{children}</div> : children}</AppShell>
 }
 
 function Loading() {
@@ -42,12 +42,12 @@ function Workspace({ base }: { base: "/app" | "/demo" }) {
   return (
     <ModeContext.Provider value={mode}>
       <Routes>
-        <Route index element={<Screen title="Calls">{ready(<TodayPage />)}</Screen>} />
+        <Route index element={<Screen title="Calls" subtitle="Who called, and who’s waiting on you.">{ready(<TodayPage />)}</Screen>} />
         {/* "Calls" is the home screen; /calls is an alias so a typed or shared link lands there too. */}
         <Route path="calls" element={<Navigate to={base} replace />} />
         {!preview && <Route path="start" element={dashboard.data ? <StartPage /> : <div className="mx-auto max-w-xl p-4">{ready(null)}</div>} />}
-        <Route path="jobs" element={<Screen title="Jobs">{ready(<JobsPage />)}</Screen>} />
-        <Route path="calendar" element={<Screen title="Calendar">{ready(<CalendarPage />)}</Screen>} />
+        <Route path="jobs" element={<Screen title="Jobs" subtitle="Every job from your calls, by where it stands.">{ready(<JobsPage />)}</Screen>} />
+        <Route path="calendar" element={<Screen title="Calendar" subtitle="Booked visits and times callers asked for." actions={<CalendarHeaderActions />}>{ready(<CalendarPage />)}</Screen>} />
         <Route path="calls/:id" element={<Screen title="Call" back={{ to: base, label: "Calls" }} hideTitle><CallPage /></Screen>} />
         {/* One route for the whole settings area, so an unsaved edit survives moving between its pages. */}
         {/* Team members never see Settings: a typed or old link goes home (the server refuses them too). */}
