@@ -1,7 +1,7 @@
 import type { CallPath } from "../domain/call-path.js";
 import { ownerTaskReason } from "../domain/task-reason.js";
 import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
-import { CARRIER_CHOICES, forwardingPlan, type CarrierInfo, type ForwardingPlan } from "../domain/forwarding.js";
+import { CARRIER_CHOICES, forwardingChoice, forwardingPlan, mayForwardAll, ringFirstSeconds, type CarrierInfo, type ForwardingChoice, type ForwardingMode, type ForwardingPlan, type TestedFor } from "../domain/forwarding.js";
 import { isPaidStatus } from "../domain/billing.js";
 import { describeHours } from "../domain/hours.js";
 import { fairUseCalls, type PlanId } from "../domain/plans.js";
@@ -48,7 +48,27 @@ export interface ApiDashboard {
     mode: BusinessConfig["operationMode"];
     forwarding: Array<{ carrier: string; on: string; off: string }>;
     /** The owner's own business number and how to forward it. */
-    business: { number: string | null; carrier: CarrierInfo | null; plan: ForwardingPlan | null; choices: typeof CARRIER_CHOICES; suggested: string | null };
+    business: {
+      number: string | null; carrier: CarrierInfo | null; plan: ForwardingPlan | null; choices: typeof CARRIER_CHOICES; suggested: string | null;
+      /**
+       * Today's choice or code (every call, ring first, ring time) differs from what the last passed test was set up
+       * for (or may be set up for: every call was picked when they left it, untested): dial plan.on once to apply it,
+       * after clearFirst (the off code) when leaving every call for ring first. leavingEveryCall without a code: an
+       * office line turns off "forward all calls" in the website first. Stays until a test passes for the new choice.
+       */
+      update: { clearFirst: string | null; leavingEveryCall: boolean } | null;
+      /** Forwarding works, and the last passed test was for every call. */
+      everyCallOn: boolean;
+      /** Forwarding works, and the last passed test was for today's choice and code, so its ring time is what they get. */
+      codeApplied: boolean;
+      /**
+       * Every call is picked, or the last passed test was for every call: calls to the business number may all go to
+       * Otto. Otto never dials that number then, and pausing would leave those calls nowhere to go.
+       */
+      mayForwardAll: boolean;
+      /** How long "Ring my phone first" would ring for this carrier (GSM timer, Verizon ~30 s), or null when unknown. */
+      ringFirstSeconds: number | null;
+    };
     /** When a call last proved forwarding works. */
     confirmedAt: string | null;
     check: {
@@ -61,8 +81,8 @@ export interface ApiDashboard {
       callerId: string | null;
     };
     helpRequestedAt: string | null;
-    /** Otto's AI setup helper's last call to the owner: where and when. */
-    helpCall: { to: string; startedAt: string } | null;
+    /** Otto's AI setup helper's last call to the owner: where, when, and when it ended (null while it's still up). */
+    helpCall: { to: string; startedAt: string; endedAt: string | null } | null;
     /** Brock's follow-up email in the last 24 hours, and whether it has a booking link (no calendar connected: it asks for a reply). */
     founderEmail: { sentAt: string; link: boolean } | null;
   };
@@ -183,7 +203,7 @@ export function apiDashboard(input: {
   const c = input.config;
   const lineNumber = input.lineNumber ?? null;
   return {
-    line: lineModel(lineNumber, c.operationMode, input.forwarding, input.now, input.account.role === "member" ? null : input.ownerMobile ?? null, input.checkCallerId ?? null),
+    line: lineModel(lineNumber, c, input.forwarding, input.now, input.account.role === "member" ? null : input.ownerMobile ?? null, input.checkCallerId ?? null),
     csrf: input.csrf,
     now: input.now,
     preview: input.preview,
@@ -234,11 +254,12 @@ export function apiDashboard(input: {
 }
 
 /**
- * passed: the test call reached Call Otto. picked_up: the business phone (a person, a call screener,
- * a watch or car) answered it, so it never forwarded. voicemail: their voicemail answered it.
+ * passed: the test call reached Call Otto. phone_answers: the business phone answered it itself (iOS call
+ * screening or Live Voicemail, Pixel Call Screen, or a person, watch or car), so carrier forwarding never got a
+ * chance. you_answered: a person picked it up (most likely the owner). voicemail: a voicemail answered it.
  * declined: it was declined but nothing forwarded it. not_reached: it rang out and never reached us.
  */
-export type ForwardingCheckStatus = "idle" | "calling" | "passed" | "picked_up" | "voicemail" | "declined" | "not_reached";
+export type ForwardingCheckStatus = "idle" | "calling" | "passed" | "phone_answers" | "you_answered" | "voicemail" | "declined" | "not_reached";
 
 /** The stored check, as the check endpoint and the check call's webhooks write it. */
 export interface ForwardingCheckRecord {
@@ -248,15 +269,25 @@ export interface ForwardingCheckRecord {
   answeredAt?: string | null;
   endedAt?: string | null;
   hangupCause?: string | null;
+  /** When Telnyx heard the phone's own screener (iOS Call Screening or Live Voicemail) answer. */
+  screenedAt?: string | null;
+  /** Premium AMD's verdict on whatever answered: human_residence, human_business, machine, silence, not_sure... */
+  amdResult?: string | null;
+  /** The code on screen when the owner started this test. */
+  code?: string | null;
+  /** What the owner picked when they started this test: a pass records it as what they're set up for. */
+  choice?: ForwardingChoice | null;
 }
 
 export interface ForwardingState {
   businessNumber: string | null;
   carrier: CarrierInfo | null;
   confirmedAt: string | null;
-  check: { startedAt: string; method: "auto" | "manual"; answeredAt?: string | null; endedAt?: string | null; hangupCause?: string | null } | null;
+  check: { startedAt: string; method: "auto" | "manual"; answeredAt?: string | null; endedAt?: string | null; hangupCause?: string | null; screenedAt?: string | null; amdResult?: string | null; code?: string | null; choice?: ForwardingChoice | null } | null;
   helpRequestedAt: string | null;
-  helpCall?: { to: string; startedAt: string } | null;
+  helpCall?: { to: string; startedAt: string; endedAt: string | null } | null;
+  /** What the owner was set up for when a test last passed (see TestedFor). */
+  testedFor?: TestedFor | null;
   founderEmail?: { sentAt: string; link: boolean } | null;
 }
 
@@ -265,22 +296,34 @@ export const FORWARDING_CHECK_WINDOW_MS = 100_000;
 /** Picked up sooner than this: the phone itself (a person, a screener). Later: a voicemail. */
 const PHONE_PICKUP_MS = 12_000;
 
-function forwardingCheckStatus(check: ForwardingState["check"], confirmedAt: string | null, now: string): ForwardingCheckStatus {
+export function forwardingCheckStatus(check: ForwardingState["check"], confirmedAt: string | null, now: string): ForwardingCheckStatus {
   if (!check) return "idle";
   if (confirmedAt && confirmedAt >= check.startedAt) return "passed";
+  // The phone's own screener answered: say so right away, while our short explanation plays and we hang up.
+  if (check.method === "auto" && check.screenedAt) return "phone_answers";
   const finished = Boolean(check.endedAt) || Date.parse(now) - Date.parse(check.startedAt) >= FORWARDING_CHECK_WINDOW_MS;
   if (!finished) return "calling";
   if (check.method !== "auto") return "not_reached";
-  if (check.answeredAt) return Date.parse(check.answeredAt) - Date.parse(check.startedAt) < PHONE_PICKUP_MS ? "picked_up" : "voicemail";
+  if (check.answeredAt) {
+    // No screening heard: a machine is a voicemail greeting (carrier voicemail, or Live Voicemail we couldn't tell
+    // apart); a person is someone picking up, most likely the owner. Without a verdict, a fast pick-up is the phone.
+    if (check.amdResult === "machine") return "voicemail";
+    if (check.amdResult?.startsWith("human")) return "you_answered";
+    return Date.parse(check.answeredAt) - Date.parse(check.startedAt) < PHONE_PICKUP_MS ? "phone_answers" : "voicemail";
+  }
   if (check.hangupCause === "user_busy" || check.hangupCause === "call_rejected") return "declined";
   return "not_reached";
 }
 
-function lineModel(lineNumber: string | null, mode: BusinessConfig["operationMode"], state: ForwardingState | undefined, now: string, ownerMobile: string | null, checkCallerId: string | null): ApiDashboard["line"] {
+function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "operationMode" | "answerAfterRings">, state: ForwardingState | undefined, now: string, ownerMobile: string | null, checkCallerId: string | null): ApiDashboard["line"] {
+  const mode = config.operationMode;
   const check = state?.check ?? null;
   const confirmedAt = state?.confirmedAt ?? null;
   const status = forwardingCheckStatus(check, confirmedAt, now);
   const answeredAfterSec = check?.answeredAt ? Math.max(0, Math.round((Date.parse(check.answeredAt) - Date.parse(check.startedAt)) / 1_000)) : null;
+  const plan = lineNumber && state?.carrier ? forwardingPlan(state.carrier.family, lineNumber, mode, config.answerAfterRings) : null;
+  const testedFor = state?.testedFor ?? null;
+  const update = forwardingUpdate(plan, mode, testedFor);
   return {
     number: lineNumber,
     mode,
@@ -288,9 +331,14 @@ function lineModel(lineNumber: string | null, mode: BusinessConfig["operationMod
     business: {
       number: state?.businessNumber ?? null,
       carrier: state?.carrier ?? null,
-      plan: lineNumber && state?.carrier ? forwardingPlan(state.carrier.family, lineNumber, mode) : null,
+      plan,
       choices: CARRIER_CHOICES,
       suggested: state?.businessNumber ? null : ownerMobile,
+      update,
+      everyCallOn: Boolean(confirmedAt) && testedFor?.mode === "every-call",
+      codeApplied: Boolean(confirmedAt && plan && testedFor) && !update,
+      mayForwardAll: mayForwardAll({ mode, testedFor }),
+      ringFirstSeconds: state?.carrier ? ringFirstSeconds(state.carrier.family, config.answerAfterRings) : null,
     },
     confirmedAt,
     check: { status, method: check?.method ?? null, startedAt: check?.startedAt ?? null, answeredAfterSec, callerId: checkCallerId },
@@ -298,6 +346,21 @@ function lineModel(lineNumber: string | null, mode: BusinessConfig["operationMod
     helpCall: state?.helpCall ?? null,
     founderEmail: state?.founderEmail ?? null,
   };
+}
+
+/**
+ * Today's choice or code differs from what the last passed test was set up for (or what the phone may be set up
+ * for, see rememberLegacyTestedFor): dial the new code once (office lines: change it in the phone company's website).
+ * Leaving every call for ring first turns forward-all off first, since it wins over every conditional code: the off
+ * code (clearFirst), or for office lines "forward all calls" in the website (leavingEveryCall, no code). Never
+ * inferred from test timing.
+ */
+export function forwardingUpdate(plan: ForwardingPlan | null, mode: ForwardingMode, testedFor: TestedFor | null): { clearFirst: string | null; leavingEveryCall: boolean } | null {
+  if (!plan || !testedFor || plan.family === "unknown") return null;
+  const choice = forwardingChoice(mode);
+  if (testedFor.mode === choice && testedFor.code === plan.on) return null;
+  const leavingEveryCall = testedFor.mode === "every-call" && choice === "ring-first";
+  return { clearFirst: leavingEveryCall ? plan.off : null, leavingEveryCall };
 }
 
 /** The owner settings form as plain values; the client posts the same names back. */

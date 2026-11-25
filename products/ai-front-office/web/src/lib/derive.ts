@@ -44,11 +44,13 @@ export function derive(data: ApiDashboard) {
 }
 
 /** The line's state in plain words. Text alerts being off is shown separately, never folded into this label. */
-export function coverageStatus(data: Pick<ApiDashboard, "viewer" | "shop" | "preview">): { tone: "on" | "pending" | "paused" | "warning"; label: string; detail: string } {
+export function coverageStatus(data: Pick<ApiDashboard, "viewer" | "shop" | "preview"> & { line?: { business: Pick<ApiDashboard["line"]["business"], "everyCallOn"> } }): { tone: "on" | "pending" | "paused" | "warning"; label: string; detail: string } {
   if (data.preview) return { tone: "on", label: "Answering calls", detail: "Call Otto picks up when you can’t." }
   if (data.viewer.status !== "active") return { tone: "pending", label: "Setting up your line", detail: "We turn it on as soon as it’s approved and let you know." }
   if (data.shop.pausedForBilling) return { tone: "warning", label: "Paused for billing", detail: "Update your card in Plan and billing to turn answering back on." }
   if (data.shop.paused) return { tone: "paused", label: "Answering paused", detail: "Call Otto isn’t answering. Turn it back on in How calls are answered." }
+  // Only once a test proved every call reaches Otto, not as soon as the setting is picked.
+  if (data.line?.business.everyCallOn) return { tone: "on", label: "Answering every call", detail: "Call Otto answers every call to your business number." }
   return { tone: "on", label: "Answering calls", detail: "Call Otto picks up when you can’t." }
 }
 

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
+import { loginReturningHere } from "@/lib/login-next"
 
 export class ApiError extends Error {
   readonly status: number
@@ -22,7 +23,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
     ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
   })
   if (response.status === 401) {
-    window.location.assign("/login")
+    window.location.assign(loginReturningHere(window.location))
     throw new ApiError("Sign in again", 401)
   }
   const payload = await response.json().catch(() => ({}))

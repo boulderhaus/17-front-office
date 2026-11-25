@@ -1,6 +1,7 @@
 import type { BusinessConfig } from "./models.js";
 import { DEFAULT_USAGE_ALERT_PERCENT, isValidUsageAlertPercent } from "./usage.js";
 import { stateCode } from "./area-codes.js";
+import { DEFAULT_ANSWER_AFTER_RINGS } from "./forwarding.js";
 import { DEFAULT_OVERAGE_CENTS_PER_CALL, DEFAULT_PLANS, normalizePlanId } from "./plans.js";
 
 export function createDemoConfig(tenantId = "demo"): BusinessConfig {
@@ -20,7 +21,8 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     calendarConnectionRef: "google-primary",
     bookingMode: "confirm",
     operationMode: "after_hours",
-    answerAfterRings: 4,
+    // 2 rings ≈ 10 seconds: the GSM forwarding timer (see ringSeconds in domain/forwarding.ts). Saved shops keep theirs.
+    answerAfterRings: DEFAULT_ANSWER_AFTER_RINGS,
     afterHours: {
       weekdayStart: "17:00",
       weekdayEnd: "08:00",

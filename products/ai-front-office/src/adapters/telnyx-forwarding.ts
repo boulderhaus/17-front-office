@@ -9,6 +9,21 @@ const CHECK_STATE_PREFIX = "forwarding-check:";
 export const FORWARDING_CHECK_SPEECH = "Hi, this is Call Otto, testing your call forwarding. Your phone picked up this test call, so it did not reach Call Otto. Please hang up, and follow the steps on your screen.";
 
 /**
+ * Telnyx Premium AMD with iOS call screening detection: it hears Apple's screener (Ask Reason, Live Voicemail)
+ * answer our test call and says so, so the owner learns in seconds that their phone answers calls itself.
+ */
+export const CHECK_CALL_AMD = "premium_ios_call_screening_detection";
+/** The phone's own screener answered (iOS Call Screening or Live Voicemail). Not terminal: AMD keeps listening. */
+export const SCREENING_DETECTED_EVENT = "call.machine.premium.call_screening.detected";
+/**
+ * Premium AMD's verdict: human_residence, human_business, machine, silence, fax_detected or not_sure. With iOS
+ * screening detection the first one is "machine" for Apple's screener too; a screening event can follow it.
+ */
+export const AMD_ENDED_EVENT = "call.machine.premium.detection.ended";
+/** The greeting finished: beep_detected, no_beep_detected, or prompt_ended (Apple's screening prompt ended, no beep). */
+export const GREETING_ENDED_EVENT = "call.machine.premium.greeting.ended";
+
+/**
  * The shop whose forwarding check this Call Control leg is, and which test it belongs to (its start
  * time, so a webhook that beats our own save can wait for it), or null for any other call.
  */
@@ -50,9 +65,10 @@ export class TelnyxForwardingClient {
         connection_id: input.connectionId,
         to: input.to,
         from: input.from,
-        // Carriers forward an unanswered call after 20–30 s; ring long enough for that to happen.
+        // Verizon forwards an unanswered call after about 30 s (and Telnyx's own default is 30 s): ring long enough.
         timeout_secs: 60,
         time_limit_secs: 90,
+        answering_machine_detection: CHECK_CALL_AMD,
         webhook_url: input.webhookUrl,
         client_state: Buffer.from(`${CHECK_STATE_PREFIX}${input.tenantId}|${input.startedAt}`).toString("base64"),
       }),

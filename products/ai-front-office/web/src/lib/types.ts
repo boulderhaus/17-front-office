@@ -46,9 +46,12 @@ export interface ForwardingPlan {
   off: string | null
   dialLink: string | null
   offDialLink: string | null
+  /** Every call goes to Call Otto; the owner's phone never rings for this number. */
+  forwardsAll: boolean
+  /** About how long the owner's phone rings before Call Otto answers (GSM timer, Verizon ~30 s), or null. */
+  ringSeconds: number | null
   what: string
   tips: string[]
-  iphoneTip: string | null
   confirm: string | null
 }
 
@@ -66,17 +69,32 @@ export interface ApiDashboard {
       choices: Array<{ family: Exclude<CarrierFamily, "unknown">; label: string }>
       /** The owner's mobile from signup, offered as the number customers call. */
       suggested: string | null
+      /**
+       * Today's choice or code differs from what the last passed test was for (or what an untested every call may
+       * have set): dial plan.on once (after clearFirst, the off code, when leaving every call; an office line with
+       * leavingEveryCall turns off "forward all calls" in the website first). Stays until a test passes for it.
+       */
+      update: { clearFirst: string | null; leavingEveryCall: boolean } | null
+      /** Forwarding works and the last passed test was for every call. */
+      everyCallOn: boolean
+      /** Forwarding works and the last passed test was for today's choice and code, so its ring time is real. */
+      codeApplied: boolean
+      /** Every call is picked, or the last passed test was for every call: all calls to the number may go to Otto. */
+      mayForwardAll: boolean
+      /** How long "Ring my phone first" rings for this carrier (GSM timer, Verizon ~30 s), or null when unknown. */
+      ringFirstSeconds?: number | null
     }
     confirmedAt: string | null
     check: {
-      status: "idle" | "calling" | "passed" | "picked_up" | "voicemail" | "declined" | "not_reached"
+      status: "idle" | "calling" | "passed" | "phone_answers" | "you_answered" | "voicemail" | "declined" | "not_reached"
       method: "auto" | "manual" | null
       startedAt: string | null
       answeredAfterSec: number | null
       callerId: string | null
     }
     helpRequestedAt: string | null
-    helpCall: { to: string; startedAt: string } | null
+    /** The AI setup helper's last call: endedAt is null while it's still up. */
+    helpCall: { to: string; startedAt: string; endedAt: string | null } | null
     /** Brock's follow-up email in the last 24 hours, and whether it has a booking link. */
     founderEmail?: { sentAt: string; link: boolean } | null
   }
@@ -171,7 +189,8 @@ export type SettingsValues = Record<string, string | boolean>
 
 export interface ApiSettings {
   /** Automated emergency calls to the owner's mobile: offered, and on only with the owner's recorded consent. */
-  urgentCalls?: { available: boolean; on: boolean; disclosure: string }
+  /** held: the urgent number may send every call to Otto, so urgent calls to it are skipped (push and email still go). */
+  urgentCalls?: { available: boolean; on: boolean; disclosure: string; held?: boolean }
   csrf: string
   values: SettingsValues
   status: string
