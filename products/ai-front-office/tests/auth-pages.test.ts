@@ -48,15 +48,36 @@ describe("public page system", () => {
     expect(page).toContain('<main class="publicmain formpage authpage">');
   });
 
-  it("the founder booking page is the same narrow page, with the strong red buttons", () => {
+  it("signup: the guarantee sits with the plan above the button; only the charge and terms lines sit under it", () => {
+    const plan = { id: "solo", label: "Solo", priceCents: 4_999, firstMonthCents: 2_499, includedCalls: 60, blurb: "60 answered calls a month, about 2 a day", who: "Just you", chargeNote: "Today: $24.99." };
+    const page = renderOwnerSignup("", {}, { plans: [plan, { ...plan, id: "team", label: "Team" }], chargeNote: plan.chargeNote });
+    const at = (text: string): number => page.indexOf(text);
+    const [guarantee, button, charge, agree] = [at('<p class="guarantee">'), at("<button>Continue to card</button>"), at('<p class="charge"'), at('<p class="agree">')];
+    expect(guarantee).toBeGreaterThan(at('<fieldset class="plans">'));
+    expect([guarantee < button, button < charge, charge < agree]).toEqual([true, true, true]);
+    expect(page.slice(button, page.indexOf("</form>")).match(/<p class="(?!charge)/g)).toEqual(['<p class="']);
+  });
+
+  it("sign-in, check-email, link, forgot and reset pages share one eyebrow", async () => {
+    const render = await import("../src/admin/render.js");
+    for (const page of [render.renderOwnerLogin(), render.renderSignInLinkSent("owner@synthetic.example"), render.renderSignInLinkConfirm("token"), render.renderForgotPassword({ emailEnabled: true }), render.renderResetPassword("token")]) {
+      expect(page).toContain('<p class="eyebrow">Your calls. Your rules.</p>');
+    }
+  });
+
+  it("the founder booking page is the same narrow page; times are white choices, not a wall of red buttons", () => {
     const slots = [{ start: "2026-11-30T15:00:00Z", end: "2026-11-30T15:10:00Z" }];
     const pick = renderFounderBooking({ state: "pick", token: "t", businessName: "Synthetic Air", timeZone: "America/Chicago", slots });
     expect(pick).toContain('<main class="publicmain formpage authpage">');
     expect(pick).toContain('<div class="slotday" role="group" aria-labelledby="day-0"><h2 id="day-0">');
-    expect(pick).toContain("--red-strong:#b42318");
+    expect(pick).toMatch(/\.slotgrid button\{[^}]*background:var\(--white\);color:var\(--blue\)/);
     const booked = renderFounderBooking({ state: "booked", slot: slots[0]!, timeZone: "America/Chicago", callNumber: "(941) 555-0199", justBooked: true });
     expect(booked).toContain('<span class="nowrap">(941) 555-0199</span>');
     expect(booked).not.toContain('style="white-space:nowrap"');
+    expect(booked).toMatch(/p\.done\{[^}]*text-wrap:balance/);
+    // Brock is named once per line.
+    const reply = renderFounderBooking({ state: "reply", reason: "nothing_open" });
+    expect(reply).toContain("<p>Brock’s open times are full this week. Reply to his email with a good time and he’ll call you.</p>");
   });
 });
 
@@ -103,6 +124,11 @@ describe("signup errors", () => {
     expect(page).not.toContain("signup-shop-error");
   });
 
+  it("a one-letter shop name says how long it must be", async () => {
+    const page = await (await signup({ businessName: "C", email: "owner@synthetic.example", password: "long-password-for-tests", trade: "hvac" })).text();
+    expect(page).toContain('<span class="fielderror" id="signup-shop-error">Use at least 2 characters for your shop name.</span>');
+  });
+
   it("asks for a mobile number when the text box is checked without one", async () => {
     const page = await (await signup({ businessName: "Synthetic Air", email: "owner@synthetic.example", password: "long-password-for-tests", ownerSmsConsent: "yes" })).text();
     expect(page).toContain('<span class="fielderror" id="signup-phone-error">Add your mobile number to get texts.</span>');
@@ -113,6 +139,9 @@ describe("signup errors", () => {
     expect((await signup(fields)).status).toBe(303);
     const again = await signup(fields);
     expect(again.status).toBe(409);
-    expect(await again.text()).toContain('<span class="fielderror" id="signup-email-error">That email already has an account. Sign in instead.</span>');
+    const page = await again.text();
+    // The fix is signing in, so both the field error and the summary link there.
+    expect(page).toContain('<span class="fielderror" id="signup-email-error">That email already has an account. <a href="/login">Sign in instead</a></span>');
+    expect(page).toContain('<div class="formerror" role="alert" id="signup-error"><p><a href="/login">That email already has an account. Sign in instead.</a></p></div>');
   });
 });

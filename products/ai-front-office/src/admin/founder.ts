@@ -7,8 +7,9 @@ const BOOKING_STYLE = `<style>
 .slotday{margin:0 0 20px}.slotday:last-child{margin-bottom:0}
 .slotday h2{margin:0 0 10px;font:800 17px/1.3 ui-sans-serif,system-ui,-apple-system,sans-serif}
 .slotgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px}
-.authpage .publicform .slotgrid button{min-height:52px;padding:12px 10px;font-size:17px;text-transform:none;letter-spacing:0}
-.booking .publicform>p.done{margin:0 0 10px;font:900 24px/1.2 ui-sans-serif,system-ui,-apple-system,sans-serif;letter-spacing:-.02em}
+.authpage .publicform .slotgrid button{min-height:52px;padding:12px 10px;background:var(--white);color:var(--blue);box-shadow:3px 3px 0 var(--blue);font-size:17px;text-transform:none;letter-spacing:0}
+.authpage .publicform .slotgrid button:hover,.authpage .publicform .slotgrid button:focus-visible{background:#fff;transform:translate(2px,2px);box-shadow:1px 1px 0 var(--blue)}
+.booking .publicform>p.done{margin:0 0 10px;text-wrap:balance;font:900 24px/1.2 ui-sans-serif,system-ui,-apple-system,sans-serif;letter-spacing:-.02em}
 .booking .publicform>p{margin:0 0 8px;font:600 17px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}.booking .publicform>p:last-child{margin:0}
 .nowrap{white-space:nowrap}
 </style>`;
@@ -26,19 +27,20 @@ export type FounderBookingView =
 /** /book-setup: pick a 10-minute call with Brock, shown in the owner's own time zone. */
 export function renderFounderBooking(view: FounderBookingView): string {
   if (view.state === "expired") {
-    return page("Link expired", "Setup call", "This link has expired.", `<p class="authnote">Reply to Brock's email and he'll find a time with you.</p>`, `<p>Booking links work for 7 days.</p>`);
+    return page("Link expired", "Setup call", "This link has expired.", `<p class="authnote">Reply to Brock’s email and he’ll find a time with you.</p>`, `<p>Booking links work for 7 days.</p>`);
   }
   if (view.state === "reply") {
+    // Brock is named once: "his email" after a line that already says whose open times.
     const why = view.reason === "nothing_open"
-      ? "Brock's open times are all taken this week."
-      : view.reason === "unavailable" ? "We couldn't load Brock's open times just now." : "Online booking isn't open yet.";
-    return page("Book a setup call", "Setup call", "Reply with a good time.", "", `<p>${why} Reply to Brock's email with a good time and he'll call you.</p>`);
+      ? "Brock’s open times are full this week. Reply to his email"
+      : view.reason === "unavailable" ? "We couldn’t load Brock’s open times just now. Reply to his email" : "Online booking isn’t open yet. Reply to Brock’s email";
+    return page("Book a setup call", "Setup call", "Reply with a good time.", "", `<p>${why} with a good time and he’ll call you.</p>`);
   }
   if (view.state === "booked") {
     const when = slotFullLabel(view.slot.start, view.timeZone);
     const call = view.callNumber ? `Brock will call you at <span class="nowrap">${escapeHtml(view.callNumber)}</span>.` : "Brock will call you.";
     const sent = view.justBooked ? `<p>We emailed you a calendar invite.</p>` : "";
-    return page("You're set", "Setup call", "You're set.", `<div class="publicform"><p class="done">${escapeHtml(when)}</p><p>${call} It takes about 10 minutes.</p>${sent}</div><p class="authnote">Need a different time? Reply to Brock's email.</p>`);
+    return page("You’re set", "Setup call", "You’re set.", `<div class="publicform"><p class="done">${escapeHtml(when)}</p><p>${call} It takes about 10 minutes.</p>${sent}</div><p class="authnote">Need a different time? Reply to Brock’s email.</p>`);
   }
   const days = new Map<string, FounderSlot[]>();
   for (const slot of view.slots) {

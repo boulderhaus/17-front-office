@@ -480,7 +480,8 @@ describe("sign-in page", () => {
     expect(page).toContain('fill="#4285F4"');
     const wrong = await (await fetch(`${h.baseUrl}/login`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "nobody@synthetic.example", password: "wrong-password" }) })).text();
     expect(wrong).toContain('role="alert" id="login-error"');
-    expect(wrong).toContain('<a href="#password-email">Email or password is incorrect.</a>');
+    // The summary links to the field that shows the error and has focus: the password, since the email was kept.
+    expect(wrong).toContain('<a href="#password">Email or password is incorrect.</a>');
     expect(wrong).toMatch(/id="password-email"[^>]*aria-invalid="true" aria-describedby="login-error"/);
     expect(wrong).toContain('<details class="pwd" open>');
     // The typed email stays, the password field takes focus, and the problem also sits right under it.
@@ -512,7 +513,7 @@ describe("sign-in page", () => {
     expect(short).toContain('<span class="fielderror" id="reset-password-error">Make your password at least 12 characters.</span>');
     const mismatch = await (await reset("long-password-one", "long-password-two")).text();
     expect(mismatch).toMatch(/<input name="confirm" id="reset-confirm" [^>]*aria-invalid="true" autofocus>/);
-    expect(mismatch).toContain("The two passwords don&#39;t match. Type the same one twice.");
+    expect(mismatch).toContain("The two passwords don’t match. Type the same one twice.");
   });
 });
 
@@ -533,7 +534,13 @@ describe("login CSRF", () => {
     const forged = await postLink(h, { token: link!.token });
     expect(forged.status).toBe(400);
     expect(cookieOf(forged, "afo_owner")).toBeNull();
-    expect(await forged.text()).toContain("Open the link from your email again");
+    const forgedPage = await forged.text();
+    expect(forgedPage).toContain("Open the link from your email again");
+    // Nothing typed is wrong: the email box takes focus to send a new link, but isn't marked invalid.
+    expect(forgedPage).toMatch(/id="link-email" [^>]*value="" required aria-describedby="login-error" autofocus>/);
+    expect(forgedPage).not.toMatch(/<input[^>]*aria-invalid/);
+    expect(forgedPage).not.toContain("login-field-error");
+    expect(forgedPage).toContain('<div class="formerror" role="alert" id="login-error"><p>Open the link from your email again, then tap Sign me in.</p></div>');
     h.store.notifications.clear();
     await requestLink(h, "owner@synthetic.example");
     const [other] = await queuedLinks(h);

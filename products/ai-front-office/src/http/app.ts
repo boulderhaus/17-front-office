@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { renderAdminResetLink, renderCallbackLink, renderForgotPassword, renderResetPassword, renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms, type SignupFieldErrors } from "../admin/render.js";
+import { renderAdminResetLink, renderCallbackLink, renderForgotPassword, renderResetPassword, renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms, SIGNUP_EMAIL_TAKEN, type SignupFieldErrors } from "../admin/render.js";
 import { buildActivationReport, shopActivationBlockers, type ActivationReport } from "../application/readiness.js";
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService, ToolWriteInProgressError } from "../application/call-service.js";
@@ -826,7 +826,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         },
       };
       const created = await dependencies.store.createOwnerWorkspace({ account, config, ownerPhone: phone });
-      if (!created) return sendHtml(response, 409, signupPage(request, "", values, identity, { email: "That email already has an account. Sign in instead." }));
+      if (!created) return sendHtml(response, 409, signupPage(request, "", values, identity, { email: SIGNUP_EMAIL_TAKEN }));
       if (parsed.data.founderSmsConsent === "yes") {
         const welcomeConfigured = dependencies.env.FOUNDER_WELCOME_ENABLED
           && dependencies.env.TELNYX_MESSAGING_APPROVED
@@ -926,7 +926,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const token = form.get("token") ?? "";
       const password = form.get("password") ?? "";
       if (password.length < 12 || password.length > 200) return sendHtml(response, 400, renderResetPassword(token, "Make your password at least 12 characters.", dependencies.env.SUPPORT_EMAIL ?? null, "password"));
-      if (password !== form.get("confirm")) return sendHtml(response, 400, renderResetPassword(token, "The two passwords don't match. Type the same one twice.", dependencies.env.SUPPORT_EMAIL ?? null, "confirm"));
+      if (password !== form.get("confirm")) return sendHtml(response, 400, renderResetPassword(token, "The two passwords don’t match. Type the same one twice.", dependencies.env.SUPPORT_EMAIL ?? null, "confirm"));
       const accountId = token ? await dependencies.store.consumePasswordReset(hashPasswordResetToken(token), dependencies.clock.now().toISOString()) : null;
       if (!accountId) return sendHtml(response, 400, renderForgotPassword({ emailEnabled: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL), supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, error: "That reset link is expired or already used. Ask for a new one." }));
       await dependencies.store.updateOwnerPassword(accountId, await hashOwnerPassword(password), dependencies.clock.now().toISOString());
@@ -3719,7 +3719,10 @@ const RECORDING_NOTICE = TRANSFER_RECORDING_NOTICE;
 function signupFieldErrors(issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey> }>, values: Record<string, string>, verified: boolean): SignupFieldErrors {
   const errors: SignupFieldErrors = {};
   const bad = new Set(issues.map((issue) => issue.path[0]));
-  if (bad.has("businessName")) errors.businessName = "Enter your shop name.";
+  if (bad.has("businessName")) {
+    const shop = (values.businessName ?? "").trim();
+    errors.businessName = !shop ? "Enter your shop name." : shop.length < 2 ? "Use at least 2 characters for your shop name." : "Shorten your shop name to 120 characters.";
+  }
   const phoneInput = (values.phone ?? "").trim();
   if (bad.has("phone") || (phoneInput && !normalizeUsPhone(phoneInput))) errors.phone = "Enter a 10-digit US mobile number.";
   else if (!phoneInput && (values.ownerSmsConsent === "yes" || values.founderSmsConsent === "yes")) errors.phone = "Add your mobile number to get texts.";

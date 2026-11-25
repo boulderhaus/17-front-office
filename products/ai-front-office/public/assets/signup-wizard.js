@@ -20,7 +20,16 @@
     input.after(toggle);
   });
 
-  // One tap sends a form once: later taps do nothing while it's on its way.
+  // One tap sends a form once: the button says "Sending…" and later taps do nothing while it's on its way.
+  // Ready again after Back, or after 10 seconds in case the network dropped it.
+  const labels = new WeakMap();
+  const ready = (formElement) => {
+    delete formElement.dataset.busy;
+    formElement.querySelectorAll('[aria-busy="true"]').forEach((button) => {
+      button.removeAttribute("aria-busy");
+      if (labels.has(button)) button.replaceChildren(...labels.get(button));
+    });
+  };
   document.querySelectorAll("form.publicform, .publicform form").forEach((formElement) => {
     formElement.addEventListener("submit", (event) => {
       if (formElement.dataset.busy) {
@@ -28,16 +37,15 @@
         return;
       }
       formElement.dataset.busy = "1";
-      event.submitter?.setAttribute("aria-busy", "true");
+      const button = event.submitter ?? formElement.querySelector('button:not([type="button"])');
+      if (!button) return;
+      button.setAttribute("aria-busy", "true");
+      labels.set(button, [...button.childNodes]);
+      button.replaceChildren("Sending…");
+      setTimeout(() => ready(formElement), 10_000);
     });
   });
-  // Coming back with the Back button shows the form ready again.
-  window.addEventListener("pageshow", () => {
-    document.querySelectorAll("form[data-busy]").forEach((formElement) => {
-      delete formElement.dataset.busy;
-      formElement.querySelectorAll('[aria-busy="true"]').forEach((button) => button.removeAttribute("aria-busy"));
-    });
-  });
+  window.addEventListener("pageshow", () => document.querySelectorAll("form[data-busy]").forEach(ready));
 
   // Signup: send the browser's timezone so the shop's hours start out right.
   const timezone = document.querySelector('.publicform input[name="timezone"]');
