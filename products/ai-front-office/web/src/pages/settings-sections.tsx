@@ -213,7 +213,7 @@ export function AnswersSection() {
 /* ---------------------------------------------------------------- Alerts */
 
 export function AlertsSection() {
-  const { text, flag, set, bind, settings, urgentBusy, toggleUrgentCalls } = useSettings()
+  const { text, flag, set, bind, settings, urgentBusy, toggleUrgentCalls, patchSettings } = useSettings()
   const { reload: reloadDashboard } = useMode()
   const { integrations: i } = settings
   const { hash } = useLocation()
@@ -243,6 +243,12 @@ export function AlertsSection() {
     try {
       const result = await api<{ texts: NonNullable<ApiSettings["texts"]> }>("/api/app/alerts/texts", { method: "POST", body: { on, ...(on && typed ? { phone: typed } : {}) } })
       setTexts(result.texts)
+      // The saved settings learn it too, so another settings page and back (and the Settings list) show it.
+      patchSettings((current) => ({
+        ...current,
+        texts: result.texts,
+        integrations: { ...current.integrations, ownerPhoneConfigured: current.integrations.ownerPhoneConfigured || Boolean(result.texts.mobile), ownerPhoneMasked: result.texts.mobile ?? current.integrations.ownerPhoneMasked ?? null },
+      }))
       if (on && typed) { set("ownerPhone", ""); setEditingMobile(false) }
       await reloadDashboard()
       toast.success(on ? (result.texts.live ? "Text alerts are on." : "Saved. Texts start once approved.") : "Text alerts are off.")

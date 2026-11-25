@@ -58,6 +58,8 @@ export interface SettingsContextValue {
   /** Automated emergency calls: saved on its own, right away (it records or withdraws the owner's consent). */
   urgentBusy: boolean
   toggleUrgentCalls: (on: boolean) => Promise<void>
+  /** Keeps what a save-on-its-own control changed (text consent, the mobile) when moving between pages; edits stay. */
+  patchSettings: (patch: (current: ApiSettings) => ApiSettings) => void
 }
 
 const SettingsContext = createContext<SettingsContextValue | null>(null)
@@ -89,7 +91,8 @@ export function SettingsArea() {
       setUrgentBusy(false)
     }
   }
-  useEffect(() => { if (settings.data) setValues(settings.data.values) }, [settings.data])
+  // Only a new set of saved values resets the form: a patch (consent, the mobile) never throws away an unsaved edit.
+  useEffect(() => { if (settings.data) setValues(settings.data.values) }, [settings.data?.values]) // eslint-disable-line react-hooks/exhaustive-deps
   const section = SECTIONS.find((item) => item.id === sectionId) ?? null
 
   const context = useMemo<SettingsContextValue | null>(() => {
@@ -126,6 +129,7 @@ export function SettingsArea() {
       reload: async () => { await settings.reload(); await reloadDashboard() },
       urgentBusy,
       toggleUrgentCalls,
+      patchSettings: (patch) => { if (settings.data) settings.setData(patch(settings.data)) },
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, values, saving, reloadDashboard, urgentBusy])

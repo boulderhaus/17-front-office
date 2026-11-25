@@ -100,6 +100,8 @@ export interface ApiDashboard {
     helpRequestedAt: string | null
     /** "Set it up with me" reaches our team by email, so the app may promise a reply. */
     helpTeam?: boolean
+    /** Where to write when "Set it up with me" reached no one (the company email). */
+    helpEmail?: string
     /** The AI setup helper's last call: endedAt is null while it's still up. */
     helpCall: { to: string; startedAt: string; endedAt: string | null } | null
     /** Brock's follow-up email in the last 24 hours, and whether it has a booking link. */

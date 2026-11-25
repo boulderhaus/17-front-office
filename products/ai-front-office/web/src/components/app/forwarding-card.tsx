@@ -96,15 +96,17 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
   const helpAsked = Boolean(line.helpRequestedAt) && Date.parse(dashboard.now) - Date.parse(line.helpRequestedAt!) < 24 * 60 * 60_000
   // The setup call rings for up to 30 s and can run 15 min; show "calling now" for its first 2 minutes, until it ends.
   const helpCalling = Boolean(line.helpCall && !line.helpCall.endedAt) && Date.parse(dashboard.now) - Date.parse(line.helpCall!.startedAt) < 2 * 60_000
-  // What really happened: Brock's email once it's gone (a missed setup call queues it too), our team when the request
-  // reached them by email, and otherwise that it didn't go anywhere. Never "we'll email you" when nothing was sent.
-  const helpLine = !helpAsked || helpCalling || line.helpCall ? null
+  // What really happened: Brock's email once it's gone (a missed setup call queues it too, so it shows after a setup
+  // call), our team when the request reached them by email, and otherwise that it didn't go anywhere. Never "we'll
+  // email you" when nothing was sent.
+  const helpLine = !helpAsked || helpCalling ? null
     : line.founderEmail ? founderEmailLine(line.founderEmail, dashboard.now)
-      : line.helpTeam ? "Got it. We’ll get back to you within one business day."
-        : null
+      : line.helpCall ? null
+        : line.helpTeam ? "Got it. We’ll get back to you within one business day."
+          : null
   const helpFailed = helpAsked && !helpCalling && !line.helpCall && !line.founderEmail && !line.helpTeam
   // One tap is enough: once it reached someone, the button goes (after a setup call, "Have Otto call me again" stays).
-  const helpDone = Boolean(helpLine)
+  const helpDone = Boolean(helpLine) && !line.helpCall
   const asking = !editing && !business.number && Boolean(business.suggested)
   const startTest = () => void post("check", "/api/app/line/check")
   const cancelTest = () => void post("check", "/api/app/line/check/cancel")
@@ -267,7 +269,8 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
             ) : helpLine ? (
               <p className="flex items-start gap-2 text-sm" role="status"><Check className="mt-0.5 size-4 shrink-0 text-emerald-700" />{helpLine}</p>
             ) : helpFailed ? (
-              <p className="text-sm" role="status">That didn’t reach us. Please try again.</p>
+              // Nothing could carry it (no setup call, no email): say where to write, never "try again" forever.
+              <p className="text-sm" role="status">That didn’t reach us. {line.helpEmail ? <>Email <a className="font-semibold underline underline-offset-4" href={`mailto:${line.helpEmail}`}>{line.helpEmail}</a> and we’ll help.</> : "Please try again."}</p>
             ) : null}
             {!helpCalling && !helpDone && (
               <Button type="button" variant="link" className={linkButton} disabled={busy === "help"} onClick={() => void post("help", "/api/app/line/help", { device: isIphone ? "iphone" : isAndroid ? "android" : "other" })}>
@@ -425,16 +428,34 @@ function DialAction({ code, dialLink, label }: { code: string; dialLink: string 
   )
 }
 
+/** The QR's link works for 15 minutes: a fresh one every 10, and whenever the page comes back into view. */
+const HANDOFF_REFRESH_MS = 10 * 60_000
+
 /**
  * A computer can't dial. The QR opens a short-lived signed page on the phone that shows this shop's code, with no
- * sign-in in the way. Asked for when shown, so the link is fresh.
+ * sign-in in the way. Asked for when shown and kept fresh, so a QR left on screen never opens an expired link.
  */
 function PhoneHandoff() {
   const [link, setLink] = useState<string | null>(null)
   useEffect(() => {
     let live = true
-    void api<{ url: string }>("/api/app/line/handoff", { method: "POST", body: {} }).then((result) => { if (live) setLink(result.url) }).catch(() => undefined)
-    return () => { live = false }
+    let fetchedAt = 0
+    const refresh = () => {
+      fetchedAt = Date.now()
+      void api<{ url: string }>("/api/app/line/handoff", { method: "POST", body: {} }).then((result) => { if (live) setLink(result.url) }).catch(() => undefined)
+    }
+    // Back on this tab or window after a while: the old link may be close to expiring.
+    const onVisible = () => { if (document.visibilityState === "visible" && Date.now() - fetchedAt > 60_000) refresh() }
+    refresh()
+    const id = window.setInterval(refresh, HANDOFF_REFRESH_MS)
+    document.addEventListener("visibilitychange", onVisible)
+    window.addEventListener("focus", onVisible)
+    return () => {
+      live = false
+      window.clearInterval(id)
+      document.removeEventListener("visibilitychange", onVisible)
+      window.removeEventListener("focus", onVisible)
+    }
   }, [])
   if (!link) return null
   return (

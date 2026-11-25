@@ -72,7 +72,17 @@ export function timezoneForState(state: string | null): string {
 }
 
 /**
- * States where recording a call needs everyone's OK (all-party consent). A new shop there starts with the recording
- * notice on. The owner app's hint uses the same list (web/src/lib/recording-hint.ts; a test keeps them equal).
+ * States where recording a phone call may need everyone's OK (all-party consent). A new shop there starts with the
+ * recording notice on. Oregon is one-party for phone calls (ORS 165.540), so it isn't listed. The owner app's hint
+ * uses the same list (web/src/lib/recording-hint.ts; a test keeps them equal).
  */
-export const ALL_PARTY_CONSENT_STATES: ReadonlySet<string> = new Set(["CA", "CT", "DE", "FL", "IL", "MD", "MA", "MI", "MT", "NV", "NH", "OR", "PA", "WA"]);
+export const ALL_PARTY_CONSENT_STATES: ReadonlySet<string> = new Set(["CA", "CT", "DE", "FL", "IL", "MD", "MA", "MI", "MT", "NV", "NH", "PA", "WA"]);
+
+/** "Sarasota FL" or "Sarasota, FL" (normalized service-area terms) → "FL"; ZIP-only areas give no state. */
+export function serviceAreaState(terms: string[]): string | null {
+  for (const term of terms) {
+    const match = /(?:^|[\s,])([A-Z]{2})$/.exec(term.trim());
+    if (match) return match[1]!;
+  }
+  return null;
+}

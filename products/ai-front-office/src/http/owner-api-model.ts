@@ -6,6 +6,7 @@ import { isPaidStatus } from "../domain/billing.js";
 import { describeHours } from "../domain/hours.js";
 import { fairUseCalls, type PlanId } from "../domain/plans.js";
 import { extraCalls } from "../domain/usage.js";
+import { COMPANY } from "../admin/footer.js";
 import type { GuaranteeStatus } from "../application/billing-jobs.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, OutboxNotification, OwnerAccount, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 
@@ -88,6 +89,8 @@ export interface ApiDashboard {
     helpRequestedAt: string | null;
     /** "Set it up with me" reaches our team by email (SUPPORT_EMAIL): only then may the app promise a reply. */
     helpTeam: boolean;
+    /** Where an owner writes when "Set it up with me" reached no one: the company email published in the footer. */
+    helpEmail: string;
     /** Otto's AI setup helper's last call to the owner: where, when, and when it ended (null while it's still up). */
     helpCall: { to: string; startedAt: string; endedAt: string | null } | null;
     /** Brock's follow-up email in the last 24 hours, and whether it has a booking link (no calendar connected: it asks for a reply). */
@@ -209,7 +212,7 @@ export function apiDashboard(input: {
   guarantee?: GuaranteeStatus | undefined;
   onboarding?: { hoursSet: boolean; completed: boolean } | undefined;
   checkCallerId?: string | null | undefined;
-  /** Consent to owner texts is on file (owner_sms_consent). Without it, texts are off whatever the config says. */
+  /** Consent to owner texts is on file (owner_sms_consent). Without it, texts are off whatever the config says (the SMS sender holds them too). */
   smsConsent?: boolean | undefined;
   textsLive?: boolean | undefined;
   helpTeam?: boolean | undefined;
@@ -217,7 +220,7 @@ export function apiDashboard(input: {
   const c = input.config;
   const lineNumber = input.lineNumber ?? null;
   return {
-    line: { ...lineModel(lineNumber, c, input.forwarding, input.now, input.account.role === "member" ? null : input.ownerMobile ?? null, input.checkCallerId ?? null), helpTeam: input.helpTeam === true },
+    line: { ...lineModel(lineNumber, c, input.forwarding, input.now, input.account.role === "member" ? null : input.ownerMobile ?? null, input.checkCallerId ?? null), helpTeam: input.helpTeam === true, helpEmail: COMPANY.email },
     csrf: input.csrf,
     now: input.now,
     preview: input.preview,
@@ -308,10 +311,12 @@ export interface ForwardingState {
   founderEmail?: { sentAt: string; link: boolean } | null;
 }
 
-/** How long a check waits for the forwarded call before saying it didn't reach us (our call rings up to 60 s). */
+/**
+ * How long a check waits for the forwarded call before saying it didn't reach us: our call rings up to 60 s, and a
+ * test from another phone needs time to find that phone and dial (ring first adds up to 30 s of ringing). The server
+ * accepts the forwarded call for this long too, so the card never says "didn't reach Otto" while a pass can still land.
+ */
 export const FORWARDING_CHECK_WINDOW_MS = 100_000;
-/** A test the owner places from another phone: the forwarded call lands within seconds or not at all. */
-export const MANUAL_CHECK_WINDOW_MS = 60_000;
 
 /** A saved mobile, enough to recognise it: "(941) •••-0177". Never the whole number. */
 export function maskedPhone(e164: string): string {
@@ -332,7 +337,7 @@ export function forwardingCheckStatus(check: ForwardingState["check"], confirmed
   if (confirmedAt && confirmedAt >= check.startedAt) return "passed";
   // The phone's own screener answered: say so right away, while our short explanation plays and we hang up.
   if (check.method === "auto" && check.screenedAt) return "phone_answers";
-  const finished = Boolean(check.endedAt) || Date.parse(now) - Date.parse(check.startedAt) >= (check.method === "manual" ? MANUAL_CHECK_WINDOW_MS : FORWARDING_CHECK_WINDOW_MS);
+  const finished = Boolean(check.endedAt) || Date.parse(now) - Date.parse(check.startedAt) >= FORWARDING_CHECK_WINDOW_MS;
   if (!finished) return "calling";
   if (check.method !== "auto") return "not_reached";
   if (check.answeredAt) {
@@ -346,7 +351,7 @@ export function forwardingCheckStatus(check: ForwardingState["check"], confirmed
   return "not_reached";
 }
 
-function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "operationMode" | "answerAfterRings">, state: ForwardingState | undefined, now: string, ownerMobile: string | null, checkCallerId: string | null): Omit<ApiDashboard["line"], "helpTeam"> {
+function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "operationMode" | "answerAfterRings">, state: ForwardingState | undefined, now: string, ownerMobile: string | null, checkCallerId: string | null): Omit<ApiDashboard["line"], "helpTeam" | "helpEmail"> {
   const mode = config.operationMode;
   const check = state?.check ?? null;
   const confirmedAt = state?.confirmedAt ?? null;

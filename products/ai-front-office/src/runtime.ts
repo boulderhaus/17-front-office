@@ -90,6 +90,10 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
         resolveDestination: async (tenantId, reference) =>
           (await store.getIntegrationSecret(tenantId, "notifications", reference)) ?? null,
         isOptedOut: (tenantId, phone) => store.isSmsOptedOut(tenantId, phone),
+        // Every shop with an owner account needs its owner's yes on file. Only the operator's own default shop with
+        // no owner account (numbers set by the operator in OWNER_DESTINATIONS_JSON or /admin/config) goes without.
+        hasOwnerTextConsent: async (tenantId) => Boolean(await store.getIntegrationSecret(tenantId, "notifications", "owner_sms_consent"))
+          || (tenantId === env.DEFAULT_TENANT_ID && !await store.getOwnerAccountByTenant(tenantId)),
         claimStopNotice: (phone, notificationId, firstAttempt) => store.claimSmsStopNotice(phone, notificationId, new Date().toISOString(), firstAttempt),
         webhookUrl: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx`,
         textingApproved: env.TELNYX_MESSAGING_APPROVED,

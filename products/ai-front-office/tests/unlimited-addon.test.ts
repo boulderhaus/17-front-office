@@ -428,6 +428,19 @@ describe("homepage pricing and terms", () => {
     expect(html).toContain('href="/signup?unlimited=1"');
   });
 
+  it("gives every plan card a standard and an Unlimited link, shown one at a time, named by the card's own text", () => {
+    const plans = planCatalog(demoEnvironment({}));
+    const html = renderMarketing(config, [], { plans });
+    for (const plan of plans) {
+      expect(html).toContain(`<a class="plan-row std" href="/signup?plan=${plan.id}">`);
+      if (plan.unlimited) expect(html).toContain(`<a class="plan-row unl" href="/signup?plan=${plan.id}&amp;unlimited=1">`);
+    }
+    expect(html).not.toMatch(/class="plan-row[^"]*"[^>]*aria-label/);
+    expect(html).toContain("a.plan-row.unl{display:none}");
+    expect(html).toContain(".price-section:has(#unlimited-toggle:checked) a.plan-row.std{display:none}");
+    expect(html).toContain(".price-section:has(#unlimited-toggle:checked) a.plan-row.unl{display:grid}");
+  });
+
   it("advertises the first month half off only when the offer is on and the coupon is set", () => {
     const on = renderMarketing(config, [], { plans: planCatalog(demoEnvironment({ ...STRIPE_ENV, STRIPE_FIRST_MONTH_COUPON_ID: "front_office_first_month_50" })) });
     expect(on).toContain("Limited time: first month half off");
