@@ -88,8 +88,10 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
   const plan = business.plan
   const family = business.carrier?.family ?? null
   const helpAsked = Boolean(line.helpRequestedAt)
-  // The setup call rings for up to 30 s and can run 15 min; show "calling now" for the first 2 minutes.
-  const helpCalling = Boolean(line.helpCall) && Date.parse(dashboard.now) - Date.parse(line.helpCall!.startedAt) < 2 * 60_000
+  // The setup call rings for up to 30 s and can run 15 min; show "calling now" for its first 2 minutes, until it ends.
+  const helpCalling = Boolean(line.helpCall && !line.helpCall.endedAt) && Date.parse(dashboard.now) - Date.parse(line.helpCall!.startedAt) < 2 * 60_000
+  // Brock's email once it's gone (a missed setup call queues it too); "we'll email you" only when no call was placed.
+  const helpLine = !helpAsked || helpCalling ? null : line.founderEmail ? founderEmailLine(line.founderEmail, dashboard.now) : line.helpCall ? null : "Got it. We’ll email you to set this up."
   const asking = !editing && !business.number && Boolean(business.suggested)
   const startTest = () => void post("check", "/api/app/line/check")
   const testLabel = line.check.status === "idle" ? "Call me now" : "Test again"
@@ -196,10 +198,13 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
 
             {confirmed && (
               <div className="grid gap-2 text-sm">
-                {/* Only what a test proved: every call once a forward-all code passed, the ring time once its own code did. */}
+                {/* Only what a test proved: every call once a forward-all code passed, missed calls and the ring time once
+                    the ring-first code did. Otherwise (a manual test, an office line) only that calls get here. */}
                 <p>{business.everyCallOn
                   ? `Every call to ${formatPhone(business.number!)} now goes to Otto. Your phone won’t ring for these.`
-                  : `Calls you miss on ${formatPhone(business.number!)} now go to Otto.${plan?.ringSeconds && business.codeApplied ? ` Your phone rings about ${plan.ringSeconds} seconds first.` : ""}`}</p>
+                  : business.codeApplied
+                    ? `Calls you miss on ${formatPhone(business.number!)} now go to Otto.${plan?.ringSeconds ? ` Your phone rings about ${plan.ringSeconds} seconds first.` : ""}`
+                    : `Calls to ${formatPhone(business.number!)} now reach Otto.`}</p>
                 {business.update && plan?.on && (
                   <div className="grid gap-2.5 border-t pt-3">
                     <p className="text-[15px] font-semibold">Dial this once to apply your change</p>
@@ -239,8 +244,8 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
                 <PhoneCall className="mt-0.5 size-4 shrink-0" />
                 <span><strong>Otto is calling you now at <span className="whitespace-nowrap">{formatPhone(line.helpCall!.to)}</span>.</strong> Pick up{callerId ? <> (it’s from <span className="whitespace-nowrap">{callerId}</span>)</> : null}.</span>
               </p>
-            ) : helpAsked && !line.helpCall ? (
-              <p className="flex items-start gap-2 text-sm"><Check className="mt-0.5 size-4 shrink-0 text-emerald-700" />{founderEmailLine(line.founderEmail ?? null, dashboard.now)}</p>
+            ) : helpLine ? (
+              <p className="flex items-start gap-2 text-sm"><Check className="mt-0.5 size-4 shrink-0 text-emerald-700" />{helpLine}</p>
             ) : null}
             {!helpCalling && (
               <Button type="button" variant="link" className={linkButton} disabled={busy === "help"} onClick={() => void post("help", "/api/app/line/help", { device: isIphone ? "iphone" : isAndroid ? "android" : "other" })}>
@@ -256,8 +261,7 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
 }
 
 /** What Brock's follow-up email actually was: a booking link, or (no calendar connected yet) a note asking for a reply. */
-function founderEmailLine(email: { sentAt: string; link: boolean } | null, now: string): string {
-  if (!email) return "Got it. We’ll email you to set this up."
+function founderEmailLine(email: { sentAt: string; link: boolean }, now: string): string {
   const just = Date.parse(now) - Date.parse(email.sentAt) < 10 * 60_000 ? "just emailed" : "emailed"
   return email.link ? `Brock, our founder, ${just} you a link to book a 10-minute call.` : `Brock, our founder, ${just} you to set up a quick call.`
 }
@@ -271,7 +275,8 @@ function ModeChoice({ choice, busy, locked, family, ringFirstSeconds, onPick }: 
   // The business phone may be an iPhone even when this page is open on a computer; Android needs nothing extra.
   const iphoneNote = !isAndroid && family !== "office"
   const options: Array<{ id: Choice; title: string; line: string; note: string | null }> = [
-    { id: "always", title: "Otto answers every call", line: "Nothing to change on your phone.", note: "Your phone won’t ring for this number." },
+    // "No phone settings": there's still a code to dial below. An office line is set in a website either way.
+    { id: "always", title: "Otto answers every call", line: family === "office" ? "Otto picks up right away." : "No phone settings to change.", note: "Your phone won’t ring for this number." },
     // The iPhone step shows once ring first is picked: it's the one thing to do before dialing that code.
     { id: "ring", title: "Ring my phone first", line: `Otto takes the calls you miss${after}.`, note: iphoneNote && choice === "ring" ? "iPhone: turn off Live Voicemail first (Settings › Apps › Phone)." : null },
   ]
@@ -336,7 +341,7 @@ function DialCode({ code, dialLink, codeRef }: { code: string; dialLink: string 
         <Button size="tap" variant="outline" className={cn(tapWidth, "md:w-fit md:min-w-44")} onClick={copy}><Copy />Copy code</Button>
         <div className="flex items-center gap-4 rounded-lg border bg-muted/40 p-3 md:max-w-[480px]">
           <QrCode value={here} size={112} label="QR code that opens this setup page on your phone" />
-          <p className="text-sm font-semibold">Scan to dial from your phone.</p>
+          <p className="text-sm font-semibold">Scan to open this on your phone.</p>
         </div>
       </div>
     )

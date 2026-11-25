@@ -75,8 +75,8 @@ export interface ApiDashboard {
       callerId: string | null;
     };
     helpRequestedAt: string | null;
-    /** Otto's AI setup helper's last call to the owner: where and when. */
-    helpCall: { to: string; startedAt: string } | null;
+    /** Otto's AI setup helper's last call to the owner: where, when, and when it ended (null while it's still up). */
+    helpCall: { to: string; startedAt: string; endedAt: string | null } | null;
     /** Brock's follow-up email in the last 24 hours, and whether it has a booking link (no calendar connected: it asks for a reply). */
     founderEmail: { sentAt: string; link: boolean } | null;
   };
@@ -277,7 +277,7 @@ export interface ForwardingState {
   confirmedAt: string | null;
   check: { startedAt: string; method: "auto" | "manual"; answeredAt?: string | null; endedAt?: string | null; hangupCause?: string | null; screenedAt?: string | null; amdResult?: string | null; code?: string | null } | null;
   helpRequestedAt: string | null;
-  helpCall?: { to: string; startedAt: string } | null;
+  helpCall?: { to: string; startedAt: string; endedAt: string | null } | null;
   /** The code the last passing test proved is in force (see codeProvenByTest). */
   dialedCode?: string | null;
   founderEmail?: { sentAt: string; link: boolean } | null;

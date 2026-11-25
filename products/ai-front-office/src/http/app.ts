@@ -1289,9 +1289,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       // the support email below tells us the request came in.
       const device = helpRequest.device === "iphone" || helpRequest.device === "android" ? helpRequest.device : "other";
       const candidate = ownerPhone && /^\+1[2-9]\d{9}$/.test(ownerPhone) ? ownerPhone : state.businessNumber;
-      // "Every call" forwarding sends the business phone's calls to Otto: never ring it (Otto would call Otto).
-      // A separate mobile is already preferred above; with none, Brock's email below takes over.
-      const loops = forwardsBackToOtto({ mode: config.operationMode, businessNumber: state.businessNumber, phone: candidate, dialedCode: state.dialedCode ?? null });
+      // Never ring a business number a test proved forwards every call to Otto (Otto would call Otto); a separate mobile
+      // is preferred above, and with none Brock's email below takes over. "Every call" picked but not proven yet
+      // (the default): ring it, since that's when owners need the helper most. If the code is already on, the call
+      // lands on Otto, which ends it and counts it as forwarding working (noteForwardedCall).
+      const loops = forwardsBackToOtto({ mode: "overflow", businessNumber: state.businessNumber, phone: candidate, dialedCode: state.dialedCode ?? null });
       if (loops) log({ level: "info", event: "setup_call_skipped_forwards_to_otto", tenantId: account.tenantId });
       const callTo = loops ? null : candidate;
       // One setup call per shop at a time, written only under this lock (here and by the call's webhooks).
@@ -2412,7 +2414,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       businessNumber, carrier: parse<CarrierInfo>(carrierJson), confirmedAt, dialedCode,
       check: check ? { startedAt: check.startedAt, method: check.method, answeredAt: check.answeredAt ?? null, endedAt: check.endedAt ?? null, hangupCause: check.hangupCause ?? null, screenedAt: check.screenedAt ?? null, amdResult: check.amdResult ?? null, code: check.code ?? null } : null,
       helpRequestedAt,
-      helpCall: ((call) => call?.to && call.startedAt ? { to: call.to, startedAt: call.startedAt } : null)(parse<{ to?: string; startedAt?: string }>(setupCallJson)),
+      helpCall: ((call) => call?.to && call.startedAt ? { to: call.to, startedAt: call.startedAt, endedAt: call.endedAt ?? null } : null)(readSetupCall(setupCallJson)),
       founderEmail,
     };
   }
@@ -2504,7 +2506,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         everyCallCode: everyCall?.on ?? null,
         ringFirstCode: ringFirst?.on ?? null,
         ringFirstSeconds: ringFirst?.ringSeconds ?? null,
-        phoneAnswersTest: forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "phone_answers",
+        // Only while ring first is picked: after switching to every call, the screen asks for the new code instead.
+        phoneAnswersTest: !plan?.forwardsAll && forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "phone_answers",
       },
     }).then(() => log({ level: "info", event: "setup_call_started", tenantId }), async (error: unknown) => {
       // Never leave the owner on a silent line: queue Brock's email first, so the apology can say he just sent it,
@@ -2777,10 +2780,13 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     // Some carriers show the forwarding phone's own number; trust that only for our automatic check call.
     // Our own number only ever calls owners (tests, urgent alerts, the setup helper). One of those reaching the
     // shop's line was forwarded there: it proves forwarding works, and it must never become Otto talking to Otto.
-    const ours = Boolean(dependencies.env.TELNYX_FROM_NUMBER) && callerPhone === dependencies.env.TELNYX_FROM_NUMBER;
+    // The setup helper ringing a business number that already forwards every call lands here too (some carriers show
+    // the business number as the caller): end the helper's leg before it starts, so Otto never talks to Otto.
+    const helperLooped = await endLoopedSetupCall(tenantId, callerPhone, businessNumber, now);
+    const ours = helperLooped || (Boolean(dependencies.env.TELNYX_FROM_NUMBER) && callerPhone === dependencies.env.TELNYX_FROM_NUMBER);
     const fromCheck = ours || (check?.method === "auto" && businessNumber !== null && callerPhone === businessNumber);
     // The owner dialing their Call Otto number from the business phone is a direct call, not a forwarded one.
-    if (!(open && fromCheck) && businessNumber !== null && callerPhone === businessNumber) return "customer";
+    if (!ours && !(open && fromCheck) && businessNumber !== null && callerPhone === businessNumber) return "customer";
     await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "confirmed_at", now.toISOString());
     if (!ours && !(open && fromCheck)) return "customer";
     await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check_inbound_call", callControlId);
@@ -2798,6 +2804,27 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     }
     log({ level: "info", event: "forwarding_check_passed", tenantId });
     return "check";
+  }
+
+  /**
+   * A setup call to the business number placed in the last minute, still up, now arriving on the shop's own line
+   * (from our number, or showing the business number): mark it ended under the setup-call lock (so its answer never
+   * starts the helper and its hang-up never emails Brock) and hang it up. True when it was one.
+   */
+  async function endLoopedSetupCall(tenantId: string, callerPhone: string, businessNumber: string | null, now: Date): Promise<boolean> {
+    if (!businessNumber) return false;
+    const ours = Boolean(dependencies.env.TELNYX_FROM_NUMBER) && callerPhone === dependencies.env.TELNYX_FROM_NUMBER;
+    if (!ours && callerPhone !== businessNumber) return false;
+    const looped = await dependencies.store.withLock(`setup-call:${tenantId}`, async () => {
+      const call = readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"));
+      if (!call?.callControlId || call.to !== businessNumber || call.endedAt || !call.startedAt || now.getTime() - Date.parse(call.startedAt) >= 60_000) return null;
+      await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...call, endedAt: now.toISOString(), hangupCause: "forwarded_to_otto" }));
+      return call.callControlId;
+    });
+    if (!looped) return false;
+    log({ level: "info", event: "setup_call_forwarded_to_otto", tenantId });
+    await setupCaller()?.hangUp(looped).catch((error: unknown) => log({ level: "warn", event: "setup_call_hangup_failed", tenantId, error: safeError(error) }));
+    return true;
   }
 
   /**

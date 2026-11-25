@@ -771,21 +771,52 @@ describe("owner one-tap go-live", () => {
         expect(helpDials().map((call) => (call.body as { to: string }).to)).toEqual(["+19415550199"]);
       });
 
-      it("Set it up with me never rings a business number that forwards every call to Otto; a separate mobile still gets the call", async () => {
+      it("Set it up with me rings the business number until a test proves it forwards every call; a call that loops back ends at once", async () => {
         const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection", TELNYX_TEMPLATE_ASSISTANT_ID: "template-assistant" }, carriers: { "+19415550199": { name: "T-Mobile USA", type: "mobile" }, "+19415550177": { name: "T-Mobile USA", type: "mobile" } } });
-        const { api, store, account, telnyx } = made;
+        const { api, store, account, telnyx, baseUrl, privateKey, clock } = made;
         expect(await store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")).toBe("+19415550199");
         const helpDials = () => telnyx.calls.filter((call) => call.url.endsWith("/v2/calls") && Buffer.from(String((call.body as { client_state?: string }).client_state ?? ""), "base64").toString().startsWith("setup-help:"));
-        // The owner's only number is the business number, and it forwards every call to Otto.
+        const hangups = () => telnyx.calls.filter((call) => call.url.endsWith("/v2/calls/v3%3Acheck-call/actions/hangup")).length;
+        const arrives = (id: string, from: string) => {
+          const init = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id, occurred_at: clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: from, call_control_id: `v3:${id}`, assistant_id: "assistant-1" } } });
+          return fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, privateKey, clock.now()), body: init });
+        };
+        const setupCall = async () => JSON.parse(await store.getIntegrationSecret(account.tenantId, "forwarding", "setup_call") ?? "null") as { endedAt?: string; hangupCause?: string } | null;
+        // The owner's only number is the business number. Every call is picked (the default), nothing proven yet:
+        // the helper rings it, since nothing says the code is on.
         await api("/api/app/line/business-number", { number: "9415550199" });
         await api("/api/app/line/mode", { mode: "always" });
         expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
-        expect(helpDials()).toHaveLength(0);
+        expect(helpDials().map((call) => (call.body as { to: string }).to)).toEqual(["+19415550199"]);
+        // The code was on after all: the helper's call lands on Otto. Otto ends it (no Otto talking to Otto, no call
+        // record), hangs up the helper's leg, and counts it as forwarding working.
+        const reply = await arrives("help-loop", "+15555550199");
+        expect(((await reply.json()) as { dynamic_variables: { call_access: string } }).dynamic_variables.call_access).toBe("forwarding_check");
+        expect(await setupCall()).toMatchObject({ hangupCause: "forwarded_to_otto" });
+        expect(hangups()).toBe(1);
+        expect((await line(made)).confirmedAt).toBeTruthy();
+        expect(await store.listCalls(account.tenantId, 10)).toHaveLength(0);
+        // Some carriers show the business number as the caller: the same.
+        clock.at = new Date(clock.at.getTime() + 60_000);
+        expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+        expect(helpDials()).toHaveLength(2);
+        const shown = await arrives("help-loop-2", "+19415550199");
+        expect(((await shown.json()) as { dynamic_variables: { call_access: string } }).dynamic_variables.call_access).toBe("forwarding_check");
+        expect(hangups()).toBe(2);
+        expect(await store.listCalls(account.tenantId, 10)).toHaveLength(0);
+        expect(((await line(made)) as unknown as { helpCall: { endedAt: string | null } }).helpCall.endedAt).toBeTruthy();
+        // A test proves every call is forwarded: never ring that number again.
+        clock.at = new Date(clock.at.getTime() + 60_000);
+        await api("/api/app/line/check");
+        await forwarded(made, "all-on");
+        expect(await store.getIntegrationSecret(account.tenantId, "forwarding", "dialed_code")).toBe("**21*19415550123#");
+        expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+        expect(helpDials()).toHaveLength(2);
         expect((await line(made) as unknown as { helpCall: unknown }).helpCall ?? null).toBeNull();
         // A different business number: the owner's mobile is separate, so the helper calls it.
         await api("/api/app/line/business-number", { number: "9415550177" });
         expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
-        expect(helpDials().map((call) => (call.body as { to: string }).to)).toEqual(["+19415550199"]);
+        expect(helpDials().map((call) => (call.body as { to: string }).to)).toEqual(["+19415550199", "+19415550199", "+19415550199"]);
       });
     });
 

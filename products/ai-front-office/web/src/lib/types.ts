@@ -90,7 +90,8 @@ export interface ApiDashboard {
       callerId: string | null
     }
     helpRequestedAt: string | null
-    helpCall: { to: string; startedAt: string } | null
+    /** The AI setup helper's last call: endedAt is null while it's still up. */
+    helpCall: { to: string; startedAt: string; endedAt: string | null } | null
     /** Brock's follow-up email in the last 24 hours, and whether it has a booking link. */
     founderEmail?: { sentAt: string; link: boolean } | null
   }

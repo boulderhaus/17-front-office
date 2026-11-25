@@ -212,7 +212,7 @@ describe("the AI setup helper's script", () => {
   it("asks which they want, one sentence each, every call first and suggested", () => {
     const text = setupInstructions({ ...base, device: "iphone" });
     expect(text).not.toMatch(/before anything else/i);
-    const everyCall = text.indexOf("Otto answers every call: nothing to change on their phone");
+    const everyCall = text.indexOf("Otto answers every call: no phone settings to change, Otto answers right away");
     const ringFirst = text.indexOf("Ring my phone first: their phone rings for 15 seconds first");
     expect(everyCall).toBeGreaterThan(0);
     expect(ringFirst).toBeGreaterThan(everyCall);
@@ -228,7 +228,11 @@ describe("the AI setup helper's script", () => {
     expect(text).toContain("let it ring (about 15 seconds)");
     expect(text).toContain("Call Forwarding Link Blocked");
     expect(text).toContain("Don't ask them to change phone settings unless they pick Ring my phone first on an iPhone, or their phone picked up our test call by itself.");
-    expect(text).toContain("With every call: if they ever pause Call Otto, they dial ##002#");
+    expect(text).toContain("To turn forwarding off later, they dial ##002#");
+    expect(text).toContain("With every call, they do that before they ever pause Call Otto");
+    expect(text.match(/##002#/g)).toHaveLength(1);
+    expect(text).toContain("tap Call me now (or Test again)");
+    expect(text).not.toContain("first ring");
     expect(text).toContain("their phone doesn't ring for those. Calls they make and texts work like before.");
     // The founder-email promise stays.
     expect(text).toContain("Brock, our founder, will email them a link to book a 10-minute call");

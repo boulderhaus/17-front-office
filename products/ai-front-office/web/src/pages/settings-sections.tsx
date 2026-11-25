@@ -107,9 +107,10 @@ export function AnsweringSection() {
   // With every call sent to Otto, pausing (which disconnects the line) leaves callers with nowhere to go.
   const everyCall = text("operationMode") === "always" || Boolean(dashboard?.line.business.everyCallOn)
   const off = dashboard?.line.business.plan?.off
+  // Said when they pick Paused, not before: until the code is dialed, pausing stops nothing.
   const pauseHint = settings.status !== "active"
     ? "Your line turns on after it’s approved. Until then it stays paused."
-    : everyCall
+    : everyCall && text("serviceState") === "paused"
       ? `Otto answers every call, so pausing stops all calls to your business number. Turn forwarding off first${off ? `: dial ${off} on that phone` : " with your phone company"}.`
       : undefined
   return (

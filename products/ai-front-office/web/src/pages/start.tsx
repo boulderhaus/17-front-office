@@ -297,7 +297,7 @@ function DoneStep({ dashboard, activation, toForward }: { dashboard: ApiDashboar
       ) : (
         <div className="grid justify-items-start gap-4">
           <span className="grid size-14 place-items-center rounded-full bg-emerald-600 text-white shadow-[0_0_0_6px_rgba(5,150,105,.15)]"><Check className="size-8" strokeWidth={3} /></span>
-          <Heading title={<span className="marker">You’re set!</span>}>{waiting ? "Your setup is saved. We’ll turn your line on as soon as it’s approved and let you know." : dashboard.line.business.everyCallOn ? "Otto answers every call now. New jobs show up in Calls." : "Otto answers the calls you miss now. New jobs show up in Calls."}</Heading>
+          <Heading title={<span className="marker">You’re set!</span>}>{waiting ? "Your setup is saved. We’ll turn your line on as soon as it’s approved and let you know." : dashboard.line.business.everyCallOn ? "Otto answers every call now. New jobs show up in Calls." : dashboard.line.business.codeApplied ? "Otto answers the calls you miss now. New jobs show up in Calls." : "Calls now reach Otto. New jobs show up in Calls."}</Heading>
         </div>
       )}
       <Card>
