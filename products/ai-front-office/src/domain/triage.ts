@@ -108,8 +108,7 @@ export function triageEmergency(
 /**
  * Lowercase words that read the same however they were typed: contractions opened ("roof's" is
  * "roof is"), other apostrophes and hyphens dropped ("won’t", "wont"; "break-in", "break in"),
- * and the filler "is"/"are" removed, so "the roof's leaking" and "roof is leaking" match. Clause
- * punctuation stays for the negation check.
+ * spaces collapsed. Line breaks and clause punctuation stay: they end a negation's reach.
  */
 function plainWords(text: string): string {
   return text.toLowerCase()
@@ -117,23 +116,30 @@ function plainWords(text: string): string {
     .replace(/(\w)['’]re\b/g, "$1 are")
     .replace(/['’‘`]/g, "")
     .replace(/[-‐‑–—_/]/g, " ")
-    .replace(/\b(?:is|are)\b/g, " ")
-    .replace(/\s+/g, " ")
+    .replace(/[^\S\n]+/g, " ")
     .trim();
 }
 
-const KEYWORD_NEGATION = /(?:^|\s)(?:no|not|never|without|nothing|dont|doesnt|didnt|isnt|wasnt|arent|werent|cant|cannot|couldnt|wont|havent|hasnt)\s+(?:\S+\s+)?$/;
+// "no", "isn't", "won't" right before a phrase (at most one word between) cancel it, except
+// "won't stop sparking": stop/quit there mean it keeps happening.
+const KEYWORD_NEGATION = /(?:^|\s)(?:no|not|never|without|nothing|dont|doesnt|didnt|isnt|wasnt|arent|werent|cant|cannot|couldnt|wont|havent|hasnt)\s+(?:(?!stop|quit)\S+\s+)?$/;
+const STARTS_NEGATED = /^(?:no|not|never|without|dont|doesnt|didnt|cant|cannot|wont)\s/;
 
 /**
- * A configured phrase said as whole words (an owner's stem like "leak" also covers "leaks",
- * "leaked", "leaking"; "power out" never matches "power outlet") and not negated in its own clause
- * within one word ("no flooding", "isn't sparking"). Any one plain mention counts.
+ * A configured phrase said as whole words and not negated in its own clause ("no flooding",
+ * "isn't sparking"). An owner's stem still covers its endings ("drip" → "dripping", "trap" →
+ * "trapped", "leak" → "leaky", "burn" → "burnt"), but "power out" never matches "outlet" or "outage".
+ * A phrase that is itself a negation ("no running water", "won't close") skips the check, so
+ * "we don't have no running water" still counts. Any one plain mention counts.
  */
 function saidPlainly(notes: string, phrase: string): boolean {
   const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`(?<![a-z0-9])${escaped}(?:s|es|ed|ing)?(?![a-z0-9])`, "g");
+  const last = /[a-z]$/.test(phrase) ? phrase.at(-1) : "";
+  const pattern = new RegExp(`(?<![a-z0-9])${escaped}(?:s|es|y|t|${last}?(?:ed|ing))?(?![a-z0-9])`, "g");
   for (const match of notes.matchAll(pattern)) {
-    const clause = notes.slice(0, match.index).split(/[.,;:!?\n]/).at(-1) ?? "";
+    if (STARTS_NEGATED.test(phrase)) return true;
+    const before = notes.slice(Math.max(0, match.index - 60), match.index);
+    const clause = before.split(/[.,;:!?\n]/).at(-1) ?? "";
     if (!KEYWORD_NEGATION.test(clause)) return true;
   }
   return false;

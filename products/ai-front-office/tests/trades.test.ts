@@ -42,6 +42,9 @@ describe("trades", () => {
       "Need a broken window pane replaced.", "Wants the drywall patched where there was a water leak last year.", "Back door won't lock right.",
       "Need a broken spring replaced on the garage door.", "Wants a quote on a standby generator; they lost power for three days last winter.",
       "Heat output seems low in the back bedroom.", "Mold inspection, there was standing water last month.", "Need the dead tree taken down before winter.",
+      "I want to run power out to my shed.", "We get water coming in the basement when it rains, want a waterproofing estimate.", "Fridge stopped making ice.",
+      "Can you cut a dead tree down next month?", "Want better locks to prevent a break-in.", "Want to insulate the crawlspace to prevent frozen pipes.",
+      "Some exposed wires in the unfinished basement need covering.", "Wants a power outage plan.",
     ];
     for (const sentence of calm) {
       // Only the trade phrases are under test here; the built-in rules are covered in triage tests.
@@ -64,6 +67,19 @@ describe("trades", () => {
       const trade = findTrade(key)!;
       for (const sentence of sentences) expect(triageEmergency(sentence, { emergencyKeywords: trade.urgentWords, emergencyThreshold: 0.7 }).evidence.some((item) => item.startsWith("configured keyword")), `${key}: ${sentence}`).toBe(true);
     }
+    // A "no" on one line never cancels the next; "won't stop" means it keeps going; a negated phrase survives a double negative.
+    for (const [key, sentence] of [
+      ["plumbing", "No\nPipes froze and the kitchen is wet"], ["hvac", "Annual tune-up, nothing urgent\nHeat went out last night actually"],
+      ["electrical", "The outlet won't stop sparking"], ["appliance", "Dishwasher won't stop overflowing"], ["plumbing", "We don't have no running water"],
+      ["landscaping", "The tree's down across the driveway"], ["locksmith", "We had a break-in last night"],
+    ] as const) expect(triageEmergency(sentence, { emergencyKeywords: findTrade(key)!.urgentWords, emergencyThreshold: 0.7 }).evidence.some((item) => item.startsWith("configured keyword")), `${key}: ${sentence}`).toBe(true);
+    for (const [stem, sentence] of [["drip", "Ceiling is dripping in the kitchen"], ["trap", "Kid trapped in the garage"], ["trip", "Breaker keeps tripping"], ["clog", "Toilet clogged"], ["burn", "smells burnt"], ["leak", "Faucet won't stop leaking"]]) {
+      expect(triageEmergency(sentence!, { emergencyKeywords: [stem!], emergencyThreshold: 0.7 }).emergency, `${stem}: ${sentence}`).toBe(true);
+    }
+    // Long negated input stays fast.
+    const started = performance.now();
+    triageEmergency("no sparking ".repeat(9000), { emergencyKeywords: findTrade("electrical")!.urgentWords, emergencyThreshold: 0.7 });
+    expect(performance.now() - started).toBeLessThan(500);
     // An owner's own stem still covers its forms, but a phrase never runs into a longer word.
     expect(triageEmergency("Basement is flooding", { emergencyKeywords: ["flood"], emergencyThreshold: 0.7 }).emergency).toBe(true);
     expect(triageEmergency("Pipe leaked overnight", { emergencyKeywords: ["leak"], emergencyThreshold: 0.7 }).emergency).toBe(true);
