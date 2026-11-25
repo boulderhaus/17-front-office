@@ -267,7 +267,10 @@ describe("Owner JSON API and React app serving", () => {
     expect(asset.headers.get("cache-control")).toContain("immutable");
     expect((await fetch(`${baseUrl}/web/assets/..%2F..%2Fpackage.json`)).status).toBe(404);
     expect((await fetch(`${baseUrl}/web/assets/index.html`)).status).toBe(404);
-    expect((await fetch(`${baseUrl}/app/calendar`, { redirect: "manual" })).headers.get("location")).toBe("/login");
+    // Signed out: sign in, then back to the same page (a phone that scanned the setup QR code lands on its code).
+    expect((await fetch(`${baseUrl}/app/calendar`, { redirect: "manual" })).headers.get("location")).toBe("/login?next=%2Fapp%2Fcalendar");
+    expect((await fetch(`${baseUrl}/app/start?step=forward`, { redirect: "manual" })).headers.get("location")).toBe("/login?next=%2Fapp%2Fstart%3Fstep%3Dforward");
+    expect((await fetch(`${baseUrl}/app`, { redirect: "manual" })).headers.get("location")).toBe("/login");
     const owner = await signUp("a@synthetic.example");
     const app = await fetch(`${baseUrl}/app/calls/${CALL_ID}`, { headers: { cookie: owner.cookie } });
     expect(await app.text()).toContain('id="root"');

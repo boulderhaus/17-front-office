@@ -1,4 +1,5 @@
 import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
+import { ringChoicesWith } from "../domain/forwarding.js";
 import { ownerTaskReason } from "../domain/task-reason.js";
 import { USAGE_EXCLUSION_NOTE, extraCalls, usageAlertOptions } from "../domain/usage.js";
 import { fairUseCalls, money, perCall } from "../domain/plans.js";
@@ -358,7 +359,7 @@ export function renderOwnerSettings(input: {
 <section class="fo-card fo-group"><h2>Answering</h2>
 <label>Call Otto is<select name="serviceState"><option value="active"${selected(!c.paused)}>On, answering calls</option><option value="paused"${selected(c.paused)}>Paused</option></select></label>${input.account.status === "active" ? "" : `<p class="fo-hint">Your line turns on after activation. Until then it stays paused.</p>`}
 <label>Answer<select name="operationMode"><option value="overflow"${selected(c.operationMode === "overflow")}>Only calls I miss</option><option value="after_hours"${selected(c.operationMode === "after_hours")}>After hours</option><option value="always"${selected(c.operationMode === "always")}>Every call</option></select></label>
-<div class="fo-grid2"><label>Ring my phone first<select name="answerAfterRings">${[2, 3, 4, 5, 6, 8, 10, 12].map((rings) => `<option value="${rings}"${selected(c.answerAfterRings === rings)}>${rings} rings</option>`).join("")}</select></label><label class="fo-check"><input type="checkbox" name="weekends"${checked(c.afterHours.weekends)}> Answer all weekend</label></div>
+<div class="fo-grid2"><label>Ring my phone first<select name="answerAfterRings">${ringChoicesWith(c.answerAfterRings).map((choice) => `<option value="${choice.rings}"${selected(c.answerAfterRings === choice.rings)}>${e(choice.label)}</option>`).join("")}</select></label><label class="fo-check"><input type="checkbox" name="weekends"${checked(c.afterHours.weekends)}> Answer all weekend</label></div>
 <div class="fo-grid2"><label>After hours start<input type="time" name="weekdayStart" value="${e(c.afterHours.weekdayStart)}"></label><label>After hours end<input type="time" name="weekdayEnd" value="${e(c.afterHours.weekdayEnd)}"></label></div>
 <label>Holidays to cover (YYYY-MM-DD, comma separated)<input name="holidayDates" value="${e(c.afterHours.holidayDates.join(", "))}" placeholder="2026-12-25"></label></section>
 <section class="fo-card fo-group"><h2>Your shop</h2>

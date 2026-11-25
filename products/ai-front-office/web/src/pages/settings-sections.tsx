@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react"
+import { Link } from "react-router-dom"
 import { CheckCircle2, Download, ExternalLink, LogOut } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -11,6 +12,8 @@ import { api } from "@/lib/api"
 import { FAIR_USE_LINE, money, perCall } from "@/lib/format"
 import { useMode } from "@/lib/mode"
 import type { PlanId } from "@/lib/types"
+import { ringChoicesWith, VERIZON_RING_LINE } from "@/lib/dial"
+import { pauseHint } from "@/lib/pause-hint"
 import { cn } from "@/lib/utils"
 import { useSettings } from "./settings"
 
@@ -101,16 +104,25 @@ export function BusinessSection() {
 
 export function AnsweringSection() {
   const { text, flag, set, bind, settings } = useSettings()
+  const { dashboard } = useMode()
+  // Said when they pick Paused, and only when every call may go to Otto (the saved choice or the last passed test).
+  const business = dashboard?.line.business
+  const hint = pauseHint({ active: settings.status === "active", paused: text("serviceState") === "paused", mayForwardAll: Boolean(business?.mayForwardAll), off: business?.plan?.off })
   return (
     <>
       <SettingsCard title="Which calls">
-        <Field label="Call Otto is" hint={settings.status === "active" ? undefined : "Your line turns on after it’s approved. Until then it stays paused."}>
+        <Field label="Call Otto is" hint={hint}>
           <select className={selectClass} {...bind("serviceState")}><option value="active">On, answering calls</option><option value="paused">Paused</option></select>
         </Field>
         <Pair>
-          <Field label="Answer"><select className={selectClass} {...bind("operationMode")}><option value="overflow">Only calls I miss</option><option value="after_hours">After hours</option><option value="always">Every call</option></select></Field>
-          <Field label="Ring my phone first"><select className={selectClass} {...bind("answerAfterRings")}>{[2, 3, 4, 5, 6, 8, 10, 12].map((rings) => <option key={rings} value={rings}>{rings} rings</option>)}</select></Field>
+          <Field label="Calls to your business number" hint={text("operationMode") === "always" ? "Your phone won’t ring for this number." : "Otto takes the calls you miss."}><select className={selectClass} {...bind("operationMode")}><option value="always">Otto answers every call</option><option value="overflow">Ring my phone first</option><option value="after_hours">After hours</option></select></Field>
+          <RingFirstField rings={Number(text("answerAfterRings"))} onChange={(value) => set("answerAfterRings", value)} everyCall={text("operationMode") === "always"} family={dashboard?.line.business.carrier?.family ?? null} confirmed={Boolean(dashboard?.line.confirmedAt)} />
         </Pair>
+        {dashboard?.line.business.update && (
+          <p className="rounded-md border border-brand-ink/15 bg-accent px-3 py-2.5 text-sm text-accent-foreground" role="status">
+            Dial your new code once to apply this. <Link className="font-semibold underline underline-offset-4" to={dashboard.onboarding.completed ? "/app" : "/app/start?step=forward"}>Show me the code</Link>
+          </p>
+        )}
       </SettingsCard>
       <SettingsCard title="After hours" description="When Call Otto answers every call, even ones you could pick up.">
         <Pair>
@@ -134,6 +146,31 @@ export function AnsweringSection() {
         </Field>
       </SettingsCard>
     </>
+  )
+}
+
+/**
+ * "Ring my phone first", in what the owner gets: the GSM forwarding timer (about 6 s a ring, 5–30 s). Verizon's
+ * timer is fixed, and in "every call" mode the phone never rings, so both show it locked with the reason.
+ */
+function RingFirstField({ rings, onChange, everyCall, family, confirmed }: { rings: number; onChange: (value: string) => void; everyCall: boolean; family: string | null; confirmed: boolean }) {
+  const verizon = family === "verizon"
+  const choices = ringChoicesWith(rings)
+  const hint = verizon ? VERIZON_RING_LINE
+    : everyCall ? "Only for Ring my phone first."
+    : family === "gsm" && confirmed ? "After you save, dial the new code once to apply it."
+    : family === "office" ? "For an office line, set the ring time in your phone company’s website or app."
+    : undefined
+  return (
+    <Field label="Ring time" hint={hint}>
+      {verizon ? (
+        <select className={cn(selectClass, "disabled:cursor-not-allowed disabled:opacity-70")} disabled value="verizon" onChange={() => undefined}><option value="verizon">About 30 seconds (Verizon)</option></select>
+      ) : (
+        <select className={cn(selectClass, "disabled:cursor-not-allowed disabled:opacity-70")} name="answerAfterRings" disabled={everyCall} value={String(choices.find((choice) => choice.rings === rings)?.rings ?? 2)} onChange={(event) => onChange(event.target.value)}>
+          {choices.map((choice) => <option key={choice.rings} value={String(choice.rings)}>{choice.label}</option>)}
+        </select>
+      )}
+    </Field>
   )
 }
 
@@ -167,6 +204,10 @@ export function AlertsSection() {
           <ToggleRow id="urgentCalls" label="Call me about emergencies" checked={settings.urgentCalls.on} disabled={urgentBusy}
             hint={settings.urgentCalls.disclosure}
             onChange={(on) => void toggleUrgentCalls(on)} />
+        )}
+        {/* The urgent number is the business number and may send every call to Otto: Otto skips those calls. */}
+        {settings.urgentCalls?.available && settings.urgentCalls.on && settings.urgentCalls.held && (
+          <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">Emergency calls paused: this number may send every call to Otto. You still get a push and an email.</p>
         )}
       </SettingsCard>
       <SettingsCard title="Texts">

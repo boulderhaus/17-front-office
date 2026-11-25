@@ -9,6 +9,7 @@ import { NotificationRouter } from "./adapters/notification-router.js";
 import { WebPushSender } from "./adapters/web-push.js";
 import { hasOwnerCallConsent } from "./domain/owner-call-consent.js";
 import { TelnyxOwnerCallSender, urgentOwnerCallsConfigured } from "./adapters/telnyx-owner-call.js";
+import { dialsBackToOtto } from "./application/forwarding-loop.js";
 import { UnavailableCalendar } from "./adapters/unavailable.js";
 import { founderEmailSender, parseOwnerDestinations, type Environment } from "./config/environment.js";
 import { createDemoConfig } from "./domain/config.js";
@@ -109,6 +110,7 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
         resolveDestination: async (tenantId, reference) => (await store.getIntegrationSecret(tenantId, "notifications", reference)) ?? null,
         claimDial: (key) => store.claimWebhook(key),
         hasConsent: (tenantId, phone) => hasOwnerCallConsent(store, tenantId, phone),
+        forwardsToOtto: (tenantId, phone) => dialsBackToOtto(store, tenantId, phone),
         ...(env.PROVIDER_TEST_MODE ? { allowedDestinations: new Set(Object.values(destinations)) } : {}),
       })
     : null;
