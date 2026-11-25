@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { formatEmailBody } from "../adapters/resend.js";
 import type { BusinessConfig, OutboxNotification, UsageSummary } from "../domain/models.js";
 import { fairUseCalls } from "../domain/plans.js";
+import { isCompStatus } from "../domain/billing.js";
 import { currentBillingPeriod, dueUsageAlerts } from "../domain/usage.js";
 import type { Clock, Store } from "../ports.js";
 
@@ -24,7 +25,8 @@ export class UsageAlertService {
       this.store.getSubscription(tenantId),
       this.store.getOwnerAccountByTenant(tenantId),
     ]);
-    if (account?.status === "suspended") return 0;
+    // Suspended, or complimentary (the Google review account): no usage alerts.
+    if (account?.status === "suspended" || isCompStatus(subscription?.status)) return 0;
     const now = this.clock.now();
     const [periodStart, periodEnd] = currentBillingPeriod(now, subscription?.currentPeriodEnd);
     const usage = await this.store.getUsageSummary(tenantId, periodStart, periodEnd);

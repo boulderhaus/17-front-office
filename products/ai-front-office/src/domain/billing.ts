@@ -6,6 +6,19 @@ export function isPaidStatus(status: SubscriptionRecord["status"] | null | undef
   return status === "active" || status === "trialing";
 }
 
+/** A complimentary account (the Google OAuth review account): no Stripe, no line, nothing sent. */
+export function isCompStatus(status: SubscriptionRecord["status"] | null | undefined): boolean {
+  return status === "comp";
+}
+
+/**
+ * The owner app treats the shop as on a plan: no card step, no checkout. Paid, or complimentary. Anything that
+ * spends money or reaches the phone network (a number, customer calls, activation) still asks isPaidStatus.
+ */
+export function hasPlanAccess(status: SubscriptionRecord["status"] | null | undefined): boolean {
+  return isPaidStatus(status) || isCompStatus(status);
+}
+
 /** When a card added now is first charged: now plus the trial, or now with no trial. */
 export function firstChargeDate(now: Date, trialDays: number): Date {
   return new Date(now.getTime() + Math.max(0, trialDays) * 24 * 60 * 60_000);
