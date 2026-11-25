@@ -2,7 +2,7 @@ import { randomInt, randomUUID } from "node:crypto";
 import { isCompStatus } from "../domain/billing.js";
 import { createDemoConfig } from "../domain/config.js";
 import { readFounderToken, signFounderToken } from "../domain/founder-booking.js";
-import type { BusinessConfig, OwnerAccount, SubscriptionRecord } from "../domain/models.js";
+import type { BusinessConfig, OwnerAccount } from "../domain/models.js";
 import type { Clock, Store } from "../ports.js";
 import { hashOwnerPassword } from "../security/owner-auth.js";
 
@@ -84,62 +84,53 @@ export interface ReviewAccountResult {
   created: boolean;
 }
 
+/** Any account with the review email that this link didn't make. Brock removes it first; we never take it over. */
+const STRAY_SIGNUP = `${REVIEW_ACCOUNT_EMAIL} already belongs to a regular signup, so it can’t be made the review account. Nothing was changed. Delete that account first (Admin > Owners > Create reset link, sign in as it, Settings > Delete your account), then open this link again.`;
+
 /**
  * Make the review account, or give it a new password. Idempotent: one account, one shop, however often the link is
- * opened. An existing account with that email is taken over as the review account (the address is ours, and a
- * password signup proves nothing about the email), unless it belongs to a teammate or has ever touched Stripe:
- * a shop with a Stripe customer or subscription is never turned complimentary.
+ * opened. Only the account this link made (complimentary) is ever reused. Any other account with that email (a stray
+ * signup, a teammate) is refused and left exactly as it is: it may carry teammates, invites or a Stripe checkout that
+ * taking it over would leave behind in the shop Google signs in to.
  */
 export async function ensureReviewAccount(store: Store, clock: Clock): Promise<ReviewAccountResult> {
   return store.withLock("review-account", async () => {
     const password = generateReviewPassword();
     const passwordHash = await hashOwnerPassword(password);
     const now = clock.now().toISOString();
-    let account: OwnerAccount | null = await store.getOwnerAccountByEmail(REVIEW_ACCOUNT_EMAIL);
-    let created = false;
-    let subscription: SubscriptionRecord | null = null;
-    if (!account) {
-      const tenantId = `shop_${randomUUID()}`;
-      account = {
-        id: randomUUID(), tenantId, email: REVIEW_ACCOUNT_EMAIL, displayName: REVIEW_ACCOUNT_NAME, passwordHash,
-        // We made it on our own domain: a later Google sign-in with this address keeps the password.
-        emailVerifiedAt: now,
-        status: "pending_activation", createdAt: now, updatedAt: now,
-      };
-      if (!await store.createOwnerWorkspace({ account, config: reviewShopConfig(tenantId), ownerPhone: null })) {
-        throw new ReviewAccountError("The review account couldn’t be created. Open the link again.");
-      }
-      created = true;
-    } else {
-      if (account.role === "member") throw new ReviewAccountError(`${REVIEW_ACCOUNT_EMAIL} is a teammate in another shop. Nothing was changed.`);
-      subscription = await store.getSubscription(account.tenantId);
-      if (subscription && !isCompStatus(subscription.status) && (subscription.providerCustomerId || subscription.providerSubscriptionId)) {
-        throw new ReviewAccountError(`${REVIEW_ACCOUNT_EMAIL} has a Stripe billing record, so it can’t be made a review account. Nothing was changed.`);
-      }
-      if (!isCompStatus(subscription?.status)) {
-        // Taken over: the demo shop's settings, and no phone or calendar someone else left on it.
-        await store.saveConfig(reviewShopConfig(account.tenantId));
-        await store.deleteIntegrationSecret(account.tenantId, "notifications", "owner-primary");
-        await store.deleteIntegrationSecret(account.tenantId, "google", "refresh_token");
-      }
+    const existing = await store.getOwnerAccountByEmail(REVIEW_ACCOUNT_EMAIL);
+    if (existing) {
+      if (existing.role === "member") throw new ReviewAccountError(`${REVIEW_ACCOUNT_EMAIL} is a teammate in another shop. Nothing was changed.`);
+      if (!await isCompTenant(store, existing.tenantId)) throw new ReviewAccountError(STRAY_SIGNUP);
+      await finishSetup(store, existing.tenantId, now);
+      // A new password every visit; it signs out every earlier session too.
+      await store.updateOwnerPassword(existing.id, passwordHash, now);
+      if (!existing.emailVerifiedAt) await store.markOwnerEmailVerified(existing.id, now, null);
+      if (existing.status === "suspended") await store.updateOwnerAccountStatus(existing.id, "pending_activation", now);
+      return { email: existing.email, password, tenantId: existing.tenantId, created: false };
     }
-    const tenantId = account.tenantId;
-    // Never later than a stored record, so the write always lands (the store keeps the newest provider event).
-    const stamp = subscription && Date.parse(subscription.providerEventCreatedAt) > Date.parse(now) ? subscription.providerEventCreatedAt : now;
+    const tenantId = `shop_${randomUUID()}`;
+    const account: OwnerAccount = {
+      id: randomUUID(), tenantId, email: REVIEW_ACCOUNT_EMAIL, displayName: REVIEW_ACCOUNT_NAME, passwordHash,
+      // We made it on our own domain: a later Google sign-in with this address keeps the password.
+      emailVerifiedAt: now,
+      status: "pending_activation", createdAt: now, updatedAt: now,
+    };
+    if (!await store.createOwnerWorkspace({ account, config: reviewShopConfig(tenantId), ownerPhone: null })) {
+      throw new ReviewAccountError("The review account couldn’t be created. Open the link again.");
+    }
     await store.saveSubscription({
       tenantId, providerCustomerId: null, providerSubscriptionId: null, status: "comp", currentPeriodEnd: null,
-      providerEventCreatedAt: stamp, createdAt: subscription?.createdAt ?? now, updatedAt: now,
+      providerEventCreatedAt: now, createdAt: now, updatedAt: now,
     });
-    // Setup is done for a demo shop, so the app opens on Calls with the calendar card, not the setup steps.
-    for (const key of ["hours_set_at", "completed_at"]) {
-      if (!await store.getIntegrationSecret(tenantId, "onboarding", key)) await store.saveIntegrationSecret(tenantId, "onboarding", key, now);
-    }
-    if (!created) {
-      // A new password every visit; it signs out every earlier session too.
-      await store.updateOwnerPassword(account.id, passwordHash, now);
-      if (!account.emailVerifiedAt) await store.markOwnerEmailVerified(account.id, now, null);
-      if (account.status === "suspended") await store.updateOwnerAccountStatus(account.id, "pending_activation", now);
-    }
-    return { email: account.email, password, tenantId, created };
+    await finishSetup(store, tenantId, now);
+    return { email: account.email, password, tenantId, created: true };
   });
+}
+
+/** Setup is done for a demo shop, so the app opens on Calls with the calendar card, not the setup steps. */
+async function finishSetup(store: Store, tenantId: string, now: string): Promise<void> {
+  for (const key of ["hours_set_at", "completed_at"]) {
+    if (!await store.getIntegrationSecret(tenantId, "onboarding", key)) await store.saveIntegrationSecret(tenantId, "onboarding", key, now);
+  }
 }

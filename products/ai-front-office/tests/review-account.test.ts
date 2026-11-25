@@ -227,27 +227,40 @@ describe("GET /admin/review-account", () => {
     expect((await fetch(`${made.baseUrl}/api/app/dashboard`, { headers: { cookie: session.cookie } })).status).toBe(401);
   });
 
-  it("takes over a stray signup with that email, but never a shop that has touched Stripe", async () => {
+  it("never takes over a stray signup with that email: refused, nothing changed, with or without a Stripe trail", async () => {
     const made = await app();
     const now = made.clock.now().toISOString();
-    // Someone signed up with our address and left a phone number: taken over, demo settings, phone gone.
+    // Someone signed up with our address, left a phone number and invited a teammate.
     await made.store.createOwnerWorkspace({
       account: { id: "11111111-1111-4111-8111-111111111111", tenantId: "shop_stray", email: REVIEW_ACCOUNT_EMAIL, displayName: "Stray", passwordHash: "x", status: "pending_activation", createdAt: now, updatedAt: now },
       config: { ...createDemoConfig("shop_stray"), businessName: "Not ours" }, ownerPhone: "+15555550111",
     });
-    const reviewer = await made.reviewAccount();
-    expect(await made.store.getSubscription("shop_stray")).toMatchObject({ status: "comp" });
-    expect((await made.store.getConfig("shop_stray")).businessName).toBe(REVIEW_BUSINESS_NAME);
-    expect(await made.store.getIntegrationSecret("shop_stray", "notifications", "owner-primary")).toBeNull();
-    expect((await made.login(reviewer.email, reviewer.password)).status).toBe(303);
+    const unchanged = async () => {
+      expect((await made.store.getOwnerAccountByEmail(REVIEW_ACCOUNT_EMAIL))).toMatchObject({ id: "11111111-1111-4111-8111-111111111111", tenantId: "shop_stray", passwordHash: "x" });
+      expect((await made.store.getConfig("shop_stray")).businessName).toBe("Not ours");
+      expect(await made.store.getIntegrationSecret("shop_stray", "notifications", "owner-primary")).not.toBeNull();
+      expect(await made.store.getIntegrationSecret("shop_stray", "onboarding", "completed_at")).toBeNull();
+    };
+    const refusedNoBilling = await made.open(reviewAccountToken(KEY, made.clock.now()));
+    expect(refusedNoBilling.status).toBe(409);
+    expect(await refusedNoBilling.text()).toContain("already belongs to a regular signup");
+    expect(await made.store.getSubscription("shop_stray")).toBeNull();
+    await unchanged();
 
-    // A billing record: refused, nothing changed.
-    await made.store.saveSubscription({ tenantId: "shop_stray", providerCustomerId: "cus_real", providerSubscriptionId: "sub_real", status: "active", currentPeriodEnd: null, providerEventCreatedAt: new Date(made.clock.now().getTime() + 1_000).toISOString(), createdAt: now, updatedAt: now });
-    const refused = await made.open(reviewAccountToken(KEY, made.clock.now()));
-    expect(refused.status).toBe(409);
-    expect(await refused.text()).toContain("Stripe billing record");
-    expect(await made.store.getSubscription("shop_stray")).toMatchObject({ status: "active", providerSubscriptionId: "sub_real" });
-    expect((await made.login(reviewer.email, reviewer.password)).status).toBe(303);
+    // An open Stripe checkout (no subscription record yet): refused too.
+    await made.store.saveIntegrationSecret("shop_stray", "stripe", "open_checkout", JSON.stringify({ id: "cs_synthetic_open", url: "https://checkout.stripe.com/c/pay/cs_synthetic_open" }));
+    expect((await made.open(reviewAccountToken(KEY, made.clock.now()))).status).toBe(409);
+    expect(await made.store.getSubscription("shop_stray")).toBeNull();
+    await unchanged();
+
+    // A paid subscription: refused, and its Stripe ids stay.
+    await made.store.saveSubscription({ tenantId: "shop_stray", providerCustomerId: "cus_real", providerSubscriptionId: "sub_real", status: "active", currentPeriodEnd: null, providerEventCreatedAt: now, createdAt: now, updatedAt: now });
+    expect((await made.open(reviewAccountToken(KEY, made.clock.now()))).status).toBe(409);
+    expect(await made.store.getSubscription("shop_stray")).toMatchObject({ status: "active", providerCustomerId: "cus_real", providerSubscriptionId: "sub_real" });
+    await unchanged();
+    expect(made.logs.map((entry) => entry.event)).toContain("review_account_refused");
+    expect(made.logs.map((entry) => entry.event)).not.toContain("review_account_password_reset");
+    expect(made.paidProviders()).toEqual([]);
   });
 });
 
@@ -261,6 +274,11 @@ describe("the review account in the owner app", () => {
     const settings = await (await fetch(`${made.baseUrl}/api/app/settings`, { headers: { cookie: owner.cookie } })).json() as Record<string, any>;
     expect(settings.plan.paid).toBe(true);
     expect(settings.integrations).toMatchObject({ googleAvailable: true, googleConnected: false });
+    // No billing card to open: the billing portal would only answer with an error page.
+    const settingsPage = await (await fetch(`${made.baseUrl}/app/settings`, { headers: { cookie: owner.cookie } })).text();
+    expect(settingsPage).toContain("Connect Google Calendar");
+    expect(settingsPage).not.toContain("/app/billing/portal");
+    expect(settingsPage).not.toContain("/app/billing/checkout");
     const start = await fetch(`${made.baseUrl}/app/integrations/google/start`, { headers: { cookie: owner.cookie }, redirect: "manual" });
     expect(start.status).toBe(303);
     const google = new URL(start.headers.get("location")!);

@@ -308,6 +308,7 @@ export function PlanSection() {
   const [unlimitedBusy, setUnlimitedBusy] = useState(false)
   const choice = plan.plans.find((item) => item.id === picked)
   const usage = dashboard?.usage
+  const comp = dashboard?.billing.status === "comp"
   const tz = dashboard?.shop.timezone ?? "America/New_York"
   const leads = dashboard?.guarantee.state === "watching" ? dashboard.guarantee.leads : null
   const monthly = plan.unlimited && plan.unlimitedOffer ? plan.unlimitedOffer.priceCents : plan.flatMonthlyPriceCents
@@ -392,12 +393,15 @@ export function PlanSection() {
         </SettingsCard>
       )}
 
-      <SettingsCard title={plan.paid ? "Card, invoices, cancel" : "Start your plan"} description={plan.paid ? "Opens our billing page (Stripe) to change your card, see invoices or cancel." : "Add a card to start answering calls."}>
-        <form method="post" action={plan.paid ? "/app/billing/portal" : "/app/billing/checkout"}>
-          <input type="hidden" name="csrf" value={csrf} />
-          <Button size="tap" variant={plan.paid ? "outline" : "brand"} className={actionClass}>{plan.paid ? "Manage billing or cancel" : "Start your plan"}</Button>
-        </form>
-      </SettingsCard>
+      {/* A complimentary shop (the Google review account) has no card or Stripe billing to open. */}
+      {!comp && (
+        <SettingsCard title={plan.paid ? "Card, invoices, cancel" : "Start your plan"} description={plan.paid ? "Opens our billing page (Stripe) to change your card, see invoices or cancel." : "Add a card to start answering calls."}>
+          <form method="post" action={plan.paid ? "/app/billing/portal" : "/app/billing/checkout"}>
+            <input type="hidden" name="csrf" value={csrf} />
+            <Button size="tap" variant={plan.paid ? "outline" : "brand"} className={actionClass}>{plan.paid ? "Manage billing or cancel" : "Start your plan"}</Button>
+          </form>
+        </SettingsCard>
+      )}
     </>
   )
 }
