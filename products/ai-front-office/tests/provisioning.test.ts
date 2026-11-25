@@ -64,7 +64,7 @@ function fakeTelnyx(options: { available?: Record<string, string[]>; orderStatus
       return json({ data: { phone_number: number, carrier: { name: carrier.name, type: carrier.type }, portability: { line_type: carrier.type } } });
     }
     if (url.endsWith("/v2/calls") && method === "POST") return json({ data: { call_control_id: "v3:check-call" } });
-    if (/\/calls\/[^/]+\/actions\/(hangup|speak)$/.test(url)) return json({ data: { result: "ok" } });
+    if (/\/calls\/[^/]+\/actions\/(hangup|speak|ai_assistant_start)$/.test(url)) return json({ data: { result: "ok" } });
     if (method === "DELETE") return json({ data: {} });
     if (url.endsWith("/10dlc/phone_number_campaigns")) return json({ phoneNumber: body?.phoneNumber, campaignId: body?.campaignId });
     throw new Error(`Unexpected outbound request in test: ${method} ${url}`);
@@ -402,7 +402,9 @@ describe("owner one-tap go-live", () => {
         // Webhooks for our check leg: Telnyx echoes the client_state we dialed with on every event.
         const send = async (event: string, secondsAfter: number, extra: Record<string, unknown> = {}) => {
           const at = new Date(made.clock.now().getTime() + secondsAfter * 1_000);
-          const body = JSON.stringify({ data: { record_type: "event", event_type: event, id: `evt-${event}-${secondsAfter}`, occurred_at: at.toISOString(), payload: { call_control_id: "v3:check-call", client_state: Buffer.from(`forwarding-check:${made.account.tenantId}`).toString("base64"), ...extra } } });
+          // The client_state we dialed with (shop + test start), exactly as Telnyx echoes it back.
+          const clientState = (made.telnyx.calls.filter((call) => call.url.endsWith("/v2/calls")).at(-1)!.body as { client_state: string }).client_state;
+          const body = JSON.stringify({ data: { record_type: "event", event_type: event, id: `evt-${event}-${secondsAfter}`, occurred_at: at.toISOString(), payload: { call_control_id: "v3:check-call", client_state: clientState, ...extra } } });
           return fetch(`${made.baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(body, made.privateKey, made.clock.now()), body });
         };
         return { ...made, send };
@@ -452,6 +454,14 @@ describe("owner one-tap go-live", () => {
         expect((await dashboard()).line.check.status).toBe("passed");
       });
 
+      it("a pick-up that beats our own save of the test is retried by Telnyx, not dropped", async () => {
+        const { baseUrl, privateKey, clock, account, dashboard } = await started();
+        const ahead = new Date(clock.now().getTime() + 60_000).toISOString();
+        const early = JSON.stringify({ data: { record_type: "event", event_type: "call.answered", id: "evt-early", occurred_at: clock.now().toISOString(), payload: { call_control_id: "v3:next-call", client_state: Buffer.from(`forwarding-check:${account.tenantId}|${ahead}`).toString("base64") } } });
+        expect((await fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(early, privateKey, clock.now()), body: early })).status).toBe(502);
+        expect((await dashboard()).line.check.status).toBe("calling");
+      });
+
       it("an older test call finishing late never rewrites the newest test", async () => {
         const { dashboard, baseUrl, privateKey, clock, account } = await started();
         const stale = JSON.stringify({ data: { record_type: "event", event_type: "call.hangup", id: "evt-stale", occurred_at: clock.now().toISOString(), payload: { call_control_id: "v3:older-call", hangup_cause: "timeout", client_state: Buffer.from(`forwarding-check:${account.tenantId}`).toString("base64") } } });
@@ -497,6 +507,43 @@ describe("owner one-tap go-live", () => {
       expect(email?.body).toContain("+19415550177");
       expect(email?.body).toContain("+19415550123");
       expect(email?.tenantId).toBe(account.tenantId);
+    });
+
+    it("Set it up with me: Otto's AI setup helper calls the owner right away with their exact code, and never loops into their own line", async () => {
+      const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection", TELNYX_TEMPLATE_ASSISTANT_ID: "template-assistant" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } } });
+      const { api, dashboard, telnyx, baseUrl, privateKey, clock, account, store } = made;
+      await api("/api/app/line/business-number", { number: "9415550177" });
+      expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+      const dial = telnyx.calls.filter((call) => call.url.endsWith("/v2/calls")).at(-1);
+      expect(dial?.body).toMatchObject({ connection_id: "check-connection", from: "+15555550199" });
+      const to = (dial?.body as { to: string }).to;
+      expect((await dashboard()).line).toMatchObject({ helpCall: { to } });
+
+      const state = (dial?.body as { client_state: string }).client_state;
+      const answered = JSON.stringify({ data: { record_type: "event", event_type: "call.answered", id: "evt-help-answered", occurred_at: clock.now().toISOString(), payload: { call_control_id: "v3:check-call", client_state: state } } });
+      expect((await fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(answered, privateKey, clock.now()), body: answered })).status).toBe(200);
+      const created = telnyx.calls.filter((call) => call.url.endsWith("/ai/assistants") && call.method === "POST").at(-1);
+      expect((created?.body as { name: string }).name).toBe("Call Otto · Setup helper");
+      expect((created?.body as Record<string, unknown>).dynamic_variables_webhook_url).toBeUndefined();
+      const start = telnyx.calls.find((call) => call.url.endsWith("/actions/ai_assistant_start"));
+      const startBody = start?.body as { assistant: { id: string; instructions: string }; greeting: string };
+      expect(startBody.greeting).toContain("setup helper");
+      expect(startBody.assistant.instructions).toContain("**004*19415550123#");
+      expect(startBody.assistant.instructions).toContain("Screen Unknown Callers to Never");
+      expect(startBody.assistant.instructions).toContain("Never invent a code");
+
+      // Missed, it forwards into the shop's own line: Otto ends it at once, and that proves forwarding works.
+      const looped = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id: "evt-loop", occurred_at: clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: "+15555550199", call_control_id: "v3:looped", assistant_id: "assistant-1" } } });
+      const reply = await fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(looped, privateKey, clock.now()), body: looped });
+      expect(((await reply.json()) as { dynamic_variables: { call_access: string } }).dynamic_variables.call_access).toBe("forwarding_check");
+      expect(await store.listCalls(account.tenantId, 10)).toHaveLength(0);
+      expect((await dashboard()).line.confirmedAt).toBeTruthy();
+
+      // A second setup call reuses the one setup assistant.
+      expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+      const again = JSON.stringify({ data: { record_type: "event", event_type: "call.answered", id: "evt-help-answered-2", occurred_at: clock.now().toISOString(), payload: { call_control_id: "v3:check-call", client_state: state } } });
+      await fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(again, privateKey, clock.now()), body: again });
+      expect(telnyx.calls.filter((call) => call.url.endsWith("/ai/assistants") && call.method === "POST" && (call.body as { name?: string }).name === "Call Otto · Setup helper")).toHaveLength(1);
     });
 
     it("only the owner can change forwarding, and a forged request without the token buys nothing", async () => {

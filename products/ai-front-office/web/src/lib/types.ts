@@ -76,6 +76,7 @@ export interface ApiDashboard {
       callerId: string | null
     }
     helpRequestedAt: string | null
+    helpCall: { to: string; startedAt: string } | null
   }
   csrf: string
   now: string

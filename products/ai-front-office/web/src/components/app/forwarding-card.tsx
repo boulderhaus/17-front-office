@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react"
-import { Check, Copy, LifeBuoy, Loader2, Phone, PhoneForwarded } from "lucide-react"
+import { Check, Copy, LifeBuoy, Loader2, Phone, PhoneCall, PhoneForwarded } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -66,6 +66,8 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
   const confirmed = Boolean(line.confirmedAt) && (line.check.status === "idle" || line.check.status === "passed")
   const plan = business.plan
   const helpAsked = Boolean(line.helpRequestedAt)
+  // The setup call rings for up to 30 s and can run 15 min; show "calling now" for the first 2 minutes.
+  const helpCalling = Boolean(line.helpCall) && Date.parse(dashboard.now) - Date.parse(line.helpCall!.startedAt) < 2 * 60_000
   const asking = !editing && !business.number && Boolean(business.suggested)
 
   return (
@@ -166,7 +168,7 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
                     <p className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-950" role="status">
                       <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin" />
                       {line.check.method === "auto"
-                        ? <span><strong>Calling your phone now{callerId ? ` from ${callerId}` : ""}.</strong> Don’t answer. Let it ring until it stops.</span>
+                        ? <span><strong>Calling your phone now{callerId ? <> from <span className="whitespace-nowrap">{callerId}</span></> : null}.</strong> Don’t answer. Let it ring until it stops.</span>
                         : `From another phone, call ${formatPhone(business.number!)} and don’t answer it. We’ll show a check mark when it reaches us.`}
                     </p>
                   ) : (
@@ -202,13 +204,19 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
         {error && <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">{error}</p>}
 
         {!confirmed && line.number && (
-          <div className="border-t pt-3">
-            {helpAsked ? (
-              <p className="flex items-center gap-2 text-sm"><Check className="size-4 text-emerald-700" />Got it. We’ll call you within one business hour to set this up together.</p>
-            ) : (
+          <div className="grid gap-1.5 border-t pt-3">
+            {helpCalling ? (
+              <p className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-950" role="status">
+                <PhoneCall className="mt-0.5 size-4 shrink-0" />
+                <span><strong>Otto is calling you now at <span className="whitespace-nowrap">{formatPhone(line.helpCall!.to)}</span>.</strong> Pick up{callerId ? <> (it’s from <span className="whitespace-nowrap">{callerId}</span>)</> : null}. Otto, our AI setup helper, walks you through it and answers your questions.</span>
+              </p>
+            ) : helpAsked && !line.helpCall ? (
+              <p className="flex items-center gap-2 text-sm"><Check className="size-4 text-emerald-700" />Got it. A person from Call Otto will email you today to set this up together.</p>
+            ) : null}
+            {!helpCalling && (
               <p className="text-sm text-muted-foreground">
-                <button type="button" className="inline-flex min-h-11 items-center gap-1.5 font-semibold text-brand-ink underline underline-offset-4 disabled:opacity-60" disabled={busy === "help"} onClick={() => void post("help", "/api/app/line/help")}><LifeBuoy className="size-4" />Set it up with me</button>
-                <span className="block">We’ll call you and set it up together.</span>
+                <button type="button" className="inline-flex min-h-11 items-center gap-1.5 font-semibold text-brand-ink underline underline-offset-4 disabled:opacity-60" disabled={busy === "help"} onClick={() => void post("help", "/api/app/line/help", { device: isIphone ? "iphone" : isAndroid ? "android" : "other" })}><LifeBuoy className="size-4" />{line.helpCall ? "Have Otto call me again" : "Set it up with me"}</button>
+                <span className="block">Otto, our AI setup helper, calls you right now and walks you through it.</span>
               </p>
             )}
           </div>
@@ -230,7 +238,9 @@ function CheckResult({ status, afterSec, family }: { status: ApiDashboard["line"
     : "In your Phone app’s settings, turn off call screening (on Pixel: Call Screen; on Samsung: Bixby text call).";
   const redial = family === "verizon"
     ? "Dial the code again and wait for the tone, then test again."
-    : "Dial the code again and wait for “Setting Registration Succeeded”, then test again.";
+    : family === "gsm"
+      ? "Dial the code again and wait for “Setting Registration Succeeded”, then test again."
+      : "In your phone company’s website or app, check forwarding is on for calls you don’t answer, then test again.";
   const lines: string[] | null =
     status === "picked_up"
       ? afterSec !== null && afterSec <= 4

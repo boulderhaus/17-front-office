@@ -83,7 +83,7 @@ export function StartPage() {
   // forwarding (the card is already paid) goes back to Calls, where "Continue setup" brings the owner back.
   const back: Step | "calls" | null = step === "done" ? "forward" : step === "forward" ? "calls" : null
   // "All set" only once missed calls really reach Call Otto (or the line is still waiting on approval).
-  const forwardingOn = Boolean(dashboard.line.confirmedAt) && (dashboard.line.check.status === "idle" || dashboard.line.check.status === "passed")
+  const forwardingOn = Boolean(dashboard.line.confirmedAt) && ["idle", "passed", "calling"].includes(dashboard.line.check.status)
   const done = step === "done" && (forwardingOn || !dashboard.line.number)
 
   return (
@@ -275,7 +275,7 @@ function DoneStep({ dashboard, activation, toForward }: { dashboard: ApiDashboar
   }
   const waiting = !dashboard.line.number
   // Skipped forwarding (or the last test failed): the line answers, but no missed call reaches it yet. Say so.
-  const forwarding = Boolean(dashboard.line.confirmedAt) && (dashboard.line.check.status === "idle" || dashboard.line.check.status === "passed")
+  const forwarding = Boolean(dashboard.line.confirmedAt) && ["idle", "passed", "calling"].includes(dashboard.line.check.status)
   const notForwarding = !waiting && !forwarding
   const trialEnds = dashboard.billing.trialEndsAt
     ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: dashboard.shop.timezone }).format(new Date(dashboard.billing.trialEndsAt))
@@ -291,7 +291,7 @@ function DoneStep({ dashboard, activation, toForward }: { dashboard: ApiDashboar
       {notForwarding ? (
         <div className="grid justify-items-start gap-4">
           <span className="grid size-14 place-items-center rounded-full bg-amber-500 text-white shadow-[0_0_0_6px_rgba(245,158,11,.15)]"><PhoneCall className="size-7" strokeWidth={2.5} /></span>
-          <Heading title="One step left">Your Call Otto line is on, but we haven’t seen one of your missed calls reach it yet. Turn on forwarding and test it to finish.</Heading>
+          <Heading title="One step left">{dashboard.line.confirmedAt ? "Your last forwarding test didn’t reach Call Otto. Check it and test again to finish." : "Your Call Otto line is on, but we haven’t seen one of your missed calls reach it yet. Turn on forwarding and test it to finish."}</Heading>
           <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} onClick={toForward}>Turn on forwarding<ArrowRight /></Button>
         </div>
       ) : (
