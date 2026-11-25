@@ -69,12 +69,19 @@ export interface ApiDashboard {
       choices: Array<{ family: Exclude<CarrierFamily, "unknown">; label: string }>
       /** The owner's mobile from signup, offered as the number customers call. */
       suggested: string | null
-      /** Forwarding works, but today's settings need a new code: dial plan.on once (after clearFirst, if set). */
-      update: { clearFirst: string | null } | null
+      /**
+       * Forwarding works, but today's settings need a new code: dial plan.on once (after clearFirst, if set).
+       * missed: the last test of that code reached Otto, but too fast or too slow for it, so it isn't on yet.
+       */
+      update: { clearFirst: string | null; missed: boolean } | null
+      /** The last test proved every call goes to Call Otto (a forward-all code is dialed in). */
+      everyCallOn: boolean
+      /** The last test proved plan.on itself is dialed in, so its ring time is real. */
+      codeApplied: boolean
     }
     confirmedAt: string | null
     check: {
-      status: "idle" | "calling" | "passed" | "phone_answers" | "voicemail" | "declined" | "not_reached"
+      status: "idle" | "calling" | "passed" | "phone_answers" | "you_answered" | "voicemail" | "declined" | "not_reached"
       method: "auto" | "manual" | null
       startedAt: string | null
       answeredAfterSec: number | null

@@ -15,8 +15,13 @@ export const FORWARDING_CHECK_SPEECH = "Hi, this is Call Otto, testing your call
 export const CHECK_CALL_AMD = "premium_ios_call_screening_detection";
 /** The phone's own screener answered (iOS Call Screening or Live Voicemail). Not terminal: AMD keeps listening. */
 export const SCREENING_DETECTED_EVENT = "call.machine.premium.call_screening.detected";
-/** Premium AMD's verdict: human_residence, human_business, machine, silence, fax_detected or not_sure. */
+/**
+ * Premium AMD's verdict: human_residence, human_business, machine, silence, fax_detected or not_sure. With iOS
+ * screening detection the first one is "machine" for Apple's screener too; a screening event can follow it.
+ */
 export const AMD_ENDED_EVENT = "call.machine.premium.detection.ended";
+/** The greeting finished: beep_detected, no_beep_detected, or prompt_ended (Apple's screening prompt ended, no beep). */
+export const GREETING_ENDED_EVENT = "call.machine.premium.greeting.ended";
 
 /**
  * The shop whose forwarding check this Call Control leg is, and which test it belongs to (its start

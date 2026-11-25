@@ -75,11 +75,30 @@ export function isForwardAllCode(code: string | null | undefined): boolean {
 }
 
 /**
- * True when ringing `phone` would land back on this shop's Call Otto line: in "every call" mode the
- * owner's business number forwards everything to Otto, so Otto calling it would just be Otto calling Otto.
+ * True when ringing `phone` could land back on this shop's Call Otto line: the owner's business number forwards
+ * everything to Otto, so Otto calling it would just be Otto calling Otto. That's the case in "every call" mode (even
+ * before the code is dialed) and whenever the last code proven in force is a forward-all one (after switching back
+ * to "ring me first" but before dialing the off code).
  */
-export function forwardsBackToOtto(input: { mode: ForwardingMode; businessNumber: string | null; phone: string | null }): boolean {
-  return input.mode === "always" && Boolean(input.businessNumber) && input.phone === input.businessNumber;
+export function forwardsBackToOtto(input: { mode: ForwardingMode; businessNumber: string | null; phone: string | null; dialedCode?: string | null }): boolean {
+  if (!input.businessNumber || input.phone !== input.businessNumber) return false;
+  return input.mode === "always" || isForwardAllCode(input.dialedCode);
+}
+
+/** A forward-all code sends our test straight to Otto, phone untouched: a pass that took longer means the phone rang first. */
+export const FORWARD_ALL_PASS_MS = 10_000;
+/** Leaving forward-all for "ring me first": a pass this fast means the test never rang the phone, so forward-all is still on. */
+export const RANG_FIRST_MIN_MS = 6_000;
+
+/**
+ * Which code a passing test proves is in force: the one on screen when the owner started it, if the timing fits
+ * that code. Null when it doesn't (the new code wasn't dialed yet), so "Dial this once" stays up.
+ */
+export function codeProvenByTest(input: { code: string | null | undefined; previous: string | null | undefined; passMs: number }): string | null {
+  if (!input.code || !Number.isFinite(input.passMs)) return null;
+  if (isForwardAllCode(input.code)) return input.passMs <= FORWARD_ALL_PASS_MS ? input.code : null;
+  if (isForwardAllCode(input.previous) && input.passMs < RANG_FIRST_MIN_MS) return null;
+  return input.code;
 }
 
 /** Families an owner can pick when the lookup is unsure, in the words they'd use. */

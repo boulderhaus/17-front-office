@@ -104,18 +104,26 @@ export function BusinessSection() {
 export function AnsweringSection() {
   const { text, flag, set, bind, settings } = useSettings()
   const { dashboard } = useMode()
+  // With every call sent to Otto, pausing (which disconnects the line) leaves callers with nowhere to go.
+  const everyCall = text("operationMode") === "always" || Boolean(dashboard?.line.business.everyCallOn)
+  const off = dashboard?.line.business.plan?.off
+  const pauseHint = settings.status !== "active"
+    ? "Your line turns on after it’s approved. Until then it stays paused."
+    : everyCall
+      ? `Every call goes to Otto, so pausing stops all calls to your business number. Turn forwarding off first${off ? `: dial ${off} on that phone` : " with your phone company"}.`
+      : undefined
   return (
     <>
       <SettingsCard title="Which calls">
-        <Field label="Call Otto is" hint={settings.status === "active" ? undefined : "Your line turns on after it’s approved. Until then it stays paused."}>
+        <Field label="Call Otto is" hint={pauseHint}>
           <select className={selectClass} {...bind("serviceState")}><option value="active">On, answering calls</option><option value="paused">Paused</option></select>
         </Field>
         <Pair>
-          <Field label="Answer" hint={text("operationMode") === "always" ? "Your phone won’t ring for calls to your business number. Otto answers and alerts you right away." : undefined}><select className={selectClass} {...bind("operationMode")}><option value="overflow">Only calls I miss</option><option value="after_hours">After hours</option><option value="always">Every call</option></select></Field>
+          <Field label="Answer" hint={text("operationMode") === "always" ? "Your phone won’t ring for calls to your business number. Otto answers them all." : undefined}><select className={selectClass} {...bind("operationMode")}><option value="overflow">Only calls I miss</option><option value="after_hours">After hours</option><option value="always">Every call</option></select></Field>
           <RingFirstField rings={Number(text("answerAfterRings"))} onChange={(value) => set("answerAfterRings", value)} everyCall={text("operationMode") === "always"} family={dashboard?.line.business.carrier?.family ?? null} confirmed={Boolean(dashboard?.line.confirmedAt)} />
         </Pair>
         {dashboard?.line.business.update && (
-          <p className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-950" role="status">
+          <p className="rounded-md border border-brand-ink/15 bg-accent px-3 py-2.5 text-sm text-accent-foreground" role="status">
             Dial your new code once to apply this. <Link className="font-semibold underline underline-offset-4" to={dashboard.onboarding.completed ? "/app" : "/app/start?step=forward"}>Show me the code</Link>
           </p>
         )}

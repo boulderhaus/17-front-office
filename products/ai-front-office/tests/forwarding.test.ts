@@ -6,7 +6,7 @@ import { dialsBackToOtto } from "../src/application/forwarding-loop.js";
 import { urgentOwnerCallNotification } from "../src/application/owner-alerts.js";
 import { approvedTransferTargets } from "../src/application/transfer-policy.js";
 import { createDemoConfig } from "../src/domain/config.js";
-import { carrierFamily, forwardingOffInstruction, forwardingPlan, forwardsBackToOtto, isForwardAllCode, RING_CHOICES, ringChoicesWith, ringSeconds } from "../src/domain/forwarding.js";
+import { carrierFamily, codeProvenByTest, forwardingOffInstruction, forwardingPlan, forwardsBackToOtto, isForwardAllCode, RING_CHOICES, ringChoicesWith, ringSeconds } from "../src/domain/forwarding.js";
 import { forwardingCheckStatus, forwardingUpdate } from "../src/http/owner-api-model.js";
 import { NotificationHeldError } from "../src/ports.js";
 import { codeChunks, dialHref, dialPlatform, RING_CHOICES as WEB_RING_CHOICES, ringChoicesWith as webRingChoicesWith, ringSeconds as webRingSeconds, spokenCode } from "../web/src/lib/dial.js";
@@ -107,6 +107,27 @@ describe("after a settings change, the one new code to dial", () => {
   });
 });
 
+describe("which code a passing test proves", () => {
+  const all = "**21*19415550123#";
+  const ring15 = "**004*19415550123**15#";
+  it("the code on screen when the test started, never today's settings", () => {
+    expect(codeProvenByTest({ code: ring15, previous: null, passMs: 9_000 })).toBe(ring15);
+    expect(codeProvenByTest({ code: ring15, previous: "**004*19415550123**25#", passMs: 20_000 })).toBe(ring15);
+    expect(codeProvenByTest({ code: null, previous: null, passMs: 9_000 })).toBeNull();
+  });
+  it("every call: only a pass that came straight through (the phone never rang)", () => {
+    expect(codeProvenByTest({ code: all, previous: ring15, passMs: 4_000 })).toBe(all);
+    expect(codeProvenByTest({ code: "*729415550123", previous: null, passMs: 10_000 })).toBe("*729415550123");
+    // 14 s: the phone rang and was declined, so **21 isn't dialed yet.
+    expect(codeProvenByTest({ code: all, previous: ring15, passMs: 14_000 })).toBeNull();
+  });
+  it("leaving every call: a pass that came straight through means forward-all is still on", () => {
+    expect(codeProvenByTest({ code: ring15, previous: all, passMs: 3_000 })).toBeNull();
+    expect(codeProvenByTest({ code: ring15, previous: all, passMs: 8_000 })).toBe(ring15);
+    expect(codeProvenByTest({ code: "*719415550123", previous: "*729415550123", passMs: 2_000 })).toBeNull();
+  });
+});
+
 describe("what the test call result says", () => {
   const startedAt = "2026-11-23T15:00:00.000Z";
   const at = (seconds: number) => new Date(Date.parse(startedAt) + seconds * 1_000).toISOString();
@@ -114,9 +135,13 @@ describe("what the test call result says", () => {
     expect(forwardingCheckStatus({ startedAt, method: "auto", answeredAt: at(2), screenedAt: at(5) }, null, at(6))).toBe("phone_answers");
     expect(forwardingCheckStatus({ startedAt, method: "auto", answeredAt: at(2) }, null, at(6))).toBe("calling");
   });
-  it("uses Premium AMD's verdict when the call ends: a greeting is voicemail, a person is the phone", () => {
+  it("uses Premium AMD's verdict when the call ends: a greeting is voicemail, a person is someone picking up", () => {
     expect(forwardingCheckStatus({ startedAt, method: "auto", answeredAt: at(3), amdResult: "machine", endedAt: at(20) }, null, at(21))).toBe("voicemail");
-    expect(forwardingCheckStatus({ startedAt, method: "auto", answeredAt: at(25), amdResult: "human_residence", endedAt: at(40) }, null, at(41))).toBe("phone_answers");
+    // A person answered and nothing screened it: most likely the owner, not the phone answering itself.
+    expect(forwardingCheckStatus({ startedAt, method: "auto", answeredAt: at(4), amdResult: "human_residence", endedAt: at(16) }, null, at(17))).toBe("you_answered");
+    expect(forwardingCheckStatus({ startedAt, method: "auto", answeredAt: at(25), amdResult: "human_business", endedAt: at(40) }, null, at(41))).toBe("you_answered");
+    // Apple's screener: "machine" first, then the screening signal, which wins.
+    expect(forwardingCheckStatus({ startedAt, method: "auto", answeredAt: at(2), amdResult: "machine", screenedAt: at(7), endedAt: at(14) }, null, at(15))).toBe("phone_answers");
     expect(forwardingCheckStatus({ startedAt, method: "auto", answeredAt: at(2), endedAt: at(14) }, null, at(15))).toBe("phone_answers");
     expect(forwardingCheckStatus({ startedAt, method: "auto", answeredAt: at(25), endedAt: at(40) }, null, at(41))).toBe("voicemail");
   });
@@ -126,11 +151,16 @@ describe("what the test call result says", () => {
 });
 
 describe("Otto never rings a number that forwards every call back to Otto", () => {
-  it("only in every-call mode, and only the business number itself", () => {
+  it("in every-call mode, or while a forward-all code is still dialed in, and only the business number itself", () => {
     expect(forwardsBackToOtto({ mode: "always", businessNumber: "+19415550177", phone: "+19415550177" })).toBe(true);
     expect(forwardsBackToOtto({ mode: "always", businessNumber: "+19415550177", phone: "+19415550199" })).toBe(false);
     expect(forwardsBackToOtto({ mode: "overflow", businessNumber: "+19415550177", phone: "+19415550177" })).toBe(false);
     expect(forwardsBackToOtto({ mode: "always", businessNumber: null, phone: "+19415550177" })).toBe(false);
+    // Switched back to "ring me first", but the off code isn't dialed yet: **21 / *72 still sends everything to Otto.
+    expect(forwardsBackToOtto({ mode: "overflow", businessNumber: "+19415550177", phone: "+19415550177", dialedCode: "**21*19415550123#" })).toBe(true);
+    expect(forwardsBackToOtto({ mode: "after_hours", businessNumber: "+19415550177", phone: "+19415550177", dialedCode: "*729415550123" })).toBe(true);
+    expect(forwardsBackToOtto({ mode: "overflow", businessNumber: "+19415550177", phone: "+19415550177", dialedCode: "**004*19415550123**15#" })).toBe(false);
+    expect(forwardsBackToOtto({ mode: "overflow", businessNumber: "+19415550177", phone: "+19415550199", dialedCode: "**21*19415550123#" })).toBe(false);
   });
 
   it("reads the shop's mode and business number from the store", async () => {
@@ -142,6 +172,8 @@ describe("Otto never rings a number that forwards every call back to Otto", () =
     expect(await dialsBackToOtto(store, "shop", null)).toBe(false);
     await store.saveConfig({ ...createDemoConfig("shop"), operationMode: "overflow" });
     expect(await dialsBackToOtto(store, "shop", "+19415550177")).toBe(false);
+    await store.saveIntegrationSecret("shop", "forwarding", "dialed_code", "**21*19415550123#");
+    expect(await dialsBackToOtto(store, "shop", "+19415550177")).toBe(true);
   });
 
   it("urgent owner calls to a forwarded-all number are held (push and email still go), never dialed", async () => {
@@ -152,6 +184,11 @@ describe("Otto never rings a number that forwards every call back to Otto", () =
     const notification = urgentOwnerCallNotification({ tenantId: "shop", callId: "call-1", speech: "Otto here: urgent call from Maria, no AC. Check your Call Otto app.", now: "2026-11-23T15:00:00Z" });
     await expect(new TelnyxOwnerCallSender({ ...options, forwardsToOtto: async () => true }).send(notification)).rejects.toThrow(/forwards every call to Call Otto/);
     await expect(new TelnyxOwnerCallSender({ ...options, forwardsToOtto: async () => true }).send(notification)).rejects.toBeInstanceOf(NotificationHeldError);
+    expect(posted).toHaveLength(0);
+    // A lookup that fails is retried later (a plain error, not held), and never dials blind.
+    const failed = new TelnyxOwnerCallSender({ ...options, forwardsToOtto: async () => { throw new Error("database unavailable"); } }).send(notification);
+    await expect(failed).rejects.toThrow("database unavailable");
+    await expect(failed).rejects.not.toBeInstanceOf(NotificationHeldError);
     expect(posted).toHaveLength(0);
     // A separate mobile (or missed-calls-only forwarding) still rings.
     expect((await new TelnyxOwnerCallSender({ ...options, forwardsToOtto: async () => false }).send(notification)).providerReceipt).toBe("owner-call:v3:x");
@@ -164,6 +201,9 @@ describe("Otto never rings a number that forwards every call back to Otto", () =
     await store.saveIntegrationSecret("demo", "forwarding", "business_number", "+15555550101");
     expect(await approvedTransferTargets(store, config, "+15555550100", undefined)).toEqual([]);
     expect(await approvedTransferTargets(store, { ...config, operationMode: "overflow" }, "+15555550100", undefined)).toEqual([{ name: "Owner", to: "+15555550101" }]);
+    // Back on "ring me first" but **21 still dialed in: still no transfer there.
+    await store.saveIntegrationSecret("demo", "forwarding", "dialed_code", "**21*15555550123#");
+    expect(await approvedTransferTargets(store, { ...config, operationMode: "overflow" }, "+15555550100", undefined)).toEqual([]);
   });
 });
 
@@ -192,6 +232,8 @@ describe("the AI setup helper's script", () => {
     expect(text).toContain("**21*19415550123#");
     expect(text).toContain("turn off Live Voicemail");
     expect(text).toContain("Calls they make and texts work like before.");
+    expect(text).not.toContain("alerts them right away");
+    expect(text).toContain("If they ever pause Call Otto, they dial ##002# first");
   });
   it("Verizon rings about 30 seconds; every-call mode says the phone won't ring", () => {
     expect(setupInstructions({ ...base, family: "verizon", code: "*719415550123", offCode: "*73", ringSeconds: 30, everyCallCode: "*729415550123", device: "android" })).toContain("about 30 seconds before Call Otto answers. Verizon sets that");

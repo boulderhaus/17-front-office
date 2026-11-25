@@ -52,7 +52,8 @@ export class TelnyxOwnerCallSender implements NotificationPort {
     const to = await this.options.resolveDestination(notification.tenantId, notification.destinationRef);
     if (!to || !/^\+1[2-9]\d{9}$/.test(to)) throw new NotificationHeldError("No owner mobile number to call");
     if (this.options.allowedDestinations && !this.options.allowedDestinations.has(to)) throw new NotificationHeldError("Provider test mode: owner number is not allowlisted");
-    if (await this.options.forwardsToOtto?.(notification.tenantId, to).catch(() => false)) throw new NotificationHeldError("Owner number forwards every call to Call Otto; urgent call skipped, push and email still sent");
+    // A failed lookup throws (retried later), never dials blind into a number that may forward to Otto.
+    if (await this.options.forwardsToOtto?.(notification.tenantId, to)) throw new NotificationHeldError("Owner number forwards every call to Call Otto; urgent call skipped, push and email still sent");
     // Consent can be withdrawn (Settings or pressing 9) between queueing and sending.
     if (!await this.options.hasConsent(notification.tenantId, to)) throw new NotificationHeldError("Owner has not agreed to automated urgent calls");
     const now = this.options.clock.now().getTime();

@@ -51,10 +51,15 @@ export interface ApiDashboard {
     business: {
       number: string | null; carrier: CarrierInfo | null; plan: ForwardingPlan | null; choices: typeof CARRIER_CHOICES; suggested: string | null;
       /**
-       * Forwarding works, but the code for today's settings (ring time, every call) differs from the one the owner
-       * dialed: dial plan.on once to apply it, after clearFirst when leaving "every call" for "ring me first".
+       * Forwarding works, but the code for today's settings (ring time, every call) differs from the one a test last
+       * proved: dial plan.on once to apply it, after clearFirst when leaving "every call" for "ring me first".
+       * `missed`: the last test of plan.on reached Otto, but its timing shows the new code isn't on yet.
        */
-      update: { clearFirst: string | null } | null;
+      update: { clearFirst: string | null; missed: boolean } | null;
+      /** The last test proved every call goes to Otto (a forward-all code is dialed in). */
+      everyCallOn: boolean;
+      /** The last test proved plan.on itself is dialed in, so its ring time is what the owner gets. */
+      codeApplied: boolean;
     };
     /** When a call last proved forwarding works. */
     confirmedAt: string | null;
@@ -241,10 +246,10 @@ export function apiDashboard(input: {
 /**
  * passed: the test call reached Call Otto. phone_answers: the business phone answered it itself (iOS call
  * screening or Live Voicemail, Pixel Call Screen, or a person, watch or car), so carrier forwarding never got a
- * chance. voicemail: their voicemail answered it. declined: it was declined but nothing forwarded it.
- * not_reached: it rang out and never reached us.
+ * chance. you_answered: a person picked it up (most likely the owner). voicemail: a voicemail answered it.
+ * declined: it was declined but nothing forwarded it. not_reached: it rang out and never reached us.
  */
-export type ForwardingCheckStatus = "idle" | "calling" | "passed" | "phone_answers" | "voicemail" | "declined" | "not_reached";
+export type ForwardingCheckStatus = "idle" | "calling" | "passed" | "phone_answers" | "you_answered" | "voicemail" | "declined" | "not_reached";
 
 /** The stored check, as the check endpoint and the check call's webhooks write it. */
 export interface ForwardingCheckRecord {
@@ -258,16 +263,18 @@ export interface ForwardingCheckRecord {
   screenedAt?: string | null;
   /** Premium AMD's verdict on whatever answered: human_residence, human_business, machine, silence, not_sure... */
   amdResult?: string | null;
+  /** The code on screen when the owner started this test: what a pass proves, if its timing fits. */
+  code?: string | null;
 }
 
 export interface ForwardingState {
   businessNumber: string | null;
   carrier: CarrierInfo | null;
   confirmedAt: string | null;
-  check: { startedAt: string; method: "auto" | "manual"; answeredAt?: string | null; endedAt?: string | null; hangupCause?: string | null; screenedAt?: string | null; amdResult?: string | null } | null;
+  check: { startedAt: string; method: "auto" | "manual"; answeredAt?: string | null; endedAt?: string | null; hangupCause?: string | null; screenedAt?: string | null; amdResult?: string | null; code?: string | null } | null;
   helpRequestedAt: string | null;
   helpCall?: { to: string; startedAt: string } | null;
-  /** The code that was in force the last time a test call proved forwarding works. */
+  /** The code the last passing test proved is in force (see codeProvenByTest). */
   dialedCode?: string | null;
 }
 
@@ -285,9 +292,10 @@ export function forwardingCheckStatus(check: ForwardingState["check"], confirmed
   if (!finished) return "calling";
   if (check.method !== "auto") return "not_reached";
   if (check.answeredAt) {
-    // A machine is a voicemail greeting (forwarding isn't on); a person (or anything else that picks up fast) is the phone.
+    // No screening heard: a machine is a voicemail greeting (carrier voicemail, or Live Voicemail we couldn't tell
+    // apart); a person is someone picking up, most likely the owner. Without a verdict, a fast pick-up is the phone.
     if (check.amdResult === "machine") return "voicemail";
-    if (check.amdResult?.startsWith("human")) return "phone_answers";
+    if (check.amdResult?.startsWith("human")) return "you_answered";
     return Date.parse(check.answeredAt) - Date.parse(check.startedAt) < PHONE_PICKUP_MS ? "phone_answers" : "voicemail";
   }
   if (check.hangupCause === "user_busy" || check.hangupCause === "call_rejected") return "declined";
@@ -301,6 +309,10 @@ function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "oper
   const status = forwardingCheckStatus(check, confirmedAt, now);
   const answeredAfterSec = check?.answeredAt ? Math.max(0, Math.round((Date.parse(check.answeredAt) - Date.parse(check.startedAt)) / 1_000)) : null;
   const plan = lineNumber && state?.carrier ? forwardingPlan(state.carrier.family, lineNumber, mode, config.answerAfterRings) : null;
+  const dialedCode = state?.dialedCode ?? null;
+  // The last test was of today's code and reached Otto, but too fast or too slow for that code: it isn't dialed yet.
+  const missed = status === "passed" && check?.method === "auto" && Boolean(check.code) && check.code === plan?.on && dialedCode !== plan?.on;
+  const update = forwardingUpdate(plan, confirmedAt, dialedCode) ?? (missed ? { clearFirst: null } : null);
   return {
     number: lineNumber,
     mode,
@@ -311,7 +323,9 @@ function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "oper
       plan,
       choices: CARRIER_CHOICES,
       suggested: state?.businessNumber ? null : ownerMobile,
-      update: forwardingUpdate(plan, confirmedAt, state?.dialedCode ?? null),
+      update: update && { ...update, missed },
+      everyCallOn: Boolean(confirmedAt) && isForwardAllCode(dialedCode),
+      codeApplied: Boolean(confirmedAt && plan?.on) && dialedCode === plan?.on,
     },
     confirmedAt,
     check: { status, method: check?.method ?? null, startedAt: check?.startedAt ?? null, answeredAfterSec, callerId: checkCallerId },

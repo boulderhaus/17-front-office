@@ -47,13 +47,13 @@ import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, h
 import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
 import { MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_ROUTES, toolFailure, toolLimitReached, withinToolBudget, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
 import { callScreeningSetting, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
-import { AMD_ENDED_EVENT, FORWARDING_CHECK_SPEECH, forwardingCheckState, SCREENING_DETECTED_EVENT, TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
+import { AMD_ENDED_EVENT, FORWARDING_CHECK_SPEECH, forwardingCheckState, GREETING_ENDED_EVENT, SCREENING_DETECTED_EVENT, TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
 import { setupHelpState, TelnyxSetupCaller, type SetupCallFacts } from "../adapters/telnyx-setup-call.js";
 import { FOUNDER_GOOGLE_SCOPES, FounderCalendars, FounderConnectError } from "../adapters/founder-calendar.js";
 import { FounderFollowup, type FounderBookingFacts } from "../application/founder-followup.js";
 import { founderConnectToken, founderConnectTokenValid, ownerFirstName, prettyPhone, readFounderBookingToken } from "../domain/founder-booking.js";
 import { renderFounderBooking, renderFounderCalendars } from "../admin/founder.js";
-import { carrierFamily, forwardingOffInstruction, forwardsBackToOtto, type CarrierFamily, type CarrierInfo, forwardingPlan } from "../domain/forwarding.js";
+import { carrierFamily, codeProvenByTest, forwardingOffInstruction, forwardsBackToOtto, type CarrierFamily, type CarrierInfo, forwardingPlan } from "../domain/forwarding.js";
 import { FORWARDING_CHECK_WINDOW_MS, forwardingCheckStatus, type ForwardingCheckRecord, type ForwardingState } from "./owner-api-model.js";
 import {
   clearGrace,
@@ -1143,6 +1143,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           : { name: null, lineType: null };
         carrier = { ...found, family: carrierFamily(found.name, found.lineType), chosen: false };
       }
+      // A different phone: the code proven on the old one says nothing about this one.
+      if (previous.businessNumber && previous.businessNumber !== number) await dependencies.store.deleteIntegrationSecret(account.tenantId, "forwarding", "dialed_code");
       await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "business_number", number);
       await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify(carrier));
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
@@ -1157,6 +1159,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (!lineNumber) throw new HttpError(409, "Turn on your Call Otto line first.");
       if (!state.businessNumber) throw new HttpError(409, "Add your business phone number first.");
       if (!limiter.allow(`forwarding-check:${account.tenantId}`, 6, 60 * 60_000)) throw new HttpError(429, "That’s a lot of checks. Please wait a few minutes and try again.");
+      // The code on screen right now is what this test proves, if it passes in a time that fits that code.
+      const config = await dependencies.store.getConfig(account.tenantId);
+      const code = state.carrier ? forwardingPlan(state.carrier.family, lineNumber, config.operationMode, config.answerAfterRings).on : null;
+      await hangUpLiveCheck(account.tenantId);
       const startedAt = dependencies.clock.now().toISOString();
       const connectionId = dependencies.env.TELNYX_CHECK_CONNECTION_ID;
       const from = dependencies.env.TELNYX_FROM_NUMBER;
@@ -1168,7 +1174,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           .catch((error) => { log({ level: "error", event: "forwarding_check_call_failed", tenantId: account.tenantId, error: safeError(error) }); return null; });
         if (callControlId) method = "auto";
       }
-      await dependencies.store.withLock(`forwarding-check:${account.tenantId}`, () => dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "check", JSON.stringify({ startedAt, method, callControlId })));
+      await dependencies.store.withLock(`forwarding-check:${account.tenantId}`, () => dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "check", JSON.stringify({ startedAt, method, callControlId, code })));
       log({ level: "info", event: "forwarding_check_started", tenantId: account.tenantId, method });
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
     }
@@ -1182,12 +1188,17 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (!limiter.allow(`forwarding-mode:${account.tenantId}`, 20, 60 * 60_000)) throw new HttpError(429, "Too many tries. Please try again in a bit.");
       const changed = await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
         const current = await dependencies.store.getConfig(account.tenantId);
-        if (current.operationMode === mode) return false;
-        await rememberDialedCode(account.tenantId, false, current);
-        await dependencies.store.saveConfig({ ...current, operationMode: mode });
-        return true;
+        // "Ring me first" is any mode but every call: only leaving every call changes it, back to what it was
+        // (after hours stays after hours).
+        if (mode === "overflow" ? current.operationMode !== "always" : current.operationMode === "always") return null;
+        const before = await dependencies.store.getIntegrationSecret(account.tenantId, "forwarding", "mode_before_every_call");
+        const next = mode === "always" ? "always" : before === "after_hours" ? "after_hours" : "overflow";
+        await rememberLegacyDialedCode(account.tenantId, current);
+        if (mode === "always") await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "mode_before_every_call", current.operationMode);
+        await dependencies.store.saveConfig({ ...current, operationMode: next });
+        return next;
       });
-      if (changed) log({ level: "info", event: "forwarding_mode_changed", tenantId: account.tenantId, mode });
+      if (changed) log({ level: "info", event: "forwarding_mode_changed", tenantId: account.tenantId, mode: changed });
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
     }
     if (method === "POST" && url.pathname === "/api/app/line/help") {
@@ -1212,7 +1223,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const candidate = ownerPhone && /^\+1[2-9]\d{9}$/.test(ownerPhone) ? ownerPhone : state.businessNumber;
       // "Every call" forwarding sends the business phone's calls to Otto: never ring it (Otto would call Otto).
       // A separate mobile is already preferred above; with none, Brock's email below takes over.
-      const loops = forwardsBackToOtto({ mode: config.operationMode, businessNumber: state.businessNumber, phone: candidate });
+      const loops = forwardsBackToOtto({ mode: config.operationMode, businessNumber: state.businessNumber, phone: candidate, dialedCode: state.dialedCode ?? null });
       if (loops) log({ level: "info", event: "setup_call_skipped_forwards_to_otto", tenantId: account.tenantId });
       const callTo = loops ? null : candidate;
       let calling: string | null = null;
@@ -1481,7 +1492,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
     const current = await dependencies.store.getConfig(account.tenantId);
     const updated = configFromForm(current, form, "owner");
-    if (updated.operationMode !== current.operationMode || updated.answerAfterRings !== current.answerAfterRings) await rememberDialedCode(account.tenantId, false, current);
+    if (updated.operationMode !== current.operationMode || updated.answerAfterRings !== current.answerAfterRings) await rememberLegacyDialedCode(account.tenantId, current);
+    // So "Keep my phone ringing first" can put back what they had (after hours stays after hours).
+    if (updated.operationMode === "always" && current.operationMode !== "always") await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "mode_before_every_call", current.operationMode);
     if (!dependencies.env.DIRECT_BOOKING_BETA) updated.bookingMode = "confirm";
     if (!dependencies.env.WARM_TRANSFER_BETA) updated.warmTransferEnabled = false;
     updated.flatMonthlyPriceCents = current.flatMonthlyPriceCents;
@@ -2318,7 +2331,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const check = parse<ForwardingCheckRecord>(checkJson);
     return {
       businessNumber, carrier: parse<CarrierInfo>(carrierJson), confirmedAt, dialedCode,
-      check: check ? { startedAt: check.startedAt, method: check.method, answeredAt: check.answeredAt ?? null, endedAt: check.endedAt ?? null, hangupCause: check.hangupCause ?? null, screenedAt: check.screenedAt ?? null, amdResult: check.amdResult ?? null } : null,
+      check: check ? { startedAt: check.startedAt, method: check.method, answeredAt: check.answeredAt ?? null, endedAt: check.endedAt ?? null, hangupCause: check.hangupCause ?? null, screenedAt: check.screenedAt ?? null, amdResult: check.amdResult ?? null, code: check.code ?? null } : null,
       helpRequestedAt,
       helpCall: ((call) => call?.to && call.startedAt ? { to: call.to, startedAt: call.startedAt } : null)(parse<{ to?: string; startedAt?: string }>(setupCallJson)),
     };
@@ -2591,6 +2604,12 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   async function continueForwardingCheckLocked(tenantId: string, startedAt: string | null, envelope: ReturnType<typeof parseTelnyxEnvelope>): Promise<{ callControlId: string; startedAt: string; afterMs: number } | null> {
     const callControlId = envelope.data.payload.call_control_id;
     if (typeof callControlId !== "string") return null;
+    if (envelope.data.event_type === "call.speak.ended") {
+      // Our explanation finished on one of our own test legs (client_state says so): always hang it up, even when a
+      // newer test has started, so an old leg never sits on the owner's phone while the next test rings it.
+      if (dependencies.env.TELNYX_API_KEY) await new TelnyxForwardingClient({ apiKey: dependencies.env.TELNYX_API_KEY, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) }).hangUp(callControlId);
+      return null;
+    }
     let check: ForwardingCheckRecord | null = null;
     try { check = JSON.parse(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "check") ?? "null") as ForwardingCheckRecord | null; } catch { check = null; }
     // This call's test isn't saved yet (a very fast pick-up beat our own save): have Telnyx send it again.
@@ -2606,22 +2625,23 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if ((confirmedAt && confirmedAt >= check.startedAt) || !dependencies.env.TELNYX_API_KEY) return null;
       return { callControlId, startedAt: check.startedAt, afterMs: Date.parse(at) - Date.parse(check.startedAt) };
     }
-    if (type === SCREENING_DETECTED_EVENT || type === AMD_ENDED_EVENT) {
+    if (type === SCREENING_DETECTED_EVENT || type === AMD_ENDED_EVENT || type === GREETING_ENDED_EVENT) {
       // Premium AMD on our test call. The phone's own screener (iOS Call Screening or Live Voicemail) answering
       // means carrier forwarding can never fire: the app says so at once, while our short explanation plays.
+      // Telnyx sends "machine" first for Apple's screener too, then the screening tone (call_screening.detected) or
+      // the end of its prompt (greeting.ended: prompt_ended). Only the first verdict is kept.
       const confirmedAt = await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "confirmed_at");
       if (confirmedAt && confirmedAt >= check.startedAt) return null;
-      if (type === SCREENING_DETECTED_EVENT && !check.screenedAt) {
+      const result = typeof envelope.data.payload.result === "string" ? envelope.data.payload.result.slice(0, 40) : null;
+      const screened = type === SCREENING_DETECTED_EVENT || (type === GREETING_ENDED_EVENT && result === "prompt_ended");
+      if (screened && !check.screenedAt) {
         await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check", JSON.stringify({ ...check, screenedAt: at }));
         log({ level: "info", event: "forwarding_check_phone_screens", tenantId, afterMs: Date.parse(at) - Date.parse(check.startedAt) });
       }
-      const result = typeof envelope.data.payload.result === "string" ? envelope.data.payload.result.slice(0, 40) : null;
       if (type === AMD_ENDED_EVENT && result && !check.amdResult) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check", JSON.stringify({ ...check, amdResult: result }));
       return null;
     }
-    if (type === "call.speak.ended" && dependencies.env.TELNYX_API_KEY) {
-      await new TelnyxForwardingClient({ apiKey: dependencies.env.TELNYX_API_KEY, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) }).hangUp(callControlId);
-    } else if (type === "call.hangup") {
+    if (type === "call.hangup") {
       const cause = typeof envelope.data.payload.hangup_cause === "string" ? envelope.data.payload.hangup_cause.slice(0, 40) : null;
       if (!check.endedAt) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check", JSON.stringify({ ...check, endedAt: at, hangupCause: cause }));
       log({ level: "info", event: "forwarding_check_ended", tenantId, answered: Boolean(check.answeredAt), cause });
@@ -2640,7 +2660,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "check"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "business_number"),
     ]);
-    let check: { startedAt: string; method?: "auto" | "manual"; callControlId?: string | null } | null = null;
+    let check: { startedAt: string; method?: "auto" | "manual"; callControlId?: string | null; code?: string | null } | null = null;
     try { check = checkJson ? JSON.parse(checkJson) : null; } catch { check = null; }
     const open = check && now.getTime() - Date.parse(check.startedAt) < FORWARDING_CHECK_WINDOW_MS;
     // Some carriers show the forwarding phone's own number; trust that only for our automatic check call.
@@ -2653,9 +2673,14 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "confirmed_at", now.toISOString());
     if (!ours && !(open && fromCheck)) return "customer";
     await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check_inbound_call", callControlId);
-    // Our own call came through: the code for today's settings is the one in force. Remember it, so a later
-    // settings change (ring time, every call) can show the one new code to dial.
-    await rememberDialedCode(tenantId, true).catch((error) => log({ level: "warn", event: "forwarding_dialed_code_failed", tenantId, error: safeError(error) }));
+    // The owner's own test came through: it proves the code that was on screen when they started it, if the time it
+    // took fits that code (forward-all is instant; leaving it, the phone rings first). Only ever from a test, never
+    // from today's settings or our other calls looping in, so "Dial this once" stays up until the new code is on.
+    if (open && check?.code) {
+      const proven = codeProvenByTest({ code: check.code, previous: await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "dialed_code"), passMs: now.getTime() - Date.parse(check.startedAt) });
+      if (proven) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "dialed_code", proven);
+      else log({ level: "info", event: "forwarding_check_code_not_proven", tenantId, afterMs: now.getTime() - Date.parse(check.startedAt) });
+    }
     if (open && check?.callControlId && dependencies.env.TELNYX_API_KEY) {
       await new TelnyxForwardingClient({ apiKey: dependencies.env.TELNYX_API_KEY, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })
         .hangUp(check.callControlId).catch((error) => log({ level: "warn", event: "forwarding_check_hangup_failed", tenantId, error: safeError(error) }));
@@ -2665,18 +2690,37 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   }
 
   /**
-   * Remember the code that's in force: after a passing test (`overwrite`), or, before a settings change, the code
-   * the owner dialed for the old settings when forwarding already works and nothing was remembered yet.
+   * Before a settings change on a shop whose forwarding worked before any test recorded a code (set up before codes
+   * were recorded): assume the code for the old settings, so the change still shows the one new code to dial.
    */
-  async function rememberDialedCode(tenantId: string, overwrite: boolean, config?: BusinessConfig): Promise<void> {
-    const [current, state, lineNumber] = await Promise.all([
-      config ?? dependencies.store.getConfig(tenantId),
+  async function rememberLegacyDialedCode(tenantId: string, config: BusinessConfig): Promise<void> {
+    const [state, lineNumber] = await Promise.all([
       readForwarding(tenantId),
       dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
     ]);
-    if (!overwrite && (state.dialedCode || !state.confirmedAt)) return;
-    const code = lineNumber && state.carrier ? forwardingPlan(state.carrier.family, lineNumber, current.operationMode, current.answerAfterRings).on : null;
+    if (state.dialedCode || !state.confirmedAt) return;
+    const code = lineNumber && state.carrier ? forwardingPlan(state.carrier.family, lineNumber, config.operationMode, config.answerAfterRings).on : null;
     if (code) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "dialed_code", code);
+  }
+
+  /**
+   * "Test again" while the last test call is still up (the phone's screener still on the line, our explanation still
+   * playing): hang it up and give it a moment to clear, so the new test never reaches a phone that's busy on the old
+   * one (busy forwarding would send it to Otto and pass a phone that still answers calls itself).
+   */
+  async function hangUpLiveCheck(tenantId: string): Promise<void> {
+    if (!dependencies.env.TELNYX_API_KEY) return;
+    let previous: ForwardingCheckRecord | null = null;
+    try { previous = JSON.parse(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "check") ?? "null") as ForwardingCheckRecord | null; } catch { previous = null; }
+    if (!previous?.callControlId || previous.method !== "auto" || previous.endedAt) return;
+    if (dependencies.clock.now().getTime() - Date.parse(previous.startedAt) >= FORWARDING_CHECK_WINDOW_MS) return;
+    // A test that reached Otto was already hung up when it passed.
+    const confirmedAt = await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "confirmed_at");
+    if (confirmedAt && confirmedAt >= previous.startedAt) return;
+    await new TelnyxForwardingClient({ apiKey: dependencies.env.TELNYX_API_KEY, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })
+      .hangUp(previous.callControlId).catch((error) => log({ level: "warn", event: "forwarding_check_hangup_failed", tenantId, error: safeError(error) }));
+    // Something on the phone had it (a screener, Live Voicemail, a person): let the phone clear the call first.
+    if (previous.answeredAt) await new Promise((resolve) => setTimeout(resolve, dependencies.env.NODE_ENV === "test" ? 0 : 1_500));
   }
 
   /** Lapse and restore run under `billing:<tenant>`, the lock the grace sweep holds while it releases a line. */

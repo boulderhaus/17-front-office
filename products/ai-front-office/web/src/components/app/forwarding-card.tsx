@@ -16,6 +16,8 @@ const ua = typeof navigator === "undefined" ? "" : navigator.userAgent
 const platform = dialPlatform(ua)
 const isAndroid = /Android/i.test(ua)
 const isIphone = platform === "iphone"
+/** A text link that is a real button: 44px tall, underlined, with a solid focus ring (the default ring is faint). */
+const linkButton = "h-auto min-h-11 w-fit justify-start px-0 text-left text-sm font-semibold whitespace-normal text-brand-ink underline focus-visible:ring-2 focus-visible:ring-brand-ink focus-visible:ring-offset-2"
 
 /**
  * The one screen a non-technical owner needs: confirm your business number, dial one code,
@@ -170,9 +172,9 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
                     </p>
                   ) : (
                     <>
-                      <CheckResult status={line.check.status} afterSec={line.check.answeredAfterSec} plan={plan} />
+                      <CheckResult status={line.check.status} afterSec={line.check.answeredAfterSec} plan={plan} choices={showChoices(line.check.status, plan)} />
                       {showChoices(line.check.status, plan) && (
-                        <PhoneAnswersChoices busy={busy === "mode"} onEveryCall={() => void setMode("always")} onRingFirst={() => setMode("overflow")} />
+                        <PhoneAnswersChoices busy={busy === "mode"} off={plan.off} onEveryCall={() => void setMode("always")} onRingFirst={() => setMode("overflow")} />
                       )}
                       {plan.forwardsAll ? (
                         <p className="text-[15px] font-semibold">Your phone shouldn’t ring. Otto picks up the test call right away.</p>
@@ -185,7 +187,7 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
                       <Button size="tap" variant="brand" className={tapWidth} disabled={busy === "check"} onClick={startTest}>{busy === "check" ? <><Loader2 className="motion-safe:animate-spin" />Starting…</> : line.check.status === "idle" ? "Call me now" : "Test again"}</Button>
                       <p className="text-[13px] text-muted-foreground">{callerId ? `We’ll call this phone from ${callerId}. ` : "We’ll call this phone. "}When the call comes to Call Otto, you’ll see a green check.</p>
                       {line.check.status === "phone_answers" && plan.forwardsAll && (
-                        <button type="button" className="inline-flex min-h-11 w-fit items-center text-left text-sm font-semibold text-brand-ink underline underline-offset-4 disabled:opacity-60" disabled={busy === "mode"} onClick={() => void setMode("overflow")}>Changed your mind? Keep my phone ringing first</button>
+                        <Button type="button" variant="link" className={linkButton} disabled={busy === "mode"} onClick={() => void setMode("overflow")}>Changed your mind? Keep my phone ringing first</Button>
                       )}
                     </>
                   )}
@@ -195,12 +197,20 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
 
             {confirmed && (
               <div className="grid gap-2 text-sm">
-                <p>{plan?.forwardsAll
-                  ? `Every call to ${formatPhone(business.number!)} now goes to Call Otto. Your phone won’t ring for these; we alert you right away.`
-                  : `Calls you miss on ${formatPhone(business.number!)} now come to Call Otto.${plan?.ringSeconds && !business.update ? ` Your phone rings about ${plan.ringSeconds} seconds first.` : ""}`}</p>
+                {/* Only what a test proved: every call once a forward-all code passed, the ring time once its own code did. */}
+                <p>{business.everyCallOn
+                  ? `Every call to ${formatPhone(business.number!)} now goes to Call Otto. Your phone won’t ring for these. You’ll see each one in Calls.`
+                  : `Calls you miss on ${formatPhone(business.number!)} now come to Call Otto.${plan?.ringSeconds && business.codeApplied ? ` Your phone rings about ${plan.ringSeconds} seconds first.` : ""}`}</p>
                 {business.update && plan?.on && (
                   <div className="grid gap-2.5 border-t pt-3">
                     <p className="text-[15px] font-semibold">Dial this once to apply your new setting</p>
+                    {business.update.missed && (plan.forwardsAll || business.update.clearFirst) && (
+                      <p role="status" className="rounded-md border border-brand-ink/15 bg-accent px-3 py-2.5 text-accent-foreground">
+                        {plan.forwardsAll
+                          ? "That test reached Otto, but your phone rang first, so the new code isn’t on yet. Dial it, then test again."
+                          : "That test reached Otto before your phone could ring, so every call still goes to Otto. Do both steps below, then test again."}
+                      </p>
+                    )}
                     {business.update.clearFirst && <p>First dial <code className="rounded bg-muted px-1.5 py-0.5 font-mono font-semibold">{business.update.clearFirst}</code> and press Call, so your phone rings first again. Then dial:</p>}
                     <DialCode code={plan.on} dialLink={plan.dialLink} codeRef={codeRef} />
                     <p className="text-muted-foreground">{plan.what}</p>
@@ -216,7 +226,7 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
                     </div>
                   </details>
                 )}
-                {!business.update && <button type="button" className="inline-flex min-h-11 w-fit items-center font-semibold underline underline-offset-4" disabled={busy === "check"} onClick={startTest}>Check it again</button>}
+                {!business.update && <Button type="button" variant="link" className={linkButton} disabled={busy === "check"} onClick={startTest}>Check it again</Button>}
               </div>
             )}
           </>
@@ -257,10 +267,14 @@ function declineFallback(plan: ForwardingPlan): string {
   return plan.ringSeconds ? `No Decline button? Just let it ring (about ${plan.ringSeconds} seconds).` : "No Decline button? Just let it ring until it stops."
 }
 
-/** The phone answered our test itself and forwarding is still "ring me first": offer the two ways around it. */
+/**
+ * The phone answered our test itself and forwarding is still "ring me first": offer the two ways around it. On any
+ * device: the business phone may be an iPhone even when this page is open on a computer. Voicemail too, since
+ * Live Voicemail can look like any voicemail when the screening signal doesn't come through.
+ */
 function showChoices(status: ApiDashboard["line"]["check"]["status"], plan: ForwardingPlan): boolean {
   if (!plan.on || plan.forwardsAll) return false
-  return status === "phone_answers" || (status === "voicemail" && isIphone)
+  return status === "phone_answers" || status === "voicemail"
 }
 
 /**
@@ -287,6 +301,7 @@ function DialCode({ code, dialLink, codeRef }: { code: string; dialLink: string 
     return (
       <div className="grid gap-3">
         {box}
+        <Button size="tap" variant="outline" className={cn(tapWidth, "md:w-fit md:min-w-44")} onClick={copy}><Copy />Copy code</Button>
         <div className="flex items-center gap-4 rounded-lg border bg-muted/40 p-3 md:max-w-[480px]">
           <QrCode value={here} size={132} label="QR code that opens this setup page on your phone" />
           <div className="grid gap-1 text-sm">
@@ -330,7 +345,7 @@ function DialCode({ code, dialLink, codeRef }: { code: string; dialLink: string 
  * Our test call was answered by the phone itself, so carrier forwarding never got a chance. Two ways out,
  * the one with no phone settings first: Otto answers every call, or turn off the phone's own answering.
  */
-function PhoneAnswersChoices({ busy, onEveryCall, onRingFirst }: { busy: boolean; onEveryCall: () => void; onRingFirst: () => Promise<boolean> }) {
+function PhoneAnswersChoices({ busy, off, onEveryCall, onRingFirst }: { busy: boolean; off: string | null; onEveryCall: () => void; onRingFirst: () => Promise<boolean> }) {
   const [ringFirst, setRingFirst] = useState(false)
   const settings = isIphone
     ? "Your iPhone answers unknown callers itself. Turn off Live Voicemail in Settings › Apps › Phone (and set Screen Unknown Callers to Never if it’s on), then test again."
@@ -342,7 +357,8 @@ function PhoneAnswersChoices({ busy, onEveryCall, onRingFirst }: { busy: boolean
       <p className="text-[15px] font-semibold">Pick one:</p>
       <div className="grid gap-1.5">
         <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} disabled={busy} onClick={onEveryCall}>{busy ? <Loader2 className="motion-safe:animate-spin" /> : null}Let Otto answer every call</Button>
-        <p className="text-sm"><strong className="font-semibold">Best if this number is only for work. No settings to change.</strong> Your phone won’t ring for calls to this number. Otto answers every call and alerts you right away, and you call back with one tap. Calls you make and texts work like before.</p>
+        <p className="text-sm"><strong className="font-semibold">Best if this number is only for work. No settings to change.</strong> Your phone won’t ring for calls to this number. Otto answers every call, you see each one in Calls, and you call back with one tap. Calls you make and texts work like before.</p>
+        {off && <p className="text-[13px] text-muted-foreground">Ever pause Otto? Dial {off} first, or calls to this number won’t go through.</p>}
       </div>
       <div className="grid gap-1.5 border-t pt-3">
         <Button size="tap" variant="outline" className={cn(tapWidth, "h-14 border-2 border-brand-ink bg-card text-base text-brand-ink lg:h-12")} disabled={busy} aria-expanded={ringFirst}
@@ -354,7 +370,7 @@ function PhoneAnswersChoices({ busy, onEveryCall, onRingFirst }: { busy: boolean
 }
 
 /** What happened to the last test call, in plain words, with the one fix that matches it. */
-function CheckResult({ status, afterSec, plan }: { status: ApiDashboard["line"]["check"]["status"]; afterSec: number | null; plan: ForwardingPlan }) {
+function CheckResult({ status, afterSec, plan, choices }: { status: ApiDashboard["line"]["check"]["status"]; afterSec: number | null; plan: ForwardingPlan; choices: boolean }) {
   const family = plan.family
   const redial = family === "verizon"
     ? "Dial the code again and wait for the tone, then test again."
@@ -363,14 +379,16 @@ function CheckResult({ status, afterSec, plan }: { status: ApiDashboard["line"][
       : "In your phone company’s website or app, check forwarding is on for calls you don’t answer, then test again."
   if (status === "phone_answers" && plan.forwardsAll) {
     // They just picked "Let Otto answer every call": the new code isn't dialed yet.
-    return <p role="status" className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-950"><strong className="font-semibold">Now dial the new code above.</strong> Then tap Test again.</p>
+    return <p role="status" className="rounded-md border border-brand-ink/15 bg-accent px-3 py-2.5 text-sm text-accent-foreground"><strong className="font-semibold">Now dial the new code above.</strong> Then tap Test again.</p>
   }
   const who = isIphone ? "On iPhone that’s usually Live Voicemail or call screening." : isAndroid ? "Usually that’s call screening." : "Usually that’s Live Voicemail or call screening."
   const lines: string[] | null =
     status === "phone_answers"
       ? [`Your phone answered our test call itself${afterSec !== null ? ` (in ${afterSec} second${afterSec === 1 ? "" : "s"})` : ""}, so it couldn’t forward.`, who, "Answered it yourself? Test again and tap Decline."]
-      : status === "voicemail"
-        ? ["Our test call went to voicemail, so it didn’t reach Call Otto.", redial, ...(isIphone ? ["If that was your iPhone’s Live Voicemail, pick one of the two fixes below."] : [])]
+      : status === "you_answered"
+        ? ["Someone picked up our test call, so it couldn’t forward.", "If that was you, test again and tap Decline when it rings."]
+        : status === "voicemail"
+        ? ["Our test call went to voicemail, so it didn’t reach Call Otto.", redial, ...(choices ? ["Or your phone answered it itself (like iPhone Live Voicemail). Then pick one of the two fixes below."] : [])]
         : status === "declined"
           ? ["You declined the test call, but it didn’t forward.", redial]
           : status === "not_reached"

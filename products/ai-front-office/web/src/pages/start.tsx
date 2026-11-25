@@ -244,7 +244,7 @@ function ForwardStep({ dashboard, next }: { dashboard: ApiDashboard; next: () =>
   return (
     <>
       {dashboard.line.mode === "always"
-        ? <Heading oneLine title="Send your calls to Call Otto">Otto answers every call and alerts you right away.</Heading>
+        ? <Heading oneLine title="Send your calls to Call Otto">Otto answers every call to your business number.</Heading>
         : <Heading oneLine title="Send missed calls to Call Otto">Your phone still rings first. Only calls you miss come here.</Heading>}
       <ForwardingCard
         dashboard={dashboard}
@@ -299,7 +299,7 @@ function DoneStep({ dashboard, activation, toForward }: { dashboard: ApiDashboar
       ) : (
         <div className="grid justify-items-start gap-4">
           <span className="grid size-14 place-items-center rounded-full bg-emerald-600 text-white shadow-[0_0_0_6px_rgba(5,150,105,.15)]"><Check className="size-8" strokeWidth={3} /></span>
-          <Heading title={<span className="marker">You’re set!</span>}>{waiting ? "Your setup is saved. We’ll turn your line on as soon as it’s approved and let you know." : dashboard.line.mode === "always" ? "Every call now gets answered. New jobs show up in Calls." : "Missed calls now get answered. New jobs show up in Calls."}</Heading>
+          <Heading title={<span className="marker">You’re set!</span>}>{waiting ? "Your setup is saved. We’ll turn your line on as soon as it’s approved and let you know." : dashboard.line.business.everyCallOn ? "Every call now gets answered. New jobs show up in Calls." : "Missed calls now get answered. New jobs show up in Calls."}</Heading>
         </div>
       )}
       <Card>
