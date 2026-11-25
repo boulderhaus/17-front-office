@@ -1872,7 +1872,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const subscription = await dependencies.store.getSubscription(account.tenantId);
       // A browser goes back to Plan and billing, which says what happened in one line; other clients get the JSON error.
       if (isCompStatus(subscription?.status)) {
-        if (wantsPage(request)) return redirect(response, "/app/settings/plan?billing=none");
+        if (wantsPage(request)) return redirect(response, "/app/settings/plan?billing=comp");
         throw new HttpError(409, "This is a complimentary review account. There’s no billing to manage.");
       }
       if (!stripeClient || !subscription?.providerCustomerId) {

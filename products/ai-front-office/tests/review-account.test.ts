@@ -302,7 +302,7 @@ describe("the review account in the owner app", () => {
     expect(((await portalJson.json()) as { error: string }).error).toBe("This is a complimentary review account. There’s no billing to manage.");
     const portalPage = await owner.form("/app/billing/portal", {}, { accept: "text/html,application/xhtml+xml" });
     expect(portalPage.status).toBe(303);
-    expect(portalPage.headers.get("location")).toBe("/app/settings/plan?billing=none");
+    expect(portalPage.headers.get("location")).toBe("/app/settings/plan?billing=comp");
     expect((await owner.form("/app/line/go-live")).status).toBe(303);
 
     const activate = await (await owner.api("/api/app/onboarding/activate", { sessionId: "cs_synthetic_forged" })).json() as Record<string, any>;
