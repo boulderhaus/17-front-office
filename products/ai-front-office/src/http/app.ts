@@ -370,7 +370,7 @@ function publicOwnerDemo(now: Date): {
   };
 }
 
-const OWNER_APP_PATH = /^\/app(?:\/(?:start|jobs|calendar|settings|calls|calls\/[0-9a-f-]{36}))?\/?$/i;
+const OWNER_APP_PATH = /^\/app(?:\/(?:start|jobs|calendar|settings|settings\/[a-z-]{1,40}|calls|calls\/[0-9a-f-]{36}))?\/?$/i;
 const DEMO_APP_PATH = /^\/demo(?:\/(?:jobs|calendar|calls|calls\/[A-Za-z0-9-]{1,64}))?\/?$/;
 function isOwnerAppPath(pathname: string): boolean { return OWNER_APP_PATH.test(pathname); }
 function isDemoAppPath(pathname: string): boolean { return DEMO_APP_PATH.test(pathname); }
@@ -1465,10 +1465,13 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const now = dependencies.clock.now();
     let next: CallbackTask;
     if (action === "complete") {
+      // A second Done for the same call (a double-click, a second tab) changes nothing: the first completion stands.
+      if (task.status === "completed") return task;
       next = { ...task, status: "completed", completedAt: now.toISOString(), completionSource: "owner", updatedAt: now.toISOString() };
     } else if (action === "reopen") {
       if (task.status !== "completed") throw new HttpError(404, "Completed task not found");
-      next = { ...task, status: "open", dueAt: now.toISOString(), completedAt: null, completionSource: null, updatedAt: now.toISOString() };
+      // Undo puts the follow-up back exactly as it was: Complete never touches dueAt, so its "Call back by" time returns.
+      next = { ...task, status: "open", completedAt: null, completionSource: null, updatedAt: now.toISOString() };
     } else {
       if (task.status === "completed" || task.status === "cancelled") throw new HttpError(404, "Task not found");
       if (minutes === undefined || ![60, 240, 1_440].includes(minutes)) throw new HttpError(400, "Choose a valid reminder time");

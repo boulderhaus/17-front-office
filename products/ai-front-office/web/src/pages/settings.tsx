@@ -1,140 +1,72 @@
-import { useEffect, useState, type ReactNode } from "react"
-import { Link } from "react-router-dom"
-import { CheckCircle2, Download, FileSpreadsheet, LogOut, Users } from "lucide-react"
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
+import { Link, Navigate, NavLink, useLocation, useParams } from "react-router-dom"
+import { BellRing, CalendarDays, Check, ChevronRight, MessageSquareQuote, CreditCard, Database, LogOut, PhoneIncoming, Store, Users } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Switch } from "@/components/ui/switch"
-import { Textarea } from "@/components/ui/textarea"
-import { CallAlertsCard } from "@/components/app/call-alerts"
+import { AppShell } from "@/components/app/shell"
 import { api, useApi } from "@/lib/api"
-import { FAIR_USE_LINE, money, perCall } from "@/lib/format"
-import { useMode } from "@/lib/mode"
-import type { ApiSettings, PlanId, SettingsValues } from "@/lib/types"
-import { cn, tapWidth } from "@/lib/utils"
+import { useMediaQuery, useMode } from "@/lib/mode"
+import type { ApiSettings, SettingsValues } from "@/lib/types"
+import { cn } from "@/lib/utils"
+import { AlertsSection, AnsweringSection, AnswersSection, BusinessSection, CalendarSection, DataSection, PlanSection, TeamSection } from "./settings-sections"
 
-const ZONES: Array<[string, string]> = [["America/New_York", "Eastern"], ["America/Chicago", "Central"], ["America/Denver", "Mountain"], ["America/Phoenix", "Arizona"], ["America/Los_Angeles", "Pacific"], ["America/Anchorage", "Alaska"], ["Pacific/Honolulu", "Hawaii"]]
-const selectClass = "h-12 w-full rounded-lg border border-input bg-card px-3 text-[16px] shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 lg:h-10 lg:text-sm"
-const fieldClass = "h-12 text-[16px] lg:h-10 lg:text-sm bg-card"
-// The server accepts any whole percent from 50 to 95; 75 (the default) and 90 are the easy picks.
-const EASY_ALERT_PERCENTS = [75, 90]
-const OTHER_ALERT_PERCENTS = [50, 55, 60, 65, 70, 80, 85, 95]
-
-function Field({ label, hint, children, className }: { label: string; hint?: string; children: ReactNode; className?: string }) {
-  return (
-    <label className={cn("grid gap-1.5", className)}>
-      <span className="text-sm font-semibold">{label}</span>
-      {children}
-      {hint && <span className="text-[13px] text-muted-foreground">{hint}</span>}
-    </label>
-  )
+/** Every setting lives on one of these pages: a short list on a phone, a left menu on a computer. */
+export interface SectionDef {
+  id: string
+  title: string
+  description: string
+  icon: typeof Store
+  /** Has fields that save with the Save button (the rest act on their own). */
+  form: boolean
+  summary: (context: SettingsContextValue) => string
+  render: () => ReactNode
 }
 
-function Group({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">{title}</CardTitle>
-        {description && <CardDescription>{description}</CardDescription>}
-      </CardHeader>
-      <CardContent className="grid gap-4">{children}</CardContent>
-    </Card>
-  )
+const MODE_WORDS: Record<string, string> = { overflow: "Calls you miss", after_hours: "After hours", always: "Every call" }
+
+export const SECTIONS: SectionDef[] = [
+  { id: "business", title: "Business details", icon: Store, form: true, description: "Name, greeting, where you work and what you fix.", summary: ({ text }) => text("businessName"), render: () => <BusinessSection /> },
+  { id: "answering", title: "How calls are answered", icon: PhoneIncoming, form: true, description: "Which calls Call Otto picks up, after hours and emergencies.", summary: ({ text }) => (text("serviceState") === "paused" ? "Paused" : MODE_WORDS[text("operationMode")] ?? "On"), render: () => <AnsweringSection /> },
+  { id: "answers", title: "Prices and answers", icon: MessageSquareQuote, form: true, description: "The only prices and facts Call Otto may tell callers.", summary: ({ text }) => { const count = [text("priceSnippets"), text("approvedKnowledge")].join("\n").split("\n").filter((line) => line.trim()).length; return count ? `${count} saved` : "None yet" }, render: () => <AnswersSection /> },
+  { id: "alerts", title: "Alerts", icon: BellRing, form: true, description: "How we let you know about new calls.", summary: ({ settings }) => (settings.integrations.ownerPhoneConfigured ? "Mobile saved" : "No mobile yet"), render: () => <AlertsSection /> },
+  { id: "calendar", title: "Calendar", icon: CalendarDays, form: true, description: "Google Calendar, appointment hours and booking.", summary: ({ settings }) => (settings.integrations.googleConnected ? "Connected" : settings.integrations.googleAvailable ? "Not connected" : "Not available yet"), render: () => <CalendarSection /> },
+  { id: "plan", title: "Plan and billing", icon: CreditCard, form: false, description: "Your plan, your card, invoices, cancel.", summary: ({ settings }) => settings.plan.label, render: () => <PlanSection /> },
+  { id: "team", title: "Team", icon: Users, form: false, description: "People who work your calls with you.", summary: () => "Invite people", render: () => <TeamSection /> },
+  { id: "data", title: "Your data", icon: Database, form: true, description: "Downloads, how long calls are kept, sign out, delete.", summary: ({ text }) => `${text("dataRetentionDays")} days`, render: () => <DataSection /> },
+]
+// Old links and the status pill used these ids.
+const ALIASES: Record<string, string> = { shop: "business", area: "business", appointments: "calendar", emergencies: "answering" }
+
+export interface SettingsContextValue {
+  settings: ApiSettings
+  values: SettingsValues
+  text: (name: string) => string
+  flag: (name: string) => boolean
+  set: (name: string, value: string | boolean) => void
+  bind: (name: string) => { name: string; value: string; onChange: (event: { target: { value: string } }) => void }
+  dirty: boolean
+  discard: () => void
+  saving: boolean
+  save: () => Promise<void>
+  reload: () => Promise<void>
+  /** Automated emergency calls: saved on its own, right away (it records or withdraws the owner's consent). */
+  urgentBusy: boolean
+  toggleUrgentCalls: (on: boolean) => Promise<void>
 }
 
-function Toggle({ id, label, hint, checked, disabled, onChange, extra }: { id: string; label: ReactNode; hint?: ReactNode; checked: boolean; disabled?: boolean; onChange: (value: boolean) => void; extra?: ReactNode }) {
-  return (
-    <div className={cn("flex items-start justify-between gap-4 rounded-xl border bg-card p-3.5", disabled && "opacity-70")}>
-      <Label htmlFor={id} className="grid gap-1 font-normal">
-        <span className="text-[15px] font-semibold">{label}</span>
-        {hint && <span className="text-[13px] text-muted-foreground">{hint}</span>}
-        {extra}
-      </Label>
-      <Switch id={id} checked={checked} disabled={disabled} onCheckedChange={onChange} className="mt-0.5" />
-    </div>
-  )
+const SettingsContext = createContext<SettingsContextValue | null>(null)
+export function useSettings(): SettingsContextValue {
+  const value = useContext(SettingsContext)
+  if (!value) throw new Error("useSettings outside the settings area")
+  return value
 }
 
-/** The shop's plan, priced by answered calls, and a one-tap switch to another (owner only; Stripe prorates). */
-function PlanCard({ plan, csrf, onChanged }: { plan: ApiSettings["plan"]; csrf: string; onChanged: () => Promise<void> }) {
-  const [picked, setPicked] = useState<PlanId>(plan.id)
-  const [busy, setBusy] = useState(false)
-  const choice = plan.plans.find((item) => item.id === picked)
-  const [unlimitedBusy, setUnlimitedBusy] = useState(false)
-  const toggleUnlimited = async (on: boolean) => {
-    setUnlimitedBusy(true)
-    try {
-      await api("/api/app/billing/unlimited", { method: "POST", body: { on } })
-      await onChanged()
-      toast.success(on ? "Unlimited calls are on." : "Unlimited calls are off.")
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unlimited calls didn’t change. Please try again.")
-    } finally {
-      setUnlimitedBusy(false)
-    }
-  }
-  const change = async () => {
-    if (!choice) return
-    setBusy(true)
-    try {
-      await api("/api/app/billing/plan", { method: "POST", body: { plan: choice.id } })
-      await onChanged()
-      toast.success(`You’re on ${choice.label}.`)
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Your plan didn’t change. Please try again.")
-    } finally {
-      setBusy(false)
-    }
-  }
-  return (
-    <Card className="relative overflow-hidden">
-      <span aria-hidden className="absolute inset-x-0 top-0 h-1 bg-brand-yellow" />
-      <CardHeader><CardTitle className="text-base">Plan</CardTitle></CardHeader>
-      <CardContent className="grid gap-3">
-        <p className="text-sm"><span className="block text-[13px] font-semibold text-muted-foreground">{plan.label}{plan.unlimited ? " + Unlimited calls" : ""}{plan.sold ? "" : " (no longer offered, yours to keep)"}</span><strong className="text-2xl font-semibold tracking-tight">{money(plan.unlimited && plan.unlimitedOffer ? plan.unlimitedOffer.priceCents : plan.flatMonthlyPriceCents)}</strong>/month · {plan.unlimited && plan.unlimitedOffer ? `unlimited calls, fair use up to ${plan.unlimitedOffer.fairUseCalls.toLocaleString("en-US")}` : `${plan.includedCalls} answered calls`} · {perCall(plan.overageCentsPerCall)} per extra call</p>
-        {plan.unlimitedOffer && (
-          <div className="grid gap-1 rounded-lg border-2 border-brand-ink/15 px-3 py-2.5">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <label htmlFor="settings-unlimited" className="flex min-h-11 cursor-pointer items-center gap-2.5 text-[15px] font-semibold">
-                <Switch id="settings-unlimited" checked={plan.unlimited} disabled={unlimitedBusy} onCheckedChange={(on) => void toggleUnlimited(on)} />
-                Unlimited calls
-              </label>
-              <span className="rounded border border-brand-ink/40 px-1.5 py-0.5 text-[13px] font-semibold">{FAIR_USE_LINE}</span>
-            </div>
-            <span className="text-[13px] text-muted-foreground">+{money(plan.unlimitedOffer.addOnCents)}/month. {plan.paid ? "You pay or get credit for the difference right away." : "Added when you start your plan."} Past fair use, extra calls are {perCall(plan.overageCentsPerCall)}.</span>
-          </div>
-        )}
-        {plan.plans.length > 1 && (
-          <div className="grid gap-2" role="radiogroup" aria-label="Change plan">
-            {plan.plans.map((item) => (
-              <button key={item.id} type="button" role="radio" aria-checked={picked === item.id} onClick={() => setPicked(item.id)}
-                className={cn("flex min-h-12 items-center justify-between gap-3 rounded-lg border-2 bg-card px-3 py-2 text-left text-sm transition focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none", picked === item.id ? "border-brand-ink" : "border-brand-ink/15")}>
-                <span className="grid"><strong className="font-semibold">{item.label}{item.id === plan.id ? <span className="ml-1.5 text-[12px] font-medium text-muted-foreground">Current</span> : null}</strong><small className="text-[12.5px] text-muted-foreground">{item.includedCalls} calls · {item.who}</small></span>
-                <span className="tabular font-semibold">{money(item.priceCents)}<small className="text-[12px] font-medium text-muted-foreground">/mo</small></span>
-              </button>
-            ))}
-          </div>
-        )}
-        {choice && choice.id !== plan.id && (
-          <div className="grid gap-1.5">
-            <Button size="tap" variant="brand" className={tapWidth} disabled={busy} onClick={() => void change()}>{busy ? "Switching…" : `Switch to ${choice.label}`}</Button>
-            <p className="text-[13px] text-muted-foreground">{plan.paid ? "You pay or get credit for the difference right away. Team members stay free." : "We’ll use this plan when you add your card."}</p>
-          </div>
-        )}
-        <form method="post" action={plan.paid ? "/app/billing/portal" : "/app/billing/checkout"}>
-          <input type="hidden" name="csrf" value={csrf} />
-          <Button size="tap" variant={plan.paid ? "outline" : "brand"} className={tapWidth}>{plan.paid ? "Manage billing or cancel" : "Start your plan"}</Button>
-        </form>
-      </CardContent>
-    </Card>
-  )
-}
-
-export function SettingsPage() {
+/** /app/settings and /app/settings/:section. The form state lives here, so moving between pages never loses an edit. */
+export function SettingsArea() {
   const { reload: reloadDashboard } = useMode()
+  const sectionId = useParams()["*"]?.replace(/\/$/, "") || undefined
+  const wide = useMediaQuery("(min-width: 1024px)")
   const settings = useApi<ApiSettings>("/api/app/settings")
   const [values, setValues] = useState<SettingsValues | null>(null)
   const [saving, setSaving] = useState(false)
@@ -153,201 +85,149 @@ export function SettingsPage() {
     }
   }
   useEffect(() => { if (settings.data) setValues(settings.data.values) }, [settings.data])
-  if (settings.error) return <Card><CardContent>{settings.error}</CardContent></Card>
-  if (!settings.data || !values) return <div className="grid gap-4">{[0, 1, 2].map((key) => <Skeleton key={key} className="h-48 w-full rounded-xl" />)}</div>
-  const { integrations: i, plan, csrf } = settings.data
-  const text = (name: string) => String(values[name] ?? "")
-  const flag = (name: string) => values[name] === true
-  const set = (name: string, value: string | boolean) => setValues({ ...values, [name]: value })
-  const bind = (name: string) => ({ name, value: text(name), onChange: (event: { target: { value: string } }) => set(name, event.target.value) })
-  const zones = ZONES.some(([zone]) => zone === text("timezone")) ? ZONES : [[text("timezone"), text("timezone")] as [string, string], ...ZONES]
-  const unique = (list: number[]) => list.filter((value, index, all) => all.indexOf(value) === index).sort((left, right) => left - right)
-  const save = async (event: React.FormEvent) => {
-    event.preventDefault()
-    setSaving(true)
-    try {
-      const next = await api<ApiSettings>("/api/app/settings", { method: "PUT", body: values })
-      settings.setData(next)
-      setValues(next.values)
-      await reloadDashboard()
-      toast.success("Saved.")
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "That didn’t save. Please try again.")
-    } finally {
-      setSaving(false)
+  const section = SECTIONS.find((item) => item.id === sectionId) ?? null
+
+  const context = useMemo<SettingsContextValue | null>(() => {
+    if (!settings.data || !values) return null
+    const saved = settings.data.values
+    const text = (name: string) => String(values[name] ?? "")
+    const set = (name: string, value: string | boolean) => setValues((current) => ({ ...(current ?? {}), [name]: value }))
+    return {
+      settings: settings.data,
+      values,
+      text,
+      flag: (name) => values[name] === true,
+      set,
+      bind: (name) => ({ name, value: text(name), onChange: (event) => set(name, event.target.value) }),
+      dirty: Object.keys(values).some((key) => values[key] !== saved[key]),
+      discard: () => setValues(saved),
+      saving,
+      save: async () => {
+        setSaving(true)
+        try {
+          const next = await api<ApiSettings>("/api/app/settings", { method: "PUT", body: values })
+          settings.setData(next)
+          setValues(next.values)
+          await reloadDashboard()
+          toast.success("Saved.")
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "That didn’t save. Please try again.")
+        } finally {
+          setSaving(false)
+        }
+      },
+      reload: async () => { await settings.reload(); await reloadDashboard() },
+      urgentBusy,
+      toggleUrgentCalls,
     }
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings, values, saving, reloadDashboard, urgentBusy])
+
+  if (sectionId && !section) return <Navigate to={ALIASES[sectionId] ? `/app/settings/${ALIASES[sectionId]}` : "/app/settings"} replace />
+  // A computer always shows a page next to the menu; a phone shows the list first.
+  if (!sectionId && wide) return <Navigate to="/app/settings/business" replace />
+
+  const body = settings.error ? <p className="rounded-xl border bg-card p-4">{settings.error}</p>
+    : !context ? <div className="grid gap-3">{[0, 1, 2, 3].map((key) => <Skeleton key={key} className="h-14 w-full rounded-xl" />)}</div>
+    : section ? <SectionPage section={section} /> : <SettingsIndex />
   return (
-    <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
-      <form className="grid min-w-0 gap-4" onSubmit={save}>
-        <Group title="Answering">
-          <Field label="Call Otto is" hint={settings.data.status === "active" ? undefined : "Your line turns on after activation. Until then it stays paused."}>
-            <select className={selectClass} {...bind("serviceState")}><option value="active">On, answering calls</option><option value="paused">Paused</option></select>
-          </Field>
-          <Field label="Answer">
-            <select className={selectClass} {...bind("operationMode")}><option value="overflow">Only calls I miss</option><option value="after_hours">After hours</option><option value="always">Every call</option></select>
-          </Field>
-          <div className="grid gap-4 md:grid-cols-2">
-            <Field label="Ring my phone first">
-              <select className={selectClass} {...bind("answerAfterRings")}>{[2, 3, 4, 5, 6, 8, 10, 12].map((rings) => <option key={rings} value={rings}>{rings} rings</option>)}</select>
-            </Field>
-            <Toggle id="weekends" label="Answer all weekend" checked={flag("weekends")} onChange={(value) => set("weekends", value)} />
-          </div>
-          <div className="grid gap-4 md:grid-cols-2">
-            <Field label="After hours start"><Input type="time" className={fieldClass} {...bind("weekdayStart")} /></Field>
-            <Field label="After hours end"><Input type="time" className={fieldClass} {...bind("weekdayEnd")} /></Field>
-          </div>
-          <Field label="Holidays to cover" hint="YYYY-MM-DD, comma separated"><Input className={fieldClass} placeholder="2026-12-25" {...bind("holidayDates")} /></Field>
-        </Group>
-
-        <Group title="Your shop">
-          <div className="grid gap-4 md:grid-cols-2">
-            <Field label="Business name"><Input required className={fieldClass} {...bind("businessName")} /></Field>
-            <Field label="Time zone"><select className={selectClass} {...bind("timezone")}>{zones.map(([zone, label]) => <option key={zone} value={zone}>{label}</option>)}</select></Field>
-          </div>
-          <Field label="Greeting"><Textarea required rows={2} className="bg-card text-[16px] lg:text-sm" {...bind("greeting")} /></Field>
-          <Toggle id="recordingNotice" label="Recording notice on transfers" checked={flag("recordingNotice")} onChange={(value) => set("recordingNotice", value)}
-            hint="Off: just your greeting, calls saved with audio. On: nothing extra up front, transcript only (no audio), and callers hear “Calls may be recorded.” only if they’re put through to you. Your state’s rules, your call." />
-        </Group>
-
-        <Group title="Where and what you work on">
-          <Field label="Cities and ZIP codes" hint="A city with its state (“Sarasota FL”) or a 5-digit ZIP. No guessed radius."><Textarea rows={2} placeholder="Sarasota FL, 34236" className="bg-card text-[16px] lg:text-sm" {...bind("serviceAreaTerms")} /></Field>
-          <Field label="Services you offer"><Textarea rows={2} className="bg-card text-[16px] lg:text-sm" {...bind("serviceCategories")} /></Field>
-        </Group>
-
-        <Group title="Appointments">
-          <div className="grid gap-4 md:grid-cols-2">
-            <Field label="First appointment"><Input type="time" className={fieldClass} {...bind("bookableWeekdayStart")} /></Field>
-            <Field label="Last one ends by"><Input type="time" className={fieldClass} {...bind("bookableWeekdayEnd")} /></Field>
-          </div>
-          <div className="grid gap-4 md:grid-cols-2">
-            <Field label="Job length">
-              <select className={selectClass} {...bind("defaultServiceDurationMinutes")}>{unique([30, 45, 60, 90, 120, 180, 240, Number(text("defaultServiceDurationMinutes"))]).map((minutes) => <option key={minutes} value={minutes}>{minutes < 60 ? `${minutes} min` : `${minutes / 60} hr${minutes === 60 ? "" : "s"}`}</option>)}</select>
-            </Field>
-            <Field label="Notice needed">
-              <select className={selectClass} {...bind("minimumLeadTimeMinutes")}>
-                {([[0, "No minimum"], [60, "1 hour"], [120, "2 hours"], [240, "4 hours"], [1440, "Next day"], [2880, "2 days"]] as Array<[number, string]>).concat([[0, "No minimum"], [60, "1 hour"], [120, "2 hours"], [240, "4 hours"], [1440, "Next day"], [2880, "2 days"]].some(([value]) => value === Number(text("minimumLeadTimeMinutes"))) ? [] : [[Number(text("minimumLeadTimeMinutes")), `${text("minimumLeadTimeMinutes")} minutes`]]).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              </select>
-            </Field>
-          </div>
-          <Toggle id="bookableWeekends" label="Offer weekend appointments" checked={flag("bookableWeekends")} onChange={(value) => set("bookableWeekends", value)} />
-          {i.directBookingAvailable ? (
-            <Field label="Booking"><select className={selectClass} {...bind("bookingMode")}><option value="confirm">Take the details; I’ll confirm</option><option value="direct">Book open times on my calendar</option></select></Field>
-          ) : <p className="text-[13px] text-muted-foreground">Call Otto takes the time the caller wants. You confirm it.</p>}
-          <Toggle id="requireDiagnosticFeeAcceptance" label="Caller must accept your service-call fee" checked={flag("requireDiagnosticFeeAcceptance")} onChange={(value) => set("requireDiagnosticFeeAcceptance", value)} />
-        </Group>
-
-        <Group title="What callers can be told" description="Leave blank and Call Otto won’t quote a price; it takes a message.">
-          <Field label="Prices" hint="One per line, “Name: exact wording”"><Textarea rows={3} placeholder="Service call: Our service call is $89." className="bg-card text-[16px] lg:text-sm" {...bind("priceSnippets")} /></Field>
-          <Field label="Answers" hint="One per line, “Topic: exact wording”"><Textarea rows={3} placeholder="Brands: We service all major brands." className="bg-card text-[16px] lg:text-sm" {...bind("approvedKnowledge")} /></Field>
-        </Group>
-
-        <Group title="Alerts to your phone">
-          <CallAlertsCard className="p-3.5" />
-          <Field label="Mobile number" hint="Emergency calls (if on) and text alerts (once texts are on) come here.">
-            <Input type="tel" inputMode="tel" autoComplete="tel" className={fieldClass} placeholder={i.ownerPhoneConfigured ? "Saved. Enter a new number to replace it" : "+1 941 555 0100"} {...bind("ownerPhone")} />
-          </Field>
-          {settings.data.urgentCalls?.available && (
-            <Toggle id="urgentCalls" label="Call me about emergencies" checked={settings.data.urgentCalls.on} disabled={urgentBusy}
-              hint={settings.data.urgentCalls.disclosure}
-              onChange={(on) => void toggleUrgentCalls(on)} />
-          )}
-          <Toggle id="ownerDailySmsEnabled" label={<>Daily text recap <em className="ml-1 not-italic text-brand-ink/70">Included</em></>} hint="Follow-ups and appointments, once each morning." checked={flag("ownerDailySmsEnabled")} onChange={(value) => set("ownerDailySmsEnabled", value)} />
-          <Field label="Recap time">
-            <select className={selectClass} {...bind("ownerDailySmsHour")}>{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{new Intl.DateTimeFormat("en-US", { hour: "numeric", timeZone: "UTC" }).format(new Date(Date.UTC(2026, 0, 1, hour)))}</option>)}</select>
-          </Field>
-          <Toggle id="ownerRealtimeSmsEnabled" label={<>Instant lead texts <em className="ml-1 not-italic text-brand-ink/70">Included</em></>} hint="Every routine new lead the moment the call ends." checked={flag("ownerRealtimeSmsEnabled")} onChange={(value) => set("ownerRealtimeSmsEnabled", value)} />
-          <Toggle id="ownerWeeklyEmailEnabled" label={<>Sunday week-ahead email <em className="ml-1 not-italic text-brand-ink/70">Included</em></>} hint="Open callbacks and the next seven days." checked={flag("ownerWeeklyEmailEnabled")} disabled={!i.weeklyEmailAvailable} onChange={(value) => set("ownerWeeklyEmailEnabled", value)} extra={i.weeklyEmailAvailable ? undefined : <span className="text-[13px] text-amber-700">Not available yet.</span>} />
-          <Field label="Calls alert" hint={plan.unlimited && plan.unlimitedOffer ? `We’ll tell you once when you’ve answered this share of your ${plan.unlimitedOffer.fairUseCalls.toLocaleString("en-US")} fair-use calls, and again if you reach them all.` : `We’ll tell you once when you’ve answered this share of your ${plan.includedCalls} calls, and again if you use them all.`}>
-            <select className={selectClass} {...bind("usageAlertPercent")}>
-              {EASY_ALERT_PERCENTS.map((percent) => <option key={percent} value={percent}>When I’ve used {percent}%</option>)}
-              <optgroup label="Other">
-                {unique([...OTHER_ALERT_PERCENTS, Number(text("usageAlertPercent"))]).filter((percent) => percent >= 50 && percent <= 95 && !EASY_ALERT_PERCENTS.includes(percent)).map((percent) => <option key={percent} value={percent}>When I’ve used {percent}%</option>)}
-              </optgroup>
-            </select>
-          </Field>
-        </Group>
-
-        <Card>
-          <CardContent>
-            <details>
-              <summary className="flex min-h-10 cursor-pointer items-center text-base font-semibold">Advanced</summary>
-              <div className="mt-4 grid gap-4">
-                <Field label="Extra emergency words" hint="Comma separated"><Textarea rows={2} className="bg-card text-[16px] lg:text-sm" {...bind("emergencyKeywords")} /></Field>
-                <div className="grid gap-4 md:grid-cols-2">
-                  <Field label="Emergency sensitivity">
-                    <select className={selectClass} value={String(([0.5, 0.6, 0.7, 0.8, 0.9].find((value) => Math.abs(value - Number(text("emergencyThreshold"))) < 0.001)) ?? text("emergencyThreshold"))} onChange={(event) => set("emergencyThreshold", event.target.value)}>
-                      {([[0.5, "Most cautious"], [0.6, "Cautious"], [0.7, "Balanced"], [0.8, "Strict"], [0.9, "Strictest"]] as Array<[number, string]>).map(([value, label]) => <option key={value} value={String(value)}>{label}</option>)}
-                    </select>
-                  </Field>
-                  <Field label="Calls per number per day">
-                    <select className={selectClass} {...bind("maxCallsPerCallerPerDay")}>{unique([1, 2, 3, 5, 8, 10, 20, Number(text("maxCallsPerCallerPerDay"))]).map((value) => <option key={value} value={value}>{value}</option>)}</select>
-                  </Field>
-                </div>
-                <Field label="Say these words like this" hint="One per line, “Word: sounds like”"><Textarea rows={2} className="bg-card text-[16px] lg:text-sm" {...bind("pronunciations")} /></Field>
-                <div className="grid gap-4 md:grid-cols-2">
-                  <Field label="Keep call records for">
-                    <select className={selectClass} {...bind("dataRetentionDays")}>{unique([30, 60, 90, 180, 365, Number(text("dataRetentionDays"))]).map((days) => <option key={days} value={days}>{days} days</option>)}</select>
-                  </Field>
-                  <Field label="Support email for your callers"><Input type="email" className={fieldClass} {...bind("supportEmail")} /></Field>
-                </div>
-              </div>
-            </details>
-          </CardContent>
-        </Card>
-
-        <div className="sticky bottom-[calc(76px+env(safe-area-inset-bottom))] z-10 -mx-1 bg-gradient-to-t from-background via-background/95 to-transparent px-1 pt-4 pb-2 lg:bottom-0">
-          <Button size="tap" type="submit" className={cn(tapWidth, "shadow-md")} disabled={saving}>{saving ? "Saving…" : "Save changes"}</Button>
+    <AppShell title={section && !wide ? section.title : "Settings"} back={section ? { to: "/app/settings", label: "Settings" } : undefined}>
+      <SettingsContext.Provider value={context}>
+        <div className="grid gap-8 lg:grid-cols-[232px_minmax(0,1fr)] lg:items-start">
+          {context && <SideMenu />}
+          <div className="min-w-0">{body}</div>
         </div>
-      </form>
+      </SettingsContext.Provider>
+    </AppShell>
+  )
+}
 
-      <aside className="grid gap-4 lg:sticky lg:top-20">
-        <Card>
-          <CardHeader><CardTitle className="text-base">Calendar</CardTitle></CardHeader>
-          <CardContent className="grid gap-3">
-            {i.googleConnected ? (
-              <>
-                <p className="flex items-center gap-2 font-semibold text-emerald-700"><CheckCircle2 className="size-4" />Google Calendar connected</p>
-                <Button size="tap" variant="outline" asChild><a href="/app/integrations/google/start">Reconnect</a></Button>
-              </>
-            ) : i.googleAvailable ? (
-              <>
-                <p className="text-sm">Connect the calendar your jobs live on so Call Otto can offer real open times.</p>
-                <Button size="tap" variant="brand" asChild><a href="/app/integrations/google/start">Connect Google Calendar</a></Button>
-              </>
-            ) : <p className="text-sm text-muted-foreground">Calendar connection isn’t available yet.</p>}
-            {i.googleConnected || i.googleAvailable ? <a className="text-sm text-muted-foreground underline underline-offset-4" href="/privacy#google-calendar">How Call Otto uses Google Calendar data</a> : null}
-          </CardContent>
-        </Card>
-        <PlanCard plan={plan} csrf={csrf} onChanged={async () => { await settings.reload(); await reloadDashboard() }} />
-        <Card>
-          <CardHeader><CardTitle className="text-base">Team</CardTitle></CardHeader>
-          <CardContent><Button size="tap" variant="outline" className={tapWidth} asChild><a href="/app/team"><Users />Teammates &amp; calendars</a></Button></CardContent>
-        </Card>
-        <Card>
-          <CardHeader><CardTitle className="text-base">Your data</CardTitle></CardHeader>
-          <CardContent className="grid gap-2.5">
-            <Button size="tap" variant="outline" className={tapWidth} asChild><a href={`/api/app/shops/${encodeURIComponent(settings.data.shopId)}/calls.csv`} download><FileSpreadsheet />Export my calls (CSV)</a></Button>
-            <Button size="tap" variant="outline" className={tapWidth} asChild><a href="/app/account/export"><Download />Download everything</a></Button>
-            <form method="post" action="/app/account/sign-out-everywhere">
-              <input type="hidden" name="csrf" value={csrf} />
-              <Button size="tap" variant="outline" className={tapWidth}>Sign out on every device</Button>
-            </form>
-            <Button variant="link" className="h-10 w-fit px-0" asChild><a href="/logout"><LogOut />Sign out</a></Button>
-            <details>
-              <summary className="flex min-h-10 cursor-pointer items-center font-semibold text-red-700">Delete your account</summary>
-              <form method="post" action="/app/account/delete" className="mt-3 grid gap-3">
-                <input type="hidden" name="csrf" value={csrf} />
-                <p className="text-sm text-muted-foreground">Cancel your plan first. This disconnects your line and permanently deletes every call record, transcript, recording, task and setting. Appointments on your calendar stay there.</p>
-                <Field label="Type DELETE to confirm"><Input name="confirm" autoComplete="off" required className={fieldClass} /></Field>
-                <Field label="Your password"><Input name="password" type="password" autoComplete="current-password" required className={fieldClass} /></Field>
-                <Button size="tap" className="bg-red-600 text-white hover:bg-red-700">Delete my account</Button>
-              </form>
-            </details>
-          </CardContent>
-        </Card>
-        <p className="px-1 text-xs text-muted-foreground"><Link to="/app">Back to Calls</Link></p>
-      </aside>
+/** Wide screens: the settings menu on the left, the chosen page on the right. */
+function SideMenu() {
+  return (
+    <nav aria-label="Settings" className="sticky top-20 hidden gap-0.5 lg:grid">
+      {SECTIONS.map((item) => (
+        <NavLink key={item.id} to={`/app/settings/${item.id}`} className={({ isActive }) => cn("flex min-h-11 items-center gap-2.5 rounded-lg px-3 text-[15px] hover:bg-muted", isActive ? "bg-secondary font-semibold text-foreground" : "text-foreground/80")}>
+          <item.icon className="size-[18px] shrink-0" />{item.title}
+        </NavLink>
+      ))}
+    </nav>
+  )
+}
+
+/** Phone: one short list, each row with its current value, each opening its own page. */
+function SettingsIndex() {
+  const context = useSettings()
+  return (
+    <div className="grid gap-5 lg:hidden">
+      {context.dirty && <UnsavedBar />}
+      <div className="divide-y overflow-hidden rounded-xl border bg-card">
+        {SECTIONS.map((item) => (
+          <Link key={item.id} to={`/app/settings/${item.id}`} className="flex min-h-15 items-center gap-3 px-4 py-2.5 hover:bg-muted/50">
+            <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-secondary text-brand-ink"><item.icon className="size-5" /></span>
+            <span className="grid min-w-0 flex-1">
+              <span className="text-base font-medium">{item.title}</span>
+              <span className="truncate text-sm text-muted-foreground">{item.summary(context)}</span>
+            </span>
+            <ChevronRight className="size-5 shrink-0 text-muted-foreground" />
+          </Link>
+        ))}
+      </div>
+      <a href="/logout" className="flex min-h-14 items-center gap-3 rounded-xl border bg-card px-4 text-base font-medium"><LogOut className="size-5" />Sign out</a>
     </div>
+  )
+}
+
+function UnsavedBar() {
+  const { save, saving } = useSettings()
+  return (
+    <div className="flex min-h-14 items-center justify-between gap-3 rounded-xl bg-amber-50 px-4 py-2 text-[15px] text-amber-950 ring-1 ring-amber-200 ring-inset">
+      <strong className="font-semibold">You have unsaved changes.</strong>
+      <Button size="tap" className="lg:h-10" disabled={saving} onClick={() => void save()}>{saving ? "Saving…" : "Save"}</Button>
+    </div>
+  )
+}
+
+/**
+ * Save: on a computer it sits top right in the page's own sticky header, always in view and disabled until
+ * something changes (Stripe and Vercel put it with the content it saves, never floating mid-screen).
+ * On a phone it is a bar pinned above the tabs, shown only while there is something to save.
+ */
+function SectionPage({ section }: { section: SectionDef }) {
+  const { save, saving, dirty, discard } = useSettings()
+  const location = useLocation()
+  useEffect(() => { window.scrollTo(0, 0) }, [location.pathname])
+  const saveButton = (className?: string) => dirty || saving
+    ? <Button size="tap" type="submit" className={cn("min-w-36", className)} disabled={saving}>{saving ? "Saving…" : "Save changes"}</Button>
+    : <span className={cn("inline-flex h-12 min-w-36 items-center justify-center gap-1.5 text-[15px] font-medium text-muted-foreground lg:h-10", className)}><Check className="size-4" />All changes saved</span>
+  const body = (
+    <>
+      <header className="sticky top-14 z-10 -mx-1 hidden items-center justify-between gap-6 border-b bg-card/95 px-1 py-3 backdrop-blur-md lg:flex">
+        <div className="grid gap-0.5">
+          <h2 className="text-[22px] font-semibold tracking-tight">{section.title}</h2>
+          <p className="text-[15px] text-muted-foreground">{section.description}</p>
+        </div>
+        {section.form && (
+          <div className="flex shrink-0 items-center gap-2">
+            {dirty && <Button type="button" variant="ghost" size="tap" onClick={discard}>Discard</Button>}
+            {saveButton()}
+          </div>
+        )}
+      </header>
+      <p className="text-[15px] text-muted-foreground lg:hidden">{section.description}</p>
+      {section.render()}
+    </>
+  )
+  if (!section.form) return <div className="grid max-w-3xl gap-4">{body}</div>
+  return (
+    <form className="grid max-w-3xl gap-4" onSubmit={(event) => { event.preventDefault(); void save() }}>
+      {body}
+      {dirty && (
+        <div className="sticky bottom-[calc(76px+env(safe-area-inset-bottom))] z-10 -mx-4 flex items-center gap-3 border-t bg-card/95 px-4 py-3 backdrop-blur-md lg:hidden">
+          <Button type="button" variant="outline" size="tap" className="flex-1" onClick={discard}>Discard</Button>
+          {saveButton("flex-[2]")}
+        </div>
+      )}
+    </form>
   )
 }

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
+import { TeamService } from "../src/application/team-service.js";
 import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
 import type { CallRecord } from "../src/domain/models.js";
@@ -156,9 +157,24 @@ describe("Owner JSON API and React app serving", () => {
     const owner = await signUp("a@synthetic.example");
     await seedCall(owner.tenantId);
     const url = `${baseUrl}/api/app/calls/${CALL_ID}/task`;
+    const before = await store.getCallbackTaskForCall(CALL_ID);
     const done = await fetch(url, json(owner, "POST", { action: "complete" }));
-    expect(await done.json()).toMatchObject({ task: { status: "completed", completionSource: "owner" } });
-    expect((await (await fetch(url, json(owner, "POST", { action: "reopen" }))).json() as { task: { status: string } }).task.status).toBe("open");
+    expect(await done.json()).toMatchObject({ task: { status: "completed", completionSource: "owner", dueAt: before!.dueAt } });
+    // A second Done (a double-click, a second tab) changes nothing: the first completion time stands.
+    const first = await store.getCallbackTaskForCall(CALL_ID);
+    const realNow = clock.now;
+    clock.now = () => new Date("2026-01-15T08:03:00.000Z");
+    try {
+      const again = await (await fetch(url, json(owner, "POST", { action: "complete" }))).json() as { task: { status: string; completedAt: string; updatedAt: string } };
+      expect(again.task).toMatchObject({ status: "completed", completedAt: first!.completedAt, updatedAt: first!.updatedAt });
+      expect((await store.getCallbackTaskForCall(CALL_ID))?.completedAt).toBe(first!.completedAt);
+    } finally {
+      clock.now = realNow;
+    }
+    // Undo restores the follow-up exactly: open again, same "Call back by" time, no completion left behind.
+    const reopened = await (await fetch(url, json(owner, "POST", { action: "reopen" }))).json() as { task: { status: string; dueAt: string; completedAt: string | null } };
+    expect(reopened.task).toMatchObject({ status: "open", dueAt: before!.dueAt, completedAt: null });
+    expect(await store.getCallbackTaskForCall(CALL_ID)).toMatchObject({ status: "open", dueAt: "2026-01-15T08:05:00.000Z", completedAt: null, completionSource: null });
     expect((await fetch(url, json(owner, "POST", { action: "snooze", minutes: 7 }))).status).toBe(400);
     const snoozed = await (await fetch(url, json(owner, "POST", { action: "snooze", minutes: 240 }))).json() as { task: { status: string; dueAt: string } };
     expect(snoozed.task).toMatchObject({ status: "snoozed", dueAt: "2026-01-15T12:00:00.000Z" });
@@ -255,6 +271,10 @@ describe("Owner JSON API and React app serving", () => {
     const owner = await signUp("a@synthetic.example");
     const app = await fetch(`${baseUrl}/app/calls/${CALL_ID}`, { headers: { cookie: owner.cookie } });
     expect(await app.text()).toContain('id="root"');
+    // Settings has its own pages (/app/settings/plan, …); a reload or shared link must land on the app too.
+    const settingsPage = await fetch(`${baseUrl}/app/settings/plan`, { headers: { cookie: owner.cookie } });
+    expect(settingsPage.status).toBe(200);
+    expect(await settingsPage.text()).toContain('id="root"');
   });
 
   it("streams a recording from our own origin, forwarding byte ranges, only to its shop", async () => {
@@ -293,5 +313,25 @@ describe("Owner JSON API and React app serving", () => {
     const crossShop = await realFetch(`${baseUrl}${detail.recordingUrl}`, { headers: { cookie: other.cookie } });
     expect(crossShop.status).toBe(404);
     expect(seen).toHaveLength(3); // no lookup after the 416, and none for the other shop
+  });
+
+  it("keeps a team member out of shop settings: no read, no change", async () => {
+    const owner = await signUp("a@synthetic.example");
+    const account = (await store.getOwnerAccountByEmail("a@synthetic.example"))!;
+    const teams = new TeamService(store, clock);
+    await teams.accept(owner.tenantId, await teams.invite(account, "member@synthetic.example"), "Synthetic Member", "long-password-for-tests");
+    const login = await fetch(`${baseUrl}/login`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "member@synthetic.example", password: "long-password-for-tests" }) });
+    expect(login.status).toBe(303);
+    const cookie = login.headers.get("set-cookie")!.split(";")[0]!;
+    const dashboard = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie } })).json() as { csrf: string; viewer: { role: string } };
+    expect(dashboard.viewer.role).toBe("member");
+    const member = { cookie, csrf: dashboard.csrf };
+    const before = (await store.getConfig(owner.tenantId)).businessName;
+    expect((await fetch(`${baseUrl}/api/app/settings`, { headers: { cookie } })).status).toBe(403);
+    expect((await fetch(`${baseUrl}/api/app/settings`, json(member, "PUT", { businessName: "Changed By Member" }))).status).toBe(403);
+    expect((await store.getConfig(owner.tenantId)).businessName).toBe(before);
+    expect((await fetch(`${baseUrl}/api/app/billing/plan`, json(member, "POST", { plan: "team" }))).status).toBe(403);
+    // The owner still can.
+    expect((await fetch(`${baseUrl}/api/app/settings`, { headers: { cookie: owner.cookie } })).status).toBe(200);
   });
 });
