@@ -48,7 +48,7 @@ import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANS
 import { MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_ROUTES, toolFailure, toolLimitReached, withinToolBudget, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
 import { callScreeningSetting, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import { FORWARDING_CHECK_SPEECH, forwardingCheckState, TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
-import { setupHelpState, TelnyxSetupCaller, type SetupCallFacts } from "../adapters/telnyx-setup-call.js";
+import { setupHelpState, setupSorrySpeech, TelnyxSetupCaller, type SetupCallFacts } from "../adapters/telnyx-setup-call.js";
 import { FOUNDER_GOOGLE_SCOPES, FounderCalendars, FounderConnectError } from "../adapters/founder-calendar.js";
 import { FounderFollowup, type FounderBookingFacts } from "../application/founder-followup.js";
 import { founderConnectToken, founderConnectTokenValid, ownerFirstName, prettyPhone, readFounderBookingToken } from "../domain/founder-booking.js";
@@ -117,7 +117,39 @@ import {
 
 /** Brock's founder-calendar connect: its own cookie on the shared Google redirect path, never the owner's. */
 const FOUNDER_OAUTH_COOKIE = "afo_google_founder";
+/** The signed link (k) the connect started with, carried to Google's return so it goes back with that same link. */
+const FOUNDER_RETURN_COOKIE = "afo_google_founder_k";
 const FOUNDER_OAUTH_PATH = "/app/integrations/google";
+/** An admin-session connect gets a link this short for the trip back (the admin cookie is SameSite=Strict). */
+const FOUNDER_ADMIN_RETURN_MS = 15 * 60_000;
+
+/** Otto's AI setup helper's call to an owner, as the help endpoint and the call's webhooks write it. */
+interface SetupCallRecord {
+  startedAt?: string;
+  callControlId?: string;
+  device?: SetupCallFacts["device"];
+  to?: string;
+  answeredAt?: string;
+  endedAt?: string;
+  hangupCause?: string | null;
+}
+
+function readSetupCall(value: string | null): SetupCallRecord | null {
+  try {
+    const parsed = value ? JSON.parse(value) as unknown : null;
+    return parsed && typeof parsed === "object" ? parsed as SetupCallRecord : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Still ringing: not picked up or ended, inside the 2 minutes the app shows "calling now" (it rings up to 30 s). */
+function setupCallRinging(call: SetupCallRecord, nowMs: number): boolean {
+  return !call.answeredAt && !call.endedAt && typeof call.startedAt === "string" && nowMs - Date.parse(call.startedAt) < 2 * 60_000;
+}
+
+/** Telnyx hang-up causes that mean the owner never picked up: rang out, busy, declined, or the number didn't ring. */
+const SETUP_CALL_MISSED_CAUSES = new Set(["timeout", "no_answer", "user_busy", "call_rejected", "not_found"]);
 
 const dateTime = z.string().datetime({ offset: true });
 const baseToolSchema = z.object({
@@ -1178,7 +1210,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (!limiter.allow(`forwarding-help:${account.tenantId}`, 4, 24 * 60 * 60_000)) {
         // Brock's email (at most one a day) carries it from here.
         await founder.queueSafely(account.tenantId, "limit");
-        throw new HttpError(429, "Otto has called you a few times today. Brock, our founder, emailed you a link to book a 10-minute call.");
+        const sent = await founder.lastEmail(account.tenantId).catch(() => null);
+        throw new HttpError(429, `Otto has called you a few times today. ${!sent ? "Please try again tomorrow." : sent.link ? "Brock, our founder, emailed you a link to book a 10-minute call." : "Brock, our founder, emailed you to set up a quick call."}`);
       }
       const [config, state, ownerPhone, lineNumber] = await Promise.all([
         dependencies.store.getConfig(account.tenantId),
@@ -1192,22 +1225,26 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       // the support email below tells us the request came in.
       const device = helpRequest.device === "iphone" || helpRequest.device === "android" ? helpRequest.device : "other";
       const callTo = ownerPhone && /^\+1[2-9]\d{9}$/.test(ownerPhone) ? ownerPhone : state.businessNumber;
-      let calling: string | null = null;
-      if (setupCallsConfigured() && callTo && lineNumber) {
-        const callControlId = await setupCaller()!
-          .dial({ connectionId: dependencies.env.TELNYX_CHECK_CONNECTION_ID!, from: dependencies.env.TELNYX_FROM_NUMBER!, to: callTo, tenantId: account.tenantId, webhookUrl: `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx` })
-          .catch((error) => { log({ level: "error", event: "setup_call_dial_failed", tenantId: account.tenantId, error: safeError(error) }); return null; });
-        if (callControlId) {
-          calling = callTo;
-          await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "setup_call", JSON.stringify({ startedAt: now, callControlId, device, to: callTo }));
+      // One setup call per shop at a time, written only under this lock (here and by the call's webhooks).
+      const calling = await dependencies.store.withLock(`setup-call:${account.tenantId}`, async (): Promise<string | null> => {
+        const current = readSetupCall(await dependencies.store.getIntegrationSecret(account.tenantId, "forwarding", "setup_call"));
+        // Already ringing (a double tap, another device): that call carries it. Never dial over it or clear it.
+        if (current?.to && setupCallRinging(current, Date.parse(now))) return current.to;
+        if (setupCallsConfigured() && callTo && lineNumber) {
+          const callControlId = await setupCaller()!
+            .dial({ connectionId: dependencies.env.TELNYX_CHECK_CONNECTION_ID!, from: dependencies.env.TELNYX_FROM_NUMBER!, to: callTo, tenantId: account.tenantId, webhookUrl: `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx` })
+            .catch((error) => { log({ level: "error", event: "setup_call_dial_failed", tenantId: account.tenantId, error: safeError(error) }); return null; });
+          if (callControlId) {
+            await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "setup_call", JSON.stringify({ startedAt: now, callControlId, device, to: callTo }));
+            return callTo;
+          }
         }
-      }
-      if (!calling) {
-        // No call is coming (not set up, no number, or the dial failed): clear any older call so the app shows
-        // Brock's email, and send it now.
+        // No call is coming (not set up, no number, or the dial failed): clear the older, finished call so the app
+        // shows Brock's email.
         await dependencies.store.deleteIntegrationSecret(account.tenantId, "forwarding", "setup_call");
-        await founder.queueSafely(account.tenantId, "call_unavailable");
-      }
+        return null;
+      });
+      if (!calling) await founder.queueSafely(account.tenantId, "call_unavailable");
       if (dependencies.env.SUPPORT_EMAIL) {
         await dependencies.store.enqueueNotification({
           id: randomUUID(), tenantId: account.tenantId, callId: null, channel: "email", destinationRef: `email:${dependencies.env.SUPPORT_EMAIL}`,
@@ -2281,13 +2318,14 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   }
 
   async function readForwarding(tenantId: string): Promise<ForwardingState> {
-    const [businessNumber, carrierJson, confirmedAt, checkJson, helpRequestedAt, setupCallJson] = await Promise.all([
+    const [businessNumber, carrierJson, confirmedAt, checkJson, helpRequestedAt, setupCallJson, founderEmail] = await Promise.all([
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "business_number"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "carrier"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "confirmed_at"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "check"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "help_requested_at"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"),
+      founder.lastEmail(tenantId),
     ]);
     const parse = <T>(value: string | null): T | null => { try { return value ? JSON.parse(value) as T : null; } catch { return null; } };
     const check = parse<ForwardingCheckRecord>(checkJson);
@@ -2296,6 +2334,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       check: check ? { startedAt: check.startedAt, method: check.method, answeredAt: check.answeredAt ?? null, endedAt: check.endedAt ?? null, hangupCause: check.hangupCause ?? null } : null,
       helpRequestedAt,
       helpCall: ((call) => call?.to && call.startedAt ? { to: call.to, startedAt: call.startedAt } : null)(parse<{ to?: string; startedAt?: string }>(setupCallJson)),
+      founderEmail,
     };
   }
 
@@ -2331,15 +2370,32 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     // Only our apology ends in a hang-up; nothing the helper itself says ever does.
     if (phase === "sorry") { if (envelope.data.event_type === "call.speak.ended") await caller.hangUp(callControlId); return; }
     if (envelope.data.event_type !== "call.answered" && envelope.data.event_type !== "call.hangup") return;
-    let call: { callControlId?: string; device?: SetupCallFacts["device"]; answeredAt?: string } | null = null;
-    try { call = JSON.parse(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call") ?? "null"); } catch { call = null; }
-    if (!call || call.callControlId !== callControlId) return;
+    const at = dependencies.clock.now().toISOString();
+    // Read and write the call record under the same lock as the help endpoint, so an answer and a hang-up that
+    // arrive together (or out of order) never both act on a stale record.
+    const lockedCall = (task: (call: SetupCallRecord) => Promise<SetupCallRecord | null>) => dependencies.store.withLock(`setup-call:${tenantId}`, async () => {
+      const call = readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"));
+      return call && call.callControlId === callControlId ? task(call) : null;
+    });
     if (envelope.data.event_type === "call.hangup") {
-      // Rang out, busy or declined: the helper never got to talk, so Brock emails now.
-      if (!call.answeredAt) await founder.queueSafely(tenantId, "no_answer");
+      const cause = typeof envelope.data.payload.hangup_cause === "string" ? envelope.data.payload.hangup_cause.slice(0, 40) : null;
+      const ended = await lockedCall(async (call) => {
+        if (call.endedAt) return null;
+        await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...call, endedAt: at, hangupCause: cause }));
+        return call;
+      });
+      // Rang out, busy or declined: the helper never got to talk, so Brock emails now. Any other ending without a
+      // recorded answer (a normal hang-up whose answer we haven't seen yet) is left to the 20-minute check.
+      if (ended && !ended.answeredAt && cause && SETUP_CALL_MISSED_CAUSES.has(cause)) await founder.queueSafely(tenantId, "no_answer");
       return;
     }
-    await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...call, answeredAt: dependencies.clock.now().toISOString() }));
+    const call = await lockedCall(async (current) => {
+      // The hang-up already came in: the call is over, so there's no one to start the helper for.
+      if (current.endedAt) return null;
+      if (!current.answeredAt) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...current, answeredAt: at }));
+      return current;
+    });
+    if (!call) return;
     const [config, state, lineNumber] = await Promise.all([
       dependencies.store.getConfig(tenantId),
       readForwarding(tenantId),
@@ -2368,7 +2424,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       // then apologize and hang up when that's said.
       log({ level: "error", event: "setup_call_start_failed", tenantId, error: safeError(error) });
       await founder.queueSafely(tenantId, "helper_failed");
-      await caller.apologize(callControlId, `setup-sorry:${envelope.data.id}`, tenantId);
+      const sent = await founder.lastEmail(tenantId).catch(() => null);
+      const fresh = sent ? dependencies.clock.now().getTime() - Date.parse(sent.sentAt) < 10 * 60_000 : false;
+      await caller.apologize(callControlId, `setup-sorry:${envelope.data.id}`, tenantId, setupSorrySpeech(sent ? { fresh, link: sent.link } : null));
     });
   }
 
@@ -2475,7 +2533,13 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         code_challenge: attempt.challenge,
         code_challenge_method: "S256",
       }).toString();
-      response.setHeader("set-cookie", `${FOUNDER_OAUTH_COOKIE}=${value}; Path=${FOUNDER_OAUTH_PATH}; HttpOnly; SameSite=Lax; Max-Age=600${secure ? "; Secure" : ""}`);
+      // The way back: the link this connect started with, never a fresh one. A connect from the admin session gets
+      // a 15-minute link, since the SameSite=Strict admin cookie doesn't survive the trip through Google.
+      const returnLink = viaLink ? k! : founderConnectToken(signingKey, now, FOUNDER_ADMIN_RETURN_MS);
+      response.setHeader("set-cookie", [
+        `${FOUNDER_OAUTH_COOKIE}=${value}; Path=${FOUNDER_OAUTH_PATH}; HttpOnly; SameSite=Lax; Max-Age=600${secure ? "; Secure" : ""}`,
+        `${FOUNDER_RETURN_COOKIE}=${encodeURIComponent(returnLink)}; Path=${FOUNDER_OAUTH_PATH}; HttpOnly; SameSite=Lax; Max-Age=600${secure ? "; Secure" : ""}`,
+      ]);
       return redirect(response, authorization.toString());
     }
     if (form) {
@@ -2523,9 +2587,12 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const attempt = clientForAttempt(dependencies.env, `${signingKey}:founder-calendar`, (key) => verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, FOUNDER_OAUTH_COOKIE), key, now.getTime()));
     if (!attempt) return false;
     const secure = dependencies.env.NODE_ENV === "production";
-    response.setHeader("set-cookie", `${FOUNDER_OAUTH_COOKIE}=; Path=${FOUNDER_OAUTH_PATH}; HttpOnly; SameSite=Lax; Max-Age=0${secure ? "; Secure" : ""}`);
-    // A fresh signed link back to the calendars page, so it works without an admin session.
-    const back = (query: string): string => `/admin/founder-calendars?k=${encodeURIComponent(founderConnectToken(signingKey, now, 60 * 60_000))}&${query}`;
+    response.setHeader("set-cookie", [FOUNDER_OAUTH_COOKIE, FOUNDER_RETURN_COOKIE].map((name) => `${name}=; Path=${FOUNDER_OAUTH_PATH}; HttpOnly; SameSite=Lax; Max-Age=0${secure ? "; Secure" : ""}`));
+    // Back to the calendars page with the same signed link the connect started with, never a new one (so a link
+    // can't renew itself here), and none once it has run out.
+    const returnLink = readCookie(request, FOUNDER_RETURN_COOKIE);
+    const linked = returnLink && founderConnectTokenValid(signingKey, returnLink, now) ? returnLink : null;
+    const back = (query: string): string => `/admin/founder-calendars?${linked ? `k=${encodeURIComponent(linked)}&` : ""}${query}`;
     const code = url.searchParams.get("code");
     if (url.searchParams.has("error") || !code) {
       redirect(response, back("error=declined"));

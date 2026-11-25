@@ -13,12 +13,15 @@ import { encodeGoogleConnection, googleClient, missingCalendarPermissions, type 
  * platform secrets (tenant "platform", provider "google-founder"), one key per account, plus a small index.
  */
 export const FOUNDER_GOOGLE_PROVIDER = "google-founder";
-/** Busy times, events Otto creates, and which Google account this is. Nothing else. */
+/**
+ * Busy times, events on calendars the account owns (setup calls go on its main calendar), and which Google account
+ * this is. Nothing else: the same calendar permissions as GOOGLE_CALENDAR_SCOPES, the ones on the consent screen.
+ */
 export const FOUNDER_GOOGLE_SCOPES = [
   "openid",
   "email",
   "https://www.googleapis.com/auth/calendar.freebusy",
-  "https://www.googleapis.com/auth/calendar.events",
+  "https://www.googleapis.com/auth/calendar.events.owned",
 ] as const;
 const INDEX_KEY = "accounts";
 const BOOKED_KEY = "booked";

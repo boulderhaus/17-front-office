@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
 import { FOUNDER_GOOGLE_PROVIDER } from "../src/adapters/founder-calendar.js";
 import { ResendEmailAdapter, formatEmailBody, parseEmailBody } from "../src/adapters/resend.js";
-import { SETUP_SORRY_SPEECH, setupInstructions } from "../src/adapters/telnyx-setup-call.js";
+import { SETUP_SORRY_SPEECH, setupInstructions, setupSorrySpeech } from "../src/adapters/telnyx-setup-call.js";
 import { founderEmailSender, loadEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
 import {
@@ -168,6 +168,32 @@ describe("Brock's emails", () => {
     expect(parseEmailBody("Subject: Old\n\nBody text")).toEqual({ subject: "Old", text: "Body text", attachments: [] });
   });
 
+  it("a line break in a subject (a shop's name) can't add an attachment, and only Brock's own emails carry one", async () => {
+    const body = formatEmailBody("Forwarding help: Acme\nAttachment: invoice.html; PGgxPmhpPC9oMT4=", "Synthetic text");
+    expect(body.split("\n")[0]).toBe("Subject: Forwarding help: Acme Attachment: invoice.html; PGgxPmhpPC9oMT4=");
+    expect(parseEmailBody(body).attachments).toEqual([]);
+    expect(parseEmailBody(body).text).toBe("Synthetic text");
+    const sent: Array<Record<string, unknown>> = [];
+    const fetcher = (async (_url: string, init?: RequestInit) => {
+      sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify({ id: `email-${sent.length}` }), { status: 200 });
+    }) as typeof fetch;
+    const adapter = new ResendEmailAdapter({ apiKey: "re_synthetic", from: "Call Otto <alerts@callotto.example>", fetcher });
+    const withFile = formatEmailBody("Hi", "Text", [{ filename: "call-otto-setup.ics", content: "BEGIN:VCALENDAR" }]);
+    const base: OutboxNotification = { id: "n1", tenantId: "shop_a", callId: null, channel: "email", destinationRef: "email:owner@synthetic.example", body: withFile, priority: "high", state: "pending", attempts: 0, nextAttemptAt: "2026-11-30T13:00:00.000Z", idempotencyKey: "k1", providerReceipt: null, lastError: null, createdAt: "2026-11-30T13:00:00.000Z", sentAt: null };
+    await adapter.send(base);
+    await adapter.send({ ...base, id: "n2", idempotencyKey: "k2", senderRef: "founder" });
+    expect(sent[0]!.attachments).toBeUndefined();
+    expect((sent[1]!.attachments as Array<{ filename: string }>)[0]!.filename).toBe("call-otto-setup.ics");
+  });
+
+  it("the apology says only what was sent: a link, a note asking for a reply, or nothing", () => {
+    expect(setupSorrySpeech({ fresh: true, link: true })).toBe(SETUP_SORRY_SPEECH);
+    expect(setupSorrySpeech({ fresh: true, link: false })).toBe("Hi, this is Call Otto. Our setup helper couldn't start just now. Brock, our founder, just emailed you to set up a quick 10 minute call. Sorry about that. Goodbye.");
+    expect(setupSorrySpeech({ fresh: false, link: true })).toContain("Brock, our founder, emailed you a link earlier to book a quick 10 minute call.");
+    expect(setupSorrySpeech(null)).toBe("Hi, this is Call Otto. Our setup helper couldn't start just now. Please try again later from the Call Otto app. Sorry about that. Goodbye.");
+  });
+
   it("the setup helper promises Brock's email, never a person following up today", () => {
     const instructions = setupInstructions({ businessName: "Gulf Air", businessNumber: "+19415550177", carrierName: "Spectrum", family: "office", code: null, offCode: null, confirm: null, ottoNumber: "+19415550123", device: "other" });
     expect(instructions).toContain("Brock, our founder, will email them a link to book a 10-minute call");
@@ -207,6 +233,9 @@ async function app(options: { setupCalls?: boolean; failDial?: boolean; failHelp
   /** Busy blocks each founder account's freeBusy reports, keyed by account id. */
   const busy: Record<string, Array<{ start: string; end: string }>> = {};
   let tokenReply: Record<string, unknown> = {};
+  let dialFails = options.failDial ?? false;
+  /** While set, Google's event insert waits on it: holds a booking mid-flight. */
+  let eventGate: Promise<void> | null = null;
   const fake = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.startsWith("http://127.0.0.1")) return realFetch(input, init);
@@ -217,7 +246,7 @@ async function app(options: { setupCalls?: boolean; failDial?: boolean; failHelp
     try { body = raw ? JSON.parse(raw) : null; } catch { body = raw; }
     recorded.push({ url, method, body, auth: headers.authorization });
     const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
-    if (url === "https://api.telnyx.com/v2/calls") return options.failDial ? json({ errors: [{}] }, 503) : json({ data: { call_control_id: "v3:help-call" } });
+    if (url === "https://api.telnyx.com/v2/calls") return dialFails ? json({ errors: [{}] }, 503) : json({ data: { call_control_id: "v3:help-call" } });
     if (url === "https://api.telnyx.com/v2/ai/assistants" && method === "POST") return json({ data: { id: "setup-assistant" } });
     if (url.endsWith("/actions/ai_assistant_start")) return options.failHelperStart ? json({ errors: [{}] }, 500) : json({ data: { result: "ok" } });
     if (/\/actions\/(speak|hangup)$/.test(url)) return json({ data: { result: "ok" } });
@@ -233,7 +262,10 @@ async function app(options: { setupCalls?: boolean; failDial?: boolean; failHelp
       const items = (body as { items: Array<{ id: string }> }).items;
       return json({ calendars: Object.fromEntries(items.map((item) => [item.id, { busy: busy[account] ?? [] }])) });
     }
-    if (url.startsWith("https://www.googleapis.com/calendar/v3/calendars/primary/events")) return json({ id: (body as { id: string }).id });
+    if (url.startsWith("https://www.googleapis.com/calendar/v3/calendars/primary/events")) {
+      if (eventGate) await eventGate;
+      return json({ id: (body as { id: string }).id });
+    }
     throw new Error(`Unexpected outbound request in test: ${method} ${url}`);
   }) as typeof fetch;
   globalThis.fetch = fake;
@@ -278,7 +310,8 @@ async function app(options: { setupCalls?: boolean; failDial?: boolean; failHelp
     return fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(body, keys.privateKey, clock.now()), body });
   };
   const dialState = () => (recorded.filter((call) => call.url === "https://api.telnyx.com/v2/calls").at(-1)?.body as { client_state: string }).client_state;
-  return { store, clock, baseUrl, handler, recorded, busy, logs, owner, founderEmails, webhook, dialState, setTokenReply: (value: Record<string, unknown>) => { tokenReply = value; } };
+  return { store, clock, baseUrl, handler, recorded, busy, logs, owner, founderEmails, webhook, dialState, setTokenReply: (value: Record<string, unknown>) => { tokenReply = value; }, setDialFails: (value: boolean) => { dialFails = value; },
+    holdEvents: () => { let release = () => {}; eventGate = new Promise<void>((resolve) => { release = () => { eventGate = null; resolve(); }; }); return release; } };
 }
 
 function signed(body: string, privateKey: KeyObject, now: Date): Record<string, string> {
@@ -379,6 +412,90 @@ describe("Brock emails when the AI setup helper can't finish", () => {
     expect(made.founderEmails()).toHaveLength(0);
   });
 
+  it("a hang-up only means 'didn't reach you' for rang out, busy or declined; one that beats the answer sends nothing and starts nothing", async () => {
+    for (const cause of ["user_busy", "call_rejected"]) {
+      const made = await app({ founders: BROCK });
+      const { account, api } = await made.owner();
+      await api("/api/app/line/help", { device: "iphone" });
+      await made.webhook("call.hangup", `evt-${cause}`, { call_control_id: "v3:help-call", client_state: made.dialState(), hangup_cause: cause });
+      expect(made.founderEmails(account.tenantId)).toHaveLength(1);
+      await new Promise<void>((resolve) => server!.close(() => resolve()));
+      server = null;
+    }
+    const made = await app({ founders: BROCK });
+    const { account, api } = await made.owner();
+    await api("/api/app/line/help", { device: "iphone" });
+    // Picked up and hung up fast: Telnyx's hang-up lands before its answer. No "didn't reach you" email...
+    await made.webhook("call.hangup", "evt-early-hangup", { call_control_id: "v3:help-call", client_state: made.dialState(), hangup_cause: "normal_clearing" });
+    expect(made.founderEmails(account.tenantId)).toHaveLength(0);
+    // ...and the late answer doesn't start the helper on a call that's already over.
+    await made.webhook("call.answered", "evt-late-answer", { call_control_id: "v3:help-call", client_state: made.dialState() });
+    expect(made.recorded.some((call) => call.url.endsWith("/actions/ai_assistant_start"))).toBe(false);
+    // A redelivered hang-up adds nothing either; the 20-minute check is the backstop.
+    await made.webhook("call.hangup", "evt-early-hangup", { call_control_id: "v3:help-call", client_state: made.dialState(), hangup_cause: "timeout" });
+    expect(made.founderEmails(account.tenantId)).toHaveLength(0);
+    made.clock.at = new Date(made.clock.at.getTime() + 21 * 60_000);
+    expect(await made.handler.runFounderFollowups()).toEqual({ queued: 1 });
+  });
+
+  it("asking again while Otto's call is still ringing never dials over it or clears it", async () => {
+    const made = await app({ founders: BROCK });
+    const { account, api } = await made.owner();
+    const dials = () => made.recorded.filter((call) => call.url === "https://api.telnyx.com/v2/calls").length;
+    await api("/api/app/line/help", { device: "iphone" });
+    expect(dials()).toBe(1);
+    // A second tap (another device) whose dial would fail: the ringing call stays, nothing is emailed.
+    made.setDialFails(true);
+    made.clock.at = new Date(made.clock.at.getTime() + 20_000);
+    const again = await api("/api/app/line/help", { device: "iphone" });
+    expect(((await again.json()) as { line: { helpCall: { to: string } | null } }).line.helpCall).toMatchObject({ to: "+19415550199" });
+    expect(dials()).toBe(1);
+    expect(made.founderEmails(account.tenantId)).toHaveLength(0);
+    expect(JSON.parse((await made.store.getIntegrationSecret(account.tenantId, "forwarding", "setup_call"))!)).toMatchObject({ callControlId: "v3:help-call" });
+    // The owner picks up: the helper starts on that call.
+    await made.webhook("call.answered", "evt-answered", { call_control_id: "v3:help-call", client_state: made.dialState() });
+    expect(made.recorded.some((call) => call.url.endsWith("/actions/ai_assistant_start"))).toBe(true);
+    // Later, with that call over, a failed dial clears it and Brock emails.
+    await made.webhook("call.hangup", "evt-done", { call_control_id: "v3:help-call", client_state: made.dialState(), hangup_cause: "normal_clearing" });
+    made.clock.at = new Date(made.clock.at.getTime() + 3 * 60_000);
+    await api("/api/app/line/help", { device: "iphone" });
+    expect(dials()).toBe(2);
+    expect(await made.store.getIntegrationSecret(account.tenantId, "forwarding", "setup_call")).toBeNull();
+    expect(made.founderEmails(account.tenantId)).toHaveLength(1);
+  });
+
+  it("the app, the 'called you a few times' message and the apology only mention a link when the email had one", async () => {
+    const withLink = await app({ setupCalls: false, founders: BROCK });
+    const linked = await withLink.owner();
+    const linkedLine = ((await (await linked.api("/api/app/line/help", { device: "iphone" })).json()) as { line: { founderEmail: unknown } }).line;
+    expect(linkedLine.founderEmail).toEqual({ sentAt: withLink.clock.now().toISOString(), link: true });
+    for (let attempt = 0; attempt < 3; attempt += 1) await linked.api("/api/app/line/help", { device: "iphone" });
+    const limited = await linked.api("/api/app/line/help", { device: "iphone" });
+    expect(limited.status).toBe(429);
+    expect(((await limited.json()) as { error: string }).error).toBe("Otto has called you a few times today. Brock, our founder, emailed you a link to book a 10-minute call.");
+    await new Promise<void>((resolve) => server!.close(() => resolve()));
+    server = null;
+
+    // No founder calendar connected yet: the email asks for a reply, so nothing claims a link.
+    const noCalendar = await app({ setupCalls: false });
+    const unlinked = await noCalendar.owner();
+    const line = ((await (await unlinked.api("/api/app/line/help", { device: "iphone" })).json()) as { line: { founderEmail: unknown } }).line;
+    expect(line.founderEmail).toEqual({ sentAt: noCalendar.clock.now().toISOString(), link: false });
+    for (let attempt = 0; attempt < 3; attempt += 1) await unlinked.api("/api/app/line/help", { device: "iphone" });
+    const limitedNoLink = await unlinked.api("/api/app/line/help", { device: "iphone" });
+    expect(((await limitedNoLink.json()) as { error: string }).error).toBe("Otto has called you a few times today. Brock, our founder, emailed you to set up a quick call.");
+    await new Promise<void>((resolve) => server!.close(() => resolve()));
+    server = null;
+
+    const helperFails = await app({ failHelperStart: true });
+    const owner = await helperFails.owner();
+    await owner.api("/api/app/line/help", { device: "iphone" });
+    await helperFails.webhook("call.answered", "evt-answered", { call_control_id: "v3:help-call", client_state: helperFails.dialState() });
+    const speak = helperFails.recorded.find((call) => call.url.endsWith("/actions/speak"));
+    expect((speak?.body as { payload: string }).payload).toBe(setupSorrySpeech({ fresh: true, link: false }));
+    expect(helperFails.founderEmails(owner.account.tenantId)).toHaveLength(1);
+  });
+
   it("with no founder calendar connected, the email asks for a reply instead of a link, and says why in the log", async () => {
     const made = await app({ setupCalls: false });
     const { account, api } = await made.owner();
@@ -461,6 +578,34 @@ describe("booking a call with Brock", () => {
     expect(made.recorded.filter((call) => call.url.includes("/calendars/primary/events"))).toHaveLength(1);
   });
 
+  it("a double tap books once: another time or the same one shows the booked call, never a second event", async () => {
+    const made = await app({ setupCalls: false, founders: BROCK });
+    const { account, api } = await made.owner();
+    await api("/api/app/line/help", { device: "iphone" });
+    const link = new URL(await bookingLink(made, account.tenantId));
+    const offered = starts(await (await fetch(link)).text());
+    const post = (start: string) => fetch(`${made.baseUrl}/book-setup`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ t: link.searchParams.get("t")!, start }) });
+    // The first tap is mid-booking (Google hasn't answered yet) when the second, for another time, arrives.
+    const release = made.holdEvents();
+    const firstTap = post(offered[0]!);
+    while (!made.recorded.some((call) => call.url.includes("/calendars/primary/events"))) await new Promise((resolve) => setTimeout(resolve, 5));
+    const secondTap = post(offered[1]!);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    release();
+    const [one, two] = await Promise.all([firstTap, secondTap]);
+    expect([one.status, two.status]).toEqual([200, 200]);
+    const [first, second] = [await one.text(), await two.text()];
+    const label = /<p class="done">([^<]+)<\/p>/;
+    expect(label.exec(first)?.[1]).toBeTruthy();
+    expect(label.exec(second)?.[1]).toBe(label.exec(first)?.[1]);
+    // The same time again on a slow connection: still "you're set", not "that time just got taken".
+    const retap = await post(offered[0]!);
+    expect(retap.status).toBe(200);
+    expect(await retap.text()).not.toContain("just got taken");
+    expect(made.recorded.filter((call) => call.url.includes("/calendars/primary/events"))).toHaveLength(1);
+    expect(made.founderEmails(account.tenantId).filter((item) => item.idempotencyKey.endsWith(":confirmation"))).toHaveLength(1);
+  });
+
   it("a tampered or expired link shows a plain expired page", async () => {
     const made = await app({ setupCalls: false, founders: BROCK });
     const { account, api } = await made.owner();
@@ -492,22 +637,27 @@ describe("connecting Brock's calendars", () => {
     const google = new URL(start.headers.get("location")!);
     expect(google.origin + google.pathname).toBe("https://accounts.google.com/o/oauth2/v2/auth");
     expect(google.searchParams.get("redirect_uri")).toBe("https://front-office.example/app/integrations/google/callback");
-    expect(google.searchParams.get("scope")).toBe("openid email https://www.googleapis.com/auth/calendar.freebusy https://www.googleapis.com/auth/calendar.events");
+    expect(google.searchParams.get("scope")).toBe("openid email https://www.googleapis.com/auth/calendar.freebusy https://www.googleapis.com/auth/calendar.events.owned");
     expect(google.searchParams.get("access_type")).toBe("offline");
     expect(google.searchParams.get("prompt")).toBe("consent");
-    const cookie = start.headers.get("set-cookie")!;
+    const [cookie, returnCookie] = start.headers.getSetCookie();
     expect(cookie).toMatch(/^afo_google_founder=[^;]+; Path=\/app\/integrations\/google; HttpOnly; SameSite=Lax; Max-Age=600/);
+    expect(returnCookie).toMatch(/^afo_google_founder_k=[^;]+; Path=\/app\/integrations\/google; HttpOnly; SameSite=Lax; Max-Age=600/);
 
     const idToken = `x.${Buffer.from(JSON.stringify({ sub: "google-sub-1", email: "Brock.Personal@example.com" })).toString("base64url")}.y`;
-    made.setTokenReply({ refresh_token: "refresh-new", scope: "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/calendar.freebusy https://www.googleapis.com/auth/calendar.events", id_token: idToken });
+    made.setTokenReply({ refresh_token: "refresh-new", scope: "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/calendar.freebusy https://www.googleapis.com/auth/calendar.events.owned", id_token: idToken });
     const callback = new URL(`${made.baseUrl}/app/integrations/google/callback`);
     callback.searchParams.set("state", google.searchParams.get("state")!);
     callback.searchParams.set("code", "synthetic-code");
-    const done = await fetch(callback, { redirect: "manual", headers: { cookie: cookie.split(";")[0]! } });
+    const done = await fetch(callback, { redirect: "manual", headers: { cookie: `${cookie!.split(";")[0]!}; ${returnCookie!.split(";")[0]!}` } });
     expect(done.status).toBe(303);
     const back = done.headers.get("location")!;
-    expect(back).toMatch(/^\/admin\/founder-calendars\?k=[^&]+&done=connected$/);
-    expect(done.headers.get("set-cookie")).toMatch(/^afo_google_founder=; Path=\/app\/integrations\/google;.*Max-Age=0/);
+    // Back with the very link it started with: the return trip never mints a new one.
+    expect(back).toBe(`/admin/founder-calendars?k=${encodeURIComponent(k)}&done=connected`);
+    expect(done.headers.getSetCookie()).toEqual([
+      expect.stringMatching(/^afo_google_founder=; Path=\/app\/integrations\/google;.*Max-Age=0/),
+      expect.stringMatching(/^afo_google_founder_k=; Path=\/app\/integrations\/google;.*Max-Age=0/),
+    ]);
     const accounts = JSON.parse((await made.store.getIntegrationSecret(PLATFORM_TENANT_ID, FOUNDER_GOOGLE_PROVIDER, "accounts"))!) as Array<{ id: string; email: string; bookHere: boolean; calendarsSource: string }>;
     expect(accounts).toHaveLength(1);
     expect(accounts[0]).toMatchObject({ email: "brock.personal@example.com", bookHere: true, calendarsSource: "primary" });
@@ -531,6 +681,44 @@ describe("connecting Brock's calendars", () => {
     expect((await post("/admin/founder-calendars/disconnect", { k, account: "b" })).status).toBe(303);
     expect((await read()).map((account) => ({ id: account.id, bookHere: account.bookHere }))).toEqual([{ id: "a", bookHere: true }]);
     expect(await made.store.getIntegrationSecret(PLATFORM_TENANT_ID, FOUNDER_GOOGLE_PROVIDER, "token:b")).toBeNull();
+  });
+
+  it("Google's return never renews a link: same link back, none once it ran out, and an admin connect gets 15 minutes", async () => {
+    const made = await app({ setupCalls: false });
+    const k = founderConnectToken(KEY, made.clock.now(), 60 * 60_000);
+    const begin = async (headers: Record<string, string>, query = "") => {
+      const start = await fetch(`${made.baseUrl}/admin/founder-calendars/connect${query}`, { redirect: "manual", headers });
+      expect(start.status).toBe(303);
+      const [cookie, returnCookie] = start.headers.getSetCookie().map((value) => value.split(";")[0]!);
+      return { state: new URL(start.headers.get("location")!).searchParams.get("state")!, cookie: cookie!, returnCookie: returnCookie! };
+    };
+    const finish = async (attempt: { state: string; cookie: string }, cookies: string) => {
+      const callback = new URL(`${made.baseUrl}/app/integrations/google/callback`);
+      callback.searchParams.set("state", attempt.state);
+      callback.searchParams.set("error", "access_denied");
+      const done = await fetch(callback, { redirect: "manual", headers: { cookie: `${attempt.cookie}; ${cookies}` } });
+      expect(done.status).toBe(303);
+      return done.headers.get("location")!;
+    };
+
+    // Cancelled at Google (or replayed with a made-up error, no Google needed): the same link back, not a fresh one.
+    const viaLink = await begin({}, `?k=${encodeURIComponent(k)}`);
+    expect(await finish(viaLink, viaLink.returnCookie)).toBe(`/admin/founder-calendars?k=${encodeURIComponent(k)}&error=declined`);
+    // Without the return cookie, or with one that isn't a valid link: no link at all.
+    expect(await finish(await begin({}, `?k=${encodeURIComponent(k)}`), "")).toBe("/admin/founder-calendars?error=declined");
+    expect(await finish(await begin({}, `?k=${encodeURIComponent(k)}`), "afo_google_founder_k=forged")).toBe("/admin/founder-calendars?error=declined");
+    // The link ran out while at Google: back without it (sign in as admin), never renewed.
+    const short = founderConnectToken(KEY, made.clock.now(), 60_000);
+    const late = await begin({}, `?k=${encodeURIComponent(short)}`);
+    made.clock.at = new Date(made.clock.at.getTime() + 2 * 60_000);
+    expect(await finish(late, late.returnCookie)).toBe("/admin/founder-calendars?error=declined");
+
+    // Started with admin access (no link): a 15-minute link for the way back, since the admin cookie stays behind.
+    const admin = await begin({ authorization: `Bearer ${baseEnv().ADMIN_TOKEN}` });
+    const minted = decodeURIComponent(admin.returnCookie.slice(admin.returnCookie.indexOf("=") + 1));
+    expect(founderConnectTokenValid(KEY, minted, made.clock.now())).toBe(true);
+    expect(founderConnectTokenValid(KEY, minted, new Date(made.clock.at.getTime() + 15 * 60_000 + 1))).toBe(false);
+    expect(await finish(admin, admin.returnCookie)).toBe(`/admin/founder-calendars?k=${encodeURIComponent(minted)}&error=declined`);
   });
 
   it("leaves the owner's own calendar connect exactly as it was, with or without a stray founder cookie", async () => {

@@ -63,6 +63,8 @@ export interface ApiDashboard {
     helpRequestedAt: string | null;
     /** Otto's AI setup helper's last call to the owner: where and when. */
     helpCall: { to: string; startedAt: string } | null;
+    /** Brock's follow-up email in the last 24 hours, and whether it has a booking link (no calendar connected: it asks for a reply). */
+    founderEmail: { sentAt: string; link: boolean } | null;
   };
   csrf: string;
   now: string;
@@ -255,6 +257,7 @@ export interface ForwardingState {
   check: { startedAt: string; method: "auto" | "manual"; answeredAt?: string | null; endedAt?: string | null; hangupCause?: string | null } | null;
   helpRequestedAt: string | null;
   helpCall?: { to: string; startedAt: string } | null;
+  founderEmail?: { sentAt: string; link: boolean } | null;
 }
 
 /** How long a check waits for the forwarded call before saying it didn't reach us (our call rings up to 60 s). */
@@ -293,6 +296,7 @@ function lineModel(lineNumber: string | null, mode: BusinessConfig["operationMod
     check: { status, method: check?.method ?? null, startedAt: check?.startedAt ?? null, answeredAfterSec, callerId: checkCallerId },
     helpRequestedAt: state?.helpRequestedAt ?? null,
     helpCall: state?.helpCall ?? null,
+    founderEmail: state?.founderEmail ?? null,
   };
 }
 
