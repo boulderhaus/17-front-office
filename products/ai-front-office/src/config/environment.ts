@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { DEFAULT_TELNYX_VOICE } from "../voice/system-prompt.js";
 import { validVapidKeys } from "../adapters/web-push.js";
+import { parseBookingWindows } from "../domain/founder-booking.js";
 
 export { DEFAULT_TELNYX_VOICE };
 
@@ -136,6 +137,15 @@ const schema = z.object({
   RESEND_FROM_EMAIL: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
   /** Display name on owner emails: "Call Otto <hello@callotto.co>". No angle brackets or quotes, so it cannot break the header. */
   RESEND_FROM_NAME: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(60).regex(/^[^<>"\r\n]+$/, "RESEND_FROM_NAME must be plain text").default("Call Otto")),
+  /**
+   * Brock's follow-up when the AI setup helper can't finish: sent as "Brock from Call Otto" from this address
+   * (default brock@ + the domain of RESEND_FROM_EMAIL), replies to FOUNDER_REPLY_TO (default SUPPORT_EMAIL).
+   */
+  FOUNDER_FROM_EMAIL: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
+  FOUNDER_REPLY_TO: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
+  /** When owners may book a 10-minute setup call with Brock, in FOUNDER_TIMEZONE: "Mon-Fri 10:00-12:00,14:00-17:00". */
+  FOUNDER_BOOKING_WINDOWS: z.preprocess((value) => value === "" ? undefined : value, z.string().max(300).default("Mon-Fri 10:00-12:00,14:00-17:00")),
+  FOUNDER_TIMEZONE: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).default("America/New_York")),
   // Product analytics + error tracking. Unset = everything off (tests, local).
   POSTHOG_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().regex(/^phc_[A-Za-z0-9_-]{8,}$/, "POSTHOG_KEY must be a PostHog project API key (phc_...)").optional()),
   // Only PostHog Cloud ingestion hosts: the /ingest proxy forwards here, so it must never be arbitrary.
@@ -151,6 +161,12 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
   } catch {
     throw new Error("DEFAULT_TIMEZONE must be a valid IANA timezone");
   }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: parsed.FOUNDER_TIMEZONE }).format();
+  } catch {
+    throw new Error("FOUNDER_TIMEZONE must be a valid IANA timezone");
+  }
+  parseBookingWindows(parsed.FOUNDER_BOOKING_WINDOWS);
   if (parsed.ADMIN_TOKEN === parsed.TOOL_TOKEN) throw new Error("ADMIN_TOKEN and TOOL_TOKEN must be different");
   if (parsed.SESSION_SIGNING_KEY && (parsed.SESSION_SIGNING_KEY === parsed.ADMIN_TOKEN || parsed.SESSION_SIGNING_KEY === parsed.TOOL_TOKEN)) {
     throw new Error("SESSION_SIGNING_KEY must be distinct from ADMIN_TOKEN and TOOL_TOKEN");
@@ -182,6 +198,16 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
   }
   return parsed;
 }
+
+/** Who Brock's follow-up emails come from and where replies go. Null when email isn't set up. */
+export function founderEmailSender(env: Environment): { from: string; replyTo: string | null } | null {
+  const domain = env.RESEND_FROM_EMAIL?.split("@")[1];
+  const address = env.FOUNDER_FROM_EMAIL ?? (domain ? `brock@${domain}` : null);
+  if (!address) return null;
+  return { from: `${FOUNDER_FROM_NAME} <${address}>`, replyTo: env.FOUNDER_REPLY_TO ?? env.SUPPORT_EMAIL ?? null };
+}
+
+export const FOUNDER_FROM_NAME = "Brock from Call Otto";
 
 function hasProviderTestConfiguration(env: Environment): boolean {
   return Boolean(

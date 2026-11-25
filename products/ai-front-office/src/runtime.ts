@@ -10,7 +10,7 @@ import { WebPushSender } from "./adapters/web-push.js";
 import { hasOwnerCallConsent } from "./domain/owner-call-consent.js";
 import { TelnyxOwnerCallSender, urgentOwnerCallsConfigured } from "./adapters/telnyx-owner-call.js";
 import { UnavailableCalendar } from "./adapters/unavailable.js";
-import { parseOwnerDestinations, type Environment } from "./config/environment.js";
+import { founderEmailSender, parseOwnerDestinations, type Environment } from "./config/environment.js";
 import { createDemoConfig } from "./domain/config.js";
 import { systemClock, type CalendarPort, type NotificationPort, type Store } from "./ports.js";
 import { CryptoBox } from "./security/crypto-box.js";
@@ -97,7 +97,7 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
     : null;
   const emailConfigured = Boolean(env.RESEND_API_KEY && env.RESEND_FROM_EMAIL);
   const emailSender = emailConfigured
-    ? new ResendEmailAdapter({ apiKey: env.RESEND_API_KEY!, from: resendFrom(env.RESEND_FROM_NAME, env.RESEND_FROM_EMAIL!) })
+    ? new ResendEmailAdapter({ apiKey: env.RESEND_API_KEY!, from: resendFrom(env.RESEND_FROM_NAME, env.RESEND_FROM_EMAIL!), founder: founderEmailSender(env) })
     : null;
   const pushSender = env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY
     ? new WebPushSender({ store, clock: systemClock, vapid: { publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY, subject: env.VAPID_SUBJECT } })

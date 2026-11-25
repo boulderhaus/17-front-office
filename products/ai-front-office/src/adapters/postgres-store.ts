@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import pg from "pg";
-import type { Store, ToolClaim } from "../ports.js";
+import { PLATFORM_TENANT_ID, type Store, type ToolClaim } from "../ports.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, CustomerRecord, OutboxNotification, OwnerAccount, OwnerWorkspaceInput, PilotSignup, ProviderRoute, SubscriptionRecord, ToolEvent, UsageSummary } from "../domain/models.js";
 import { CryptoBox } from "../security/crypto-box.js";
 import { SIGN_IN_LINK_OUTBOX_TENANT } from "../security/owner-auth.js";
@@ -97,19 +97,34 @@ export class PostgresStore implements Store {
   }
 
   async getIntegrationSecret(tenantId: string, provider: string, key: string): Promise<string | null> {
-    const result = await this.#pool.query(
-      "SELECT value_ciphertext FROM integration_secrets WHERE tenant_id=$1 AND provider=$2 AND secret_key=$3",
-      [tenantId, provider, key],
-    );
+    const result = tenantId === PLATFORM_TENANT_ID
+      ? await this.#pool.query("SELECT value_ciphertext FROM platform_secrets WHERE provider=$1 AND secret_key=$2", [provider, key])
+      : await this.#pool.query(
+        "SELECT value_ciphertext FROM integration_secrets WHERE tenant_id=$1 AND provider=$2 AND secret_key=$3",
+        [tenantId, provider, key],
+      );
     if (!result.rows[0]) return null;
     return this.cryptoBox.decrypt(String(result.rows[0].value_ciphertext));
   }
 
   async deleteIntegrationSecret(tenantId: string, provider: string, key: string): Promise<void> {
+    if (tenantId === PLATFORM_TENANT_ID) {
+      await this.#pool.query("DELETE FROM platform_secrets WHERE provider=$1 AND secret_key=$2", [provider, key]);
+      return;
+    }
     await this.#pool.query("DELETE FROM integration_secrets WHERE tenant_id=$1 AND provider=$2 AND secret_key=$3", [tenantId, provider, key]);
   }
 
   async saveIntegrationSecret(tenantId: string, provider: string, key: string, value: string): Promise<void> {
+    // Platform-wide secrets have no shop row for integration_secrets' foreign key (migrations/017).
+    if (tenantId === PLATFORM_TENANT_ID) {
+      await this.#pool.query(
+        `INSERT INTO platform_secrets(provider,secret_key,value_ciphertext,updated_at) VALUES($1,$2,$3,now())
+         ON CONFLICT (provider,secret_key) DO UPDATE SET value_ciphertext=EXCLUDED.value_ciphertext,updated_at=now()`,
+        [provider, key, this.cryptoBox.encrypt(value)],
+      );
+      return;
+    }
     // Only values we must find by content get a keyed lookup hash; every other secret stays opaque.
     const lookupHash = provider === "telnyx" && key === "inbound_number" ? this.cryptoBox.hashLookup(value) : null;
     await this.#pool.query(

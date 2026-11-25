@@ -77,6 +77,8 @@ export interface ApiDashboard {
     }
     helpRequestedAt: string | null
     helpCall: { to: string; startedAt: string } | null
+    /** Brock's follow-up email in the last 24 hours, and whether it has a booking link. */
+    founderEmail?: { sentAt: string; link: boolean } | null
   }
   csrf: string
   now: string
