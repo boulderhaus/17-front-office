@@ -2,6 +2,7 @@ import type { GuaranteeRefund, StripeBillingClient } from "../adapters/stripe.js
 import type { PlanId } from "../domain/plans.js";
 import { extraCallsWithUnlimited, isQualifyingLead, lastClosedBillingPeriod } from "../domain/usage.js";
 import type { Clock, Store } from "../ports.js";
+import { isCompStatus } from "../domain/billing.js";
 
 const DAY_MS = 24 * 60 * 60_000;
 /** The guarantee watches the first 30 days after the first successful charge… */
@@ -164,7 +165,8 @@ export class OverageBillingService {
     if (!stripe) return "skipped";
     return this.store.withLock(`billing:${tenantId}`, async () => {
       const subscription = await this.store.getSubscription(tenantId);
-      if (!subscription?.providerCustomerId) return "skipped";
+      // Never billed: no Stripe customer, or a complimentary shop (the Google review account).
+      if (!subscription?.providerCustomerId || isCompStatus(subscription.status)) return "skipped";
       const now = this.clock.now();
       const period = lastClosedBillingPeriod(now, subscription.currentPeriodEnd);
       if (!period) return "skipped";

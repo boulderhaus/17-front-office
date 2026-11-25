@@ -2,7 +2,7 @@ import type { CallPath } from "../domain/call-path.js";
 import { ownerTaskReason } from "../domain/task-reason.js";
 import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
 import { CARRIER_CHOICES, forwardingChoice, forwardingPlan, mayForwardAll, ringFirstSeconds, type CarrierInfo, type ForwardingChoice, type ForwardingMode, type ForwardingPlan, type TestedFor } from "../domain/forwarding.js";
-import { isPaidStatus } from "../domain/billing.js";
+import { hasPlanAccess } from "../domain/billing.js";
 import { describeHours } from "../domain/hours.js";
 import { fairUseCalls, type PlanId } from "../domain/plans.js";
 import { extraCalls } from "../domain/usage.js";
@@ -241,7 +241,8 @@ export function apiDashboard(input: {
     },
     googleConnected: input.googleConnected,
     googleAvailable: input.googleAvailable ?? false,
-    paid: isPaidStatus(input.subscription?.status),
+    // Paid or complimentary (the review account): the app shows no card step either way.
+    paid: hasPlanAccess(input.subscription?.status),
     checkoutConfigured: input.checkoutConfigured,
     billing: {
       status: input.subscription?.status ?? "none",

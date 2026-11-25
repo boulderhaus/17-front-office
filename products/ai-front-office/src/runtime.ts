@@ -6,6 +6,7 @@ import { PostgresStore } from "./adapters/postgres-store.js";
 import { TelnyxSmsAdapter } from "./adapters/telnyx.js";
 import { ResendEmailAdapter, resendFrom } from "./adapters/resend.js";
 import { NotificationRouter } from "./adapters/notification-router.js";
+import { isCompTenant } from "./application/review-account.js";
 import { WebPushSender } from "./adapters/web-push.js";
 import { hasOwnerCallConsent } from "./domain/owner-call-consent.js";
 import { TelnyxOwnerCallSender, urgentOwnerCallsConfigured } from "./adapters/telnyx-owner-call.js";
@@ -119,8 +120,9 @@ export async function createRuntime(env: Environment): Promise<Runtime> {
       })
     : null;
   // Same rule as the answering exemption: the named demo tenant, and only while no owner account exists for it.
+  // The Google review account (a complimentary shop) is silent too: no text, email, push or call ever leaves it.
   const sender = new NotificationRouter(smsSender, emailSender, pushSender, voiceSender,
-    async (tenantId) => tenantId === env.PUBLIC_DEMO_TENANT_ID && !await store.getOwnerAccountByTenant(tenantId));
+    async (tenantId) => (tenantId === env.PUBLIC_DEMO_TENANT_ID && !await store.getOwnerAccountByTenant(tenantId)) || await isCompTenant(store, tenantId));
   return {
     store,
     calendar,
