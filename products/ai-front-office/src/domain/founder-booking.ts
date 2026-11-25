@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { isUsHoliday } from "./us-holidays.js";
 
 /**
  * When Otto's AI setup helper can't finish, Brock (the founder) emails the owner a link to book a 10-minute call.
@@ -137,7 +138,8 @@ interface SlotInput {
 
 /**
  * Every 10-minute start inside Brock's windows (on the quarter hour) over the next `days` business days that still
- * have a start after the lead time, grouped by day. Business days are the window days, in Brock's own zone.
+ * have a start after the lead time, grouped by day. Business days are the window days, in Brock's own zone, minus US
+ * bank holidays (and the days around them in us-holidays.ts), read on his zone's calendar, not UTC's.
  */
 function candidatesByDay(input: SlotInput): Array<Array<{ start: number; end: number }>> {
   const duration = (input.durationMinutes ?? FOUNDER_CALL_MINUTES) * 60_000;
@@ -147,7 +149,7 @@ function candidatesByDay(input: SlotInput): Array<Array<{ start: number; end: nu
   for (let offset = 0; offset < SCAN_DAYS && result.length < (input.days ?? FOUNDER_BOOKING_DAYS); offset += 1) {
     const date = new Date(Date.UTC(today.year, today.month - 1, today.day + offset));
     const ranges = input.windows.get(date.getUTCDay());
-    if (!ranges) continue;
+    if (!ranges || isUsHoliday(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate())) continue;
     const day: Array<{ start: number; end: number }> = [];
     for (const [from, to] of ranges) {
       for (let minute = from; minute * 60_000 + duration <= to * 60_000; minute += SLOT_STEP_MINUTES) {
@@ -179,7 +181,7 @@ export function founderSlots(input: SlotInput): FounderSlot[] {
   return slots;
 }
 
-/** A start the owner may pick: inside the windows, on the grid, after the lead time, within the booking days. */
+/** A start the owner may pick: inside the windows, on the grid, after the lead time, within the booking days, never on a holiday. */
 export function founderSlotAllowed(start: string, input: Omit<SlotInput, "busy">): FounderSlot | null {
   const at = Date.parse(start);
   if (!Number.isFinite(at)) return null;

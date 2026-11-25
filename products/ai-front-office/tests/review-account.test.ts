@@ -130,7 +130,7 @@ async function app() {
     const dashboard = async () => (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie } })).json() as Promise<Record<string, any>>;
     const csrf = (await dashboard()).csrf as string;
     const api = (path: string, body: unknown = {}) => fetch(`${baseUrl}${path}`, { method: "POST", headers: { cookie, "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify(body) });
-    const form = (path: string, fields: Record<string, string> = {}) => fetch(`${baseUrl}${path}`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, ...fields }) });
+    const form = (path: string, fields: Record<string, string> = {}, headers: Record<string, string> = {}) => fetch(`${baseUrl}${path}`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded", ...headers }, body: new URLSearchParams({ csrf, ...fields }) });
     return { cookie, csrf, dashboard, api, form };
   }
   async function reviewAccount() {
@@ -296,7 +296,13 @@ describe("the review account in the owner app", () => {
     const checkout = await owner.form("/app/billing/checkout", { from: "start", plan: "team" });
     expect(checkout.status).toBe(303);
     expect(checkout.headers.get("location")).toBe("/app");
-    expect((await owner.form("/app/billing/portal")).status).toBe(409);
+    // A JSON client gets the 409; a browser goes back to Plan and billing with the one-line note, never an error page.
+    const portalJson = await owner.form("/app/billing/portal");
+    expect(portalJson.status).toBe(409);
+    expect(((await portalJson.json()) as { error: string }).error).toBe("This is a complimentary review account. There’s no billing to manage.");
+    const portalPage = await owner.form("/app/billing/portal", {}, { accept: "text/html,application/xhtml+xml" });
+    expect(portalPage.status).toBe(303);
+    expect(portalPage.headers.get("location")).toBe("/app/settings/plan?billing=comp");
     expect((await owner.form("/app/line/go-live")).status).toBe(303);
 
     const activate = await (await owner.api("/api/app/onboarding/activate", { sessionId: "cs_synthetic_forged" })).json() as Record<string, any>;

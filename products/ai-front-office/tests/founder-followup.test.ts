@@ -621,6 +621,26 @@ describe("booking a call with Brock", () => {
     expect(made.founderEmails(account.tenantId).filter((item) => item.idempotencyKey.endsWith(":confirmation"))).toHaveLength(1);
   });
 
+  it("never offers Thanksgiving or the day after, and refuses a crafted POST for a holiday time", async () => {
+    const made = await app({ setupCalls: false, founders: BROCK });
+    // Wednesday Nov 25 2026, 9:00 AM Eastern.
+    made.clock.at = new Date("2026-11-25T14:00:00Z");
+    const { account, api } = await made.owner();
+    await api("/api/app/line/help", { device: "iphone" });
+    const link = new URL(await bookingLink(made, account.tenantId));
+    const offered = starts(await (await fetch(link)).text());
+    expect(offered.length).toBeGreaterThan(0);
+    expect(offered.filter((start) => start.startsWith("2026-11-26") || start.startsWith("2026-11-27"))).toEqual([]);
+    expect(offered.some((start) => start.startsWith("2026-11-30"))).toBe(true);
+    // Thanksgiving 10:00 AM Eastern: on the grid, inside the windows, within five business days, and still refused.
+    const crafted = await fetch(`${made.baseUrl}/book-setup`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ t: link.searchParams.get("t")!, start: "2026-11-26T15:00:00.000Z" }) });
+    expect(crafted.status).toBe(409);
+    expect(await crafted.text()).toContain("Pick another.");
+    expect(made.recorded.filter((call) => call.method === "POST" && call.url.includes("/calendars/primary/events"))).toHaveLength(0);
+    expect(await made.store.getIntegrationSecret(account.tenantId, "founder", "booking")).toBeNull();
+    expect(made.founderEmails(account.tenantId).filter((item) => item.idempotencyKey.endsWith(":confirmation"))).toHaveLength(0);
+  });
+
   it("a tampered or expired link shows a plain expired page", async () => {
     const made = await app({ setupCalls: false, founders: BROCK });
     const { account, api } = await made.owner();
