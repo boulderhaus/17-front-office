@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
 import { COMPANY, SMS_CONSENT_VERSION } from "../src/admin/footer.js";
 import { renderFounderBooking } from "../src/admin/founder.js";
-import { renderOwnerSignup } from "../src/admin/render.js";
+import { renderForgotPassword, renderOwnerLogin, renderOwnerSignup } from "../src/admin/render.js";
 import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
 import { OWNER_CALL_CONSENT_DETAIL, OWNER_CALL_CONSENT_LABEL, OWNER_CALL_CONSENT_VERSION } from "../src/domain/owner-call-consent.js";
@@ -78,6 +78,28 @@ describe("public page system", () => {
     // Brock is named once per line.
     const reply = renderFounderBooking({ state: "reply", reason: "nothing_open" });
     expect(reply).toContain("<p>Brock’s open times are full this week. Reply to his email with a good time and he’ll call you.</p>");
+    // A taken time is said on load: the box takes focus so a screen reader reads it before the times.
+    const taken = renderFounderBooking({ state: "pick", token: "t", businessName: "Synthetic Air", timeZone: "America/Chicago", slots, taken: true });
+    expect(taken).toContain('<div class="formerror" role="alert" tabindex="-1" autofocus><p>That time just got taken. Pick another.</p></div>');
+    expect(pick).not.toContain("autofocus");
+  });
+
+  it("a page-level error box takes focus only when no field does", () => {
+    const focusBox = /<div class="formerror" role="alert" id="[^"]+" tabindex="-1" autofocus>/;
+    expect(renderOwnerSignup("Check the form and try again.")).toMatch(focusBox);
+    expect(renderOwnerSignup("", { email: "owner@synthetic" }, { fieldErrors: { email: "Enter an email like you@yourshop.com." } })).not.toMatch(focusBox);
+    expect(renderOwnerLogin("Google sign-in didn’t work. Try again.")).toMatch(focusBox);
+    expect(renderOwnerLogin("That link expired or was already used. Send a new one.", { emailLink: true, errorField: "linkToken" })).not.toMatch(focusBox);
+    expect(renderForgotPassword({ emailEnabled: true, error: "That reset link is expired or already used. Ask for a new one." })).toMatch(focusBox);
+    expect(renderForgotPassword({ emailEnabled: true, error: "Enter the email on your account, like you@yourshop.com.", email: "owner@synthetic" })).not.toMatch(focusBox);
+    expect(renderOwnerLogin()).toMatch(/\.formerror:focus-visible\{outline:3px solid var\(--field-ink\)/);
+  });
+
+  it("inline links grow to 44px as boxes, not padding that overlaps the line above or below", () => {
+    const page = renderOwnerLogin();
+    expect(page).toContain(".publicform .fielderror a{display:inline-flex;align-items:center;min-height:44px;");
+    expect(page).toContain(".authnote a{display:inline-flex;align-items:center;min-height:44px;");
+    expect(page).not.toMatch(/(fielderror|authnote) a\{[^}]*padding-block/);
   });
 });
 

@@ -49,11 +49,12 @@ export function renderFounderBooking(view: FounderBookingView): string {
   }
   const zone = view.slots[0] ? zoneLabel(view.slots[0].start, view.timeZone) : "";
   const groups = [...days.entries()].map(([label, slots], index) => `<div class="slotday" role="group" aria-labelledby="day-${index}"><h2 id="day-${index}">${escapeHtml(label)}</h2><div class="slotgrid">${slots.map((slot) => `<button name="start" value="${escapeHtml(slot.start)}">${escapeHtml(slotTimeLabel(slot.start, view.timeZone))}</button>`).join("")}</div></div>`).join("");
+  // A taken time is said on load, so the box takes focus: screen readers skip an alert that is already there.
   return page(
     "Book a setup call",
     "Setup call",
     "Book a 10-minute call with Brock.",
-    `${view.taken ? `<div class="formerror" role="alert"><p>That time just got taken. Pick another.</p></div>` : ""}${zone ? `<p class="zone">Times are in your time zone (${escapeHtml(zone)}).</p>` : ""}<form class="publicform" method="post" action="/book-setup"><input type="hidden" name="t" value="${escapeHtml(view.token)}">${groups}</form>`,
+    `${view.taken ? `<div class="formerror" role="alert" tabindex="-1" autofocus><p>That time just got taken. Pick another.</p></div>` : ""}${zone ? `<p class="zone">Times are in your time zone (${escapeHtml(zone)}).</p>` : ""}<form class="publicform" method="post" action="/book-setup"><input type="hidden" name="t" value="${escapeHtml(view.token)}">${groups}</form>`,
     `<p>Brock, our founder, will call and turn on call forwarding for ${escapeHtml(view.businessName)}.</p>`,
   );
 }

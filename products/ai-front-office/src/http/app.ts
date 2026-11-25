@@ -881,7 +881,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const form = parseForm(await readBody(request, 16_000));
       const next = safeNext(form.get("next"));
       const parsed = ownerLoginSchema.safeParse({ email: form.get("email") ?? "", password: form.get("password") ?? "" });
-      if (!parsed.success) return sendHtml(response, 400, renderOwnerLogin("Enter a valid email and password.", signIn.loginOptions(request, { errorField: "password", email: form.get("email") ?? "", next })));
+      if (!parsed.success) {
+        // A malformed email the browser let through points at the email, not the password.
+        const badEmail = parsed.error.issues.some((issue) => issue.path[0] === "email");
+        return sendHtml(response, 400, renderOwnerLogin(badEmail ? "Enter an email like you@yourshop.com." : "Enter your password.", signIn.loginOptions(request, { errorField: badEmail ? "passwordEmail" : "password", email: form.get("email") ?? "", next })));
+      }
       // Per-account limit so guesses spread across many addresses still stop.
       if (!limiter.allow(`owner-login-email:${parsed.data.email}`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
       const account = await dependencies.store.getOwnerAccountByEmail(parsed.data.email);

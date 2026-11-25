@@ -490,6 +490,18 @@ describe("sign-in page", () => {
     expect(wrong).toContain('<span class="fielderror" id="login-field-error">Email or password is incorrect.</span>');
   });
 
+  it("a malformed email the browser lets through on the password form points at the email, not the password", async () => {
+    const h = await harness();
+    const response = await fetch(`${h.baseUrl}/login`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@shop", password: "some-long-password" }) });
+    expect(response.status).toBe(400);
+    const page = await response.text();
+    expect(page).toContain('<a href="#password-email">Enter an email like you@yourshop.com.</a>');
+    expect(page).toMatch(/id="password-email" [^>]*value="owner@shop" required aria-invalid="true" aria-describedby="login-field-error" autofocus>/);
+    // The password was fine: not marked, no focus.
+    expect(page).toMatch(/id="password" name="password" type="password" autocomplete="current-password" maxlength="200" required>/);
+    expect(page).toContain('<details class="pwd" open>');
+  });
+
   it("keeps a mistyped email on the link form and points at the fix", async () => {
     const h = await harness();
     const response = await requestLink(h, "owner@synthetic");
@@ -514,6 +526,10 @@ describe("sign-in page", () => {
     const mismatch = await (await reset("long-password-one", "long-password-two")).text();
     expect(mismatch).toMatch(/<input name="confirm" id="reset-confirm" [^>]*aria-invalid="true" autofocus>/);
     expect(mismatch).toContain("The two passwords don’t match. Type the same one twice.");
+    // A dead link is said on load with no field to fix, so the box itself takes focus and is read out.
+    const expired = await (await reset("long-password-one", "long-password-one")).text();
+    expect(expired).toContain('<div class="formerror" role="alert" id="forgot-error" tabindex="-1" autofocus><p>That reset link is expired or already used. Ask for a new one.</p></div>');
+    expect(expired.match(/ autofocus/g)).toHaveLength(1);
   });
 });
 

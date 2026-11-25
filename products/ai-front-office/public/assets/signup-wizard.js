@@ -7,9 +7,11 @@
     toggle.className = "pwtoggle";
     toggle.setAttribute("aria-controls", input.id);
     const word = document.createTextNode("Show");
+    // The hidden words name the field, so "New password" and "Type it again" don't both read "Show password".
+    const label = (input.labels?.[0]?.textContent ?? "").trim().toLowerCase();
     const rest = document.createElement("span");
     rest.className = "vh";
-    rest.textContent = " password";
+    rest.textContent = ` ${!label || label === "password" ? "password" : label.includes("password") ? label : `password (${label})`}`;
     toggle.append(word, rest);
     const set = (shown) => {
       input.type = shown ? "text" : "password";
@@ -21,7 +23,7 @@
   });
 
   // One tap sends a form once: the button says "Sending…" and later taps do nothing while it's on its way.
-  // Ready again after Back, or after 10 seconds in case the network dropped it.
+  // Ready again only after Back. No timer: a slow sign-up or booking must never let a second tap charge or book twice.
   const labels = new WeakMap();
   const ready = (formElement) => {
     delete formElement.dataset.busy;
@@ -36,13 +38,13 @@
         event.preventDefault();
         return;
       }
-      formElement.dataset.busy = "1";
       const button = event.submitter ?? formElement.querySelector('button:not([type="button"])');
       if (!button) return;
+      formElement.dataset.busy = "1";
+      // Not disabled: a disabled submitter drops its name and value (the booking time) from the post.
       button.setAttribute("aria-busy", "true");
       labels.set(button, [...button.childNodes]);
       button.replaceChildren("Sending…");
-      setTimeout(() => ready(formElement), 10_000);
     });
   });
   window.addEventListener("pageshow", () => document.querySelectorAll("form[data-busy]").forEach(ready));
