@@ -139,7 +139,7 @@ describe("signup by trade", () => {
 
   it("asks for the trade, and a homepage tile arrives with it picked", async () => {
     const plain = await (await fetch(`${baseUrl}/signup`)).text();
-    expect(plain).toContain('<select name="trade" required>');
+    expect(plain).toContain('<select name="trade" id="signup-trade" required aria-describedby="signup-trade-hint">');
     expect(plain).toContain('<option value="" selected disabled>Pick one</option>');
     expect(plain).toContain("Five quick answers.");
     const picked = await (await fetch(`${baseUrl}/signup?trade=plumbing`)).text();

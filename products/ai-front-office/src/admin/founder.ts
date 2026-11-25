@@ -1,25 +1,21 @@
 import type { FounderAccount } from "../adapters/founder-calendar.js";
 import { maskEmail, slotDayLabel, slotFullLabel, slotTimeLabel, zoneLabel, type FounderSlot } from "../domain/founder-booking.js";
-import { escapeHtml, layout, publicLayout } from "./render.js";
+import { authPage, escapeHtml, layout } from "./render.js";
 
 const BOOKING_STYLE = `<style>
-.booking{max-width:560px}.booking .formintro{padding:26px 0 18px}
-.booking .formintro h1{font-size:clamp(30px,8.6vw,52px);line-height:1.02;letter-spacing:-.035em}
-.booking .formintro p:last-child{font-size:18px;margin:12px 0 0}
-.booking p{font-size:17px}
 .booking .zone{font:700 16px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif;margin:0 0 14px}
-.slotday{margin:0 0 20px}
+.slotday{margin:0 0 20px}.slotday:last-child{margin-bottom:0}
 .slotday h2{margin:0 0 10px;font:800 17px/1.3 ui-sans-serif,system-ui,-apple-system,sans-serif}
 .slotgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px}
-.publicform .slotgrid button{width:100%;min-height:52px;padding:12px 10px;font-size:17px;text-transform:none;letter-spacing:0}
-.booking .done{font-size:20px;font-weight:700}
-@media(max-width:480px){.publicnav,.publicmain{padding-left:16px;padding-right:16px}.booking .publicform{padding:18px 16px}}
+.authpage .publicform .slotgrid button{min-height:52px;padding:12px 10px;background:var(--white);color:var(--blue);box-shadow:3px 3px 0 var(--blue);font-size:17px;text-transform:none;letter-spacing:0}
+.authpage .publicform .slotgrid button:hover,.authpage .publicform .slotgrid button:focus-visible{background:#fff;transform:translate(2px,2px);box-shadow:1px 1px 0 var(--blue)}
+.booking .publicform>p.done{margin:0 0 10px;text-wrap:balance;font:900 24px/1.2 ui-sans-serif,system-ui,-apple-system,sans-serif;letter-spacing:-.02em}
+.booking .publicform>p{margin:0 0 8px;font:600 17px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}.booking .publicform>p:last-child{margin:0}
+.nowrap{white-space:nowrap}
 </style>`;
 
-const HEADER = `<header class="publicnav"><a class="brand smallbrand" href="/"><span>Call</span> Otto</a><nav><a href="/login">Sign in</a></nav></header>`;
-
-function page(title: string, eyebrow: string, heading: string, body: string): string {
-  return publicLayout(title, `${BOOKING_STYLE}${HEADER}<main class="publicmain formpage booking"><section class="formintro"><p class="eyebrow">${escapeHtml(eyebrow)}</p><h1>${escapeHtml(heading)}</h1></section>${body}</main>`);
+function page(title: string, eyebrow: string, heading: string, body: string, lede = ""): string {
+  return authPage(title, { header: "login", eyebrow, heading, lede, style: BOOKING_STYLE, body: `<div class="booking">${body}</div>` });
 }
 
 export type FounderBookingView =
@@ -31,19 +27,20 @@ export type FounderBookingView =
 /** /book-setup: pick a 10-minute call with Brock, shown in the owner's own time zone. */
 export function renderFounderBooking(view: FounderBookingView): string {
   if (view.state === "expired") {
-    return page("Link expired", "Setup call", "This link has expired.", `<p>Booking links work for 7 days. Reply to Brock's email and he'll find a time with you.</p>`);
+    return page("Link expired", "Setup call", "This link has expired.", `<p class="authnote">Reply to Brock’s email and he’ll find a time with you.</p>`, `<p>Booking links work for 7 days.</p>`);
   }
   if (view.state === "reply") {
+    // Brock is named once: "his email" after a line that already says whose open times.
     const why = view.reason === "nothing_open"
-      ? "Brock's open times are all taken this week."
-      : view.reason === "unavailable" ? "We couldn't load Brock's open times just now." : "Online booking isn't open yet.";
-    return page("Book a setup call", "Setup call", "Reply with a good time.", `<p>${why} Reply to Brock's email with a good time for a 10-minute call and he'll call you.</p>`);
+      ? "Brock’s open times are full this week. Reply to his email"
+      : view.reason === "unavailable" ? "We couldn’t load Brock’s open times just now. Reply to his email" : "Online booking isn’t open yet. Reply to Brock’s email";
+    return page("Book a setup call", "Setup call", "Reply with a good time.", "", `<p>${why} with a good time and he’ll call you.</p>`);
   }
   if (view.state === "booked") {
     const when = slotFullLabel(view.slot.start, view.timeZone);
-    const call = view.callNumber ? `Brock will call you at <span style="white-space:nowrap">${escapeHtml(view.callNumber)}</span>.` : "Brock will call you.";
-    const sent = view.justBooked ? " We emailed you a confirmation with a calendar invite." : "";
-    return page("You're set", "Setup call", "You're set.", `<p class="done">${escapeHtml(when)}</p><p>${call}${sent} It takes about 10 minutes.</p><p>Need a different time? Reply to Brock's email.</p>`);
+    const call = view.callNumber ? `Brock will call you at <span class="nowrap">${escapeHtml(view.callNumber)}</span>.` : "Brock will call you.";
+    const sent = view.justBooked ? `<p>We emailed you a calendar invite.</p>` : "";
+    return page("You’re set", "Setup call", "You’re set.", `<div class="publicform"><p class="done">${escapeHtml(when)}</p><p>${call} It takes about 10 minutes.</p>${sent}</div><p class="authnote">Need a different time? Reply to Brock’s email.</p>`);
   }
   const days = new Map<string, FounderSlot[]>();
   for (const slot of view.slots) {
@@ -51,12 +48,14 @@ export function renderFounderBooking(view: FounderBookingView): string {
     days.set(label, [...(days.get(label) ?? []), slot]);
   }
   const zone = view.slots[0] ? zoneLabel(view.slots[0].start, view.timeZone) : "";
-  const groups = [...days.entries()].map(([label, slots]) => `<div class="slotday" role="group" aria-label="${escapeHtml(label)}"><h2>${escapeHtml(label)}</h2><div class="slotgrid">${slots.map((slot) => `<button name="start" value="${escapeHtml(slot.start)}">${escapeHtml(slotTimeLabel(slot.start, view.timeZone))}</button>`).join("")}</div></div>`).join("");
+  const groups = [...days.entries()].map(([label, slots], index) => `<div class="slotday" role="group" aria-labelledby="day-${index}"><h2 id="day-${index}">${escapeHtml(label)}</h2><div class="slotgrid">${slots.map((slot) => `<button name="start" value="${escapeHtml(slot.start)}">${escapeHtml(slotTimeLabel(slot.start, view.timeZone))}</button>`).join("")}</div></div>`).join("");
+  // A taken time is said on load, so the box takes focus: screen readers skip an alert that is already there.
   return page(
     "Book a setup call",
     "Setup call",
     "Book a 10-minute call with Brock.",
-    `${view.taken ? `<p class="formerror" role="alert">That time just got taken. Pick another.</p>` : ""}<p>Brock, our founder, will call you and get call forwarding on for ${escapeHtml(view.businessName)}. Pick a time.</p>${zone ? `<p class="zone">Times are in your time zone (${escapeHtml(zone)}).</p>` : ""}<form class="publicform" method="post" action="/book-setup"><input type="hidden" name="t" value="${escapeHtml(view.token)}">${groups}</form>`,
+    `${view.taken ? `<div class="formerror" role="alert" tabindex="-1" autofocus><p>That time just got taken. Pick another.</p></div>` : ""}${zone ? `<p class="zone">Times are in your time zone (${escapeHtml(zone)}).</p>` : ""}<form class="publicform" method="post" action="/book-setup"><input type="hidden" name="t" value="${escapeHtml(view.token)}">${groups}</form>`,
+    `<p>Brock, our founder, will call and turn on call forwarding for ${escapeHtml(view.businessName)}.</p>`,
   );
 }
 

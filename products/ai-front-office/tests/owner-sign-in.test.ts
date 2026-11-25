@@ -464,17 +464,72 @@ describe("sign-in page", () => {
     const h = await harness();
     const page = await (await fetch(`${h.baseUrl}/login`)).text();
     expect(page).toContain('<label for="link-email">');
-    expect(page).toMatch(/id="link-email" name="email" type="email" autocomplete="email" inputmode="email"/);
+    expect(page).toMatch(/id="link-email" name="email" type="email" autocomplete="username" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false"/);
     expect(page).toMatch(/id="password" name="password" type="password" autocomplete="current-password"/);
     expect(page).toContain('<a href="/forgot">Forgot your password?</a>');
-    expect(page).toMatch(/\.publicform input,[^{]*\{[^}]*font:400 17px[^}]*ui-sans-serif/);
+    expect(page).toMatch(/\.publicform input,[^{]*\{[^}]*font:500 18px[^}]*ui-sans-serif/);
+    // White on the strong red passes 4.5:1 (the brand red didn't); every control gets a visible focus ring.
+    expect(page).toContain("--red-strong:#b42318");
+    expect(page).toMatch(/\.publicform button\{background:var\(--red-strong\);color:white\}/);
+    expect(page).toMatch(/\.publicform select:focus-visible\{outline:3px solid var\(--field-ink\)/);
+    expect(page).toContain('<meta name="theme-color" content="#f1efe7">');
+    expect(page).toContain('<h1>Sign in</h1>');
+    expect(page).toContain('<div class="pwfield"><input id="password"');
+    expect(page).toContain('New to Call Otto? <a class="textlink" href="/signup">Get started</a>');
     expect(page).toContain("--field-ink:#0a2540");
     expect(page).toContain('fill="#4285F4"');
     const wrong = await (await fetch(`${h.baseUrl}/login`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "nobody@synthetic.example", password: "wrong-password" }) })).text();
     expect(wrong).toContain('role="alert" id="login-error"');
-    expect(wrong).toContain('<a href="#password-email">Email or password is incorrect.</a>');
+    // The summary links to the field that shows the error and has focus: the password, since the email was kept.
+    expect(wrong).toContain('<a href="#password">Email or password is incorrect.</a>');
     expect(wrong).toMatch(/id="password-email"[^>]*aria-invalid="true" aria-describedby="login-error"/);
     expect(wrong).toContain('<details class="pwd" open>');
+    // The typed email stays, the password field takes focus, and the problem also sits right under it.
+    expect(wrong).toMatch(/id="password-email"[^>]*value="nobody@synthetic\.example"/);
+    expect(wrong).toMatch(/id="password" [^>]*aria-describedby="login-field-error" autofocus>/);
+    expect(wrong).toContain('<span class="fielderror" id="login-field-error">Email or password is incorrect.</span>');
+  });
+
+  it("a malformed email the browser lets through on the password form points at the email, not the password", async () => {
+    const h = await harness();
+    const response = await fetch(`${h.baseUrl}/login`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@shop", password: "some-long-password" }) });
+    expect(response.status).toBe(400);
+    const page = await response.text();
+    expect(page).toContain('<a href="#password-email">Enter an email like you@yourshop.com.</a>');
+    expect(page).toMatch(/id="password-email" [^>]*value="owner@shop" required aria-invalid="true" aria-describedby="login-field-error" autofocus>/);
+    // The password was fine: not marked, no focus.
+    expect(page).toMatch(/id="password" name="password" type="password" autocomplete="current-password" maxlength="200" required>/);
+    expect(page).toContain('<details class="pwd" open>');
+  });
+
+  it("keeps a mistyped email on the link form and points at the fix", async () => {
+    const h = await harness();
+    const response = await requestLink(h, "owner@synthetic");
+    expect(response.status).toBe(400);
+    const page = await response.text();
+    expect(page).toMatch(/id="link-email" [^>]*value="owner@synthetic" required aria-invalid="true" aria-describedby="login-field-error" autofocus>/);
+    expect(page).toContain('<a href="#link-email">Enter an email like you@yourshop.com.</a>');
+  });
+
+  it("forgot and reset pages: kept email, errors on the field, focus on the field to fix", async () => {
+    const h = await harness();
+    const forgot = await fetch(`${h.baseUrl}/forgot`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@synthetic" }) });
+    expect(forgot.status).toBe(400);
+    const forgotPage = await forgot.text();
+    expect(forgotPage).toContain('<div class="formerror" role="alert" id="forgot-error"><p><a href="#forgot-email">Enter the email on your account, like you@yourshop.com.</a></p></div>');
+    expect(forgotPage).toMatch(/<input name="email" id="forgot-email" [^>]*autocomplete="username" value="owner@synthetic" required aria-describedby="forgot-email-error" aria-invalid="true" autofocus>/);
+    expect(forgotPage).toContain('<a class="textlink" href="/login">Back to sign in</a>');
+    const reset = (password: string, confirm: string) => fetch(`${h.baseUrl}/reset`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token: "synthetic-token", password, confirm }) });
+    const short = await (await reset("short", "short")).text();
+    expect(short).toMatch(/<input name="password" id="reset-password" [^>]*aria-describedby="reset-password-error" aria-invalid="true" autofocus>/);
+    expect(short).toContain('<span class="fielderror" id="reset-password-error">Make your password at least 12 characters.</span>');
+    const mismatch = await (await reset("long-password-one", "long-password-two")).text();
+    expect(mismatch).toMatch(/<input name="confirm" id="reset-confirm" [^>]*aria-invalid="true" autofocus>/);
+    expect(mismatch).toContain("The two passwords don’t match. Type the same one twice.");
+    // A dead link is said on load with no field to fix, so the box itself takes focus and is read out.
+    const expired = await (await reset("long-password-one", "long-password-one")).text();
+    expect(expired).toContain('<div class="formerror" role="alert" id="forgot-error" tabindex="-1" autofocus><p>That reset link is expired or already used. Ask for a new one.</p></div>');
+    expect(expired.match(/ autofocus/g)).toHaveLength(1);
   });
 });
 
@@ -495,7 +550,13 @@ describe("login CSRF", () => {
     const forged = await postLink(h, { token: link!.token });
     expect(forged.status).toBe(400);
     expect(cookieOf(forged, "afo_owner")).toBeNull();
-    expect(await forged.text()).toContain("Open the link from your email again");
+    const forgedPage = await forged.text();
+    expect(forgedPage).toContain("Open the link from your email again");
+    // Nothing typed is wrong: the email box takes focus to send a new link, but isn't marked invalid.
+    expect(forgedPage).toMatch(/id="link-email" [^>]*value="" required aria-describedby="login-error" autofocus>/);
+    expect(forgedPage).not.toMatch(/<input[^>]*aria-invalid/);
+    expect(forgedPage).not.toContain("login-field-error");
+    expect(forgedPage).toContain('<div class="formerror" role="alert" id="login-error"><p>Open the link from your email again, then tap Sign me in.</p></div>');
     h.store.notifications.clear();
     await requestLink(h, "owner@synthetic.example");
     const [other] = await queuedLinks(h);

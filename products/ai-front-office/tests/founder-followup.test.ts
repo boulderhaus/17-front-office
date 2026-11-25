@@ -554,7 +554,7 @@ describe("booking a call with Brock", () => {
     expect(confirmation.body).toContain("You're set for Mon, Nov 30 at 9:00 AM CST. I'll call you at (941) 555-0199");
     expect(parseEmailBody(confirmation.body).attachments[0]!.filename).toBe("call-otto-setup.ics");
     // Opening the link again shows the booking instead of booking twice.
-    expect(await (await fetch(link)).text()).toContain("<h1>You&#39;re set.</h1>");
+    expect(await (await fetch(link)).text()).toContain("<h1>You’re set.</h1>");
   });
 
   it("a time that just got taken asks for another, whether Google says so or another shop booked it first", async () => {
@@ -627,7 +627,7 @@ describe("booking a call with Brock", () => {
     const { account } = await made.owner();
     const token = founderBookingToken(KEY, account.tenantId, made.clock.now());
     const html = await (await fetch(`${made.baseUrl}/book-setup?t=${encodeURIComponent(token)}`)).text();
-    expect(html).toContain("Reply to Brock's email with a good time");
+    expect(html).toContain("Online booking isn’t open yet. Reply to Brock’s email with a good time and he’ll call you.");
   });
 });
 
