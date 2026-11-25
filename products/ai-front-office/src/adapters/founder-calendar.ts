@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Environment } from "../config/environment.js";
 import type { BusyPeriod } from "../domain/founder-booking.js";
-import { overlapsBusy } from "../domain/founder-booking.js";
+import { maskEmail, overlapsBusy } from "../domain/founder-booking.js";
 import { PLATFORM_TENANT_ID, type Clock, type Store } from "../ports.js";
 import { withTimeout } from "../application/retry.js";
 import { googleEventId } from "./google-calendar.js";
@@ -27,6 +27,13 @@ const INDEX_KEY = "accounts";
 const BOOKED_KEY = "booked";
 const tokenKey = (id: string): string => `token:${id}`;
 
+/** One connected account couldn't be read; names it (masked) so the admin page can say which. */
+export class FounderCalendarReadError extends Error {
+  constructor(readonly accountId: string, readonly account: string, readonly reason: string) {
+    super(`Couldn't read ${account}: ${reason}`);
+  }
+}
+
 export interface FounderAccount {
   id: string;
   email: string;
@@ -43,7 +50,7 @@ export class FounderConnectError extends Error {}
 export class FounderCalendars {
   readonly #tokens = new Map<string, { token: string; expiresAt: number }>();
 
-  constructor(private readonly options: { store: Store; env: Environment; clock: Clock; fetcher?: typeof fetch | undefined }) {}
+  constructor(private readonly options: { store: Store; env: Environment; clock: Clock; fetcher?: typeof fetch | undefined; log?: ((entry: Record<string, unknown>) => void) | undefined }) {}
 
   async accounts(): Promise<FounderAccount[]> {
     const raw = await this.options.store.getIntegrationSecret(PLATFORM_TENANT_ID, FOUNDER_GOOGLE_PROVIDER, INDEX_KEY);
@@ -136,28 +143,46 @@ export class FounderCalendars {
    * Busy across every connected account (each account's listed calendars), plus setup calls already booked here
    * that Google may not report yet. Fails rather than guessing when an account can't be read.
    */
+  /** Busy blocks from the last busy() read, per account id, so the admin page can show which calendar blocks what. */
+  lastBusyByAccount = new Map<string, BusyPeriod[]>();
+
   async busy(timeMin: string, timeMax: string): Promise<BusyPeriod[]> {
     const busy: BusyPeriod[] = [];
+    const byAccount = new Map<string, BusyPeriod[]>();
     for (const account of await this.accounts()) {
-      const accessToken = await this.accessToken(account.id);
+      const before = busy.length;
+      const label = account.email ? maskEmail(account.email) : "a Google account";
+      const accessToken = await this.accessToken(account.id).catch((error: unknown) => {
+        throw new FounderCalendarReadError(account.id, label, error instanceof Error ? error.message : "token refresh failed");
+      });
       const items = (account.calendars.length > 0 ? account.calendars : ["primary"]).map((id) => ({ id }));
       const response = await withTimeout(this.fetch("https://www.googleapis.com/calendar/v3/freeBusy", {
         method: "POST",
         headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
         body: JSON.stringify({ timeMin, timeMax, items }),
       }), 5_000);
-      if (!response.ok) throw new Error(`Google freeBusy failed with HTTP ${response.status}`);
-      const payload = await response.json() as { calendars?: Record<string, { busy?: BusyPeriod[]; errors?: unknown[] }> };
+      if (!response.ok) throw new FounderCalendarReadError(account.id, label, `freeBusy HTTP ${response.status}`);
+      const payload = await response.json() as { calendars?: Record<string, { busy?: BusyPeriod[]; errors?: Array<{ reason?: unknown }> }> };
+      const calendars = payload.calendars ?? {};
       for (const { id } of items) {
-        const calendar = payload.calendars?.[id];
-        // The main calendar must answer; a secondary one that errors (removed, no access) is skipped.
-        if (!calendar || (calendar.errors?.length ?? 0) > 0) {
-          if (id === "primary") throw new Error("Google freeBusy returned no result for a primary calendar");
+        // Google may key the main calendar by the account's address instead of "primary".
+        const calendar = calendars[id] ?? (id === "primary" ? calendars[account.email] ?? (Object.keys(calendars).length === 1 ? Object.values(calendars)[0] : undefined) : undefined);
+        const reasons = (calendar?.errors ?? []).map((error) => String(error?.reason ?? "unknown"));
+        if (calendar && reasons.length === 0) {
+          busy.push(...(calendar.busy ?? []));
           continue;
         }
-        busy.push(...(calendar.busy ?? []));
+        // A secondary calendar that errors (removed, no access) is skipped. So is a main calendar Google says doesn't
+        // exist (an account with Calendar turned off has nothing to clash with). Anything else fails closed.
+        if (id !== "primary" || (reasons.length > 0 && reasons.every((reason) => reason === "notFound"))) {
+          this.options.log?.({ level: "warn", event: "founder_calendar_skipped", accountId: account.id, calendar: id === "primary" ? "primary" : "secondary", reasons: reasons.join(",") || "missing" });
+          continue;
+        }
+        throw new FounderCalendarReadError(account.id, label, reasons.length > 0 ? `main calendar: ${reasons.join(", ")}` : "main calendar missing from Google's answer");
       }
+      byAccount.set(account.id, busy.slice(before));
     }
+    this.lastBusyByAccount = byAccount;
     return [...busy, ...await this.booked()];
   }
 
