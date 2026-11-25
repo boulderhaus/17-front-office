@@ -3,6 +3,7 @@ import pg from "pg";
 import type { Store, ToolClaim } from "../ports.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, CustomerRecord, OutboxNotification, OwnerAccount, OwnerWorkspaceInput, PilotSignup, ProviderRoute, SubscriptionRecord, ToolEvent, UsageSummary } from "../domain/models.js";
 import { CryptoBox } from "../security/crypto-box.js";
+import { SIGN_IN_LINK_OUTBOX_TENANT } from "../security/owner-auth.js";
 import { normalizeBusinessConfig } from "../domain/config.js";
 import { MIN_BILLABLE_CALL_SECONDS } from "../domain/usage.js";
 
@@ -574,10 +575,11 @@ export class PostgresStore implements Store {
         );
       }
       await client.query(
-        `INSERT INTO owner_accounts(id,tenant_id,email_hash,email_ciphertext,display_name_ciphertext,password_hash,status,created_at,updated_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        `INSERT INTO owner_accounts(id,tenant_id,email_hash,email_ciphertext,display_name_ciphertext,password_hash,status,created_at,updated_at,email_verified_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
         [input.account.id, input.account.tenantId, this.cryptoBox.hashLookup(input.account.email), this.cryptoBox.encrypt(input.account.email),
-          this.cryptoBox.encrypt(input.account.displayName), input.account.passwordHash, input.account.status, input.account.createdAt, input.account.updatedAt],
+          this.cryptoBox.encrypt(input.account.displayName), input.account.passwordHash, input.account.status, input.account.createdAt, input.account.updatedAt,
+          input.account.emailVerifiedAt ?? null],
       );
       await client.query("COMMIT");
       return true;
@@ -598,8 +600,8 @@ export class PostgresStore implements Store {
   async createTeamAccount(account: OwnerAccount): Promise<boolean> {
     try {
       await this.#pool.query(
-        `INSERT INTO owner_accounts(id,tenant_id,email_hash,email_ciphertext,display_name_ciphertext,password_hash,status,role,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,'member',$8,$9)`,
-        [account.id, account.tenantId, this.cryptoBox.hashLookup(account.email), this.cryptoBox.encrypt(account.email), this.cryptoBox.encrypt(account.displayName), account.passwordHash, account.status, account.createdAt, account.updatedAt],
+        `INSERT INTO owner_accounts(id,tenant_id,email_hash,email_ciphertext,display_name_ciphertext,password_hash,status,role,created_at,updated_at,email_verified_at) VALUES($1,$2,$3,$4,$5,$6,$7,'member',$8,$9,$10)`,
+        [account.id, account.tenantId, this.cryptoBox.hashLookup(account.email), this.cryptoBox.encrypt(account.email), this.cryptoBox.encrypt(account.displayName), account.passwordHash, account.status, account.createdAt, account.updatedAt, account.emailVerifiedAt ?? null],
       );
       return true;
     } catch (error) {
@@ -661,8 +663,10 @@ export class PostgresStore implements Store {
   }
 
   async createSignInLink(tokenHash: string, email: string, expiresAt: string, now: string): Promise<void> {
-    // Spent and expired links are kept a day at most; the email inside is encrypted either way.
+    // Spent and expired links are kept a day at most; the email inside is encrypted either way. So are the
+    // queued link emails to addresses with no shop (no shop's retention or deletion ever reaches them).
     await this.#pool.query("DELETE FROM owner_sign_in_tokens WHERE expires_at < $1::timestamptz - interval '1 day'", [now]);
+    await this.#pool.query("DELETE FROM notification_outbox WHERE tenant_id=$2 AND created_at < $1::timestamptz - interval '1 day'", [now, SIGN_IN_LINK_OUTBOX_TENANT]);
     await this.#pool.query("INSERT INTO owner_sign_in_tokens(token_hash,email_ciphertext,expires_at,created_at) VALUES($1,$2,$3,$4)", [tokenHash, this.cryptoBox.encrypt(email.trim().toLowerCase()), expiresAt, now]);
   }
 
@@ -672,6 +676,17 @@ export class PostgresStore implements Store {
       [tokenHash, now],
     );
     return result.rows[0] ? this.cryptoBox.decrypt(String(result.rows[0].email_ciphertext)) : null;
+  }
+
+  async markOwnerEmailVerified(accountId: string, verifiedAt: string, replacePasswordHash: string | null): Promise<void> {
+    if (replacePasswordHash === null) {
+      await this.#pool.query("UPDATE owner_accounts SET email_verified_at=$2, updated_at=$2 WHERE id=$1", [accountId, verifiedAt]);
+      return;
+    }
+    await this.#pool.query(
+      "UPDATE owner_accounts SET email_verified_at=$2, updated_at=$2, password_hash=$3, session_version=session_version+1 WHERE id=$1",
+      [accountId, verifiedAt, replacePasswordHash],
+    );
   }
 
   async revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void> {
@@ -867,6 +882,7 @@ function mapOwnerAccount(row: Row, cryptoBox: CryptoBox): OwnerAccount {
     role: row.role === "owner" ? "owner" : "member",
     status: row.status as OwnerAccount["status"],
     sessionVersion: row.session_version === undefined || row.session_version === null ? 0 : Number(row.session_version),
+    emailVerifiedAt: row.email_verified_at === undefined || row.email_verified_at === null ? null : iso(row.email_verified_at),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };

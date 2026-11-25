@@ -114,6 +114,9 @@ export function hashPasswordResetToken(token: string): string {
   return createHash("sha256").update(`password-reset:${token}`).digest("hex");
 }
 
+/** Outbox tenant for a sign-in link to an email that has no shop yet. Those emails are purged after a day. */
+export const SIGN_IN_LINK_OUTBOX_TENANT = "owner-sign-in";
+
 /** A single-use email sign-in link token, and the hash that is stored. Only the hash is persisted. */
 export function createSignInLinkToken(): { token: string; tokenHash: string } {
   const token = randomBytes(32).toString("base64url");

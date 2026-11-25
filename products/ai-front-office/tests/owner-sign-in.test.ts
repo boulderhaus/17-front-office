@@ -94,10 +94,11 @@ const cookieOf = (response: Response, name: string): string | null => {
   return found ? found.split(";")[0]! : null;
 };
 
-async function ownerAccount(h: Harness, email: string, passwordHash?: string): Promise<{ id: string; tenantId: string }> {
+/** An owner whose email is already proved (as every account made before this change is), unless emailVerified is false. */
+async function ownerAccount(h: Harness, email: string, passwordHash?: string, emailVerified = true): Promise<{ id: string; tenantId: string }> {
   const tenantId = `shop_${randomUUID()}`;
   const now = new Date(h.now()).toISOString();
-  const account = { id: randomUUID(), tenantId, email, displayName: "Synthetic Owner", passwordHash: passwordHash ?? await hashOwnerPassword("long-password-for-tests"), status: "active" as const, createdAt: now, updatedAt: now };
+  const account = { id: randomUUID(), tenantId, email, displayName: "Synthetic Owner", passwordHash: passwordHash ?? await hashOwnerPassword("long-password-for-tests"), status: "active" as const, emailVerifiedAt: emailVerified ? now : null, createdAt: now, updatedAt: now };
   expect(await h.store.createOwnerWorkspace({ account, config: { ...createDemoConfig(tenantId), businessName: "Synthetic Air" }, ownerPhone: null })).toBe(true);
   return account;
 }
@@ -131,14 +132,21 @@ async function finishMicrosoft(h: Harness, attempt: { state: string; cookie: str
   return fetch(callback, { redirect: "manual", headers: { cookie: attempt.cookie } });
 }
 
-async function queuedLinks(h: Harness): Promise<Array<{ to: string; token: string; tenantId: string }>> {
+async function queuedLinks(h: Harness): Promise<Array<{ to: string; token: string; tenantId: string; url: string }>> {
   return [...h.store.notifications.values()]
     .filter((item) => item.idempotencyKey.startsWith("sign-in-link:"))
-    .map((item) => ({ to: item.destinationRef.slice(6), token: /\/login\/link\?token=([A-Za-z0-9_-]+)/.exec(item.body)![1]!, tenantId: item.tenantId }));
+    .map((item) => ({ to: item.destinationRef.slice(6), token: /\/login\/link\?token=([A-Za-z0-9_-]+)/.exec(item.body)![1]!, tenantId: item.tenantId, url: /(http\S+\/login\/link\?\S+)/.exec(item.body)![1]! }));
 }
 
-const useLink = (h: Harness, token: string): Promise<Response> => fetch(`${h.baseUrl}/login/link`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token }) });
-const requestLink = (h: Harness, email: string): Promise<Response> => fetch(`${h.baseUrl}/login/email`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email }) });
+/** Taps "Sign me in" with the given cookie (none, or the one opening a link sets). */
+const postLink = (h: Harness, form: Record<string, string>, headers: Record<string, string> = {}): Promise<Response> =>
+  fetch(`${h.baseUrl}/login/link`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", ...headers }, body: new URLSearchParams(form) });
+/** Opens the emailed link in this "browser" (which sets its cookie), then taps "Sign me in". */
+async function useLink(h: Harness, token: string, next?: string): Promise<Response> {
+  const bind = cookieOf(await fetch(`${h.baseUrl}/login/link?token=${token}`), "afo_sign_in_link");
+  return postLink(h, { token, ...(next ? { next } : {}) }, bind ? { cookie: bind } : {});
+}
+const requestLink = (h: Harness, email: string, next?: string): Promise<Response> => fetch(`${h.baseUrl}/login/email`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email, ...(next ? { next } : {}) }) });
 
 describe("Continue with Google", () => {
   it("signs an existing owner in with the normal session, asking Google only for openid, email and profile", async () => {
@@ -467,5 +475,159 @@ describe("sign-in page", () => {
     expect(wrong).toContain('<a href="#password-email">Email or password is incorrect.</a>');
     expect(wrong).toMatch(/id="password-email"[^>]*aria-invalid="true" aria-describedby="login-error"/);
     expect(wrong).toContain('<details class="pwd" open>');
+  });
+});
+
+describe("login CSRF", () => {
+  it("uses an emailed link only in the browser that opened it, and the link survives a forged tap", async () => {
+    const h = await harness();
+    await ownerAccount(h, "owner@synthetic.example");
+    await requestLink(h, "owner@synthetic.example");
+    const [link] = await queuedLinks(h);
+    const opened = await fetch(`${h.baseUrl}/login/link?token=${link!.token}`);
+    const setCookie = opened.headers.getSetCookie().find((cookie) => cookie.startsWith("afo_sign_in_link="))!;
+    for (const part of ["Path=/login/link", "HttpOnly", "SameSite=Lax", "Max-Age=900"]) expect(setCookie).toContain(part);
+    expect(setCookie).not.toContain(link!.token);
+    expect(opened.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(opened.headers.get("cache-control")).toBe("no-store");
+
+    // Another site posting the link: no cookie, or a cookie from opening a different link.
+    const forged = await postLink(h, { token: link!.token });
+    expect(forged.status).toBe(400);
+    expect(cookieOf(forged, "afo_owner")).toBeNull();
+    expect(await forged.text()).toContain("Open the link from your email again");
+    h.store.notifications.clear();
+    await requestLink(h, "owner@synthetic.example");
+    const [other] = await queuedLinks(h);
+    const otherCookie = cookieOf(await fetch(`${h.baseUrl}/login/link?token=${other!.token}`), "afo_sign_in_link")!;
+    expect((await postLink(h, { token: link!.token }, { cookie: otherCookie })).status).toBe(400);
+    expect((await postLink(h, { token: link!.token }, { cookie: cookieOf(opened, "afo_sign_in_link")!, "sec-fetch-site": "cross-site" })).status).toBe(403);
+
+    // The owner's own tap still works, and clears the cookie.
+    const mine = await postLink(h, { token: link!.token }, { cookie: cookieOf(opened, "afo_sign_in_link")!, "sec-fetch-site": "same-origin", origin: "null" });
+    expect(mine.status).toBe(303);
+    expect(cookieOf(mine, "afo_owner")).toBeTruthy();
+    expect(mine.headers.getSetCookie().some((cookie) => cookie.startsWith("afo_sign_in_link=;") && cookie.includes("Max-Age=0"))).toBe(true);
+  });
+
+  it("refuses password and email-link posts another site sends", async () => {
+    const h = await harness();
+    await ownerAccount(h, "owner@synthetic.example");
+    const login = (headers: Record<string, string>) => fetch(`${h.baseUrl}/login`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", ...headers }, body: new URLSearchParams({ email: "owner@synthetic.example", password: "long-password-for-tests" }) });
+    expect((await login({ "sec-fetch-site": "cross-site" })).status).toBe(403);
+    expect((await login({ origin: "https://evil.example" })).status).toBe(403);
+    // Our own pages post with Origin: null (they're sent with Referrer-Policy: no-referrer).
+    for (const headers of [{}, { "sec-fetch-site": "same-origin", origin: "null" }, { origin: BASE }]) {
+      const ok = await login(headers);
+      expect(ok.status, JSON.stringify(headers)).toBe(303);
+    }
+    const crossLink = await fetch(`${h.baseUrl}/login/email`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "sec-fetch-site": "cross-site" }, body: new URLSearchParams({ email: "owner@synthetic.example" }) });
+    expect(crossLink.status).toBe(403);
+    expect(await queuedLinks(h)).toEqual([]);
+  });
+});
+
+describe("a password sign-up with someone else's email", () => {
+  it("loses its password and sessions when the real owner first proves the email", async () => {
+    const h = await harness();
+    // Someone signs up with the owner's email and a password; nothing proved the email.
+    const squatter = await fetch(`${h.baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Squatter Air", email: "owner@synthetic.example", password: "squatter-password-123" }) });
+    const squatterSession = cookieOf(squatter, "afo_owner")!;
+    expect((await h.store.getOwnerAccountByEmail("owner@synthetic.example"))!.emailVerifiedAt).toBeNull();
+
+    const attempt = await start(h, "google");
+    h.claims = googleClaims(attempt.nonce, h.now());
+    const owner = await finishGoogle(h, attempt);
+    expect(owner.headers.get("location")).toBe("/app");
+    const ownerSession = cookieOf(owner, "afo_owner")!;
+    const account = (await h.store.getOwnerAccountByEmail("owner@synthetic.example"))!;
+    expect(account.passwordHash).toBe(PASSWORDLESS_HASH);
+    expect(account.emailVerifiedAt).toBeTruthy();
+
+    const password = await fetch(`${h.baseUrl}/login`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@synthetic.example", password: "squatter-password-123" }) });
+    expect(password.status).toBe(401);
+    expect((await fetch(`${h.baseUrl}/api/app/settings`, { headers: { cookie: squatterSession } })).status).toBe(401);
+    expect((await fetch(`${h.baseUrl}/api/app/settings`, { headers: { cookie: ownerSession } })).status).toBe(200);
+  });
+
+  it("keeps a password set through a reset link, and an already-proved owner's password", async () => {
+    const h = await harness();
+    await ownerAccount(h, "proved@synthetic.example");
+    const reset = await ownerAccount(h, "reset@synthetic.example", undefined, false);
+    const { token, tokenHash } = (await import("../src/security/owner-auth.js")).createPasswordResetToken();
+    await h.store.createPasswordReset(reset.id, tokenHash, new Date(h.now() + 30 * 60_000).toISOString());
+    expect((await fetch(`${h.baseUrl}/reset`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token, password: "fresh-password-456", confirm: "fresh-password-456" }) })).status).toBe(303);
+    expect((await h.store.getOwnerAccountByEmail("reset@synthetic.example"))!.emailVerifiedAt).toBeTruthy();
+
+    for (const [email, password] of [["proved@synthetic.example", "long-password-for-tests"], ["reset@synthetic.example", "fresh-password-456"]] as const) {
+      const attempt = await start(h, "google");
+      h.claims = googleClaims(attempt.nonce, h.now(), { email });
+      expect(cookieOf(await finishGoogle(h, attempt), "afo_owner")).toBeTruthy();
+      const login = await fetch(`${h.baseUrl}/login`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email, password }) });
+      expect(login.status, email).toBe(303);
+    }
+  });
+});
+
+describe("email link details", () => {
+  it("lands on the page the owner asked from, inside the app only", async () => {
+    const h = await harness();
+    await ownerAccount(h, "owner@synthetic.example");
+    const login = await (await fetch(`${h.baseUrl}/login?next=/app/settings/data`)).text();
+    expect(login).toMatch(/action="\/login\/email"><input type="hidden" name="next" value="\/app\/settings\/data">/);
+    await requestLink(h, "owner@synthetic.example", "/app/settings/data");
+    const [link] = await queuedLinks(h);
+    expect(link!.url).toBe(`${BASE}/login/link?token=${link!.token}&next=%2Fapp%2Fsettings%2Fdata`);
+    const page = await (await fetch(`${h.baseUrl}/login/link?token=${link!.token}&next=%2Fapp%2Fsettings%2Fdata`)).text();
+    expect(page).toContain('<input type="hidden" name="next" value="/app/settings/data">');
+    expect((await useLink(h, link!.token, "/app/settings/data")).headers.get("location")).toBe("/app/settings/data");
+
+    h.store.notifications.clear();
+    await requestLink(h, "owner@synthetic.example", "https://evil.example/app");
+    const [evil] = await queuedLinks(h);
+    expect(evil!.url).not.toContain("next=");
+    expect((await useLink(h, evil!.token, "//evil.example/app")).headers.get("location")).toBe("/app");
+  });
+
+  it("purges day-old link emails to addresses with no shop, and leaves a shop's alone", async () => {
+    const h = await harness();
+    await ownerAccount(h, "owner@synthetic.example");
+    await requestLink(h, "stranger@synthetic.example");
+    await requestLink(h, "owner@synthetic.example");
+    expect((await queuedLinks(h)).map((link) => link.tenantId).filter((tenant) => tenant === "owner-sign-in").length).toBe(1);
+    h.advance(25 * 60 * 60_000);
+    await requestLink(h, "someone@synthetic.example");
+    const left = await queuedLinks(h);
+    expect(left.map((link) => link.to).sort()).toEqual(["owner@synthetic.example", "someone@synthetic.example"]);
+  });
+
+  it("doesn't point at the email link when email isn't set up", async () => {
+    const h = await harness({ RESEND_API_KEY: "", RESEND_FROM_EMAIL: "" });
+    const attempt = await start(h, "google");
+    h.claims = googleClaims(attempt.nonce, h.now(), { email_verified: false });
+    const text = await (await finishGoogle(h, attempt)).text();
+    expect(text).toContain("Google hasn’t verified that email. Try another way in.");
+    expect(text).not.toContain("email link");
+  });
+});
+
+describe("in-app browsers", () => {
+  it("hide Continue with Google in the Instagram, Facebook and TikTok browsers, and keep the rest", async () => {
+    const h = await harness({ MICROSOFT_CLIENT_ID: MICROSOFT_CLIENT, MICROSOFT_CLIENT_SECRET: "synthetic-microsoft-secret" });
+    const inApp = [
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 357.0.0.25.101 (iPhone15,3; iOS 18_1; en_US)",
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 [FBAN/FBIOS;FBAV/488.0.0.40.103;FBBV/1]",
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 musical_ly_37.5.0 JsSdk/2.0 NetType/WIFI Channel/App Store",
+      "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/AP2A; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/129.0 Mobile Safari/537.36",
+    ];
+    for (const ua of inApp) {
+      for (const path of ["/login", "/signup"]) {
+        const page = await (await fetch(`${h.baseUrl}${path}`, { headers: { "user-agent": ua } })).text();
+        expect(page, `${path} ${ua}`).not.toContain("Continue with Google");
+        expect(page).toContain("Continue with Microsoft");
+      }
+    }
+    const safari = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1";
+    expect(await (await fetch(`${h.baseUrl}/signup`, { headers: { "user-agent": safari } })).text()).toContain("Continue with Google");
   });
 });

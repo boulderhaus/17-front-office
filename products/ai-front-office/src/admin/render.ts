@@ -188,7 +188,7 @@ export function renderOwnerLogin(error = "", options: LoginPageOptions = {}): st
   const providers = providerButtons(options);
   const emailInput = (id: string, name: "link" | "password"): string => `<label for="${id}">Email<input id="${id}" name="email" type="email" autocomplete="email" inputmode="email" autocapitalize="none" spellcheck="false" maxlength="254" value="${email}" required${invalid(name)}></label>`;
   const linkForm = options.emailLink
-    ? `<form method="post" action="/login/email">${emailInput("link-email", "link")}<button>Email me a sign-in link</button><p class="hint">No password needed. The link works once, for 15 minutes.</p></form>`
+    ? `<form method="post" action="/login/email">${next}${emailInput("link-email", "link")}<button>Email me a sign-in link</button><p class="hint">No password needed. The link works once, for 15 minutes.</p></form>`
     : "";
   const passwordForm = `<form method="post" action="/login">${next}${emailInput("password-email", "password")}<label for="password">Password<input id="password" name="password" type="password" autocomplete="current-password" maxlength="200" required${invalid("password")}></label><button>Sign in</button><p class="small"><a href="/forgot">Forgot your password?</a></p></form>`;
   // Password stays for existing accounts, folded away when there is a quicker way in.
@@ -205,8 +205,9 @@ export function renderSignInLinkSent(email: string): string {
 }
 
 /** The page behind the emailed link. Signing in takes a tap, so link scanners that open it don't use it up. */
-export function renderSignInLinkConfirm(token: string): string {
-  return publicLayout("Sign in", `${SIGN_IN_STYLE}${signInHeader("signup")}<main class="publicmain formpage signinpage"><section class="formintro"><p class="eyebrow">Owner sign in</p><h1>One tap and you’re in.</h1></section><form class="publicform signinform" method="post" action="/login/link"><input type="hidden" name="token" value="${escapeHtml(token)}"><button>Sign me in</button></form></main>`);
+export function renderSignInLinkConfirm(token: string, next: string | null = null): string {
+  const nextField = next ? `<input type="hidden" name="next" value="${escapeHtml(next)}">` : "";
+  return publicLayout("Sign in", `${SIGN_IN_STYLE}${signInHeader("signup")}<main class="publicmain formpage signinpage"><section class="formintro"><p class="eyebrow">Owner sign in</p><h1>One tap and you’re in.</h1></section><form class="publicform signinform" method="post" action="/login/link"><input type="hidden" name="token" value="${escapeHtml(token)}">${nextField}<button>Sign me in</button></form></main>`);
 }
 
 export function renderForgotPassword(input: { sent?: boolean; emailEnabled: boolean; supportEmail?: string | null; error?: string }): string {

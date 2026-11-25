@@ -97,7 +97,15 @@ export interface Store {
   /** Replace the password, revoke every existing session, and void every outstanding reset link. */
   updateOwnerPassword(accountId: string, passwordHash: string, updatedAt: string): Promise<void>;
   revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void>;
-  /** Store a hashed single-use email sign-in link. The email may have no account yet (the link then opens sign-up). */
+  /**
+   * Record that the account's email was proved (Google, Microsoft, an email link or a reset link). With
+   * replacePasswordHash, also swap the password and revoke every session in the same write.
+   */
+  markOwnerEmailVerified(accountId: string, verifiedAt: string, replacePasswordHash: string | null): Promise<void>;
+  /**
+   * Store a hashed single-use email sign-in link. The email may have no account yet (the link then opens sign-up).
+   * Also purges spent links and day-old sign-in emails queued for addresses with no shop.
+   */
   createSignInLink(tokenHash: string, email: string, expiresAt: string, now: string): Promise<void>;
   /** Atomically mark an unexpired, unused sign-in link used; returns its email or null. */
   consumeSignInLink(tokenHash: string, now: string): Promise<string | null>;

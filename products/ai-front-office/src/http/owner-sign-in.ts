@@ -8,8 +8,8 @@ import { withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import type { OwnerAccount } from "../domain/models.js";
 import type { Clock, Store } from "../ports.js";
-import { createSignInLinkToken, hashSignInLinkToken, mintOwnerSession, ownerSessionCookie } from "../security/owner-auth.js";
-import { HttpError, parseForm, readBody, readCookie, redirect, sendHtml, type RateLimiter } from "./security.js";
+import { createSignInLinkToken, hashSignInLinkToken, isPasswordless, mintOwnerSession, ownerSessionCookie, PASSWORDLESS_HASH, SIGN_IN_LINK_OUTBOX_TENANT } from "../security/owner-auth.js";
+import { HttpError, isCrossSiteFormPost, parseForm, readBody, readCookie, redirect, sendHtml, type RateLimiter } from "./security.js";
 
 /**
  * Owner sign-in without a password: "Continue with Google", "Continue with Microsoft" and "Email me a sign-in link".
@@ -28,8 +28,9 @@ const PENDING_TTL_MS = 30 * 60_000;
 const LINK_TTL_MS = 15 * 60_000;
 const CLOCK_SKEW_MS = 2 * 60_000;
 const PENDING_COOKIE = "afo_pending_identity";
-/** Outbox tenant for a sign-in link to an email that has no shop yet. */
-const NO_SHOP_TENANT = "owner-sign-in";
+/** Set when the emailed link is opened; the tap must come from that same browser. */
+const LINK_COOKIE = "afo_sign_in_link";
+const LINK_TOKEN = /^[A-Za-z0-9_-]{20,100}$/;
 const emailSchema = z.string().trim().toLowerCase().email().max(254);
 
 export type IdentityProvider = "google" | "microsoft";
@@ -70,6 +71,14 @@ export function safeNext(value: string | null | undefined): string | null {
   return `${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
 
+/**
+ * Facebook, Instagram and TikTok open links in their own in-app browser, where Google refuses to sign anyone in
+ * (disallowed_useragent) and never sends them back. The Google button is hidden there; the email link still works.
+ */
+export function isInAppBrowser(userAgent: string | undefined): boolean {
+  return /\b(?:FBAN|FBAV|FB_IAB|Instagram|BytedanceWebview)\b|musical_ly|; wv\)/.test(userAgent ?? "");
+}
+
 /** A Google callback that belongs to sign-in (not calendar connect) carries a sign-in state. */
 export function isSignInState(state: string | null): boolean {
   return state?.startsWith(STATE_PREFIX) === true;
@@ -98,10 +107,18 @@ export function createOwnerSignIn(deps: SignInDependencies) {
   const jwks = new JwksCache(deps.fetcher);
   const sign = (purpose: string, value: string): string => createHmac("sha256", key).update(`${purpose}:${value}`).digest("base64url");
 
-  const available: SignInProviders = { google: Boolean(providers.google.client), microsoft: Boolean(providers.microsoft.client) };
-  const loginOptions = (extra: LoginPageOptions = {}): LoginPageOptions => ({ ...available, emailLink: emailEnabled, ...extra });
-  const loginPage = (response: ServerResponse, status: number, error: string, extra: LoginPageOptions = {}): void =>
-    sendHtml(response, status, renderOwnerLogin(error, loginOptions(extra)));
+  /** The buttons this browser can use: none for a provider without an app registration, no Google in an in-app browser. */
+  const providersFor = (request: IncomingMessage): SignInProviders => ({
+    google: Boolean(providers.google.client) && !isInAppBrowser(request.headers["user-agent"]),
+    microsoft: Boolean(providers.microsoft.client),
+  });
+  const loginOptions = (request: IncomingMessage, extra: LoginPageOptions = {}): LoginPageOptions => ({ ...providersFor(request), emailLink: emailEnabled, ...extra });
+  const loginPage = (request: IncomingMessage, response: ServerResponse, status: number, error: string, extra: LoginPageOptions = {}): void =>
+    sendHtml(response, status, renderOwnerLogin(error, loginOptions(request, extra)));
+  /** Only point at the email link when this server can send one. */
+  const retryMessage = (label: string): string => `${label} sign-in didn’t work. ${emailEnabled ? "Try again, or use the email link." : "Try again."}`;
+  const otherWayIn = emailEnabled ? "Use the email link instead." : "Try another way in.";
+  const linkCookie = (value: string, maxAgeSeconds: number): string => `${LINK_COOKIE}=${value}; Path=/login/link; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure}`;
 
   function startAttempt(provider: ProviderConfig, next: string | null): { state: string; nonce: string; challenge: string; cookie: string } {
     const payload = b64(JSON.stringify({ p: provider.name, r: randomBytes(18).toString("base64url"), x: clock.now().getTime() + ATTEMPT_TTL_MS }));
@@ -148,8 +165,8 @@ export function createOwnerSignIn(deps: SignInDependencies) {
 
   const clearPendingIdentity = (): string => `${PENDING_COOKIE}=; Path=/signup; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
 
-  async function start(provider: ProviderConfig, response: ServerResponse, url: URL): Promise<void> {
-    if (!provider.client) return loginPage(response, 404, `${provider.label} sign-in isn’t available right now.`);
+  async function start(provider: ProviderConfig, request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    if (!provider.client) return loginPage(request, response, 404, `${provider.label} sign-in isn’t available right now.`);
     const attempt = startAttempt(provider, safeNext(url.searchParams.get("next")));
     const authorization = new URL(provider.authorizeUrl);
     authorization.search = new URLSearchParams({
@@ -172,7 +189,7 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     const cookies = [clearAttempt(provider)];
     const fail = (status: number, message: string): void => {
       response.setHeader("set-cookie", cookies);
-      loginPage(response, status, message);
+      loginPage(request, response, status, message);
     };
     if (!provider.client) return fail(404, `${provider.label} sign-in isn’t available right now.`);
     const attempt = readAttempt(provider, url.searchParams.get("state"), readCookie(request, provider.cookie));
@@ -182,7 +199,7 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     if (!code) return fail(400, "That sign-in expired. Try again.");
     try {
       const claims = await verifyIdToken(provider, provider.client, await exchangeCode(provider, provider.client, code, attempt.verifier), attempt.nonce);
-      return await finish(response, trustedIdentity(provider, claims), attempt.next, cookies);
+      return await finish(request, response, trustedIdentity(provider, claims), attempt.next, cookies);
     } catch (error) {
       if (!(error instanceof SignInError)) throw error;
       log({ level: "warn", event: "owner_sign_in_rejected", provider: provider.name, reason: error.reason });
@@ -193,7 +210,7 @@ export function createOwnerSignIn(deps: SignInDependencies) {
   async function exchangeCode(provider: ProviderConfig, client: { id: string; secret: string }, code: string, verifier: string): Promise<string> {
     const body = new URLSearchParams({ client_id: client.id, client_secret: client.secret, code, code_verifier: verifier, grant_type: "authorization_code", redirect_uri: `${base}${provider.callbackPath}` });
     if (provider.name === "microsoft") body.set("scope", "openid email profile");
-    const retry = `${provider.label} sign-in didn’t work. Try again, or use the email link.`;
+    const retry = retryMessage(provider.label);
     let reply: Response;
     try {
       reply = await withTimeout(deps.fetcher(provider.tokenUrl, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, body }), 5_000);
@@ -217,7 +234,7 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     try {
       publicKey = await jwks.key(provider.jwksUrl, header.kid);
     } catch {
-      throw new SignInError(502, `${provider.label} sign-in didn’t work. Try again, or use the email link.`, "jwks_unreachable");
+      throw new SignInError(502, retryMessage(provider.label), "jwks_unreachable");
     }
     if (!publicKey || !verify("sha256", Buffer.from(`${headerText}.${claimsText}`), publicKey, Buffer.from(signatureText, "base64url"))) throw invalid("signature");
     const now = clock.now().getTime();
@@ -237,25 +254,33 @@ export function createOwnerSignIn(deps: SignInDependencies) {
   /** The email only when the provider vouches for it; otherwise the email link is the safe way in. */
   function trustedIdentity(provider: ProviderConfig, claims: Record<string, unknown>): VerifiedIdentity {
     if (provider.name === "google" && claims.email_verified !== true) {
-      throw new SignInError(403, "Google hasn’t verified that email. Use the email link instead.", "email_unverified");
+      throw new SignInError(403, `Google hasn’t verified that email. ${otherWayIn}`, "email_unverified");
     }
     // A work tenant's email is whatever its admin typed (nOAuth): trusted only for personal accounts or a domain-verified email.
     if (provider.name === "microsoft" && claims.tid !== MICROSOFT_CONSUMER_TENANT && ![true, "true", 1, "1"].includes(claims.xms_edov as never)) {
-      throw new SignInError(403, "We can’t confirm that work email through Microsoft. Use the email link instead.", "email_unverified");
+      throw new SignInError(403, `We can’t confirm that work email through Microsoft. ${otherWayIn}`, "email_unverified");
     }
     const email = emailSchema.safeParse(claims.email);
-    if (!email.success) throw new SignInError(403, `${provider.label} didn’t share your email. Use the email link instead.`, "no_email");
+    if (!email.success) throw new SignInError(403, `${provider.label} didn’t share your email. ${otherWayIn}`, "no_email");
     const name = typeof claims.name === "string" && claims.name.trim().length >= 2 ? claims.name.trim().slice(0, 120) : null;
     return { provider: provider.name, email: email.data, name };
   }
 
   /** Same session as a password sign-in for an existing account; a new email goes to sign-up with it confirmed. */
-  async function finish(response: ServerResponse, identity: VerifiedIdentity, next: string | null, cookies: string[]): Promise<void> {
-    const account = await store.getOwnerAccountByEmail(identity.email);
+  async function finish(request: IncomingMessage, response: ServerResponse, identity: VerifiedIdentity, next: string | null, cookies: string[]): Promise<void> {
+    let account = await store.getOwnerAccountByEmail(identity.email);
+    if (account && account.status !== "suspended" && !account.emailVerifiedAt) {
+      // The first proof that this person controls the email. A password typed at sign-up (maybe by someone else
+      // using their email) stops working and its sessions end. "Forgot your password?" sets a new one.
+      const dropPassword = !isPasswordless(account.passwordHash);
+      await store.markOwnerEmailVerified(account.id, clock.now().toISOString(), dropPassword ? PASSWORDLESS_HASH : null);
+      if (dropPassword) log({ level: "info", event: "owner_unproven_password_dropped", method: identity.provider, accountId: account.id });
+      account = await store.getOwnerAccountByEmail(identity.email);
+    }
     if (account) {
       if (account.status === "suspended") {
         response.setHeader("set-cookie", cookies);
-        return loginPage(response, 403, `This account is switched off.${env.SUPPORT_EMAIL ? ` Email ${env.SUPPORT_EMAIL} for help.` : ""}`);
+        return loginPage(request, response, 403, `This account is switched off.${env.SUPPORT_EMAIL ? ` Email ${env.SUPPORT_EMAIL} for help.` : ""}`);
       }
       cookies.push(ownerSessionCookie(mintOwnerSession(account, key, clock.now().getTime()), env.NODE_ENV === "production"));
       response.setHeader("set-cookie", cookies);
@@ -270,25 +295,29 @@ export function createOwnerSignIn(deps: SignInDependencies) {
 
   async function requestLink(request: IncomingMessage, response: ServerResponse, ip: string): Promise<void> {
     if (!emailEnabled) throw new HttpError(404, "Not found");
+    if (isCrossSiteFormPost(request, env.PUBLIC_BASE_URL)) throw new HttpError(403, "Forbidden");
     if (!limiter.allow(`${ip}:owner-login-link`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
-    const parsed = emailSchema.safeParse(parseForm(await readBody(request, 4_000)).get("email") ?? "");
-    if (!parsed.success) return loginPage(response, 400, "Enter a valid email.", { errorField: "link" });
+    const form = parseForm(await readBody(request, 4_000));
+    const next = safeNext(form.get("next"));
+    const parsed = emailSchema.safeParse(form.get("email") ?? "");
+    if (!parsed.success) return loginPage(request, response, 400, "Enter a valid email.", { errorField: "link", next });
     const email = parsed.data;
     // Same answer either way; past the per-email limit nothing more is sent.
     if (limiter.allow(`owner-login-link-email:${email}`, 5, 60 * 60_000)) {
       const account = await store.getOwnerAccountByEmail(email);
-      if (account?.status !== "suspended") await sendLink(email, account);
+      if (account?.status !== "suspended") await sendLink(email, account, next);
     }
     return sendHtml(response, 200, renderSignInLinkSent(email));
   }
 
-  async function sendLink(email: string, account: OwnerAccount | null): Promise<void> {
+  async function sendLink(email: string, account: OwnerAccount | null, next: string | null): Promise<void> {
     const { token, tokenHash } = createSignInLinkToken();
     const now = clock.now();
     await store.createSignInLink(tokenHash, email, new Date(now.getTime() + LINK_TTL_MS).toISOString(), now.toISOString());
-    const link = `${base}/login/link?token=${encodeURIComponent(token)}`;
+    // The page they asked from (say, deleting the shop) opens after the tap.
+    const link = `${base}/login/link?token=${encodeURIComponent(token)}${next ? `&next=${encodeURIComponent(next)}` : ""}`;
     await store.enqueueNotification({
-      id: randomUUID(), tenantId: account?.tenantId ?? NO_SHOP_TENANT, callId: null, channel: "email", destinationRef: `email:${email}`,
+      id: randomUUID(), tenantId: account?.tenantId ?? SIGN_IN_LINK_OUTBOX_TENANT, callId: null, channel: "email", destinationRef: `email:${email}`,
       body: formatEmailBody("Your Call Otto sign-in link", `Tap this link to sign in to Call Otto. It works once, for 15 minutes:\n\n${link}\n\nIf you didn't ask for this, ignore this email.`),
       priority: "high", state: "pending", attempts: 0, nextAttemptAt: now.toISOString(),
       idempotencyKey: `sign-in-link:${tokenHash}`, providerReceipt: null, lastError: null, createdAt: now.toISOString(), sentAt: null,
@@ -296,23 +325,35 @@ export function createOwnerSignIn(deps: SignInDependencies) {
   }
 
   async function useLink(request: IncomingMessage, response: ServerResponse, ip: string): Promise<void> {
+    if (isCrossSiteFormPost(request, env.PUBLIC_BASE_URL)) throw new HttpError(403, "Forbidden");
     if (!limiter.allow(`${ip}:owner-login-link-use`, 20, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
-    const token = parseForm(await readBody(request, 4_000)).get("token") ?? "";
-    const email = /^[A-Za-z0-9_-]{20,100}$/.test(token) ? await store.consumeSignInLink(hashSignInLinkToken(token), clock.now().toISOString()) : null;
-    if (!email) return loginPage(response, 400, "That link expired or was already used. Send a new one.", { errorField: "link" });
-    return finish(response, { provider: "email", email, name: null }, null, []);
+    const form = parseForm(await readBody(request, 4_000));
+    const token = form.get("token") ?? "";
+    const expired = (): void => loginPage(request, response, 400, "That link expired or was already used. Send a new one.", { errorField: "link" });
+    if (!LINK_TOKEN.test(token)) return expired();
+    // Only the browser that opened the link can use it, so another site can't post its own link here and sign
+    // this browser into its shop. The link stays unused, so the owner can still open it again and tap.
+    if (!same(readCookie(request, LINK_COOKIE) ?? "", sign("owner-sign-in-link", token))) {
+      return loginPage(request, response, 400, "Open the link from your email again, then tap Sign me in.", { errorField: "link" });
+    }
+    const email = await store.consumeSignInLink(hashSignInLinkToken(token), clock.now().toISOString());
+    if (!email) return expired();
+    return finish(request, response, { provider: "email", email, name: null }, safeNext(form.get("next")), [linkCookie("", 0)]);
   }
 
   /** Handles /auth/* and the email-link routes; false for anything else. */
   async function route(request: IncomingMessage, response: ServerResponse, url: URL, method: string, ip: string): Promise<boolean> {
     const path = url.pathname;
-    if (method === "GET" && (path === "/auth/google" || path === "/auth/microsoft")) await start(path === "/auth/google" ? providers.google : providers.microsoft, response, url);
+    if (method === "GET" && (path === "/auth/google" || path === "/auth/microsoft")) await start(path === "/auth/google" ? providers.google : providers.microsoft, request, response, url);
     else if (method === "GET" && path === MICROSOFT_SIGN_IN_CALLBACK) await callback(providers.microsoft, request, response, url);
     else if (method === "POST" && path === "/login/email") await requestLink(request, response, ip);
     else if (method === "GET" && path === "/login/link") {
       const token = url.searchParams.get("token") ?? "";
-      if (/^[A-Za-z0-9_-]{20,100}$/.test(token)) sendHtml(response, 200, renderSignInLinkConfirm(token));
-      else loginPage(response, 400, "That link doesn’t work. Send a new one.", { errorField: "link" });
+      if (LINK_TOKEN.test(token)) {
+        // Opening the link only shows a button (mail scanners open links too); this cookie ties the tap to this browser.
+        response.setHeader("set-cookie", linkCookie(sign("owner-sign-in-link", token), LINK_TTL_MS / 1_000));
+        sendHtml(response, 200, renderSignInLinkConfirm(token, safeNext(url.searchParams.get("next"))));
+      } else loginPage(request, response, 400, "That link doesn’t work. Send a new one.", { errorField: "link" });
     } else if (method === "POST" && path === "/login/link") await useLink(request, response, ip);
     else return false;
     return true;
@@ -325,7 +366,7 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     loginOptions,
     pendingIdentity,
     clearPendingIdentity,
-    providers: available,
+    providersFor,
   };
 }
 

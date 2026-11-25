@@ -96,6 +96,7 @@ import {
   createGoogleOAuthAttempt,
   csrfForSession,
   HttpError,
+  isCrossSiteFormPost,
   mintAdminSession,
   parseForm,
   parseJson,
@@ -438,9 +439,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     overageCentsPerCall: plan.overageCentsPerCall, blurb: plan.blurb, who: plan.who, chargeNote: planCharge(plan, timezone),
     unlimited: plan.unlimited ? { addOnCents: plan.unlimited.addOnCents, priceCents: plan.unlimited.priceCents, firstMonthCents: plan.unlimited.firstMonthCents, fairUseCalls: plan.unlimited.fairUseCalls, chargeNote: planCharge(plan, timezone, true) } : null,
   })) : [];
-  const signupPage = (error = "", values: Record<string, string> = {}, identity: VerifiedIdentity | null = null): string => renderOwnerSignup(error, values, {
+  const signupPage = (request: IncomingMessage, error = "", values: Record<string, string> = {}, identity: VerifiedIdentity | null = null): string => renderOwnerSignup(error, values, {
     supportEmail: dependencies.env.SUPPORT_EMAIL ?? null,
-    providers: signIn.providers,
+    providers: signIn.providersFor(request),
     verified: verifiedSignupEmail(identity),
     chargeNote: stripeClient ? planCharge(plans[0]!) : null,
     plans: stripeClient ? plans.map((plan) => ({ ...plan, chargeNote: planCharge(plan), unlimitedChargeNote: plan.unlimited ? planCharge(plan, undefined, true) : null })) : [],
@@ -689,26 +690,26 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (presetPlan && plans.some((plan) => plan.id === presetPlan)) preset.plan = presetPlan;
       const presetTrade = findTrade(url.searchParams.get("trade"));
       if (presetTrade) preset.trade = presetTrade.key;
-      return sendHtml(response, 200, analyticsPage(signupPage("", preset, signIn.pendingIdentity(request))));
+      return sendHtml(response, 200, analyticsPage(signupPage(request, "", preset, signIn.pendingIdentity(request))));
     }
     if (method === "POST" && url.pathname === "/signup") {
       if (!limiter.allow(`${ip}:owner-signup`, 5, 60 * 60_000)) throw new HttpError(429, "Too many signup attempts from this connection");
       const form = parseForm(await readBody(request, 48_000));
       // Google, Microsoft or an email link verified this email: it is the account email, and no password is set.
       const identity = signIn.pendingIdentity(request);
-      if (form.get("faxNumber")?.trim()) return sendHtml(response, 200, signupPage("", {}, identity));
+      if (form.get("faxNumber")?.trim()) return sendHtml(response, 200, signupPage(request, "", {}, identity));
       const values = Object.fromEntries(form.entries());
       if (identity) {
         values.email = identity.email;
         delete values.password;
       }
       const parsed = ownerSignupSchema.safeParse(values);
-      if (!parsed.success || (!identity && !parsed.data.password)) return sendHtml(response, 400, signupPage(identity ? "Check every required field." : "Check every required field and use a password with at least 12 characters.", values, identity));
+      if (!parsed.success || (!identity && !parsed.data.password)) return sendHtml(response, 400, signupPage(request, identity ? "Check every required field." : "Check every required field and use a password with at least 12 characters.", values, identity));
       const phoneInput = parsed.data.phone?.trim() ?? "";
       const phone = phoneInput ? normalizeUsPhone(phoneInput) : null;
-      if (phoneInput && !phone) return sendHtml(response, 400, signupPage("Enter a valid US mobile number.", values, identity));
+      if (phoneInput && !phone) return sendHtml(response, 400, signupPage(request, "Enter a valid US mobile number.", values, identity));
       if ((parsed.data.ownerSmsConsent === "yes" || parsed.data.founderSmsConsent === "yes") && !phone) {
-        return sendHtml(response, 400, signupPage("Add a valid US mobile number to receive text messages.", values, identity));
+        return sendHtml(response, 400, signupPage(request, "Add a valid US mobile number to receive text messages.", values, identity));
       }
       // Defaults from the owner's mobile: their state is the starting service area and timezone.
       // The browser's timezone wins when the page sent one. Both are refined later in Settings.
@@ -730,13 +731,15 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         email: parsed.data.email,
         displayName: identity?.name && !form.has("displayName") ? identity.name : parsed.data.displayName,
         passwordHash: identity || !parsed.data.password ? PASSWORDLESS_HASH : await hashOwnerPassword(parsed.data.password),
+        // A password sign-up proves nothing about the email; the first Google, Microsoft, email or reset link does.
+        emailVerifiedAt: identity ? now : null,
         status: "pending_activation",
         createdAt: now,
         updatedAt: now,
       };
       const splitList = (value: string): string[] => value.split(",").map((item) => item.trim()).filter(Boolean).slice(0, 100);
       const serviceArea = normalizeServiceAreaInput(parsed.data.serviceAreaTerms || homeState || "");
-      if (serviceArea.errors.length > 0) return sendHtml(response, 400, signupPage(serviceAreaMessage(serviceArea.errors), values, identity));
+      if (serviceArea.errors.length > 0) return sendHtml(response, 400, signupPage(request, serviceAreaMessage(serviceArea.errors), values, identity));
       // The plan picked above the button; Solo when nothing was sent.
       const plan = pickPlan(plans, form.get("plan"));
       const trade = findTrade(parsed.data.trade);
@@ -775,7 +778,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         },
       };
       const created = await dependencies.store.createOwnerWorkspace({ account, config, ownerPhone: phone });
-      if (!created) return sendHtml(response, 409, signupPage("That email already has an account. Sign in instead.", values, identity));
+      if (!created) return sendHtml(response, 409, signupPage(request, "That email already has an account. Sign in instead.", values, identity));
       if (parsed.data.founderSmsConsent === "yes") {
         const welcomeConfigured = dependencies.env.FOUNDER_WELCOME_ENABLED
           && dependencies.env.TELNYX_MESSAGING_APPROVED
@@ -822,13 +825,15 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       }
       return redirect(response, "/app/start");
     }
-    if (method === "GET" && url.pathname === "/login") return sendHtml(response, 200, renderOwnerLogin("", signIn.loginOptions({ next: safeNext(url.searchParams.get("next")) })));
+    if (method === "GET" && url.pathname === "/login") return sendHtml(response, 200, renderOwnerLogin("", signIn.loginOptions(request, { next: safeNext(url.searchParams.get("next")) })));
     if (method === "POST" && url.pathname === "/login") {
+      // Another site can't post its own email and password here to sign this browser into its shop.
+      if (isCrossSiteFormPost(request, dependencies.env.PUBLIC_BASE_URL)) throw new HttpError(403, "Forbidden");
       if (!limiter.allow(`${ip}:owner-login`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
       const form = parseForm(await readBody(request, 16_000));
       const next = safeNext(form.get("next"));
       const parsed = ownerLoginSchema.safeParse({ email: form.get("email") ?? "", password: form.get("password") ?? "" });
-      if (!parsed.success) return sendHtml(response, 400, renderOwnerLogin("Enter a valid email and password.", signIn.loginOptions({ errorField: "password", email: form.get("email") ?? "", next })));
+      if (!parsed.success) return sendHtml(response, 400, renderOwnerLogin("Enter a valid email and password.", signIn.loginOptions(request, { errorField: "password", email: form.get("email") ?? "", next })));
       // Per-account limit so guesses spread across many addresses still stop.
       if (!limiter.allow(`owner-login-email:${parsed.data.email}`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
       const account = await dependencies.store.getOwnerAccountByEmail(parsed.data.email);
@@ -836,7 +841,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       // and it takes as long to say so as for a wrong password.
       const passwordHash = account && hasUsablePassword(account.passwordHash) ? account.passwordHash : null;
       const valid = await verifyOwnerPassword(parsed.data.password, passwordHash ?? await dummyOwnerPasswordHash) && passwordHash !== null;
-      if (!account || !valid || account.status === "suspended") return sendHtml(response, 401, renderOwnerLogin("Email or password is incorrect.", signIn.loginOptions({ errorField: "password", email: parsed.data.email, next })));
+      if (!account || !valid || account.status === "suspended") return sendHtml(response, 401, renderOwnerLogin("Email or password is incorrect.", signIn.loginOptions(request, { errorField: "password", email: parsed.data.email, next })));
       const session = mintOwnerSession(account, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
       response.setHeader("set-cookie", ownerSessionCookie(session, dependencies.env.NODE_ENV === "production"));
       return redirect(response, next ?? "/app");
@@ -876,6 +881,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const accountId = token ? await dependencies.store.consumePasswordReset(hashPasswordResetToken(token), dependencies.clock.now().toISOString()) : null;
       if (!accountId) return sendHtml(response, 400, renderForgotPassword({ emailEnabled: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL), supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, error: "That reset link is expired or already used. Ask for a new one." }));
       await dependencies.store.updateOwnerPassword(accountId, await hashOwnerPassword(password), dependencies.clock.now().toISOString());
+      // The reset link reached the account email, so the owner controls it: this password stays when they later use Google.
+      await dependencies.store.markOwnerEmailVerified(accountId, dependencies.clock.now().toISOString(), null);
       log({ level: "info", event: "owner_password_reset", accountId });
       response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/login");

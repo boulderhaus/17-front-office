@@ -20,6 +20,7 @@ import type {
 } from "../domain/models.js";
 import { normalizeBusinessConfig } from "../domain/config.js";
 import { billedMinutesFor, usageClass } from "../domain/usage.js";
+import { SIGN_IN_LINK_OUTBOX_TENANT } from "../security/owner-auth.js";
 
 /** Re-entrant per async call chain, like the Postgres store's session-level advisory locks. */
 class KeyedMutex {
@@ -415,6 +416,8 @@ export class InMemoryStore implements Store {
 
   async createSignInLink(tokenHash: string, email: string, expiresAt: string, now: string): Promise<void> {
     for (const [hash, link] of this.signInLinks) if (link.expiresAt < now) this.signInLinks.delete(hash);
+    const dayAgo = new Date(Date.parse(now) - 24 * 60 * 60_000).toISOString();
+    for (const [id, item] of this.notifications) if (item.tenantId === SIGN_IN_LINK_OUTBOX_TENANT && item.createdAt < dayAgo) this.notifications.delete(id);
     this.signInLinks.set(tokenHash, { email: email.trim().toLowerCase(), expiresAt, usedAt: null });
   }
 
@@ -423,6 +426,15 @@ export class InMemoryStore implements Store {
     if (!link || link.usedAt || link.expiresAt <= now) return null;
     link.usedAt = now;
     return link.email;
+  }
+
+  async markOwnerEmailVerified(accountId: string, verifiedAt: string, replacePasswordHash: string | null): Promise<void> {
+    const account = this.ownerAccounts.get(accountId);
+    if (!account) return;
+    this.ownerAccounts.set(accountId, {
+      ...account, emailVerifiedAt: verifiedAt, updatedAt: verifiedAt,
+      ...(replacePasswordHash === null ? {} : { passwordHash: replacePasswordHash, sessionVersion: (account.sessionVersion ?? 0) + 1 }),
+    });
   }
 
   async revokeOwnerSessions(accountId: string, updatedAt: string): Promise<void> {
