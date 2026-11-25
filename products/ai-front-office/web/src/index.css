@@ -152,6 +152,15 @@
   .pb-safe { padding-bottom: env(safe-area-inset-bottom); }
   .pt-safe { padding-top: env(safe-area-inset-top); }
   .tabular { font-variant-numeric: tabular-nums; }
+  /* A soft shadow at the edge that has more to scroll to (and none at an edge you've reached). CSS only. */
+  .scroll-shade {
+    background:
+      linear-gradient(var(--sidebar) 30%, transparent) top / 100% 28px no-repeat local,
+      linear-gradient(transparent, var(--sidebar) 70%) bottom / 100% 28px no-repeat local,
+      radial-gradient(farthest-side at 50% 0, rgb(11 37 69 / 0.16), transparent) top / 100% 12px no-repeat scroll,
+      radial-gradient(farthest-side at 50% 100%, rgb(11 37 69 / 0.16), transparent) bottom / 100% 12px no-repeat scroll,
+      var(--sidebar);
+  }
 }
 
 html, body, #root { min-height: 100dvh; }

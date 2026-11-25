@@ -264,6 +264,24 @@ describe("Telnyx provider boundary", () => {
     });
   });
 
+  it("holds owner texts without the owner's yes on file, and never holds texts to callers or the founder's note", async () => {
+    const fetcher = vi.fn(async () => jsonResponse({ data: { id: "message-consent" } })) as unknown as typeof fetch;
+    const adapter = new TelnyxSmsAdapter({
+      apiKey: "synthetic-key",
+      fromNumber: "+15555550199",
+      founderFromNumber: "+15555550200",
+      textingApproved: true,
+      resolveDestination: async () => "+15555550100",
+      hasOwnerTextConsent: async () => false,
+      fetcher,
+    });
+    await expect(adapter.send(syntheticNotification())).rejects.toBeInstanceOf(NotificationHeldError);
+    expect(fetcher).not.toHaveBeenCalled();
+    await adapter.send({ ...syntheticNotification(), destinationRef: "tel:+15555550101", body: "Suncoast Heating: Your visit is confirmed." });
+    await adapter.send({ ...syntheticNotification(), callId: null, senderRef: "founder" as const, body: "Synthetic welcome" });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("refuses SMS to a destination that opted out", async () => {
     const fetcher = vi.fn() as unknown as typeof fetch;
     const adapter = new TelnyxSmsAdapter({

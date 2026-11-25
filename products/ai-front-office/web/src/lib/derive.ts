@@ -1,12 +1,12 @@
 import type { ApiCall, ApiDashboard, ApiTask } from "./types"
-import { compactDate } from "./format"
+import { compactDate, dateKey, timeOnly } from "./format"
 
 export type Tone = "danger" | "warn" | "good" | "neutral"
 
 export function urgency(task: ApiTask | undefined, call: ApiCall | undefined): { tone: Tone; label: string } {
   if (call?.outcome === "ignored_spam") return { tone: "neutral", label: "Likely spam" }
   if (call?.outcome === "in_progress") return { tone: "warn", label: "On the call" }
-  if (task?.status === "completed") return call?.outcome === "booked" ? { tone: "good", label: "Booked" } : { tone: "neutral", label: "Complete" }
+  if (task?.status === "completed") return call?.outcome === "booked" ? { tone: "good", label: "Booked" } : { tone: "neutral", label: "Done" }
   if (call?.emergency?.severity === "life_safety") return { tone: "danger", label: "Emergency" }
   if (task?.priority === "high" || call?.emergency?.emergency) return { tone: "danger", label: "Urgent" }
   if (call?.outcome === "booked") return { tone: "good", label: "Booked" }
@@ -38,21 +38,15 @@ export function derive(data: ApiDashboard) {
   const included = data.usage.fairUseCalls ?? data.usage.includedCalls
   const remaining = Math.max(0, included - used)
   const extraCalls = data.usage.extraCalls
-  const due = (task: ApiTask) => (Date.parse(task.dueAt) <= nowMs ? "Due now" : `Due ${compactDate(task.dueAt, tz)}`)
+  // "Due now", "Due today 11:52 AM" (same day: no date), or "Due Nov 26, 9:00 AM".
+  const due = (task: ApiTask) => (Date.parse(task.dueAt) <= nowMs ? "Due now"
+    : dateKey(new Date(task.dueAt), tz) === dateKey(new Date(nowMs), tz) ? `Due today ${timeOnly(task.dueAt, tz)}`
+      : `Due ${compactDate(task.dueAt, tz)}`)
   const taskFor = (callId: string) => data.tasks.find((task) => task.callId === callId)
   return { nowMs, tz, callsById, actionable, snoozed, completed, handled, urgentCount, upcoming, booked, used, included, remaining, extraCalls, due, taskFor }
 }
 
-/** The line's state in plain words. Text alerts being off is shown separately, never folded into this label. */
-export function coverageStatus(data: Pick<ApiDashboard, "viewer" | "shop" | "preview"> & { line?: { business: Pick<ApiDashboard["line"]["business"], "everyCallOn"> } }): { tone: "on" | "pending" | "paused" | "warning"; label: string; detail: string } {
-  if (data.preview) return { tone: "on", label: "Answering calls", detail: "Call Otto picks up when you can’t." }
-  if (data.viewer.status !== "active") return { tone: "pending", label: "Setting up your line", detail: "We turn it on as soon as it’s approved and let you know." }
-  if (data.shop.pausedForBilling) return { tone: "warning", label: "Paused for billing", detail: "Update your card in Plan and billing to turn answering back on." }
-  if (data.shop.paused) return { tone: "paused", label: "Answering paused", detail: "Call Otto isn’t answering. Turn it back on in How calls are answered." }
-  // Only once a test proved every call reaches Otto, not as soon as the setting is picked.
-  if (data.line?.business.everyCallOn) return { tone: "on", label: "Answering every call", detail: "Call Otto answers every call to your business number." }
-  return { tone: "on", label: "Answering calls", detail: "Call Otto picks up when you can’t." }
-}
+export { forwardingOn, lineStatus as coverageStatus } from "./line-status"
 
 export function shortAddress(call: ApiCall | undefined): string {
   return (call?.fields.address ?? "").split(",").slice(0, 2).join(",").trim()

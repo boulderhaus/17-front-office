@@ -360,7 +360,8 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     // Same answer either way; past the per-email limit nothing more is sent.
     if (limiter.allow(`owner-login-link-email:${email}`, 5, 60 * 60_000)) {
       const account = await store.getOwnerAccountByEmail(email);
-      if (account?.status !== "suspended") await sendLink(email, account, next);
+      // A sign-up started from the pricing page keeps its plan, Unlimited and trade through the link.
+      if (account?.status !== "suspended") await sendLink(email, account, next, signupPicks(new URLSearchParams(form.get("picks") ?? "")));
     }
     return sendHtml(response, 200, renderSignInLinkSent(email));
   }

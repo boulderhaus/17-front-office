@@ -1,3 +1,4 @@
+import { renderOwnerSignup } from "../src/admin/render.js";
 import { createHash, generateKeyPairSync, randomUUID, sign, type KeyObject } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
@@ -756,6 +757,21 @@ describe("sign-up picks through Google and Microsoft", () => {
     const [second] = await queuedLinks(h);
     const bind = cookieOf(await fetch(`${h.baseUrl}/login/link?token=${second!.token}`), "afo_sign_in_link")!;
     expect((await postLink(h, { token: second!.token, picks: "plan=platinum&unlimited=yes" }, { cookie: bind })).headers.get("location")).toBe("/signup");
+  });
+
+  it("keeps the plan, Unlimited and trade through the sign-up page's own email link", async () => {
+    const h = await harness();
+    const body = new URLSearchParams({ email: "fresh@synthetic.example", picks: "plan=team&unlimited=1&trade=hvac" });
+    expect((await fetch(`${h.baseUrl}/login/email`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body })).status).toBe(200);
+    const [link] = await queuedLinks(h);
+    expect(Object.fromEntries(new URL(link!.url).searchParams)).toEqual({ token: link!.token, plan: "team", unlimited: "1", trade: "hvac" });
+    h.store.notifications.clear();
+    const bogus = new URLSearchParams({ email: "other@synthetic.example", picks: "plan=platinum&trade=%3Cscript%3E" });
+    await fetch(`${h.baseUrl}/login/email`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: bogus });
+    const [plain] = await queuedLinks(h);
+    expect(Object.fromEntries(new URL(plain!.url).searchParams)).toEqual({ token: plain!.token });
+    const page = renderOwnerSignup("", { plan: "team", unlimited: "yes", trade: "hvac" }, { emailLink: true, providers: {} });
+    expect(page).toContain('<form class="linkstart" method="post" action="/login/email"><input type="hidden" name="picks" value="plan=team&amp;unlimited=1&amp;trade=hvac">');
   });
 });
 

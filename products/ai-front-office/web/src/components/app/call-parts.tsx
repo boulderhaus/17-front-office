@@ -1,5 +1,7 @@
 import type { ReactNode } from "react"
 import { ChevronDown, MapPin, MessageSquare, Phone, ShieldAlert, TriangleAlert } from "lucide-react"
+import { toast } from "sonner"
+import { useMode } from "@/lib/mode"
 import { ToneBadge } from "./bits"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import type { Tone } from "@/lib/derive"
@@ -9,12 +11,14 @@ import { cn } from "@/lib/utils"
 
 export const ASSISTANT_NAME = "Otto"
 
-export function CallHeader({ call, tone, label }: { call: ApiCall; tone: Tone; label: string }) {
+/** `page`: the call's own screen, where the caller's name is the page's one h1; in a panel beside a list it's an h2. */
+export function CallHeader({ call, tone, label, page = false }: { call: ApiCall; tone: Tone; label: string; page?: boolean }) {
+  const Heading = page ? "h1" : "h2"
   return (
     // ph-no-capture on every block that shows a caller's name, number or address: never sent to PostHog.
     <div className="ph-no-capture grid gap-1.5">
       <div className="flex items-start justify-between gap-3">
-        <h2 className="text-2xl leading-tight font-semibold tracking-tight">{call.fields.callerName ?? "Unknown caller"}</h2>
+        <Heading className="text-2xl leading-tight font-semibold tracking-tight">{call.fields.callerName ?? "Unknown caller"}</Heading>
         <ToneBadge tone={tone} className="mt-0.5 h-7 px-2.5 text-sm">{label}</ToneBadge>
       </div>
       <p className="text-base text-foreground/85">{call.fields.problemDescription || (call.outcome === "ignored_spam" ? "Robocall or sales pitch. Nothing to do." : "No problem summary captured")}</p>
@@ -83,12 +87,15 @@ export interface Action {
  * call": a gray-outline Done (or Reopen) and a quiet Later. Call back, Text and Map never show for likely spam.
  */
 export function ActionBar({ call, extra = [], reachNote }: { call: ApiCall; extra?: Action[]; reachNote?: ReactNode }) {
+  const { preview } = useMode()
   const address = call.fields.address?.trim() || null
   const spam = call.outcome === "ignored_spam"
   const actions: Action[] = []
   if (call.phone && !spam) {
-    actions.push({ key: "call", label: callLabel(call), icon: <Phone />, href: `tel:${call.phone}`, primary: true, group: "reach" })
-    actions.push({ key: "text", label: "Text", icon: <MessageSquare />, href: `sms:${call.phone}`, group: "reach" })
+    // The demo's numbers are made up: Call and Text say what they'd do instead of dialing a fake number.
+    const demo = (what: string) => () => toast(`In your account, this ${what} ${call.fields.callerName?.split(" ")[0] ?? "the caller"} from your phone.`)
+    actions.push({ key: "call", label: callLabel(call), icon: <Phone />, ...(preview ? { onClick: demo("calls") } : { href: `tel:${call.phone}` }), primary: true, group: "reach" })
+    actions.push({ key: "text", label: "Text", icon: <MessageSquare />, ...(preview ? { onClick: demo("texts") } : { href: `sms:${call.phone}` }), group: "reach" })
   }
   if (address && !spam) actions.push({ key: "map", label: "Map", icon: <MapPin />, href: mapsUrl(address), external: true, group: "look" })
   actions.push(...extra)
@@ -98,8 +105,8 @@ export function ActionBar({ call, extra = [], reachNote }: { call: ApiCall; extr
   const tile = (action: Action) => action.group === "status" ? cn(
     "inline-flex items-center justify-center transition-colors [&_svg]:size-4",
     action.menu
-      ? "h-12 gap-1.5 rounded-lg px-3 text-[15px] font-semibold text-muted-foreground hover:bg-muted hover:text-foreground lg:pointer-fine:h-10"
-      : "h-12 gap-2 rounded-lg border border-muted-foreground bg-card px-4 text-[15px] font-semibold hover:bg-muted lg:pointer-fine:h-10",
+      ? "h-12 gap-1.5 rounded-lg px-3 text-[15px] font-semibold text-muted-foreground hover:bg-muted hover:text-foreground lg:pointer-fine:h-11"
+      : "h-12 gap-2 rounded-lg border border-muted-foreground bg-card px-4 text-[15px] font-semibold hover:bg-muted lg:pointer-fine:h-11",
     focus,
     action.disabled && "pointer-events-none opacity-50",
   ) : cn(

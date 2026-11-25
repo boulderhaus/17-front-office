@@ -321,6 +321,11 @@ interface TelnyxSmsOptions {
    */
   textingApproved: boolean;
   isOptedOut?: (tenantId: string, phone: string) => Promise<boolean>;
+  /**
+   * The owner's yes to texts is on file (owner_sms_consent). Owner texts (not texts to callers, not the founder's
+   * note) are held without it, whatever the shop's config says: the one check every owner-text sender goes through.
+   */
+  hasOwnerTextConsent?: (tenantId: string) => Promise<boolean>;
   /** Claims a number's one-time "Reply STOP to opt out" line for this notification (see Store.claimSmsStopNotice). */
   claimStopNotice?: (phone: string, notificationId: string, firstAttempt: boolean) => Promise<boolean>;
   webhookUrl?: string;
@@ -340,6 +345,9 @@ export class TelnyxSmsAdapter implements NotificationPort {
     if (!to || !isAllowedUsNumber(to)) throw new Error(`No valid US phone number is configured for destination reference ${notification.destinationRef}`);
     if (!this.options.textingApproved && !this.options.allowedDirectDestinations?.has(to)) {
       throw new NotificationHeldError("Texting is not approved yet; text held, not sent");
+    }
+    if (!direct && notification.senderRef !== "founder" && this.options.hasOwnerTextConsent && !await this.options.hasOwnerTextConsent(notification.tenantId)) {
+      throw new NotificationHeldError("Owner has not agreed to texts; text held, not sent");
     }
     if (await this.options.isOptedOut?.(notification.tenantId, to)) throw new Error("Destination has opted out of SMS");
     const from = notification.senderRef === "founder" ? this.options.founderFromNumber : this.options.fromNumber;
