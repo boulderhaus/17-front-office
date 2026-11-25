@@ -6,6 +6,8 @@ import { CallPanel } from "./today"
 import { derive } from "@/lib/derive"
 import { dateKey, timeOnly } from "@/lib/format"
 import { useMediaQuery, useMode } from "@/lib/mode"
+import { JUMP } from "@/lib/nav"
+import { layoutVisits, VISIT_MIN_SPAN } from "@/lib/calendar-layout"
 import type { ApiCall } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -34,7 +36,7 @@ export function CalendarHeaderActions() {
   const wide = useMediaQuery("(min-width: 1024px)")
   // Not until the dashboard says who is looking (a team member never gets a Settings link), and not in the demo (no Settings there).
   if (!dashboard || member || preview || !wide) return null
-  return <Link to={`${base}/settings/calendar`} className="inline-flex h-11 items-center gap-2 rounded-lg border bg-card px-3 text-[15px] font-semibold hover:bg-muted"><Settings2 className="size-4" />Hours and Google Calendar</Link>
+  return <Link to={`${base}/settings/calendar`} state={JUMP} className="inline-flex h-11 items-center gap-2 rounded-lg border bg-card px-3 text-[15px] font-semibold hover:bg-muted"><Settings2 className="size-4" />Hours and Google Calendar</Link>
 }
 
 export function CalendarPage() {
@@ -79,16 +81,17 @@ export function CalendarPage() {
       <section className="grid min-w-0 content-start gap-3">
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2.5">
           <div className="flex items-center gap-1.5">
-            <button type="button" aria-label="Previous" onClick={() => step(-1)} className="grid size-11 place-items-center rounded-lg border bg-card hover:bg-muted"><ChevronLeft className="size-5" /></button>
-            <button type="button" aria-label="Next" onClick={() => step(1)} className="grid size-11 place-items-center rounded-lg border bg-card hover:bg-muted"><ChevronRight className="size-5" /></button>
-            <button type="button" onClick={() => go({ date: today })} disabled={anchor === today} className="h-11 rounded-lg border bg-card px-3.5 text-[15px] font-semibold hover:bg-muted disabled:opacity-50">Today</button>
+            <button type="button" aria-label="Previous" onClick={() => step(-1)} className="grid size-11 shrink-0 place-items-center rounded-lg border bg-card hover:bg-muted"><ChevronLeft className="size-5" /></button>
+            <button type="button" aria-label="Next" onClick={() => step(1)} className="grid size-11 shrink-0 place-items-center rounded-lg border bg-card hover:bg-muted"><ChevronRight className="size-5" /></button>
+            <button type="button" onClick={() => go({ date: today })} disabled={anchor === today} className="h-11 shrink-0 rounded-lg border bg-card px-3.5 text-[15px] font-semibold hover:bg-muted disabled:opacity-50">Today</button>
             <h2 className="tabular ml-2 text-lg font-semibold tracking-tight">{title}</h2>
           </div>
           <div className="flex items-center gap-2 max-sm:w-full">
             <div role="tablist" aria-label="Calendar view" className="grid grid-cols-3 gap-1 rounded-lg bg-secondary p-1 max-sm:flex-1">
               {(["day", "week", "month"] as View[]).map((item) => (
                 <button key={item} role="tab" aria-selected={view === item} type="button" onClick={() => go({ view: item })}
-                  className={cn("h-9 rounded-md px-4 text-[15px] font-semibold capitalize", view === item ? "bg-card shadow-sm ring-1 ring-border" : "text-muted-foreground hover:bg-card/60")}>{item}</button>
+                  // 36px to look at, 44px to tap: the hit area reaches into the strip's padding.
+                  className={cn("relative h-9 rounded-md px-4 text-[15px] font-semibold capitalize after:absolute after:inset-x-0 after:-inset-y-1", view === item ? "bg-card shadow-sm ring-1 ring-border" : "text-muted-foreground hover:bg-card/60")}>{item}</button>
               ))}
             </div>
           </div>
@@ -113,14 +116,15 @@ export function CalendarPage() {
           <span className="inline-flex items-center gap-2"><i className="size-3 rounded-sm bg-emerald-500" />Booked</span>
           <span className="inline-flex items-center gap-2"><i className="size-3 rounded-sm bg-amber-400" />Caller asked for this time. Confirm it.</span>
         </div>
-        {!member && !preview && <Link to={`${base}/settings/calendar`} className="flex min-h-14 items-center justify-between gap-3 rounded-xl border bg-card px-4 py-2.5 lg:hidden">
+        {/* A jump into Settings: its "‹ Settings" goes to Settings, not back here. */}
+        {!member && !preview && <Link to={`${base}/settings/calendar`} state={JUMP} className="flex min-h-14 items-center justify-between gap-3 rounded-xl border bg-card px-4 py-2.5 lg:hidden">
           <span className="grid"><strong className="text-base font-semibold">Hours and Google Calendar</strong><span className="text-sm text-muted-foreground">{dashboard.googleConnected ? "Google Calendar connected" : dashboard.googleAvailable ? "Google Calendar not connected" : "Appointment hours and booking"}</span></span>
           <ChevronRight className="size-5 shrink-0 text-muted-foreground" />
         </Link>}
       </section>
       {selected && (
         <aside className="max-lg:hidden lg:sticky lg:top-8">
-          <div className="mb-2 flex justify-end"><button type="button" onClick={close} className="inline-flex h-10 items-center gap-1.5 rounded-lg px-3 text-[15px] font-semibold hover:bg-muted"><X className="size-4" />Close</button></div>
+          <div className="mb-2 flex justify-end"><button type="button" onClick={close} className="inline-flex h-11 items-center gap-1.5 rounded-lg px-3 text-[15px] font-semibold hover:bg-muted"><X className="size-4" />Close</button></div>
           <CallPanel call={selected} task={d.taskFor(selected.id)} tz={d.tz} standalone={false} />
         </aside>
       )}
@@ -133,6 +137,8 @@ function DayNumber({ day, today, className }: { day: string; today: boolean; cla
 }
 
 const HOUR = 52
+/** Minutes a Day block needs for its third line, the problem: 68/60 x 52px - 3 = 56px for 8 + 15 + 16.25 + 16.25. */
+const THREE_LINES = 68
 
 /** Day and Week: a time grid like Google Calendar, today's column tinted, a line at the current time. */
 function TimeGrid({ days, today, visits, tz, nowMs, detailed, selectedId, onDay }: { days: string[]; today: string; visits: Visit[]; tz: string; nowMs: number; detailed: boolean; selectedId: string | null; onDay: (day: string) => void }) {
@@ -143,6 +149,19 @@ function TimeGrid({ days, today, visits, tz, nowMs, detailed, selectedId, onDay 
   const nowMinutes = minutesIn(new Date(nowMs).toISOString(), tz)
   const single = days.length === 1
   const cols = { gridTemplateColumns: `3rem repeat(${days.length}, minmax(0, 1fr))` }
+  // A block shows 1.5 hours (1.2 in a phone's week), shorter when the next visit starts sooner; closer visits sit side by side.
+  const placed = (day: string) => {
+    const mine = shown.filter((visit) => visit.day === day).sort((left, right) => left.minutes - right.minutes)
+    const slots = layoutVisits(mine.map((visit) => visit.minutes), detailed ? 90 : 72, VISIT_MIN_SPAN)
+    return mine.map((visit, index) => ({ visit, slot: slots[index]! }))
+  }
+  // A phone's week: side-by-side lanes in a 30-40px column would be slivers, so visits that share the column show as
+  // one block ("+1") that opens the day, where they sit side by side at full width.
+  const shared = (items: ReturnType<typeof placed>) => {
+    const groups = new Map<number, ReturnType<typeof placed>>()
+    for (const item of items) if (!detailed && item.slot.lanes > 1) groups.set(item.slot.group, [...(groups.get(item.slot.group) ?? []), item])
+    return [...groups.values()]
+  }
   return (
     <div className="overflow-hidden rounded-xl border bg-card">
       <div className={cn("grid border-b", single && "hidden")} style={cols}>
@@ -163,19 +182,34 @@ function TimeGrid({ days, today, visits, tz, nowMs, detailed, selectedId, onDay 
             {day === today && nowMinutes >= first * 60 && nowMinutes <= last * 60 && (
               <span aria-hidden className="absolute inset-x-0 z-10 h-0.5 bg-red-600" style={{ top: ((nowMinutes - first * 60) / 60) * HOUR }}><i className="absolute -top-1 -left-1 size-2.5 rounded-full bg-red-600" /></span>
             )}
-            {shown.filter((visit) => visit.day === day).map((visit) => (
+            {/* auto-rows-max: each line keeps its height and a short block clips at its foot, instead of the lines squeezing into each other. */}
+            {placed(day).filter(({ slot }) => detailed || slot.lanes === 1).map(({ visit, slot }) => (
               <CallLink key={visit.call.id} callId={visit.call.id} aria-current={selectedId === visit.call.id}
-                className={cn("absolute inset-x-0.5 z-20 grid content-start overflow-hidden rounded-md border-l-[3px] px-1.5 py-1 text-left leading-tight", visit.booked ? "border-emerald-600 bg-emerald-100 text-emerald-950" : "border-amber-500 bg-amber-100 text-amber-950", selectedId === visit.call.id && "ring-2 ring-brand-ink")}
-                style={{ top: ((visit.minutes - first * 60) / 60) * HOUR + 1, height: HOUR * (detailed ? 1.5 : 1.2) - 3 }}>
+                className={cn("absolute z-20 grid auto-rows-max content-start overflow-hidden rounded-md border-l-[3px] px-1.5 py-1 text-left leading-tight", visit.booked ? "border-emerald-600 bg-emerald-100 text-emerald-950" : "border-amber-500 bg-amber-100 text-amber-950", selectedId === visit.call.id && "ring-2 ring-brand-ink")}
+                style={{ top: ((slot.start - first * 60) / 60) * HOUR + 1, height: ((slot.end - slot.start) / 60) * HOUR - 3, left: `calc(${(slot.lane / slot.lanes) * 100}% + 2px)`, width: `calc(${100 / slot.lanes}% - 4px)` }}>
                 <span className="tabular text-[12px] font-semibold">{detailed ? timeOnly(visit.call.fields.requestedStart!, tz) : shortTime(visit.minutes)}</span>
                 {detailed ? (
                   <>
                     <strong className="truncate text-[13px] font-semibold">{visit.call.fields.callerName ?? "Unknown caller"}</strong>
-                    {single && <span className="truncate text-[13px]">{visit.call.fields.problemDescription}</span>}
+                    {single && slot.end - slot.start >= THREE_LINES && <span className="truncate text-[13px]">{visit.call.fields.problemDescription}</span>}
                   </>
                 ) : <span className="truncate text-[11px]">{(visit.call.fields.callerName ?? "Caller").split(" ")[0]}</span>}
               </CallLink>
             ))}
+            {shared(placed(day)).map((group) => {
+              const start = group[0]!.slot.start
+              const end = Math.max(...group.map(({ slot }) => slot.end))
+              const booked = group.every(({ visit }) => visit.booked)
+              return (
+                <button key={group[0]!.visit.call.id} type="button" onClick={() => onDay(day)} aria-label={`${group.length} visits from ${shortTime(start)}. Open ${fmt(day, { weekday: "long", month: "long", day: "numeric" })}`}
+                  className={cn("absolute z-20 grid auto-rows-max content-start overflow-hidden rounded-md border-l-[3px] px-1.5 py-1 text-left leading-tight", booked ? "border-emerald-600 bg-emerald-100 text-emerald-950" : "border-amber-500 bg-amber-100 text-amber-950", group.some(({ visit }) => visit.call.id === selectedId) && "ring-2 ring-brand-ink")}
+                  style={{ top: ((start - first * 60) / 60) * HOUR + 1, height: ((end - start) / 60) * HOUR - 3, left: 2, width: "calc(100% - 4px)" }}>
+                  <span className="tabular text-[12px] font-semibold">{shortTime(start)}</span>
+                  <span className="truncate text-[11px]">{(group[0]!.visit.call.fields.callerName ?? "Caller").split(" ")[0]}</span>
+                  <span className="text-[11px] font-semibold">+{group.length - 1}</span>
+                </button>
+              )
+            })}
           </div>
         ))}
       </div>
@@ -195,8 +229,9 @@ function MonthGrid({ anchor, today, visits, wide, onDay, selectedId }: { anchor:
     const items = visits.filter((visit) => visit.day === day)
     const outside = day.slice(0, 7) !== month
     return (
-      <div key={day} className={cn("grid min-h-20 content-start gap-1 border-t border-l p-1 first:border-l-0 lg:min-h-28 lg:p-1.5 [&:nth-child(7n+1)]:border-l-0", outside && "bg-muted/40", day === today && "bg-brand-yellow/10")}>
-        <button type="button" onClick={() => onDay(day)} className="justify-self-center lg:justify-self-start" aria-label={fmt(day, { weekday: "long", month: "long", day: "numeric" })}>
+      <div key={day} className={cn("relative grid min-h-20 content-start gap-1 border-t border-l p-1 first:border-l-0 lg:min-h-28 lg:p-1.5 [&:nth-child(7n+1)]:border-l-0", outside && "bg-muted/40", day === today && "bg-brand-yellow/10")}>
+        {/* Phone and tablet: the whole day is the tap target, not just its 28px number. */}
+        <button type="button" onClick={() => onDay(day)} className={cn("justify-self-center lg:justify-self-start", !wide && "after:absolute after:inset-0")} aria-label={fmt(day, { weekday: "long", month: "long", day: "numeric" })}>
           <DayNumber day={day} today={day === today} className={cn(outside && "text-muted-foreground", "size-7 text-sm")} />
         </button>
         {wide ? items.slice(0, 3).map((visit) => (

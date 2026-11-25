@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react"
 import { Link, useLocation } from "react-router-dom"
 import { ChevronLeft, ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { callOrigin } from "@/lib/nav"
 import type { Tone } from "@/lib/derive"
 import { useMediaQuery, useMode } from "@/lib/mode"
 
@@ -55,6 +56,7 @@ export function ListBox({ children, className }: { children: ReactNode; classNam
 /**
  * On a phone a call opens its own screen; on wide screens it opens in the side panel.
  * `list="all"` marks a link from the "All calls" list (`from=all`), so only the row that was clicked lights up.
+ * The call's own screen remembers the list that opened it, so its back button returns there ("‹ Jobs").
  */
 export function CallLink({ callId, className, children, list, ...rest }: { callId: string; className?: string; children: ReactNode; list?: "all"; "aria-current"?: boolean; style?: React.CSSProperties }) {
   const { base } = useMode()
@@ -64,8 +66,8 @@ export function CallLink({ callId, className, children, list, ...rest }: { callI
   params.set("call", callId)
   if (list === "all") params.set("from", "all")
   else params.delete("from")
-  const to = wide ? `${location.pathname}?${params.toString()}` : `${base}/calls/${encodeURIComponent(callId)}`
-  return <Link to={to} className={className} {...rest}>{children}</Link>
+  if (wide) return <Link to={`${location.pathname}?${params.toString()}`} className={className} {...rest}>{children}</Link>
+  return <Link to={`${base}/calls/${encodeURIComponent(callId)}`} state={{ origin: callOrigin({ base, pathname: location.pathname, search: location.search }) }} className={className} {...rest}>{children}</Link>
 }
 
 export function Empty({ title, text, image }: { title: string; text: string; image?: boolean }) {

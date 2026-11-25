@@ -56,3 +56,28 @@ export function backGoes(input: { key: string; state: unknown }): "history" | "p
   const state = input.state as { jump?: unknown } | null | undefined
   return state && state.jump === true ? "parent" : "history"
 }
+
+/** The list a call was opened from: where its "‹ Jobs" goes (with the list's ?tab), and the name it shows. */
+export interface CallOrigin { to: string; label: string }
+
+/** A call opened from Jobs or Calendar says so; from anywhere else it came from Calls. */
+export function callOrigin(input: { base: string; pathname: string; search: string }): CallOrigin {
+  const rest = input.pathname.slice(input.base.length)
+  const label = rest.startsWith("/jobs") ? "Jobs" : rest.startsWith("/calendar") ? "Calendar" : "Calls"
+  return { to: `${input.pathname}${input.search}`, label }
+}
+
+/**
+ * A call's back button: "‹ Jobs" back to Jobs when Jobs opened it, "‹ Calls" back to Calls when Calls did, one step
+ * back in history so the list keeps its place. With no list behind it (a deep link, a text alert, a jump), Calls.
+ */
+export function callBack(input: { key: string; state: unknown; base: string }): CallOrigin & { history: boolean } {
+  const origin = (input.state as { origin?: Partial<CallOrigin> } | null | undefined)?.origin
+  if (input.key !== "default" && typeof origin?.to === "string" && typeof origin.label === "string") return { to: origin.to, label: origin.label, history: true }
+  return { to: input.base, label: "Calls", history: false }
+}
+
+/** Unsaved settings stay with the settings area: moving between its pages keeps them; leaving it asks first. */
+export function leavesSettings(next: { pathname: string }): boolean {
+  return !/^\/app\/settings(\/|$)/.test(next.pathname)
+}

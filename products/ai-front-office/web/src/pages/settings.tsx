@@ -1,13 +1,15 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
-import { Link, Navigate, useLocation, useParams } from "react-router-dom"
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { Link, Navigate, useBlocker, useLocation, useParams } from "react-router-dom"
 import { Check, ChevronRight, LogOut, type LucideIcon } from "lucide-react"
 import { toast } from "sonner"
+import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { AppShell } from "@/components/app/shell"
 import { settingsPage } from "@/components/app/settings-pages"
 import { api, useApi } from "@/lib/api"
 import { useMediaQuery, useMode } from "@/lib/mode"
+import { leavesSettings } from "@/lib/nav"
 import type { ApiSettings, SettingsValues } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { AlertsSection, AnsweringSection, AnswersSection, BusinessSection, CalendarSection, DataSection, PlanSection, TeamSection } from "./settings-sections"
@@ -49,7 +51,8 @@ export interface SettingsContextValue {
   dirty: boolean
   discard: () => void
   saving: boolean
-  save: () => Promise<void>
+  /** True once the server has the changes; false when it refused (the toast says why). */
+  save: () => Promise<boolean>
   reload: () => Promise<void>
   /** Automated emergency calls: saved on its own, right away (it records or withdraws the owner's consent). */
   urgentBusy: boolean
@@ -111,8 +114,10 @@ export function SettingsArea() {
           setValues(next.values)
           await reloadDashboard()
           toast.success("Saved.")
+          return true
         } catch (error) {
           toast.error(error instanceof Error ? error.message : "That didn’t save. Please try again.")
+          return false
         } finally {
           setSaving(false)
         }
@@ -123,6 +128,8 @@ export function SettingsArea() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, values, saving, reloadDashboard, urgentBusy])
+
+  const dirty = context?.dirty ?? false
 
   if (sectionId && !section) return <Navigate to={ALIASES[sectionId] ? `/app/settings/${ALIASES[sectionId]}` : "/app/settings"} replace />
   // A computer always shows a page next to the menu; a phone shows the list first.
@@ -141,8 +148,49 @@ export function SettingsArea() {
       {/* Wide screens: the pages are listed under Settings in the side menu, so the chosen page has the full width. */}
       <SettingsContext.Provider value={context}>
         <div className="min-w-0">{body}</div>
+        <LeaveGuard dirty={dirty} />
       </SettingsContext.Provider>
     </AppShell>
+  )
+}
+
+/**
+ * Leaving Settings with unsaved changes (the menu, the drawer, Back, a call link) asks first: Save, Discard or Stay.
+ * Moving between settings pages never asks: the edit travels with them. A reload or closing the tab gets the
+ * browser's own "Leave site?".
+ */
+function LeaveGuard({ dirty }: { dirty: boolean }) {
+  const context = useContext(SettingsContext)
+  const blocker = useBlocker(({ nextLocation }) => dirty && leavesSettings(nextLocation))
+  useEffect(() => {
+    if (!dirty) return
+    const hold = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = "" }
+    window.addEventListener("beforeunload", hold)
+    return () => window.removeEventListener("beforeunload", hold)
+  }, [dirty])
+  // Saved or discarded while the question was up (the dialog's Save and Discard included): nothing is left to lose, so go.
+  // This is the only place that moves on: a second proceed (from a button as well) throws in React Router.
+  useEffect(() => { if (blocker.state === "blocked" && !dirty) blocker.proceed() }, [blocker, dirty])
+  // The blocker as it is now, not as it was when Save was tapped: Stay may have closed the question mid-save.
+  const latest = useRef(blocker)
+  useEffect(() => { latest.current = blocker }, [blocker])
+  if (!context) return null
+  const { save, saving, discard } = context
+  return (
+    <AlertDialog open={blocker.state === "blocked"} onOpenChange={(open) => { if (!open && blocker.state === "blocked") blocker.reset() }}>
+      {/* Stay: back to the page, not to a menu row that closed with the drawer. */}
+      <AlertDialogContent onCloseAutoFocus={() => requestAnimationFrame(() => { if (document.activeElement === document.body) document.getElementById("main")?.focus({ preventScroll: true }) })}>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Leave without saving?</AlertDialogTitle>
+          <AlertDialogDescription>Your changes aren’t saved yet.</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Stay</AlertDialogCancel>
+          <Button type="button" variant="outline" size="tap" disabled={saving} onClick={discard}>Discard</Button>
+          <Button type="button" size="tap" disabled={saving} onClick={() => void save().then((saved) => { if (!saved && latest.current.state === "blocked") latest.current.reset?.() })}>{saving ? "Saving…" : "Save"}</Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   )
 }
 
@@ -174,7 +222,7 @@ function UnsavedBar() {
   return (
     <div className="flex min-h-14 items-center justify-between gap-3 rounded-xl bg-amber-50 px-4 py-2 text-[15px] text-amber-950 ring-1 ring-amber-200 ring-inset">
       <strong className="font-semibold">You have unsaved changes.</strong>
-      <Button size="tap" className="lg:h-10" disabled={saving} onClick={() => void save()}>{saving ? "Saving…" : "Save"}</Button>
+      <Button size="tap" disabled={saving} onClick={() => void save()}>{saving ? "Saving…" : "Save"}</Button>
     </div>
   )
 }
@@ -190,7 +238,7 @@ function SectionPage({ section }: { section: SectionDef }) {
   useEffect(() => { window.scrollTo(0, 0) }, [location.pathname])
   const saveButton = (className?: string) => dirty || saving
     ? <Button size="tap" type="submit" className={cn("min-w-36", className)} disabled={saving}>{saving ? "Saving…" : "Save changes"}</Button>
-    : <span className={cn("inline-flex h-12 min-w-36 items-center justify-center gap-1.5 text-[15px] font-medium text-muted-foreground lg:h-10", className)}><Check className="size-4" />All changes saved</span>
+    : <span className={cn("inline-flex h-12 min-w-36 items-center justify-center gap-1.5 text-[15px] font-medium text-muted-foreground lg:pointer-fine:h-10", className)}><Check className="size-4" />All changes saved</span>
   const body = (
     <>
       <header className="sticky top-0 z-10 -mx-1 hidden items-center justify-between gap-6 border-b bg-card/95 px-1 py-3 backdrop-blur-md lg:flex">

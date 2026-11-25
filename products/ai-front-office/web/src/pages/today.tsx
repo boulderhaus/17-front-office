@@ -18,6 +18,7 @@ import { useMediaQuery, useMode } from "@/lib/mode"
 import { ForwardingCard } from "@/components/app/forwarding-card"
 import type { ApiCall, ApiDashboard, ApiTask } from "@/lib/types"
 import { cn, tapWidth } from "@/lib/utils"
+import { callOrigin, JUMP } from "@/lib/nav"
 
 // One gate for every Done, Later and Undo on the page: one save at a time, and a double-click never reaches the next caller.
 const taskGate = createTaskGate()
@@ -103,7 +104,7 @@ export function TodayPage() {
         <section aria-labelledby="attention" className="grid gap-2.5 scroll-mt-20" id="attention-list">
           <SectionTitle id="attention" title="Needs your attention" count={d.actionable.length} urgent={d.urgentCount > 0} />
           {d.actionable.length ? (
-            <ListBox>{d.actionable.map((task) => <TaskRow key={task.callId} task={task} call={d.callsById.get(task.callId)} due={d.due(task)} selected={attentionRowSelected({ wide, panelId: panelCall?.id, callId: task.callId, from })} open={wide && panelCall?.id === task.callId} wide={wide} />)}</ListBox>
+            <ListBox className="@container">{d.actionable.map((task) => <TaskRow key={task.callId} task={task} call={d.callsById.get(task.callId)} due={d.due(task)} selected={attentionRowSelected({ wide, panelId: panelCall?.id, callId: task.callId, from })} open={wide && panelCall?.id === task.callId} wide={wide} />)}</ListBox>
           ) : (
             <Empty image title="You’re all caught up." text="Emergencies, callbacks and times to confirm show up here the moment a call ends." />
           )}
@@ -139,13 +140,13 @@ function Summary({ dashboard }: { dashboard: ApiDashboard }) {
           <span className={label}>Booked</span>
           <strong className={number}>{d.booked.length}</strong>
         </Link>
-        <Link to={preview || member ? `${base}` : `${base}/settings/plan`} className={cell}>
+        <Link to={preview || member ? `${base}` : `${base}/settings/plan`} state={preview || member ? undefined : JUMP} className={cell}>
           <span className={label}>{usage.unlimited ? "Answered" : "Calls left"}</span>
           <strong className={number}>{usage.unlimited ? d.used : d.remaining}</strong>
         </Link>
       </nav>
       {usage.extraCalls > 0 && !member && (
-        <Link to={`${base}/settings/plan`} className="flex min-h-12 items-center justify-between gap-3 rounded-xl bg-amber-50 px-3.5 py-2.5 text-[15px] text-amber-950 ring-1 ring-amber-200 ring-inset">
+        <Link to={`${base}/settings/plan`} state={JUMP} className="flex min-h-12 items-center justify-between gap-3 rounded-xl bg-amber-50 px-3.5 py-2.5 text-[15px] text-amber-950 ring-1 ring-amber-200 ring-inset">
           <span><strong className="font-semibold">{usage.extraCalls} extra calls</strong> at {perCall(usage.overageCentsPerCall)}: <span className="tabular">{money(usage.extraCents)}</span> so far</span>
           <span className="flex shrink-0 items-center font-semibold">See plans<ChevronRight className="size-4" /></span>
         </Link>
@@ -185,31 +186,35 @@ function TaskRow({ task, call, due, selected, open, wide }: { task: ApiTask; cal
   if (wide) {
     // The link's ::after covers the row, so a click anywhere selects it; Done sits above that layer. Every row keeps
     // the Done column (an invisible stand-in on the open row), so all badges share one right edge and never move.
-    const doneClass = "relative z-10 inline-flex h-9 items-center gap-1.5 self-end rounded-lg border border-transparent px-2.5 text-sm font-semibold text-muted-foreground transition-colors group-hover:border-muted-foreground hover:bg-card hover:text-foreground focus-visible:border-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-ink disabled:pointer-events-none disabled:opacity-50 [&_svg]:size-4"
+    // A narrow list (a 1024px screen, beside the open call) has no room for that column: Done goes under the row,
+    // at the right, and the open row needs no stand-in.
+    const doneClass = "relative z-10 inline-flex h-11 items-center gap-1.5 justify-self-end self-end rounded-lg border border-transparent px-2.5 text-sm font-semibold text-muted-foreground transition-colors group-hover:border-muted-foreground hover:bg-card hover:text-foreground focus-visible:border-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-ink disabled:pointer-events-none disabled:opacity-50 [&_svg]:size-4"
     const done = () => {
       setPending(true)
       void act(task.callId, "complete").finally(() => setPending(false))
     }
     return (
-      <div className={cn("group relative px-4 py-3.5 hover:bg-muted/50", preview ? "grid" : "grid grid-cols-[minmax(0,1fr)_auto] gap-3", selected && SELECTED_ROW)}>
-        <CallLink callId={task.callId} aria-current={selected} className="grid gap-1.5 outline-none after:absolute after:inset-0 focus-visible:after:outline-2 focus-visible:after:-outline-offset-2 focus-visible:after:outline-brand-ink">{body}</CallLink>
+      <div className={cn("group relative px-4 py-3.5 hover:bg-muted/50", preview ? "grid" : "grid grid-cols-1 gap-2 @sm:grid-cols-[minmax(0,1fr)_auto] @sm:gap-3", selected && SELECTED_ROW)}>
+        <CallLink callId={task.callId} aria-current={selected} className="grid grid-cols-1 gap-1.5 outline-none after:absolute after:inset-0 focus-visible:after:outline-2 focus-visible:after:-outline-offset-2 focus-visible:after:outline-brand-ink">{body}</CallLink>
         {rowShowsDone({ wide, open, preview }) ? (
           <button type="button" aria-label={`Mark ${call?.fields.callerName ?? "call"} handled`} disabled={pending} aria-busy={pending || undefined} onClick={done} className={doneClass}>
             <Check />Done
           </button>
-        ) : !preview && <span aria-hidden className={cn(doneClass, "invisible")}><Check />Done</span>}
+        ) : !preview && <span aria-hidden className={cn(doneClass, "invisible @max-sm:hidden")}><Check />Done</span>}
       </div>
     )
   }
   return (
     <article className="grid min-w-0 gap-3 px-4 py-4">
-      <CallLink callId={task.callId} className="grid gap-1.5">{body}</CallLink>
-      <div className="grid grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1fr)] gap-2 [&>*]:px-2">
+      <CallLink callId={task.callId} className="grid grid-cols-1 gap-1.5">{body}</CallLink>
+      {/* Call, Done and Later side by side; on a small phone (320px) Call takes its own row so no label is cut.
+          The demo has no Done or Later: Call and Details share the row. */}
+      <div className={cn("grid gap-2 [&>*]:px-2", preview ? "grid-cols-2 @[20rem]:grid-cols-[minmax(0,1.5fr)_minmax(0,2fr)]" : "grid-cols-2 *:first:col-span-2 @[20rem]:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1fr)] @[20rem]:*:first:col-span-1")}>
         {call?.phone && call.outcome !== "ignored_spam"
-          ? <Button size="tap" className="w-full" asChild><a href={`tel:${call.phone}`}><Phone />{callLabel(call)}</a></Button>
+          ? <Button size="tap" className="w-full" asChild><a href={`tel:${call.phone}`}><Phone /><span className="truncate">{callLabel(call)}</span></a></Button>
           : <Button size="tap" className="w-full" asChild><CallLink callId={task.callId}>Open</CallLink></Button>}
         {preview ? (
-          <Button size="tap" variant="outline" className="col-span-2 w-full" asChild><CallLink callId={task.callId}>Details</CallLink></Button>
+          <Button size="tap" variant="outline" className="w-full" asChild><CallLink callId={task.callId}>Details</CallLink></Button>
         ) : (
           <>
             <Button size="tap" variant="outline" className="w-full" aria-label={`Mark ${call?.fields.callerName ?? "call"} handled`} onClick={() => void act(task.callId, "complete")}><Check />Done</Button>
@@ -326,7 +331,7 @@ function CalendarCard({ dashboard }: { dashboard: ApiDashboard }) {
   const { base, member } = useMode()
   if (member || !dashboard.googleAvailable || dashboard.googleConnected) return null
   return (
-    <Link to={`${base}/settings/calendar`} className="flex min-h-14 items-center justify-between gap-3 rounded-xl border bg-card px-4 py-3 text-[15px] hover:bg-muted/50">
+    <Link to={`${base}/settings/calendar`} state={JUMP} className="flex min-h-14 items-center justify-between gap-3 rounded-xl border bg-card px-4 py-3 text-[15px] hover:bg-muted/50">
       <span><strong className="font-semibold">Put jobs on Google Calendar</strong><span className="block text-sm text-muted-foreground">Optional. Confirmed jobs land on your calendar.</span></span>
       <ChevronRight className="size-5 shrink-0 text-muted-foreground" />
     </Link>
@@ -394,7 +399,7 @@ export function CallPanel({ call, task, tz, standalone, next, linked = false, ca
   const tiles = useTaskTiles()
   const wide = useMediaQuery("(min-width: 1024px)")
   const navigate = useNavigate()
-  const { pathname } = useLocation()
+  const { pathname, search } = useLocation()
   // Only while the owner is still on this page: an Undo tapped after leaving never pulls them back.
   const openCall = (id: string | null, doneId?: string) => {
     if (window.location.pathname !== pathname) return
@@ -463,7 +468,7 @@ export function CallPanel({ call, task, tz, standalone, next, linked = false, ca
         <h3 className="text-[17px] font-semibold">Call transcript</h3>
         <Transcript call={call} />
       </div>
-      <Link className="inline-flex min-h-11 items-center gap-0.5 text-[15px] font-semibold text-brand-ink" to={`${base}/calls/${encodeURIComponent(call.id)}`}>
+      <Link className="inline-flex min-h-11 items-center gap-0.5 text-[15px] font-semibold text-brand-ink" to={`${base}/calls/${encodeURIComponent(call.id)}`} state={{ origin: callOrigin({ base, pathname, search }) }}>
         {preview ? "Open the full call" : "Recording and full record"}<ChevronRight className="size-4" />
       </Link>
     </section>

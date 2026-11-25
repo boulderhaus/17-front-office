@@ -51,7 +51,7 @@ export function CallPathCard({ path, stale, onRefresh }: { path: ApiCallPath; st
       <div className="flex items-center justify-between gap-2">
         <h3 className="text-[15px] font-semibold">Otto’s path</h3>
         {stale ? (
-          <button type="button" onClick={onRefresh} className="min-h-9 rounded-md px-2 text-[13px] font-semibold text-primary underline-offset-2 hover:underline">Refresh for the latest</button>
+          <button type="button" onClick={onRefresh} className="min-h-11 rounded-md px-2 text-[13px] font-semibold text-primary underline-offset-2 hover:underline">Refresh for the latest</button>
         ) : (
           <span className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-muted-foreground">
             {path.live && <i className="size-2 animate-pulse rounded-full bg-red-600" />}
