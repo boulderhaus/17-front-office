@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react"
+import { Link } from "react-router-dom"
 import { CheckCircle2, Download, ExternalLink, LogOut } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -11,6 +12,7 @@ import { api } from "@/lib/api"
 import { FAIR_USE_LINE, money, perCall } from "@/lib/format"
 import { useMode } from "@/lib/mode"
 import type { PlanId } from "@/lib/types"
+import { ringChoicesWith } from "@/lib/dial"
 import { cn } from "@/lib/utils"
 import { useSettings } from "./settings"
 
@@ -101,6 +103,7 @@ export function BusinessSection() {
 
 export function AnsweringSection() {
   const { text, flag, set, bind, settings } = useSettings()
+  const { dashboard } = useMode()
   return (
     <>
       <SettingsCard title="Which calls">
@@ -108,9 +111,14 @@ export function AnsweringSection() {
           <select className={selectClass} {...bind("serviceState")}><option value="active">On, answering calls</option><option value="paused">Paused</option></select>
         </Field>
         <Pair>
-          <Field label="Answer"><select className={selectClass} {...bind("operationMode")}><option value="overflow">Only calls I miss</option><option value="after_hours">After hours</option><option value="always">Every call</option></select></Field>
-          <Field label="Ring my phone first"><select className={selectClass} {...bind("answerAfterRings")}>{[2, 3, 4, 5, 6, 8, 10, 12].map((rings) => <option key={rings} value={rings}>{rings} rings</option>)}</select></Field>
+          <Field label="Answer" hint={text("operationMode") === "always" ? "Your phone won’t ring for calls to your business number. Otto answers and alerts you right away." : undefined}><select className={selectClass} {...bind("operationMode")}><option value="overflow">Only calls I miss</option><option value="after_hours">After hours</option><option value="always">Every call</option></select></Field>
+          <RingFirstField rings={Number(text("answerAfterRings"))} onChange={(value) => set("answerAfterRings", value)} everyCall={text("operationMode") === "always"} family={dashboard?.line.business.carrier?.family ?? null} confirmed={Boolean(dashboard?.line.confirmedAt)} />
         </Pair>
+        {dashboard?.line.business.update && (
+          <p className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-950" role="status">
+            Dial your new code once to apply this. <Link className="font-semibold underline underline-offset-4" to={dashboard.onboarding.completed ? "/app" : "/app/start?step=forward"}>Show me the code</Link>
+          </p>
+        )}
       </SettingsCard>
       <SettingsCard title="After hours" description="When Call Otto answers every call, even ones you could pick up.">
         <Pair>
@@ -134,6 +142,31 @@ export function AnsweringSection() {
         </Field>
       </SettingsCard>
     </>
+  )
+}
+
+/**
+ * "Ring my phone first", in what the owner gets: the GSM forwarding timer (about 6 s a ring, 5–30 s). Verizon's
+ * timer is fixed, and in "every call" mode the phone never rings, so both show it locked with the reason.
+ */
+function RingFirstField({ rings, onChange, everyCall, family, confirmed }: { rings: number; onChange: (value: string) => void; everyCall: boolean; family: string | null; confirmed: boolean }) {
+  const verizon = family === "verizon"
+  const choices = ringChoicesWith(rings)
+  const hint = verizon ? "Verizon rings about 30 seconds. They don’t let anyone change that."
+    : everyCall ? "Otto answers every call, so your phone doesn’t ring first."
+    : family === "gsm" && confirmed ? "After you save, dial the new code once to apply it."
+    : family === "office" ? "For an office line, set the ring time in your phone company’s website or app."
+    : undefined
+  return (
+    <Field label="Ring my phone first" hint={hint}>
+      {verizon ? (
+        <select className={cn(selectClass, "disabled:cursor-not-allowed disabled:opacity-70")} disabled value="verizon" onChange={() => undefined}><option value="verizon">About 30 seconds (Verizon)</option></select>
+      ) : (
+        <select className={cn(selectClass, "disabled:cursor-not-allowed disabled:opacity-70")} name="answerAfterRings" disabled={everyCall} value={String(choices.find((choice) => choice.rings === rings)?.rings ?? 2.5)} onChange={(event) => onChange(event.target.value)}>
+          {choices.map((choice) => <option key={choice.rings} value={String(choice.rings)}>{choice.label}</option>)}
+        </select>
+      )}
+    </Field>
   )
 }
 

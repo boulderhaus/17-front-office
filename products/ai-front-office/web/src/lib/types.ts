@@ -46,9 +46,12 @@ export interface ForwardingPlan {
   off: string | null
   dialLink: string | null
   offDialLink: string | null
+  /** Every call goes to Call Otto; the owner's phone never rings for this number. */
+  forwardsAll: boolean
+  /** About how long the owner's phone rings before Call Otto answers (GSM timer, Verizon ~30 s), or null. */
+  ringSeconds: number | null
   what: string
   tips: string[]
-  iphoneTip: string | null
   confirm: string | null
 }
 
@@ -66,10 +69,12 @@ export interface ApiDashboard {
       choices: Array<{ family: Exclude<CarrierFamily, "unknown">; label: string }>
       /** The owner's mobile from signup, offered as the number customers call. */
       suggested: string | null
+      /** Forwarding works, but today's settings need a new code: dial plan.on once (after clearFirst, if set). */
+      update: { clearFirst: string | null } | null
     }
     confirmedAt: string | null
     check: {
-      status: "idle" | "calling" | "passed" | "picked_up" | "voicemail" | "declined" | "not_reached"
+      status: "idle" | "calling" | "passed" | "phone_answers" | "voicemail" | "declined" | "not_reached"
       method: "auto" | "manual" | null
       startedAt: string | null
       answeredAfterSec: number | null

@@ -20,7 +20,8 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     calendarConnectionRef: "google-primary",
     bookingMode: "confirm",
     operationMode: "after_hours",
-    answerAfterRings: 4,
+    // 2.5 rings ≈ 15 seconds: the GSM forwarding timer (see ringSeconds in domain/forwarding.ts).
+    answerAfterRings: 2.5,
     afterHours: {
       weekdayStart: "17:00",
       weekdayEnd: "08:00",
