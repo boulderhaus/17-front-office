@@ -242,7 +242,7 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
                 <span><strong>Otto is calling you now at <span className="whitespace-nowrap">{formatPhone(line.helpCall!.to)}</span>.</strong> Pick up{callerId ? <> (it’s from <span className="whitespace-nowrap">{callerId}</span>)</> : null}. Otto, our AI setup helper, walks you through it and answers your questions.</span>
               </p>
             ) : helpAsked && !line.helpCall ? (
-              <p className="flex items-center gap-2 text-sm"><Check className="size-4 text-emerald-700" />Brock, our founder, just emailed you a link to book a 10-minute call.</p>
+              <p className="flex items-center gap-2 text-sm"><Check className="size-4 text-emerald-700" />{founderEmailLine(line.founderEmail ?? null, dashboard.now)}</p>
             ) : null}
             {!helpCalling && (
               <p className="text-sm text-muted-foreground">
@@ -256,6 +256,13 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
       </div>
     </Card>
   )
+}
+
+/** What Brock's follow-up email actually was: a booking link, or (no calendar connected yet) a note asking for a reply. */
+function founderEmailLine(email: { sentAt: string; link: boolean } | null, now: string): string {
+  if (!email) return "Got it. We’ll email you to set this up."
+  const just = Date.parse(now) - Date.parse(email.sentAt) < 10 * 60_000 ? "just emailed" : "emailed"
+  return email.link ? `Brock, our founder, ${just} you a link to book a 10-minute call.` : `Brock, our founder, ${just} you to set up a quick call.`
 }
 
 function step(n: number) {

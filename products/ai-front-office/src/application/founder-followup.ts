@@ -39,6 +39,8 @@ export interface FounderBookingFacts {
   ottoNumber: string | null;
 }
 
+export interface FounderEmailSent { sentAt: string; link: boolean }
+
 export type BookResult =
   | { status: "booked"; slot: FounderSlot }
   | { status: "taken" }
@@ -103,6 +105,8 @@ export class FounderFollowup {
       });
       if (!queued) return "duplicate";
       await store.saveIntegrationSecret(tenantId, PROVIDER, "followup_sent_at", at);
+      // So the app, the 429 message and the spoken apology only mention a booking link when this email has one.
+      await store.saveIntegrationSecret(tenantId, PROVIDER, "followup_link", link ? "yes" : "no");
       log({ level: "info", event: "founder_followup_queued", tenantId, reason, bookingLink: Boolean(link) });
       return "queued";
     });
@@ -113,6 +117,16 @@ export class FounderFollowup {
     await this.queue(tenantId, reason).catch((error: unknown) => {
       this.deps.log({ level: "error", event: "founder_followup_failed", tenantId, reason, error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });
     });
+  }
+
+  /** Brock's latest follow-up to this shop, if one went in the last 24 hours, and whether it had a booking link. */
+  async lastEmail(tenantId: string): Promise<FounderEmailSent | null> {
+    const [sentAt, link] = await Promise.all([
+      this.deps.store.getIntegrationSecret(tenantId, PROVIDER, "followup_sent_at"),
+      this.deps.store.getIntegrationSecret(tenantId, PROVIDER, "followup_link"),
+    ]);
+    if (!sentAt || !(this.deps.clock.now().getTime() - Date.parse(sentAt) < FOUNDER_FOLLOWUP_GAP_MS)) return null;
+    return { sentAt, link: link === "yes" };
   }
 
   /** The loop: forwarding still not confirmed 20 minutes after "Set it up with me". */
@@ -161,9 +175,13 @@ export class FounderFollowup {
   async book(tenantId: string, start: string, facts: FounderBookingFacts): Promise<BookResult> {
     const { store, env, clock, calendars, log } = this.deps;
     if (!await calendars.connected()) return { status: "no_calendar" };
-    const slot = founderSlotAllowed(start, { now: clock.now(), windows: this.windows, timeZone: env.FOUNDER_TIMEZONE });
-    if (!slot) return { status: "invalid" };
     return store.withLock("founder-booking", async () => {
+      // A second tap (another time, or the same one on a slow connection) finds the call already booked: show that,
+      // never a second event or a second confirmation.
+      const existing = await this.existingBooking(tenantId);
+      if (existing) return { status: "booked", slot: existing } as const;
+      const slot = founderSlotAllowed(start, { now: clock.now(), windows: this.windows, timeZone: env.FOUNDER_TIMEZONE });
+      if (!slot) return { status: "invalid" } as const;
       if (!await calendars.isFree(slot, FOUNDER_BUFFER_MINUTES)) return { status: "taken" } as const;
       const key = `founder-booking:${tenantId}:${slot.start}`;
       await calendars.createEvent({

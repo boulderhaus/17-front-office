@@ -226,6 +226,11 @@ export interface OwnerAccount {
   status: "pending_activation" | "active" | "suspended";
   /** Incremented to revoke every existing session (password reset, sign out everywhere). */
   sessionVersion?: number;
+  /**
+   * When the owner proved they control the email (Google, Microsoft, an email link or a reset link). Null for
+   * a password sign-up or invite nobody has proved yet: the first proof drops that password.
+   */
+  emailVerifiedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }

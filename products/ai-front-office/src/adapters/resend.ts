@@ -19,8 +19,11 @@ export class ResendEmailAdapter implements NotificationPort {
     if (notification.channel !== "email") throw new Error("Resend only sends email notifications");
     const to = notification.destinationRef.startsWith("email:") ? notification.destinationRef.slice(6) : "";
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) throw new Error("No valid email destination is configured");
-    const { subject, text, attachments } = parseEmailBody(notification.body);
+    const parsed = parseEmailBody(notification.body);
+    const { subject, text } = parsed;
     const founder = notification.senderRef === "founder" ? this.options.founder ?? null : null;
+    // Only Brock's own emails (the booking confirmation's calendar file) ever carry an attachment.
+    const attachments = notification.senderRef === "founder" ? parsed.attachments : [];
     const response = await withTimeout((this.options.fetcher ?? fetch)("https://api.resend.com/emails", {
       method: "POST",
       headers: {
@@ -50,7 +53,8 @@ export function formatEmailBody(subject: string, text: string, attachments: Emai
   const files = attachments
     .filter((file) => /^[\w.-]{1,80}$/.test(file.filename))
     .map((file) => `Attachment: ${file.filename}; ${Buffer.from(file.content, "utf8").toString("base64")}\n`).join("");
-  return `Subject: ${subject.trim().slice(0, 160)}\n${files}\n${text.trim()}`;
+  // One line, always: a line break in the subject (a shop name, say) must never become an attachment line.
+  return `Subject: ${subject.replace(/[\r\n\u2028\u2029]+/g, " ").trim().slice(0, 160)}\n${files}\n${text.trim()}`;
 }
 
 export function parseEmailBody(value: string): { subject: string; text: string; attachments: EmailAttachment[] } {

@@ -119,6 +119,21 @@ export function setupInstructions(facts: SetupCallFacts): string {
 /** Read when the helper can't start. Brock's email with a booking link is queued before this is said. */
 export const SETUP_SORRY_SPEECH = "Hi, this is Call Otto. Our setup helper couldn't start just now. Brock, our founder, just emailed you a link to book a quick 10 minute call. Sorry about that. Goodbye.";
 
+/**
+ * The apology, true to what was actually sent: SETUP_SORRY_SPEECH when Brock's email with a booking link just went,
+ * "emailed you earlier" when today's email went before, no link mentioned when his calendar isn't connected (the
+ * email asks for a reply), and no email mentioned when none went.
+ */
+export function setupSorrySpeech(email: { fresh: boolean; link: boolean } | null): string {
+  if (email?.fresh && email.link) return SETUP_SORRY_SPEECH;
+  const middle = email
+    ? email.link
+      ? `Brock, our founder, ${email.fresh ? "just emailed you a link" : "emailed you a link earlier"} to book a quick 10 minute call.`
+      : `Brock, our founder, ${email.fresh ? "just emailed you" : "emailed you earlier"} to set up a quick 10 minute call.`
+    : "Please try again later from the Call Otto app.";
+  return `Hi, this is Call Otto. Our setup helper couldn't start just now. ${middle} Sorry about that. Goodbye.`;
+}
+
 export class TelnyxSetupCaller {
   constructor(private readonly options: {
     apiKey: string;
@@ -160,12 +175,12 @@ export class TelnyxSetupCaller {
   }
 
   /** The helper couldn't start: say so plainly instead of leaving the owner in silence, then hang up. */
-  async apologize(callControlId: string, commandId: string, tenantId: string): Promise<void> {
+  async apologize(callControlId: string, commandId: string, tenantId: string, speech = SETUP_SORRY_SPEECH): Promise<void> {
     const clientState = Buffer.from(`${SORRY_PREFIX}${tenantId}`).toString("base64");
     await this.request(`/calls/${encodeURIComponent(callControlId)}/actions/speak`, {
       method: "POST",
       body: JSON.stringify({
-        payload: SETUP_SORRY_SPEECH,
+        payload: speech,
         voice: "AWS.Polly.Joanna", language: "en-US", command_id: commandId, client_state: clientState,
       }),
     }, [404, 422]);

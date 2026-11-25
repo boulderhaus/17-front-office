@@ -89,6 +89,8 @@ export interface ApiDashboard {
     }
     helpRequestedAt: string | null
     helpCall: { to: string; startedAt: string } | null
+    /** Brock's follow-up email in the last 24 hours, and whether it has a booking link. */
+    founderEmail?: { sentAt: string; link: boolean } | null
   }
   csrf: string
   now: string
@@ -185,6 +187,8 @@ export interface ApiSettings {
   csrf: string
   values: SettingsValues
   status: string
+  /** No password on the account (Google, Microsoft or email link): deleting needs a sign-in from the last 10 minutes. */
+  signIn?: { hasPassword: boolean; recent: boolean }
   businessName: string
   /** This shop's id, for its own calls export. */
   shopId: string

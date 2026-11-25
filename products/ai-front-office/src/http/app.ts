@@ -43,12 +43,13 @@ import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js
 import { findTrade } from "../domain/trades.js";
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import type { OwnerSession } from "../security/owner-auth.js";
-import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
+import { clearOwnerSessionCookie, createPasswordResetToken, hasUsablePassword, hashOwnerPassword, isPasswordless, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, ownerSessionIssuedAt, PASSWORDLESS_HASH, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
+import { createOwnerSignIn, GOOGLE_SIGN_IN_CALLBACK, isSignInState, safeNext, verifiedSignupEmail, type VerifiedIdentity } from "./owner-sign-in.js";
 import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
 import { MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_ROUTES, toolFailure, toolLimitReached, withinToolBudget, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
 import { callScreeningSetting, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import { AMD_ENDED_EVENT, FORWARDING_CHECK_SPEECH, forwardingCheckState, GREETING_ENDED_EVENT, SCREENING_DETECTED_EVENT, TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
-import { setupHelpState, TelnyxSetupCaller, type SetupCallFacts } from "../adapters/telnyx-setup-call.js";
+import { setupHelpState, setupSorrySpeech, TelnyxSetupCaller, type SetupCallFacts } from "../adapters/telnyx-setup-call.js";
 import { FOUNDER_GOOGLE_SCOPES, FounderCalendars, FounderConnectError } from "../adapters/founder-calendar.js";
 import { FounderFollowup, type FounderBookingFacts } from "../application/founder-followup.js";
 import { founderConnectToken, founderConnectTokenValid, ownerFirstName, prettyPhone, readFounderBookingToken } from "../domain/founder-booking.js";
@@ -99,6 +100,7 @@ import {
   createGoogleOAuthAttempt,
   csrfForSession,
   HttpError,
+  isCrossSiteFormPost,
   mintAdminSession,
   parseForm,
   parseJson,
@@ -117,7 +119,39 @@ import {
 
 /** Brock's founder-calendar connect: its own cookie on the shared Google redirect path, never the owner's. */
 const FOUNDER_OAUTH_COOKIE = "afo_google_founder";
+/** The signed link (k) the connect started with, carried to Google's return so it goes back with that same link. */
+const FOUNDER_RETURN_COOKIE = "afo_google_founder_k";
 const FOUNDER_OAUTH_PATH = "/app/integrations/google";
+/** An admin-session connect gets a link this short for the trip back (the admin cookie is SameSite=Strict). */
+const FOUNDER_ADMIN_RETURN_MS = 15 * 60_000;
+
+/** Otto's AI setup helper's call to an owner, as the help endpoint and the call's webhooks write it. */
+interface SetupCallRecord {
+  startedAt?: string;
+  callControlId?: string;
+  device?: SetupCallFacts["device"];
+  to?: string;
+  answeredAt?: string;
+  endedAt?: string;
+  hangupCause?: string | null;
+}
+
+function readSetupCall(value: string | null): SetupCallRecord | null {
+  try {
+    const parsed = value ? JSON.parse(value) as unknown : null;
+    return parsed && typeof parsed === "object" ? parsed as SetupCallRecord : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Still ringing: not picked up or ended, inside the 2 minutes the app shows "calling now" (it rings up to 30 s). */
+function setupCallRinging(call: SetupCallRecord, nowMs: number): boolean {
+  return !call.answeredAt && !call.endedAt && typeof call.startedAt === "string" && nowMs - Date.parse(call.startedAt) < 2 * 60_000;
+}
+
+/** Telnyx hang-up causes that mean the owner never picked up: rang out, busy, declined, or the number didn't ring. */
+const SETUP_CALL_MISSED_CAUSES = new Set(["timeout", "no_answer", "user_busy", "call_rejected", "not_found"]);
 
 const dateTime = z.string().datetime({ offset: true });
 const baseToolSchema = z.object({
@@ -189,7 +223,8 @@ const ownerSignupSchema = z.object({
   displayName: z.string().trim().min(2).max(120).default("Shop owner"),
   businessName: z.string().trim().min(2).max(120).default("Your service business"),
   email: z.string().trim().toLowerCase().email().max(254),
-  password: z.string().min(12).max(200),
+  // Required unless Google, Microsoft or an email link already verified the email (checked in the handler).
+  password: z.string().min(12).max(200).optional(),
   phone: z.string().trim().max(30).optional(),
   timezone: z.string().trim().max(100).optional(),
   serviceAreaTerms: z.string().trim().max(800).default(""),
@@ -419,6 +454,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
   const limiter = new RateLimiter();
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));
+  const signIn = createOwnerSignIn({ env: dependencies.env, store: dependencies.store, clock: dependencies.clock, fetcher: (input, init) => (dependencies.fetcher ?? globalThis.fetch)(input, init), limiter, log });
+  /** A passwordless account re-confirms risky changes by having signed in within this long. */
+  const RECENT_SIGN_IN_MS = 10 * 60_000;
+  const signedInRecently = (session: OwnerSession): boolean => dependencies.clock.now().getTime() - ownerSessionIssuedAt(session) <= RECENT_SIGN_IN_MS;
   const telemetry = dependencies.telemetry ?? noopTelemetry;
   /** Brock's Google calendars and his personal follow-up when the AI setup helper can't finish. */
   const founderCalendars = new FounderCalendars({ store: dependencies.store, env: dependencies.env, clock: dependencies.clock, fetcher: dependencies.fetcher });
@@ -445,8 +484,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     overageCentsPerCall: plan.overageCentsPerCall, blurb: plan.blurb, who: plan.who, chargeNote: planCharge(plan, timezone),
     unlimited: plan.unlimited ? { addOnCents: plan.unlimited.addOnCents, priceCents: plan.unlimited.priceCents, firstMonthCents: plan.unlimited.firstMonthCents, fairUseCalls: plan.unlimited.fairUseCalls, chargeNote: planCharge(plan, timezone, true) } : null,
   })) : [];
-  const signupPage = (error = "", values: Record<string, string> = {}): string => renderOwnerSignup(error, values, {
+  const signupPage = (request: IncomingMessage, error = "", values: Record<string, string> = {}, identity: VerifiedIdentity | null = null): string => renderOwnerSignup(error, values, {
     supportEmail: dependencies.env.SUPPORT_EMAIL ?? null,
+    providers: signIn.providersFor(request),
+    verified: verifiedSignupEmail(identity),
     chargeNote: stripeClient ? planCharge(plans[0]!) : null,
     plans: stripeClient ? plans.map((plan) => ({ ...plan, chargeNote: planCharge(plan), unlimitedChargeNote: plan.unlimited ? planCharge(plan, undefined, true) : null })) : [],
   });
@@ -685,6 +726,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       return joinTeam(request, response, url, dependencies);
     }
     if (method === "GET" && url.pathname === "/signup") {
+      if (url.searchParams.get("fresh") === "1") {
+        response.setHeader("set-cookie", signIn.clearPendingIdentity());
+        return redirect(response, "/signup");
+      }
       // The pricing page's picks carry over: ?unlimited=1 and ?plan=team preselect the form.
       const preset: Record<string, string> = {};
       if (url.searchParams.get("unlimited") === "1") preset.unlimited = "yes";
@@ -692,20 +737,26 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (presetPlan && plans.some((plan) => plan.id === presetPlan)) preset.plan = presetPlan;
       const presetTrade = findTrade(url.searchParams.get("trade"));
       if (presetTrade) preset.trade = presetTrade.key;
-      return sendHtml(response, 200, analyticsPage(signupPage("", preset)));
+      return sendHtml(response, 200, analyticsPage(signupPage(request, "", preset, signIn.pendingIdentity(request))));
     }
     if (method === "POST" && url.pathname === "/signup") {
       if (!limiter.allow(`${ip}:owner-signup`, 5, 60 * 60_000)) throw new HttpError(429, "Too many signup attempts from this connection");
       const form = parseForm(await readBody(request, 48_000));
-      if (form.get("faxNumber")?.trim()) return sendHtml(response, 200, signupPage());
+      // Google, Microsoft or an email link verified this email: it is the account email, and no password is set.
+      const identity = signIn.pendingIdentity(request);
+      if (form.get("faxNumber")?.trim()) return sendHtml(response, 200, signupPage(request, "", {}, identity));
       const values = Object.fromEntries(form.entries());
+      if (identity) {
+        values.email = identity.email;
+        delete values.password;
+      }
       const parsed = ownerSignupSchema.safeParse(values);
-      if (!parsed.success) return sendHtml(response, 400, signupPage("Check every required field and use a password with at least 12 characters.", values));
+      if (!parsed.success || (!identity && !parsed.data.password)) return sendHtml(response, 400, signupPage(request, identity ? "Check every required field." : "Check every required field and use a password with at least 12 characters.", values, identity));
       const phoneInput = parsed.data.phone?.trim() ?? "";
       const phone = phoneInput ? normalizeUsPhone(phoneInput) : null;
-      if (phoneInput && !phone) return sendHtml(response, 400, signupPage("Enter a valid US mobile number.", values));
+      if (phoneInput && !phone) return sendHtml(response, 400, signupPage(request, "Enter a valid US mobile number.", values, identity));
       if ((parsed.data.ownerSmsConsent === "yes" || parsed.data.founderSmsConsent === "yes") && !phone) {
-        return sendHtml(response, 400, signupPage("Add a valid US mobile number to receive text messages.", values));
+        return sendHtml(response, 400, signupPage(request, "Add a valid US mobile number to receive text messages.", values, identity));
       }
       // Defaults from the owner's mobile: their state is the starting service area and timezone.
       // The browser's timezone wins when the page sent one. Both are refined later in Settings.
@@ -725,15 +776,17 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         id: randomUUID(),
         tenantId,
         email: parsed.data.email,
-        displayName: parsed.data.displayName,
-        passwordHash: await hashOwnerPassword(parsed.data.password),
+        displayName: identity?.name && !form.has("displayName") ? identity.name : parsed.data.displayName,
+        passwordHash: identity || !parsed.data.password ? PASSWORDLESS_HASH : await hashOwnerPassword(parsed.data.password),
+        // A password sign-up proves nothing about the email; the first Google, Microsoft, email or reset link does.
+        emailVerifiedAt: identity ? now : null,
         status: "pending_activation",
         createdAt: now,
         updatedAt: now,
       };
       const splitList = (value: string): string[] => value.split(",").map((item) => item.trim()).filter(Boolean).slice(0, 100);
       const serviceArea = normalizeServiceAreaInput(parsed.data.serviceAreaTerms || homeState || "");
-      if (serviceArea.errors.length > 0) return sendHtml(response, 400, signupPage(serviceAreaMessage(serviceArea.errors), values));
+      if (serviceArea.errors.length > 0) return sendHtml(response, 400, signupPage(request, serviceAreaMessage(serviceArea.errors), values, identity));
       // The plan picked above the button; Solo when nothing was sent.
       const plan = pickPlan(plans, form.get("plan"));
       const trade = findTrade(parsed.data.trade);
@@ -772,7 +825,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         },
       };
       const created = await dependencies.store.createOwnerWorkspace({ account, config, ownerPhone: phone });
-      if (!created) return sendHtml(response, 409, signupPage("That email already has an account. Sign in instead.", values));
+      if (!created) return sendHtml(response, 409, signupPage(request, "That email already has an account. Sign in instead.", values, identity));
       if (parsed.data.founderSmsConsent === "yes") {
         const welcomeConfigured = dependencies.env.FOUNDER_WELCOME_ENABLED
           && dependencies.env.TELNYX_MESSAGING_APPROVED
@@ -805,8 +858,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         await queueOwnerOptInConfirmation(tenantId, phone!, `owner-optin:${tenantId}:signup`);
       }
       const session = mintOwnerSession(account, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
-      response.setHeader("set-cookie", ownerSessionCookie(session, dependencies.env.NODE_ENV === "production"));
-      log({ level: "info", event: "owner_workspace_created", accountId: account.id, tenantId });
+      const sessionCookie = ownerSessionCookie(session, dependencies.env.NODE_ENV === "production");
+      response.setHeader("set-cookie", identity ? [sessionCookie, signIn.clearPendingIdentity()] : sessionCookie);
+      log({ level: "info", event: "owner_workspace_created", accountId: account.id, tenantId, ...(identity ? { signInMethod: identity.provider } : {}) });
       telemetry.capture("owner_signed_up", account.id, tenantId, { operation_mode: config.operationMode });
       // Straight to the card: one tap from "Continue" to Stripe. If Stripe is slow, the next screen has the button.
       if (stripeClient) {
@@ -818,20 +872,28 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       }
       return redirect(response, "/app/start");
     }
-    if (method === "GET" && url.pathname === "/login") return sendHtml(response, 200, renderOwnerLogin());
+    if (method === "GET" && url.pathname === "/login") return sendHtml(response, 200, renderOwnerLogin("", signIn.loginOptions(request, { next: safeNext(url.searchParams.get("next")) })));
     if (method === "POST" && url.pathname === "/login") {
+      // Another site can't post its own email and password here to sign this browser into its shop.
+      if (isCrossSiteFormPost(request, dependencies.env.PUBLIC_BASE_URL)) throw new HttpError(403, "Forbidden");
       if (!limiter.allow(`${ip}:owner-login`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
-      const parsed = ownerLoginSchema.safeParse(Object.fromEntries(parseForm(await readBody(request, 16_000)).entries()));
-      if (!parsed.success) return sendHtml(response, 400, renderOwnerLogin("Enter a valid email and password."));
+      const form = parseForm(await readBody(request, 16_000));
+      const next = safeNext(form.get("next"));
+      const parsed = ownerLoginSchema.safeParse({ email: form.get("email") ?? "", password: form.get("password") ?? "" });
+      if (!parsed.success) return sendHtml(response, 400, renderOwnerLogin("Enter a valid email and password.", signIn.loginOptions(request, { errorField: "password", email: form.get("email") ?? "", next })));
       // Per-account limit so guesses spread across many addresses still stop.
       if (!limiter.allow(`owner-login-email:${parsed.data.email}`, 10, 15 * 60_000)) throw new HttpError(429, "Too many sign-in attempts");
       const account = await dependencies.store.getOwnerAccountByEmail(parsed.data.email);
-      const valid = await verifyOwnerPassword(parsed.data.password, account?.passwordHash ?? await dummyOwnerPasswordHash);
-      if (!account || !valid || account.status === "suspended") return sendHtml(response, 401, renderOwnerLogin("Email or password is incorrect."));
+      // An account made with Google, Microsoft or an email link has no password: no password ever matches it,
+      // and it takes as long to say so as for a wrong password.
+      const passwordHash = account && hasUsablePassword(account.passwordHash) ? account.passwordHash : null;
+      const valid = await verifyOwnerPassword(parsed.data.password, passwordHash ?? await dummyOwnerPasswordHash) && passwordHash !== null;
+      if (!account || !valid || account.status === "suspended") return sendHtml(response, 401, renderOwnerLogin("Email or password is incorrect.", signIn.loginOptions(request, { errorField: "password", email: parsed.data.email, next })));
       const session = mintOwnerSession(account, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
       response.setHeader("set-cookie", ownerSessionCookie(session, dependencies.env.NODE_ENV === "production"));
-      return redirect(response, "/app");
+      return redirect(response, next ?? "/app");
     }
+    if (await signIn.route(request, response, url, method, ip)) return;
     if (url.pathname === "/forgot" && (method === "GET" || method === "POST")) {
       const emailEnabled = Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL);
       if (method === "GET") return sendHtml(response, 200, renderForgotPassword({ emailEnabled, supportEmail: dependencies.env.SUPPORT_EMAIL ?? null }));
@@ -866,6 +928,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const accountId = token ? await dependencies.store.consumePasswordReset(hashPasswordResetToken(token), dependencies.clock.now().toISOString()) : null;
       if (!accountId) return sendHtml(response, 400, renderForgotPassword({ emailEnabled: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL), supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, error: "That reset link is expired or already used. Ask for a new one." }));
       await dependencies.store.updateOwnerPassword(accountId, await hashOwnerPassword(password), dependencies.clock.now().toISOString());
+      // The reset link reached the account email, so the owner controls it: this password stays when they later use Google.
+      await dependencies.store.markOwnerEmailVerified(accountId, dependencies.clock.now().toISOString(), null);
       log({ level: "info", event: "owner_password_reset", accountId });
       response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/login");
@@ -874,6 +938,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/");
     }
+    // Google sign-in returns to the calendar-connect callback (its one registered redirect URI); its signed state routes it here.
+    if (method === "GET" && url.pathname === GOOGLE_SIGN_IN_CALLBACK && isSignInState(url.searchParams.get("state"))) return signIn.googleCallback(request, response, url);
     // Founder calendar connect returns to the one registered Google redirect URI. Handled here, before the owner
     // session gate, only with its own cookie and a founder-signed state; anything else falls through unchanged.
     if (method === "GET" && url.pathname === "/app/integrations/google/callback" && readCookie(request, FOUNDER_OAUTH_COOKIE) && await finishFounderConnect(request, response, url)) return;
@@ -1207,7 +1273,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (!limiter.allow(`forwarding-help:${account.tenantId}`, 4, 24 * 60 * 60_000)) {
         // Brock's email (at most one a day) carries it from here.
         await founder.queueSafely(account.tenantId, "limit");
-        throw new HttpError(429, "Otto has called you a few times today. Brock, our founder, emailed you a link to book a 10-minute call.");
+        const sent = await founder.lastEmail(account.tenantId).catch(() => null);
+        throw new HttpError(429, `Otto has called you a few times today. ${!sent ? "Please try again tomorrow." : sent.link ? "Brock, our founder, emailed you a link to book a 10-minute call." : "Brock, our founder, emailed you to set up a quick call."}`);
       }
       const [config, state, ownerPhone, lineNumber] = await Promise.all([
         dependencies.store.getConfig(account.tenantId),
@@ -1226,22 +1293,26 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const loops = forwardsBackToOtto({ mode: config.operationMode, businessNumber: state.businessNumber, phone: candidate, dialedCode: state.dialedCode ?? null });
       if (loops) log({ level: "info", event: "setup_call_skipped_forwards_to_otto", tenantId: account.tenantId });
       const callTo = loops ? null : candidate;
-      let calling: string | null = null;
-      if (setupCallsConfigured() && callTo && lineNumber) {
-        const callControlId = await setupCaller()!
-          .dial({ connectionId: dependencies.env.TELNYX_CHECK_CONNECTION_ID!, from: dependencies.env.TELNYX_FROM_NUMBER!, to: callTo, tenantId: account.tenantId, webhookUrl: `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx` })
-          .catch((error) => { log({ level: "error", event: "setup_call_dial_failed", tenantId: account.tenantId, error: safeError(error) }); return null; });
-        if (callControlId) {
-          calling = callTo;
-          await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "setup_call", JSON.stringify({ startedAt: now, callControlId, device, to: callTo }));
+      // One setup call per shop at a time, written only under this lock (here and by the call's webhooks).
+      const calling = await dependencies.store.withLock(`setup-call:${account.tenantId}`, async (): Promise<string | null> => {
+        const current = readSetupCall(await dependencies.store.getIntegrationSecret(account.tenantId, "forwarding", "setup_call"));
+        // Already ringing (a double tap, another device): that call carries it. Never dial over it or clear it.
+        if (current?.to && setupCallRinging(current, Date.parse(now))) return current.to;
+        if (setupCallsConfigured() && callTo && lineNumber) {
+          const callControlId = await setupCaller()!
+            .dial({ connectionId: dependencies.env.TELNYX_CHECK_CONNECTION_ID!, from: dependencies.env.TELNYX_FROM_NUMBER!, to: callTo, tenantId: account.tenantId, webhookUrl: `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx` })
+            .catch((error) => { log({ level: "error", event: "setup_call_dial_failed", tenantId: account.tenantId, error: safeError(error) }); return null; });
+          if (callControlId) {
+            await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "setup_call", JSON.stringify({ startedAt: now, callControlId, device, to: callTo }));
+            return callTo;
+          }
         }
-      }
-      if (!calling) {
-        // No call is coming (not set up, no number, or the dial failed): clear any older call so the app shows
-        // Brock's email, and send it now.
+        // No call is coming (not set up, no number, or the dial failed): clear the older, finished call so the app
+        // shows Brock's email.
         await dependencies.store.deleteIntegrationSecret(account.tenantId, "forwarding", "setup_call");
-        await founder.queueSafely(account.tenantId, "call_unavailable");
-      }
+        return null;
+      });
+      if (!calling) await founder.queueSafely(account.tenantId, "call_unavailable");
       if (dependencies.env.SUPPORT_EMAIL) {
         await dependencies.store.enqueueNotification({
           id: randomUUID(), tenantId: account.tenantId, callId: null, channel: "email", destinationRef: `email:${dependencies.env.SUPPORT_EMAIL}`,
@@ -1360,6 +1431,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         urgentCalls: await urgentCallsState(account.tenantId),
         values: apiSettings(config),
         status: account.status,
+        // No password (Google, Microsoft or email link): deleting needs a sign-in from the last 10 minutes instead.
+        signIn: { hasPassword: !isPasswordless(account.passwordHash), recent: signedInRecently(session) },
         businessName: config.businessName,
         shopId: account.tenantId,
         plan: (() => {
@@ -1701,6 +1774,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         subscription: await dependencies.store.getSubscription(account.tenantId),
         csrf: session.csrf,
         saved: url.searchParams.get("saved") === "1",
+        recentSignIn: signedInRecently(session),
         integrations: {
           googleAvailable: anyGoogleClient(dependencies.env),
           googleConnected,
@@ -1754,7 +1828,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
       if (form.get("confirm")?.trim().toLowerCase() !== "delete") throw new HttpError(400, "Type DELETE to confirm");
-      if (!await verifyOwnerPassword(form.get("password") ?? "", account.passwordHash)) throw new HttpError(403, "Password is incorrect");
+      // No password on the account (Google, Microsoft or email link): a sign-in in the last 10 minutes stands in for it.
+      if (isPasswordless(account.passwordHash)) {
+        if (!signedInRecently(session)) throw new HttpError(403, "For your safety, sign in again, then delete within 10 minutes.");
+      } else if (!await verifyOwnerPassword(form.get("password") ?? "", account.passwordHash)) throw new HttpError(403, "Password is incorrect");
       const subscription = await dependencies.store.getSubscription(account.tenantId);
       // Only once billing has fully ended: anything but a cancelled subscription may still charge.
       if (subscription?.providerSubscriptionId && subscription.status !== "canceled") {
@@ -2318,7 +2395,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   }
 
   async function readForwarding(tenantId: string): Promise<ForwardingState> {
-    const [businessNumber, carrierJson, confirmedAt, checkJson, helpRequestedAt, setupCallJson, dialedCode] = await Promise.all([
+    const [businessNumber, carrierJson, confirmedAt, checkJson, helpRequestedAt, setupCallJson, dialedCode, founderEmail] = await Promise.all([
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "business_number"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "carrier"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "confirmed_at"),
@@ -2326,6 +2403,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "help_requested_at"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "dialed_code"),
+      founder.lastEmail(tenantId),
     ]);
     const parse = <T>(value: string | null): T | null => { try { return value ? JSON.parse(value) as T : null; } catch { return null; } };
     const check = parse<ForwardingCheckRecord>(checkJson);
@@ -2334,6 +2412,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       check: check ? { startedAt: check.startedAt, method: check.method, answeredAt: check.answeredAt ?? null, endedAt: check.endedAt ?? null, hangupCause: check.hangupCause ?? null, screenedAt: check.screenedAt ?? null, amdResult: check.amdResult ?? null, code: check.code ?? null } : null,
       helpRequestedAt,
       helpCall: ((call) => call?.to && call.startedAt ? { to: call.to, startedAt: call.startedAt } : null)(parse<{ to?: string; startedAt?: string }>(setupCallJson)),
+      founderEmail,
     };
   }
 
@@ -2369,15 +2448,32 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     // Only our apology ends in a hang-up; nothing the helper itself says ever does.
     if (phase === "sorry") { if (envelope.data.event_type === "call.speak.ended") await caller.hangUp(callControlId); return; }
     if (envelope.data.event_type !== "call.answered" && envelope.data.event_type !== "call.hangup") return;
-    let call: { callControlId?: string; device?: SetupCallFacts["device"]; answeredAt?: string } | null = null;
-    try { call = JSON.parse(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call") ?? "null"); } catch { call = null; }
-    if (!call || call.callControlId !== callControlId) return;
+    const at = dependencies.clock.now().toISOString();
+    // Read and write the call record under the same lock as the help endpoint, so an answer and a hang-up that
+    // arrive together (or out of order) never both act on a stale record.
+    const lockedCall = (task: (call: SetupCallRecord) => Promise<SetupCallRecord | null>) => dependencies.store.withLock(`setup-call:${tenantId}`, async () => {
+      const call = readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"));
+      return call && call.callControlId === callControlId ? task(call) : null;
+    });
     if (envelope.data.event_type === "call.hangup") {
-      // Rang out, busy or declined: the helper never got to talk, so Brock emails now.
-      if (!call.answeredAt) await founder.queueSafely(tenantId, "no_answer");
+      const cause = typeof envelope.data.payload.hangup_cause === "string" ? envelope.data.payload.hangup_cause.slice(0, 40) : null;
+      const ended = await lockedCall(async (call) => {
+        if (call.endedAt) return null;
+        await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...call, endedAt: at, hangupCause: cause }));
+        return call;
+      });
+      // Rang out, busy or declined: the helper never got to talk, so Brock emails now. Any other ending without a
+      // recorded answer (a normal hang-up whose answer we haven't seen yet) is left to the 20-minute check.
+      if (ended && !ended.answeredAt && cause && SETUP_CALL_MISSED_CAUSES.has(cause)) await founder.queueSafely(tenantId, "no_answer");
       return;
     }
-    await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...call, answeredAt: dependencies.clock.now().toISOString() }));
+    const call = await lockedCall(async (current) => {
+      // The hang-up already came in: the call is over, so there's no one to start the helper for.
+      if (current.endedAt) return null;
+      if (!current.answeredAt) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...current, answeredAt: at }));
+      return current;
+    });
+    if (!call) return;
     const [config, state, lineNumber] = await Promise.all([
       dependencies.store.getConfig(tenantId),
       readForwarding(tenantId),
@@ -2411,7 +2507,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       // then apologize and hang up when that's said.
       log({ level: "error", event: "setup_call_start_failed", tenantId, error: safeError(error) });
       await founder.queueSafely(tenantId, "helper_failed");
-      await caller.apologize(callControlId, `setup-sorry:${envelope.data.id}`, tenantId);
+      const sent = await founder.lastEmail(tenantId).catch(() => null);
+      const fresh = sent ? dependencies.clock.now().getTime() - Date.parse(sent.sentAt) < 10 * 60_000 : false;
+      await caller.apologize(callControlId, `setup-sorry:${envelope.data.id}`, tenantId, setupSorrySpeech(sent ? { fresh, link: sent.link } : null));
     });
   }
 
@@ -2518,7 +2616,13 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         code_challenge: attempt.challenge,
         code_challenge_method: "S256",
       }).toString();
-      response.setHeader("set-cookie", `${FOUNDER_OAUTH_COOKIE}=${value}; Path=${FOUNDER_OAUTH_PATH}; HttpOnly; SameSite=Lax; Max-Age=600${secure ? "; Secure" : ""}`);
+      // The way back: the link this connect started with, never a fresh one. A connect from the admin session gets
+      // a 15-minute link, since the SameSite=Strict admin cookie doesn't survive the trip through Google.
+      const returnLink = viaLink ? k! : founderConnectToken(signingKey, now, FOUNDER_ADMIN_RETURN_MS);
+      response.setHeader("set-cookie", [
+        `${FOUNDER_OAUTH_COOKIE}=${value}; Path=${FOUNDER_OAUTH_PATH}; HttpOnly; SameSite=Lax; Max-Age=600${secure ? "; Secure" : ""}`,
+        `${FOUNDER_RETURN_COOKIE}=${encodeURIComponent(returnLink)}; Path=${FOUNDER_OAUTH_PATH}; HttpOnly; SameSite=Lax; Max-Age=600${secure ? "; Secure" : ""}`,
+      ]);
       return redirect(response, authorization.toString());
     }
     if (form) {
@@ -2566,9 +2670,12 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const attempt = clientForAttempt(dependencies.env, `${signingKey}:founder-calendar`, (key) => verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, FOUNDER_OAUTH_COOKIE), key, now.getTime()));
     if (!attempt) return false;
     const secure = dependencies.env.NODE_ENV === "production";
-    response.setHeader("set-cookie", `${FOUNDER_OAUTH_COOKIE}=; Path=${FOUNDER_OAUTH_PATH}; HttpOnly; SameSite=Lax; Max-Age=0${secure ? "; Secure" : ""}`);
-    // A fresh signed link back to the calendars page, so it works without an admin session.
-    const back = (query: string): string => `/admin/founder-calendars?k=${encodeURIComponent(founderConnectToken(signingKey, now, 60 * 60_000))}&${query}`;
+    response.setHeader("set-cookie", [FOUNDER_OAUTH_COOKIE, FOUNDER_RETURN_COOKIE].map((name) => `${name}=; Path=${FOUNDER_OAUTH_PATH}; HttpOnly; SameSite=Lax; Max-Age=0${secure ? "; Secure" : ""}`));
+    // Back to the calendars page with the same signed link the connect started with, never a new one (so a link
+    // can't renew itself here), and none once it has run out.
+    const returnLink = readCookie(request, FOUNDER_RETURN_COOKIE);
+    const linked = returnLink && founderConnectTokenValid(signingKey, returnLink, now) ? returnLink : null;
+    const back = (query: string): string => `/admin/founder-calendars?${linked ? `k=${encodeURIComponent(linked)}&` : ""}${query}`;
     const code = url.searchParams.get("code");
     if (url.searchParams.has("error") || !code) {
       redirect(response, back("error=declined"));

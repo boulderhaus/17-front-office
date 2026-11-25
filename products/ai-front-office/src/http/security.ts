@@ -163,6 +163,24 @@ export function requestIp(request: IncomingMessage): string {
   return first || request.socket.remoteAddress || "unknown";
 }
 
+/**
+ * A form post another site made the browser send (login CSRF). Sec-Fetch-Site says so on current browsers; an
+ * Origin from another host says so on older ones. "Origin: null" passes: every page here is sent with
+ * Referrer-Policy: no-referrer, which makes browsers send null on our own same-origin posts.
+ */
+export function isCrossSiteFormPost(request: IncomingMessage, publicBaseUrl: string): boolean {
+  if (request.headers["sec-fetch-site"] === "cross-site") return true;
+  const origin = request.headers.origin;
+  if (!origin || origin === "null") return false;
+  let host: string;
+  try {
+    host = new URL(origin).host;
+  } catch {
+    return true;
+  }
+  return host !== new URL(publicBaseUrl).host && host !== request.headers.host;
+}
+
 export class HttpError extends Error {
   constructor(readonly status: number, message: string) {
     super(message);
