@@ -205,6 +205,10 @@ export function AlertsSection() {
             hint={settings.urgentCalls.disclosure}
             onChange={(on) => void toggleUrgentCalls(on)} />
         )}
+        {/* The urgent number is the business number and may send every call to Otto: Otto skips those calls. */}
+        {settings.urgentCalls?.available && settings.urgentCalls.on && settings.urgentCalls.held && (
+          <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">Emergency calls paused: this number may send every call to Otto. You still get a push and an email.</p>
+        )}
       </SettingsCard>
       <SettingsCard title="Texts">
         <ToggleRow id="ownerRealtimeSmsEnabled" label="A text for every new lead" hint="Sent the moment the call ends. Included in every plan." checked={flag("ownerRealtimeSmsEnabled")} onChange={(value) => set("ownerRealtimeSmsEnabled", value)} />

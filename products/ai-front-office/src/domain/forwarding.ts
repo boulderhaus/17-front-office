@@ -91,9 +91,10 @@ export function forwardingChoice(mode: ForwardingMode): ForwardingChoice {
 }
 
 /**
- * What the owner was set up for when a test last passed: their choice and the code on screen then. The owner's
- * choice is the source of truth; we never work out which code is on from how long a test took (a Decline forwards
- * as fast as forward-all, and a 15 s timer can't be told from a 25 s one).
+ * What the owner was set up for when a test last passed: their choice and the code on screen then. Also written,
+ * as every call, when the owner leaves every call before any test proved it (they may have dialed forward-all).
+ * The owner's choice is the source of truth; we never work out which code is on from how long a call took (a
+ * Decline forwards as fast as forward-all, and a 15 s timer can't be told from a 25 s one).
  */
 export interface TestedFor {
   mode: ForwardingChoice;
@@ -114,7 +115,7 @@ export function parseTestedFor(value: string | null | undefined): TestedFor | nu
 
 /**
  * True when the business number may send every call to Call Otto: "every call" is picked (dialed or not), or the
- * last passed test was for every call (until a test passes for ring first). Otto never dials it then (setup helper,
+ * last passed test was (or the owner left it untested) for every call, until a test passes for ring first. Otto never dials it then (setup helper,
  * urgent owner calls, warm transfers): it would only be Otto calling Otto. Office lines follow the same rule.
  */
 export function mayForwardAll(input: { mode: ForwardingMode; testedFor?: TestedFor | null }): boolean {

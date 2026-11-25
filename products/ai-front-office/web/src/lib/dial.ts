@@ -3,7 +3,7 @@
  *
  * - iPhone (any browser): never the code in a tel: link. iOS 27 blocks forwarding codes in links with a scary
  *   "Call Forwarding Link Blocked" alert, so the owner copies the code, we try to open the Phone keypad with a bare
- *   tel: (no number), and they paste it (or type it) there.
+ *   tel: (no number) once it's copied, and they paste it (or type it) there.
  * - Android Chrome / Samsung Internet: a tel: link opens the dialer with the code filled in (# must be %23).
  * - Firefox on Android blocks tel: links with * or #: copy instead.
  * - A computer can't dial: show the code and a QR code that opens this page on their phone.
@@ -70,12 +70,15 @@ export function ringChoicesWith(current: number): Array<{ rings: number; seconds
 export const OPEN_PHONE_WAIT_MS = 1_200
 
 /**
- * iPhone "Copy code & open Phone", all inside the one tap: copy the code, then open the Phone app's keypad with a bare
- * `tel:` (never the code itself: iOS blocks forwarding codes in links). If the page is still showing after
+ * iPhone "Copy code & open Phone", all from the one tap: copy the code, and once it's copied open the Phone app's
+ * keypad with a bare `tel:` (never the code itself: iOS blocks forwarding codes in links). If the copy fails (or
+ * there's no clipboard), the page stays put and `onCopied(false)` says to type the code: opening Phone then would
+ * leave them with nothing to paste and our message hidden behind it. If the page is still showing after
  * OPEN_PHONE_WAIT_MS (no visibilitychange to hidden), Phone didn't open: `onStayed` shows the one-line instruction.
  *
  * NEEDS A REAL-IPHONE CHECK: a bare tel: opened the dialer from an app (Apple forums thread 749906), but nobody has
- * confirmed it from Safari. If Safari shows an error instead, drop the tel: step and keep copy + the line.
+ * confirmed it from Safari, nor that Safari still follows it once the copy has resolved (after the tap's own turn).
+ * If Safari shows an error or ignores it, drop the tel: step and keep copy + the line.
  */
 export function copyAndOpenPhone(code: string, env: {
   clipboard: { writeText: (text: string) => Promise<void> } | undefined
@@ -84,19 +87,20 @@ export function copyAndOpenPhone(code: string, env: {
   setTimeout: (run: () => void, ms: number) => unknown
   onCopied: (copied: boolean) => void
   onStayed: () => void
-}): void {
+}): Promise<void> {
   if (!env.clipboard) {
     env.onCopied(false)
-    env.onStayed()
-    return
+    return Promise.resolve()
   }
-  void env.clipboard.writeText(code).then(() => env.onCopied(true), () => env.onCopied(false))
-  let left = false
-  const hidden = () => { if (env.document.visibilityState === "hidden") left = true }
-  env.document.addEventListener("visibilitychange", hidden)
-  env.location.href = "tel:"
-  env.setTimeout(() => {
-    env.document.removeEventListener("visibilitychange", hidden)
-    if (!left && env.document.visibilityState === "visible") env.onStayed()
-  }, OPEN_PHONE_WAIT_MS)
+  return env.clipboard.writeText(code).then(() => {
+    env.onCopied(true)
+    let left = false
+    const hidden = () => { if (env.document.visibilityState === "hidden") left = true }
+    env.document.addEventListener("visibilitychange", hidden)
+    env.location.href = "tel:"
+    env.setTimeout(() => {
+      env.document.removeEventListener("visibilitychange", hidden)
+      if (!left && env.document.visibilityState === "visible") env.onStayed()
+    }, OPEN_PHONE_WAIT_MS)
+  }, () => env.onCopied(false))
 }

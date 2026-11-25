@@ -96,7 +96,13 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
   const startTest = () => void post("check", "/api/app/line/check")
   const testLabel = line.check.status === "idle" ? "Call me now" : "Test again"
   const fixOffer = plan ? showFix(line.check.status, plan) : false
-  const change = <button type="button" className="font-semibold text-brand-ink underline underline-offset-4 focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-brand-ink focus-visible:outline-none" onClick={() => setEditing(true)}>Change</button>
+  const changeButton = (label: string) => <button type="button" aria-label="Change your business number" className="font-semibold whitespace-nowrap text-brand-ink underline underline-offset-4 focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-brand-ink focus-visible:outline-none" onClick={() => setEditing(true)}>{label}</button>
+  const change = changeButton("Change")
+  // Office line leaving every call: "forward all calls" goes off in the same website, then calls not answered on.
+  const officeLeaving = Boolean(business.update?.leavingEveryCall && plan && !plan.on && plan.family === "office")
+  const what = plan && officeLeaving && line.number
+    ? `In your phone company’s website or app, turn off forward all calls. Then forward calls you don’t answer to ${formatPhone(line.number)}.`
+    : plan?.what ?? ""
 
   return (
     <Card className="relative gap-0 overflow-hidden border-brand-ink/15 py-0">
@@ -161,7 +167,7 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
                   {business.update?.clearFirst && <ClearFirst code={business.update.clearFirst} />}
                   {plan.on
                     ? <DialCode code={plan.on} dialLink={plan.dialLink} codeRef={codeRef} />
-                    : <p className="text-sm">{plan.what}</p>}
+                    : <p className="text-sm">{what}</p>}
                 </section>
 
                 <section className="grid gap-2.5 border-t pt-4" aria-label="Test it">
@@ -205,13 +211,13 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
                   ? `Every call to ${formatPhone(business.number!)} now goes to Otto. Your phone won’t ring for these.`
                   : business.codeApplied
                     ? `Calls you miss on ${formatPhone(business.number!)} now go to Otto.${plan?.ringSeconds ? ` Your phone rings about ${plan.ringSeconds} seconds first.` : ""}`
-                    : `Calls to ${formatPhone(business.number!)} now reach Otto.`}</p>
+                    : `Calls to ${formatPhone(business.number!)} now reach Otto.`} {changeButton("Change number")}</p>
                 {business.update && plan && (
                   <div className="grid gap-2.5 border-t pt-3">
                     {/* Stays until a test passes for today's choice: the owner's choice is the source of truth. */}
                     <p className="text-[15px] font-semibold">{plan.on ? "Dial this once to apply your change" : "Apply your change"}</p>
                     {business.update.clearFirst && <ClearFirst code={business.update.clearFirst} />}
-                    {plan.on ? <DialCode code={plan.on} dialLink={plan.dialLink} codeRef={codeRef} /> : <p>{plan.what}</p>}
+                    {plan.on ? <DialCode code={plan.on} dialLink={plan.dialLink} codeRef={codeRef} /> : <p>{what}</p>}
                     <Button size="tap" variant="outline" className={tapWidth} disabled={busy === "check"} onClick={startTest}>{busy === "check" ? <><Loader2 className="motion-safe:animate-spin" />Starting…</> : "Then test it"}</Button>
                   </div>
                 )}
@@ -323,8 +329,8 @@ function showFix(status: Status, plan: ForwardingPlan): boolean {
  */
 function DialCode({ code, dialLink, codeRef }: { code: string; dialLink: string | null; codeRef?: Ref<HTMLDivElement> }) {
   const href = dialHref(platform, dialLink)
-  // iPhone: true once Phone didn't open from our tap, so we say how to open it by hand.
-  const [stayed, setStayed] = useState(false)
+  // iPhone: "paste" once Phone didn't open from our tap (say how to open it by hand), "type" when the copy failed.
+  const [stayed, setStayed] = useState<"paste" | "type" | null>(null)
   const copy = () => void navigator.clipboard?.writeText(code).then(
     () => toast.success(isIphone ? "Copied. In Phone › Keypad, touch and hold above the numbers, tap Paste, then Call." : "Copied. Paste it in your Phone app’s keypad, then tap Call."),
     () => toast("Type the code into your Phone app’s keypad."),
@@ -360,20 +366,21 @@ function DialCode({ code, dialLink, codeRef }: { code: string; dialLink: string 
     )
   }
   if (isIphone) {
-    // NEEDS A REAL-IPHONE CHECK (bare tel: from Safari): see copyAndOpenPhone.
-    const copyAndOpen = () => copyAndOpenPhone(code, {
+    // NEEDS A REAL-IPHONE CHECK (bare tel: from Safari, after the copy resolves): see copyAndOpenPhone.
+    // A failed copy never leaves the page: the line below says to type it (a toast would sit behind Phone).
+    const copyAndOpen = () => void copyAndOpenPhone(code, {
       clipboard: navigator.clipboard,
       location: window.location,
       document,
       setTimeout: (run, ms) => window.setTimeout(run, ms),
-      onCopied: (copied) => { if (copied) toast.success("Copied."); else toast("Type the code into your Phone app’s keypad.") },
-      onStayed: () => setStayed(true),
+      onCopied: (copied) => { if (copied) toast.success("Copied."); else setStayed("type") },
+      onStayed: () => setStayed("paste"),
     })
     return (
       <div className="grid gap-2.5">
         {box}
         <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} onClick={copyAndOpen}><Copy />Copy code &amp; open Phone</Button>
-        <p className="text-sm font-medium" role="status">{stayed ? "Paste it in Phone › Keypad and tap Call." : "Then paste it and tap Call."}</p>
+        <p className="text-sm font-medium" role="status">{stayed === "type" ? "Type it in Phone › Keypad and tap Call." : stayed === "paste" ? "Paste it in Phone › Keypad and tap Call." : "Then paste it and tap Call."}</p>
         <p className="text-[13px] text-muted-foreground">“Link Blocked”? Type it in.</p>
       </div>
     )

@@ -34,8 +34,9 @@ export interface SetupCallFacts {
   /** Their last test call was picked up by the phone itself (screening, Live Voicemail, a person). */
   phoneAnswersTest?: boolean;
   /**
-   * Their last passed test was for every call, so forward-all may still be on: for Ring my phone first they turn
-   * forwarding off first (offCode, or the website for office lines), then set ring first. Forward-all wins otherwise.
+   * Their last passed test was for every call (or they left every call untested), so forward-all may still be on:
+   * for Ring my phone first they turn forwarding off first (offCode, or the website for office lines), then set ring
+   * first. Forward-all wins otherwise.
    */
   everyCallOn?: boolean;
 }
@@ -89,7 +90,7 @@ export function setupInstructions(facts: SetupCallFacts): string {
       everyCallCode ? `For Otto answers every call, the code is ${say(everyCallCode)}.` : "",
       ringFirstCode
         ? facts.everyCallOn && facts.offCode
-          ? `For Ring my phone first, every call is on now, so they first turn forwarding off: dial ${say(facts.offCode)} and press Call. Then they dial the ring-first code, ${say(ringFirstCode)}.`
+          ? `For Ring my phone first, every call may still be on, so they first turn forwarding off: dial ${say(facts.offCode)} and press Call. Then they dial the ring-first code, ${say(ringFirstCode)}.`
           : `For Ring my phone first, the code is ${say(ringFirstCode)}.`
         : "",
     ].filter(Boolean).join(" ");
@@ -101,7 +102,7 @@ export function setupInstructions(facts: SetupCallFacts): string {
     steps.push(`${facts.phoneAnswersTest ? "Their last test: their phone picked up our test call by itself. Start with this. " : ""}If the screen says their phone picked up the test itself (Live Voicemail or call screening), carrier forwarding never got a chance. Two fixes: switch to Otto answers every call (tap it on the screen, then dial the new code${everyCallCode ? `, ${say(everyCallCode)}` : ""}), or keep ring first and turn off the phone's own answering, then test again. On iPhone that's Live Voicemail in Settings, then Apps, then Phone, and Screen Unknown Callers set to Never. On Android, automatic call screening in the Phone app's settings.`);
     if (facts.offCode) steps.push(`To turn forwarding off later, they dial ${say(facts.offCode)} on the business phone. With every call, they do that before they ever pause Call Otto, or calls to this number won't go through.`);
   } else if (facts.family === "office") {
-    steps.push(`Their business number is an office or landline phone. Ask which they want, one sentence each, every call first: Otto answers every call (their phones won't ring for this number), or Ring my phone first (Otto takes the calls they miss). Suggest every call unless they want their phones to ring. Forwarding is set in their phone company's website or app: find Call Forwarding, then forward all calls (for every call) or calls not answered, sometimes called no answer (for ring first), to their Call Otto number, ${pretty(facts.ottoNumber)}.${facts.everyCallOn ? " Every call is on now: for Ring my phone first, they turn off forward all calls there first, then set calls not answered." : ""} You can't see their portal: if they get stuck, say Brock, our founder, will email them a link to book a 10-minute call.`);
+    steps.push(`Their business number is an office or landline phone. Ask which they want, one sentence each, every call first: Otto answers every call (their phones won't ring for this number), or Ring my phone first (Otto takes the calls they miss). Suggest every call unless they want their phones to ring. Forwarding is set in their phone company's website or app: find Call Forwarding, then forward all calls (for every call) or calls not answered, sometimes called no answer (for ring first), to their Call Otto number, ${pretty(facts.ottoNumber)}.${facts.everyCallOn ? " Every call may still be on: for Ring my phone first, they turn off forward all calls there first, then set calls not answered." : ""} You can't see their portal: if they get stuck, say Brock, our founder, will email them a link to book a 10-minute call.`);
   } else {
     steps.push("We don't know their phone company yet. Ask which company they pay for this number, then tell them to pick it on the Call Otto screen; the right code shows up there. Don't make up a code.");
   }

@@ -52,10 +52,11 @@ export interface ApiDashboard {
       number: string | null; carrier: CarrierInfo | null; plan: ForwardingPlan | null; choices: typeof CARRIER_CHOICES; suggested: string | null;
       /**
        * Today's choice or code (every call, ring first, ring time) differs from what the last passed test was set up
-       * for: dial plan.on once to apply it, after clearFirst (the off code) when leaving every call for ring first.
-       * Stays until a test passes for the new choice.
+       * for (or may be set up for: every call was picked when they left it, untested): dial plan.on once to apply it,
+       * after clearFirst (the off code) when leaving every call for ring first. leavingEveryCall without a code: an
+       * office line turns off "forward all calls" in the website first. Stays until a test passes for the new choice.
        */
-      update: { clearFirst: string | null } | null;
+      update: { clearFirst: string | null; leavingEveryCall: boolean } | null;
       /** Forwarding works, and the last passed test was for every call. */
       everyCallOn: boolean;
       /** Forwarding works, and the last passed test was for today's choice and code, so its ring time is what they get. */
@@ -348,15 +349,18 @@ function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "oper
 }
 
 /**
- * Today's choice or code differs from what the last passed test was set up for: dial the new code once (office
- * lines: change it in the phone company's website). Leaving every call for ring first takes the off code first,
- * since forward-all wins over every conditional code. Never inferred from test timing.
+ * Today's choice or code differs from what the last passed test was set up for (or what the phone may be set up
+ * for, see rememberLegacyTestedFor): dial the new code once (office lines: change it in the phone company's website).
+ * Leaving every call for ring first turns forward-all off first, since it wins over every conditional code: the off
+ * code (clearFirst), or for office lines "forward all calls" in the website (leavingEveryCall, no code). Never
+ * inferred from test timing.
  */
-export function forwardingUpdate(plan: ForwardingPlan | null, mode: ForwardingMode, testedFor: TestedFor | null): { clearFirst: string | null } | null {
+export function forwardingUpdate(plan: ForwardingPlan | null, mode: ForwardingMode, testedFor: TestedFor | null): { clearFirst: string | null; leavingEveryCall: boolean } | null {
   if (!plan || !testedFor || plan.family === "unknown") return null;
   const choice = forwardingChoice(mode);
   if (testedFor.mode === choice && testedFor.code === plan.on) return null;
-  return { clearFirst: testedFor.mode === "every-call" && choice === "ring-first" ? plan.off : null };
+  const leavingEveryCall = testedFor.mode === "every-call" && choice === "ring-first";
+  return { clearFirst: leavingEveryCall ? plan.off : null, leavingEveryCall };
 }
 
 /** The owner settings form as plain values; the client posts the same names back. */

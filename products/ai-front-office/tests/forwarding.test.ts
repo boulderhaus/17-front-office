@@ -11,6 +11,8 @@ import { forwardingCheckStatus, forwardingUpdate } from "../src/http/owner-api-m
 import { NotificationHeldError } from "../src/ports.js";
 import { codeChunks, copyAndOpenPhone, dialHref, dialPlatform, OPEN_PHONE_WAIT_MS, RING_CHOICES as WEB_RING_CHOICES, ringChoicesWith as webRingChoicesWith, ringSeconds as webRingSeconds, spokenCode, VERIZON_RING_LINE } from "../web/src/lib/dial.js";
 import { pauseHint } from "../web/src/lib/pause-hint.js";
+import { loginReturningHere } from "../web/src/lib/login-next.js";
+import { safeNext } from "../src/http/owner-sign-in.js";
 
 describe("carrier family from a number lookup", () => {
   it.each([
@@ -123,17 +125,17 @@ describe("what the owner was set up for when a test last passed", () => {
   });
 
   it("shows the new code after a ring-time or every-call change, turning forwarding off first when leaving every call", () => {
-    expect(forwardingUpdate(ring15, "overflow", tested("ring-first", "**004*19415550123**25#"))).toEqual({ clearFirst: null });
-    expect(forwardingUpdate(all, "always", tested("ring-first", ring15.on))).toEqual({ clearFirst: null });
-    expect(forwardingUpdate(ring15, "overflow", tested("every-call", all.on))).toEqual({ clearFirst: "##002#" });
-    expect(forwardingUpdate(forwardingPlan("verizon", "+19415550123", "overflow"), "overflow", tested("every-call", "*729415550123"))).toEqual({ clearFirst: "*73" });
+    expect(forwardingUpdate(ring15, "overflow", tested("ring-first", "**004*19415550123**25#"))).toEqual({ clearFirst: null, leavingEveryCall: false });
+    expect(forwardingUpdate(all, "always", tested("ring-first", ring15.on))).toEqual({ clearFirst: null, leavingEveryCall: false });
+    expect(forwardingUpdate(ring15, "overflow", tested("every-call", all.on))).toEqual({ clearFirst: "##002#", leavingEveryCall: true });
+    expect(forwardingUpdate(forwardingPlan("verizon", "+19415550123", "overflow"), "overflow", tested("every-call", "*729415550123"))).toEqual({ clearFirst: "*73", leavingEveryCall: true });
   });
 
-  it("office lines: a change of choice shows the website step; there's no code to compare", () => {
+  it("office lines: a change of choice shows the website step; leaving every call says to turn forward-all off there first", () => {
     const officeRing = forwardingPlan("office", "+19415550123", "overflow");
     expect(forwardingUpdate(officeRing, "overflow", tested("ring-first", null))).toBeNull();
-    expect(forwardingUpdate(officeRing, "overflow", tested("every-call", null))).toEqual({ clearFirst: null });
-    expect(forwardingUpdate(forwardingPlan("office", "+19415550123", "always"), "always", tested("ring-first", null))).toEqual({ clearFirst: null });
+    expect(forwardingUpdate(officeRing, "overflow", tested("every-call", null))).toEqual({ clearFirst: null, leavingEveryCall: true });
+    expect(forwardingUpdate(forwardingPlan("office", "+19415550123", "always"), "always", tested("ring-first", null))).toEqual({ clearFirst: null, leavingEveryCall: false });
   });
 });
 
@@ -276,14 +278,14 @@ describe("the AI setup helper's script", () => {
   });
   it("leaving every call: the off code first, then the ring-first code, since forward-all wins otherwise", () => {
     const leaving = setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device: "android", everyCallOn: true });
-    expect(leaving).toContain("For Ring my phone first, every call is on now, so they first turn forwarding off: dial ##002# (say it as: pound pound 0 0 2 pound) and press Call. Then they dial the ring-first code, **004*19415550123**15#");
+    expect(leaving).toContain("For Ring my phone first, every call may still be on, so they first turn forwarding off: dial ##002# (say it as: pound pound 0 0 2 pound) and press Call. Then they dial the ring-first code, **004*19415550123**15#");
     expect(leaving.indexOf("turn forwarding off: dial ##002#")).toBeLessThan(leaving.indexOf("Then they dial the ring-first code"));
     // Not on: just the code.
-    expect(setupInstructions({ ...base, device: "android" })).not.toContain("every call is on now");
+    expect(setupInstructions({ ...base, device: "android" })).not.toContain("every call may still be on");
     const verizon = setupInstructions({ ...base, family: "verizon", code: "*719415550123", offCode: "*73", everyCallCode: "*729415550123", ringFirstCode: "*719415550123", ringFirstSeconds: 30, forwardsAll: false, device: "iphone", everyCallOn: true });
     expect(verizon).toContain("turn forwarding off: dial *73 (say it as: star 7 3) and press Call. Then they dial the ring-first code, *719415550123");
     const office = setupInstructions({ ...base, family: "office", code: null, offCode: null, confirm: null, everyCallCode: null, ringFirstCode: null, ringFirstSeconds: null, device: "other", everyCallOn: true });
-    expect(office).toContain("Every call is on now: for Ring my phone first, they turn off forward all calls there first, then set calls not answered.");
+    expect(office).toContain("Every call may still be on: for Ring my phone first, they turn off forward all calls there first, then set calls not answered.");
   });
 
   it("Verizon rings about 30 seconds and nobody can change it", () => {
@@ -357,38 +359,55 @@ describe("iPhone: Copy code & open Phone", () => {
   }
   const code = "**21*19415550123#";
 
-  it("copies the code, then opens Phone with a bare tel: in the same tap, never the code itself", async () => {
+  it("copies the code, then once it's copied opens Phone with a bare tel:, never the code itself", async () => {
     const phone = fakeIphone();
-    copyAndOpenPhone(code, phone.env);
+    await copyAndOpenPhone(code, phone.env);
     expect(phone.location.href).toBe("tel:");
     expect(phone.location.href).not.toContain("21");
-    await Promise.resolve();
     expect(phone.events.slice(0, 2)).toEqual([`copy:${code}`, "copied"]);
     expect(phone.waited()).toBe(OPEN_PHONE_WAIT_MS);
     expect(OPEN_PHONE_WAIT_MS).toBe(1_200);
   });
 
-  it("Phone opened (the page went to the background): no instruction line", () => {
+  it("Phone opened (the page went to the background): no instruction line", async () => {
     const phone = fakeIphone();
-    copyAndOpenPhone(code, phone.env);
+    await copyAndOpenPhone(code, phone.env);
     phone.leave();
     phone.fire();
     expect(phone.events).not.toContain("stayed");
     expect(phone.listeners.size).toBe(0);
   });
 
-  it("still on the page after the wait: shows 'Paste it in Phone › Keypad and tap Call.'", () => {
+  it("still on the page after the wait: shows 'Paste it in Phone › Keypad and tap Call.'", async () => {
     const phone = fakeIphone();
-    copyAndOpenPhone(code, phone.env);
+    await copyAndOpenPhone(code, phone.env);
     phone.fire();
     expect(phone.events).toContain("stayed");
   });
 
-  it("no clipboard: never leaves the page (they'd lose the code), says to type it", () => {
-    const phone = fakeIphone({ clipboard: false });
-    copyAndOpenPhone(code, phone.env);
+  it("the copy failed: never leaves the page (nothing to paste, and the message would hide behind Phone), says to type it", async () => {
+    const phone = fakeIphone({ failCopy: true });
+    await copyAndOpenPhone(code, phone.env);
     expect(phone.location.href).not.toBe("tel:");
-    expect(phone.events).toEqual(["not-copied", "stayed"]);
+    expect(phone.events).toEqual([`copy:${code}`, "not-copied"]);
+    expect(phone.waited()).toBe(0);
+  });
+
+  it("no clipboard: never leaves the page, says to type it", async () => {
+    const phone = fakeIphone({ clipboard: false });
+    await copyAndOpenPhone(code, phone.env);
+    expect(phone.location.href).not.toBe("tel:");
+    expect(phone.events).toEqual(["not-copied"]);
+  });
+});
+
+describe("signed out on an owner-app page", () => {
+  it("signs in, then comes back to the same page (the setup QR code on a phone)", () => {
+    expect(loginReturningHere({ pathname: "/app/start", search: "?step=forward" })).toBe("/login?next=%2Fapp%2Fstart%3Fstep%3Dforward");
+    expect(safeNext(decodeURIComponent(loginReturningHere({ pathname: "/app/start", search: "?step=forward" }).slice("/login?next=".length)))).toBe("/app/start?step=forward");
+    expect(loginReturningHere({ pathname: "/app", search: "" })).toBe("/login");
+    expect(loginReturningHere({ pathname: "/pricing", search: "" })).toBe("/login");
+    expect(loginReturningHere({ pathname: "/application", search: "" })).toBe("/login");
   });
 });
 

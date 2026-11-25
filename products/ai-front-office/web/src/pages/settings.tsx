@@ -76,7 +76,7 @@ export function SettingsArea() {
   const toggleUrgentCalls = async (on: boolean) => {
     setUrgentBusy(true)
     try {
-      const result = await api<{ urgentCalls: { available: boolean; on: boolean; disclosure: string } }>("/api/app/alerts/urgent-calls", { method: "POST", body: { on } })
+      const result = await api<{ urgentCalls: NonNullable<ApiSettings["urgentCalls"]> }>("/api/app/alerts/urgent-calls", { method: "POST", body: { on } })
       if (settings.data) settings.setData({ ...settings.data, urgentCalls: result.urgentCalls })
       toast.success(on ? "We’ll call your mobile about emergencies." : "Emergency calls are off.")
     } catch (error) {

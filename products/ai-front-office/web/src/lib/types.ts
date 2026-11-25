@@ -70,10 +70,11 @@ export interface ApiDashboard {
       /** The owner's mobile from signup, offered as the number customers call. */
       suggested: string | null
       /**
-       * Today's choice or code differs from what the last passed test was for: dial plan.on once (after clearFirst,
-       * the off code, when leaving every call). Stays until a test passes for the new choice.
+       * Today's choice or code differs from what the last passed test was for (or what an untested every call may
+       * have set): dial plan.on once (after clearFirst, the off code, when leaving every call; an office line with
+       * leavingEveryCall turns off "forward all calls" in the website first). Stays until a test passes for it.
        */
-      update: { clearFirst: string | null } | null
+      update: { clearFirst: string | null; leavingEveryCall: boolean } | null
       /** Forwarding works and the last passed test was for every call. */
       everyCallOn: boolean
       /** Forwarding works and the last passed test was for today's choice and code, so its ring time is real. */
@@ -188,7 +189,8 @@ export type SettingsValues = Record<string, string | boolean>
 
 export interface ApiSettings {
   /** Automated emergency calls to the owner's mobile: offered, and on only with the owner's recorded consent. */
-  urgentCalls?: { available: boolean; on: boolean; disclosure: string }
+  /** held: the urgent number may send every call to Otto, so urgent calls to it are skipped (push and email still go). */
+  urgentCalls?: { available: boolean; on: boolean; disclosure: string; held?: boolean }
   csrf: string
   values: SettingsValues
   status: string
