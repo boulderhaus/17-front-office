@@ -54,10 +54,14 @@ describe("Brock's booking windows and open times", () => {
     expect(slots).toHaveLength(15);
   });
 
-  it("keeps two hours of lead time", () => {
-    // Monday 10:30 AM EST: the morning window is gone, so the day starts at 2 PM.
-    const slots = founderSlots({ now: new Date("2026-11-30T15:30:00Z"), windows: WINDOWS, timeZone: NY });
+  it("keeps an hour of lead time", () => {
+    // Monday 11:10 AM EST: nothing in the morning window is an hour out, so the day starts at 2 PM.
+    const slots = founderSlots({ now: new Date("2026-11-30T16:10:00Z"), windows: WINDOWS, timeZone: NY });
     expect(slots[0]!.start).toBe("2026-11-30T19:00:00.000Z");
+    // 1:30 PM EST: 2:30 PM is the first start an hour out.
+    const afternoon = founderSlots({ now: new Date("2026-11-30T18:30:00Z"), windows: WINDOWS, timeZone: NY });
+    expect(Date.parse(afternoon[0]!.start)).toBeGreaterThanOrEqual(Date.parse("2026-11-30T19:30:00Z"));
+    expect(afternoon[0]!.start.slice(0, 10)).toBe("2026-11-30");
     // Late Friday 4:00 PM EST: Friday is done; the five days run Monday to Friday next week.
     const friday = founderSlots({ now: new Date("2026-12-04T21:00:00Z"), windows: WINDOWS, timeZone: NY });
     expect(friday[0]!.start.slice(0, 10)).toBe("2026-12-07");

@@ -6,7 +6,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
  */
 
 export const FOUNDER_CALL_MINUTES = 10;
-export const FOUNDER_LEAD_MINUTES = 120;
+export const FOUNDER_LEAD_MINUTES = 60;
 export const FOUNDER_BUFFER_MINUTES = 5;
 export const FOUNDER_BOOKING_DAYS = 5;
 export const FOUNDER_BOOKING_LINK_DAYS = 7;
