@@ -82,7 +82,7 @@ export function StartPage() {
   // A standard back arrow, top-left, on every step after paying: All set goes back to forwarding, and
   // forwarding (the card is already paid) goes back to Calls, where "Continue setup" brings the owner back.
   const back: Step | "calls" | null = step === "done" ? "forward" : step === "forward" ? "calls" : null
-  // "All set" only once missed calls really reach Call Otto (or the line is still waiting on approval).
+  // "All set" only once calls really reach Call Otto (or the line is still waiting on approval).
   const forwardingOn = Boolean(dashboard.line.confirmedAt) && ["idle", "passed", "calling"].includes(dashboard.line.check.status)
   const done = step === "done" && (forwardingOn || !dashboard.line.number)
 
@@ -243,9 +243,7 @@ function ActivationNote({ activation, dashboard, retry }: { activation: Activati
 function ForwardStep({ dashboard, next }: { dashboard: ApiDashboard; next: () => void }) {
   return (
     <>
-      {dashboard.line.mode === "always"
-        ? <Heading oneLine title="Send your calls to Call Otto">Otto answers every call to your business number.</Heading>
-        : <Heading oneLine title="Send missed calls to Call Otto">Your phone still rings first. Only calls you miss come here.</Heading>}
+      <Heading oneLine title="Send your calls to Call Otto" />
       <ForwardingCard
         dashboard={dashboard}
         footer={({ confirmed }) => (confirmed || (!dashboard.line.number && dashboard.line.business.number) ? (
@@ -257,8 +255,8 @@ function ForwardStep({ dashboard, next }: { dashboard: ApiDashboard; next: () =>
       {/* Skipping is allowed but costs something; say what, in one line. */}
       {!(dashboard.line.confirmedAt || (!dashboard.line.number && dashboard.line.business.number)) && (
         <p className="px-1 text-sm text-muted-foreground">
-          <button type="button" className="inline-flex min-h-11 items-center font-semibold text-brand-ink underline underline-offset-4" onClick={next}>Skip for now</button>
-          <span className="block">Call Otto won’t get your {dashboard.line.mode === "always" ? "calls" : "missed calls"} until forwarding is on.</span>
+          <button type="button" className="inline-flex min-h-11 items-center font-semibold text-brand-ink underline underline-offset-4 focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-brand-ink focus-visible:outline-none" onClick={next}>Skip for now</button>
+          <span> · Otto won’t get calls until this is on.</span>
         </p>
       )}
     </>
@@ -293,13 +291,13 @@ function DoneStep({ dashboard, activation, toForward }: { dashboard: ApiDashboar
       {notForwarding ? (
         <div className="grid justify-items-start gap-4">
           <span className="grid size-14 place-items-center rounded-full bg-amber-500 text-white shadow-[0_0_0_6px_rgba(245,158,11,.15)]"><PhoneCall className="size-7" strokeWidth={2.5} /></span>
-          <Heading title="One step left">{dashboard.line.confirmedAt ? "Your last forwarding test didn’t reach Call Otto. Check it and test again to finish." : "Your Call Otto line is on, but we haven’t seen one of your missed calls reach it yet. Turn on forwarding and test it to finish."}</Heading>
+          <Heading title="One step left">{dashboard.line.confirmedAt ? "Your last test didn’t reach Otto. Test again to finish." : "Your line is on, but calls aren’t reaching it yet. Turn on forwarding and test it."}</Heading>
           <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} onClick={toForward}>Turn on forwarding<ArrowRight /></Button>
         </div>
       ) : (
         <div className="grid justify-items-start gap-4">
           <span className="grid size-14 place-items-center rounded-full bg-emerald-600 text-white shadow-[0_0_0_6px_rgba(5,150,105,.15)]"><Check className="size-8" strokeWidth={3} /></span>
-          <Heading title={<span className="marker">You’re set!</span>}>{waiting ? "Your setup is saved. We’ll turn your line on as soon as it’s approved and let you know." : dashboard.line.business.everyCallOn ? "Every call now gets answered. New jobs show up in Calls." : "Missed calls now get answered. New jobs show up in Calls."}</Heading>
+          <Heading title={<span className="marker">You’re set!</span>}>{waiting ? "Your setup is saved. We’ll turn your line on as soon as it’s approved and let you know." : dashboard.line.business.everyCallOn ? "Otto answers every call now. New jobs show up in Calls." : "Otto answers the calls you miss now. New jobs show up in Calls."}</Heading>
         </div>
       )}
       <Card>

@@ -1,7 +1,7 @@
 import type { CallPath } from "../domain/call-path.js";
 import { ownerTaskReason } from "../domain/task-reason.js";
 import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
-import { CARRIER_CHOICES, forwardingPlan, isForwardAllCode, type CarrierInfo, type ForwardingPlan } from "../domain/forwarding.js";
+import { CARRIER_CHOICES, forwardingPlan, isForwardAllCode, ringFirstSeconds, type CarrierInfo, type ForwardingPlan } from "../domain/forwarding.js";
 import { isPaidStatus } from "../domain/billing.js";
 import { describeHours } from "../domain/hours.js";
 import { fairUseCalls, type PlanId } from "../domain/plans.js";
@@ -60,6 +60,8 @@ export interface ApiDashboard {
       everyCallOn: boolean;
       /** The last test proved plan.on itself is dialed in, so its ring time is what the owner gets. */
       codeApplied: boolean;
+      /** How long "Ring my phone first" would ring for this carrier (GSM timer, Verizon ~30 s), or null when unknown. */
+      ringFirstSeconds: number | null;
     };
     /** When a call last proved forwarding works. */
     confirmedAt: string | null;
@@ -329,6 +331,7 @@ function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "oper
       update: update && { ...update, missed },
       everyCallOn: Boolean(confirmedAt) && isForwardAllCode(dialedCode),
       codeApplied: Boolean(confirmedAt && plan?.on) && dialedCode === plan?.on,
+      ringFirstSeconds: state?.carrier ? ringFirstSeconds(state.carrier.family, config.answerAfterRings) : null,
     },
     confirmedAt,
     check: { status, method: check?.method ?? null, startedAt: check?.startedAt ?? null, answeredAfterSec, callerId: checkCallerId },

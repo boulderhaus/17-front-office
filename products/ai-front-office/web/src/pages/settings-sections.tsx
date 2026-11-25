@@ -110,7 +110,7 @@ export function AnsweringSection() {
   const pauseHint = settings.status !== "active"
     ? "Your line turns on after it’s approved. Until then it stays paused."
     : everyCall
-      ? `Every call goes to Otto, so pausing stops all calls to your business number. Turn forwarding off first${off ? `: dial ${off} on that phone` : " with your phone company"}.`
+      ? `Otto answers every call, so pausing stops all calls to your business number. Turn forwarding off first${off ? `: dial ${off} on that phone` : " with your phone company"}.`
       : undefined
   return (
     <>
@@ -119,7 +119,7 @@ export function AnsweringSection() {
           <select className={selectClass} {...bind("serviceState")}><option value="active">On, answering calls</option><option value="paused">Paused</option></select>
         </Field>
         <Pair>
-          <Field label="Answer" hint={text("operationMode") === "always" ? "Your phone won’t ring for calls to your business number. Otto answers them all." : undefined}><select className={selectClass} {...bind("operationMode")}><option value="overflow">Only calls I miss</option><option value="after_hours">After hours</option><option value="always">Every call</option></select></Field>
+          <Field label="Calls to your business number" hint={text("operationMode") === "always" ? "Your phone won’t ring for this number." : "Otto takes the calls you miss."}><select className={selectClass} {...bind("operationMode")}><option value="always">Otto answers every call</option><option value="overflow">Ring my phone first</option><option value="after_hours">After hours</option></select></Field>
           <RingFirstField rings={Number(text("answerAfterRings"))} onChange={(value) => set("answerAfterRings", value)} everyCall={text("operationMode") === "always"} family={dashboard?.line.business.carrier?.family ?? null} confirmed={Boolean(dashboard?.line.confirmedAt)} />
         </Pair>
         {dashboard?.line.business.update && (
@@ -161,12 +161,12 @@ function RingFirstField({ rings, onChange, everyCall, family, confirmed }: { rin
   const verizon = family === "verizon"
   const choices = ringChoicesWith(rings)
   const hint = verizon ? "Verizon rings about 30 seconds. They don’t let anyone change that."
-    : everyCall ? "Otto answers every call, so your phone doesn’t ring first."
+    : everyCall ? "Only for Ring my phone first."
     : family === "gsm" && confirmed ? "After you save, dial the new code once to apply it."
     : family === "office" ? "For an office line, set the ring time in your phone company’s website or app."
     : undefined
   return (
-    <Field label="Ring my phone first" hint={hint}>
+    <Field label="Ring time" hint={hint}>
       {verizon ? (
         <select className={cn(selectClass, "disabled:cursor-not-allowed disabled:opacity-70")} disabled value="verizon" onChange={() => undefined}><option value="verizon">About 30 seconds (Verizon)</option></select>
       ) : (

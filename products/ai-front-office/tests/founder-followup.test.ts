@@ -549,7 +549,7 @@ describe("booking a call with Brock", () => {
     expect(event.summary).toBe("Call Otto setup: Gulf Air (10 min)");
     expect(event.description).toContain("Call them at: (941) 555-0199");
     expect(event.description).toContain("Carrier: T-Mobile USA");
-    expect(event.description).toContain("Forwarding code: **004*19415550123**15#");
+    expect(event.description).toContain("Forwarding code: **21*19415550123#");
     const confirmation = made.founderEmails(account.tenantId).find((item) => item.idempotencyKey.endsWith(":confirmation"))!;
     expect(confirmation.body).toContain("You're set for Mon, Nov 30 at 9:00 AM CST. I'll call you at (941) 555-0199");
     expect(parseEmailBody(confirmation.body).attachments[0]!.filename).toBe("call-otto-setup.ics");

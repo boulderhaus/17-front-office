@@ -208,38 +208,54 @@ describe("Otto never rings a number that forwards every call back to Otto", () =
 });
 
 describe("the AI setup helper's script", () => {
-  const base = { businessName: "Gulf Air", businessNumber: "+19415550177", carrierName: "T-Mobile USA", family: "gsm" as const, code: "**004*19415550123**15#", offCode: "##002#", confirm: "You’ll see “Setting Registration Succeeded”.", ottoNumber: "+19415550123", ringSeconds: 15, forwardsAll: false, everyCallCode: "**21*19415550123#" };
-  it("has no phone-settings step up front: dial the code, test by tapping Decline", () => {
+  const base = { businessName: "Gulf Air", businessNumber: "+19415550177", carrierName: "T-Mobile USA", family: "gsm" as const, code: "**21*19415550123#", offCode: "##002#", confirm: "You’ll see “Setting Registration Succeeded.”", ottoNumber: "+19415550123", ringSeconds: null, forwardsAll: true, everyCallCode: "**21*19415550123#", ringFirstCode: "**004*19415550123**15#", ringFirstSeconds: 15 };
+  it("asks which they want, one sentence each, every call first and suggested", () => {
     const text = setupInstructions({ ...base, device: "iphone" });
     expect(text).not.toMatch(/before anything else/i);
-    expect(text).toContain("No phone settings to change first.");
-    expect(text).toContain("**004*19415550123**15#");
-    expect(text).toContain("rings for 15 seconds before Call Otto answers");
-    expect(text).toContain("they tap Decline");
+    const everyCall = text.indexOf("Otto answers every call: nothing to change on their phone");
+    const ringFirst = text.indexOf("Ring my phone first: their phone rings for 15 seconds first");
+    expect(everyCall).toBeGreaterThan(0);
+    expect(ringFirst).toBeGreaterThan(everyCall);
+    expect(text).toContain("Suggest every call unless they want their phone to ring.");
+    expect(text).toContain("Picked on their screen now: Otto answers every call.");
+    // Both codes, so whichever they pick, the helper can read it.
+    expect(text).toContain("For Otto answers every call, the code is **21*19415550123#");
+    expect(text).toContain("For Ring my phone first, the code is **004*19415550123**15#");
+    // The one iPhone prerequisite for ring first; nothing to change for every call.
+    expect(text).toContain("On iPhone they first turn off Live Voicemail in Settings, then Apps, then Phone");
+    expect(text).toContain("With every call, their phone won't ring, and they'll see a green check in a few seconds.");
+    expect(text).toContain("With ring first, they tap Decline when it rings");
     expect(text).toContain("let it ring (about 15 seconds)");
     expect(text).toContain("Call Forwarding Link Blocked");
-    expect(text).toContain("Don't ask them to change phone settings unless their phone picked up our test call by itself.");
+    expect(text).toContain("Don't ask them to change phone settings unless they pick Ring my phone first on an iPhone, or their phone picked up our test call by itself.");
+    expect(text).toContain("With every call: if they ever pause Call Otto, they dial ##002#");
+    expect(text).toContain("their phone doesn't ring for those. Calls they make and texts work like before.");
     // The founder-email promise stays.
     expect(text).toContain("Brock, our founder, will email them a link to book a 10-minute call");
   });
-  it("explains the two choices for a phone that answers the test itself, no-settings first", () => {
-    const text = setupInstructions({ ...base, device: "iphone", phoneAnswersTest: true });
-    expect(text).toContain("Their last test: their phone picked up our test call by itself.");
-    const everyCall = text.indexOf("Let Otto answer every call");
-    const ringFirst = text.indexOf("Keep my phone ringing first");
-    expect(everyCall).toBeGreaterThan(0);
-    expect(ringFirst).toBeGreaterThan(everyCall);
-    expect(text).toContain("**21*19415550123#");
-    expect(text).toContain("turn off Live Voicemail");
-    expect(text).toContain("Calls they make and texts work like before.");
-    expect(text).not.toContain("alerts them right away");
-    expect(text).toContain("If they ever pause Call Otto, they dial ##002# first");
+  it("Android has nothing extra for ring first", () => {
+    const text = setupInstructions({ ...base, device: "android" });
+    expect(text).toContain("On Android there's nothing else to change.");
+    expect(text).not.toContain("On iPhone they first turn off Live Voicemail");
+    expect(text).toContain("Tap to dial");
   });
-  it("Verizon rings about 30 seconds; every-call mode says the phone won't ring", () => {
-    expect(setupInstructions({ ...base, family: "verizon", code: "*719415550123", offCode: "*73", ringSeconds: 30, everyCallCode: "*729415550123", device: "android" })).toContain("about 30 seconds before Call Otto answers. Verizon sets that");
-    const all = setupInstructions({ ...base, code: "**21*19415550123#", forwardsAll: true, ringSeconds: null, device: "android" });
-    expect(all).toContain("their phone won't ring for those calls");
-    expect(all).not.toContain("Their phone still rings first");
+  it("a phone that answered the test itself: switch to every call, or turn off its own answering", () => {
+    const text = setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device: "iphone", phoneAnswersTest: true });
+    expect(text).toContain("Their last test: their phone picked up our test call by itself.");
+    expect(text).toContain("Picked on their screen now: Ring my phone first.");
+    expect(text).toContain("switch to Otto answers every call (tap it on the screen, then dial the new code, **21*19415550123#");
+    expect(text).toContain("Screen Unknown Callers set to Never");
+    expect(text).toContain("Right now their phone rings first.");
+  });
+  it("Verizon rings about 30 seconds and nobody can change it", () => {
+    const text = setupInstructions({ ...base, family: "verizon", code: "*729415550123", offCode: "*73", everyCallCode: "*729415550123", ringFirstCode: "*719415550123", ringFirstSeconds: 30, device: "android" });
+    expect(text).toContain("rings for about 30 seconds (Verizon sets that; nobody can change it) first");
+    expect(text).toContain("For Ring my phone first, the code is *719415550123");
+  });
+  it("office lines get the same choice, set in the phone company's website", () => {
+    const text = setupInstructions({ ...base, family: "office", code: null, offCode: null, confirm: null, everyCallCode: null, ringFirstCode: null, ringFirstSeconds: null, device: "other" });
+    expect(text).toContain("Otto answers every call (their phones won't ring for this number), or Ring my phone first");
+    expect(text).toContain("forward all calls (for every call) or calls not answered");
   });
 });
 

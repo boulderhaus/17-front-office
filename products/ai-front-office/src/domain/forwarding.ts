@@ -52,6 +52,13 @@ export function ringSeconds(answerAfterRings: number | null | undefined): number
   return Math.min(30, Math.max(5, Math.round((answerAfterRings * 6) / 5) * 5));
 }
 
+/** How long "Ring my phone first" rings before Call Otto answers, for this carrier: GSM's timer, Verizon's fixed ~30 s, else null. */
+export function ringFirstSeconds(family: CarrierFamily, answerAfterRings?: number | null): number | null {
+  if (family === "verizon") return VERIZON_RING_SECONDS;
+  if (family === "gsm") return ringSeconds(answerAfterRings);
+  return null;
+}
+
 /** The "Ring my phone first" choices, labelled with what the owner actually gets. Values are rings (half steps allowed). */
 export const RING_CHOICES: ReadonlyArray<{ rings: number; seconds: number; label: string }> = [
   { rings: 2, seconds: 10, label: "About 10 seconds (2 rings)" },
@@ -125,38 +132,38 @@ export function carrierFamily(name: string | null | undefined, lineType: string 
 export function forwardingPlan(family: CarrierFamily, frontOfficeNumber: string, mode: ForwardingMode, answerAfterRings?: number | null): ForwardingPlan {
   const digits = frontOfficeNumber.replace(/^\+1/, "").replace(/\D/g, "");
   const always = mode === "always";
-  const everyCall = "Every call goes straight to Call Otto. Your phone won’t ring for calls to this number.";
+  const everyCall = "Every call goes to Call Otto. Your phone won’t ring for this number.";
   if (family === "verizon") {
     const on = `${always ? "*72" : "*71"}${digits}`;
     return {
       family, on, off: "*73", dialLink: telLink(on), offDialLink: telLink("*73"), forwardsAll: always,
       ringSeconds: always ? null : VERIZON_RING_SECONDS,
-      what: always ? everyCall : "Your phone rings for about 30 seconds first (Verizon sets that). If you don’t pick up or you tap Decline, Call Otto answers.",
+      what: always ? everyCall : "Your phone rings about 30 seconds first (Verizon sets that). Calls you miss or decline go to Call Otto.",
       tips: [],
-      confirm: "You’ll hear a tone or a short message. Hang up, come back here and test it.",
+      confirm: "You’ll hear a tone.",
     };
   }
   if (family === "gsm") {
     // **004 covers no answer (after T seconds), busy (tapping Decline) and no signal (attics, basements) in one code.
     // ##002# clears every kind of forwarding, so the off code is right whichever one was set.
-    const seconds = ringSeconds(answerAfterRings);
+    const seconds = ringFirstSeconds("gsm", answerAfterRings)!;
     const on = always ? `**21*1${digits}#` : `**004*1${digits}**${seconds}#`;
     const off = "##002#";
     return {
       family, on, off, dialLink: telLink(on), offDialLink: telLink(off), forwardsAll: always,
       ringSeconds: always ? null : seconds,
-      what: always ? everyCall : `Your phone rings for ${seconds} seconds first. If you don’t pick up, Call Otto answers. Same if you tap Decline or have no signal.`,
+      what: always ? everyCall : `Your phone rings ${seconds} seconds first. Calls you miss or decline go to Call Otto.`,
       tips: [],
-      confirm: "You’ll see “Setting Registration Succeeded” (Android: “Call forwarding”). Tap Dismiss, come back here and test it.",
+      confirm: "You’ll see “Setting Registration Succeeded.”",
     };
   }
   if (family === "office") {
     return {
       family, on: null, off: null, dialLink: null, offDialLink: null, forwardsAll: always, ringSeconds: null,
       what: always
-        ? `In your phone company’s website or app, find Call Forwarding and forward all calls to ${pretty(frontOfficeNumber)}.`
-        : `In your phone company’s website or app, find Call Forwarding › “when not answered” (or “no answer”) and forward to ${pretty(frontOfficeNumber)}.`,
-      tips: ["Not sure where that is? Tap “Set it up with me” and we’ll do it together on the phone."],
+        ? `In your phone company’s website or app, forward all calls to ${pretty(frontOfficeNumber)}.`
+        : `In your phone company’s website or app, forward calls you don’t answer to ${pretty(frontOfficeNumber)}.`,
+      tips: [],
       confirm: null,
     };
   }

@@ -187,7 +187,8 @@ describe("owner one-tap go-live", () => {
     expect((created?.body?.telephony_settings as { time_limit_secs?: number } | undefined)?.time_limit_secs).toBe(420);
     const dashboard = await (await fetch(`${baseUrl}/app`, { headers: { cookie } })).text();
     expect(dashboard).toContain("(941) 555-0123");
-    expect(dashboard).toContain("*719415550123");
+    // New shops start on "Otto answers every call".
+    expect(dashboard).toContain("*729415550123");
 
     // A second tap never buys another number or assistant.
     const purchases = () => telnyx.calls.filter((call) => call.method === "POST" && (call.url.endsWith("/number_orders") || call.url.endsWith("/ai/assistants"))).length;
@@ -293,7 +294,7 @@ describe("owner one-tap go-live", () => {
     const after = await response.json() as { viewer: { status: string }; line: { number: string; forwarding: Array<{ on: string }> } };
     expect(after.viewer.status).toBe("active");
     expect(after.line.number).toBe("+19415550123");
-    expect(after.line.forwarding.map((row) => row.on)).toContain("*719415550123");
+    expect(after.line.forwarding.map((row) => row.on)).toContain("*729415550123");
   });
 
   it("answers the React app with a 409 and a plain reason while carrier approval is pending", async () => {
@@ -324,7 +325,8 @@ describe("owner one-tap go-live", () => {
   });
 
   describe("call forwarding a 60-year-old can do", () => {
-    async function liveShop(options: Parameters<typeof shop>[0] = {}) {
+    /** A live shop. New shops start on "Otto answers every call"; ringFirst taps "Ring my phone first" like an owner would. */
+    async function liveShop(options: Parameters<typeof shop>[0] & { ringFirst?: boolean } = {}) {
       const made = await shop(options);
       const api = async (path: string, body: unknown = {}, csrf?: string) => {
         const token = csrf ?? ((await (await fetch(`${made.baseUrl}/api/app/dashboard`, { headers: { cookie: made.cookie } })).json()) as { csrf: string }).csrf;
@@ -334,27 +336,36 @@ describe("owner one-tap go-live", () => {
         line: { business: { number: string | null; carrier: { family: string; name: string | null } | null; plan: { on: string | null; off: string | null; dialLink: string | null } | null }; confirmedAt: string | null; check: { status: string; method: string | null; answeredAfterSec: number | null; callerId: string | null }; helpRequestedAt: string | null };
       };
       expect((await api("/api/app/line/go-live")).status).toBe(200);
+      if (options.ringFirst) expect((await api("/api/app/line/mode", { mode: "overflow" })).status).toBe(200);
       return { ...made, api, dashboard };
     }
 
-    it("looks up the carrier from the business number and shows one Verizon code", async () => {
+    it("looks up the carrier from the business number and shows one Verizon code per choice", async () => {
       const { api, dashboard, telnyx } = await liveShop();
       const saved = await api("/api/app/line/business-number", { number: "(941) 555-0177" });
       expect(saved.status).toBe(200);
       const { line } = await dashboard();
       expect(line.business.number).toBe("+19415550177");
       expect(line.business.carrier?.family).toBe("verizon");
-      expect(line.business.plan?.on).toBe("*719415550123");
-      expect(line.business.plan?.off).toBe("*73");
-      expect(line.business.plan?.dialLink).toBe("tel:%2A719415550123");
+      // New shops start on "Otto answers every call": *72. "Ring my phone first" would ring about 30 seconds.
+      expect(line.business.plan?.on).toBe("*729415550123");
+      expect((line.business as { ringFirstSeconds?: number | null }).ringFirstSeconds).toBe(30);
+      await api("/api/app/line/mode", { mode: "overflow" });
+      const ringFirst = (await dashboard()).line.business;
+      expect(ringFirst.plan?.on).toBe("*719415550123");
+      expect(ringFirst.plan?.off).toBe("*73");
+      expect(ringFirst.plan?.dialLink).toBe("tel:%2A719415550123");
       // Saving the same number again does not pay for another lookup.
       await api("/api/app/line/business-number", { number: "941-555-0177" });
       expect(telnyx.calls.filter((call) => call.url.includes("/number_lookup/"))).toHaveLength(1);
     });
 
-    it("uses one AT&T/T-Mobile code that covers no answer (15 seconds by default), Decline and no signal", async () => {
+    it("new shops start on every call (**21); Ring my phone first is one code that covers no answer (15 seconds), Decline and no signal", async () => {
       const { api, dashboard } = await liveShop({ carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } } });
       await api("/api/app/line/business-number", { number: "9415550177" });
+      const start = (await dashboard()).line as unknown as { mode: string; business: { plan: { on: string; forwardsAll: boolean }; ringFirstSeconds: number | null } };
+      expect(start).toMatchObject({ mode: "always", business: { plan: { on: "**21*19415550123#", forwardsAll: true }, ringFirstSeconds: 15 } });
+      expect((await api("/api/app/line/mode", { mode: "overflow" })).status).toBe(200);
       const { plan } = (await dashboard()).line.business;
       expect(plan?.on).toBe("**004*19415550123**15#");
       expect(plan?.off).toBe("##002#");
@@ -368,7 +379,7 @@ describe("owner one-tap go-live", () => {
       await api("/api/app/line/business-number", { number: "9415550177" });
       expect((await dashboard()).line.business.plan?.on).toBeNull();
       await api("/api/app/line/business-number", { number: "9415550177", family: "gsm" });
-      expect((await dashboard()).line.business.plan?.on).toBe("**004*19415550123**15#");
+      expect((await dashboard()).line.business.plan?.on).toBe("**21*19415550123#");
     });
 
     it("refuses the Call Otto number itself and a bad number", async () => {
@@ -636,7 +647,7 @@ describe("owner one-tap go-live", () => {
       const line = async (made: Awaited<ReturnType<typeof liveShop>>) => ((await (await fetch(`${made.baseUrl}/api/app/dashboard`, { headers: { cookie: made.cookie } })).json()) as { line: Line }).line;
 
       it("Let Otto answer every call: switches to forward-all (CSRF-checked, saved), shows **21, and the test passes at once", async () => {
-        const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } } });
+        const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } }, ringFirst: true });
         const { api, store, account, baseUrl, cookie } = made;
         await api("/api/app/line/business-number", { number: "9415550177" });
         const forged = await fetch(`${baseUrl}/api/app/line/mode`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ mode: "always" }) });
@@ -679,7 +690,7 @@ describe("owner one-tap go-live", () => {
       });
 
       it("Picked every call but didn't dial it: a test where the phone rang first never claims every call is on", async () => {
-        const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } } });
+        const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } }, ringFirst: true });
         const { api, store, account } = made;
         await api("/api/app/line/business-number", { number: "9415550177" });
         await api("/api/app/line/check");
@@ -712,7 +723,7 @@ describe("owner one-tap go-live", () => {
       });
 
       it("changing 'Ring my phone first' after forwarding works shows the one new code to dial", async () => {
-        const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } } });
+        const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } }, ringFirst: true });
         const { api, baseUrl, cookie } = made;
         await api("/api/app/line/business-number", { number: "9415550177" });
         await api("/api/app/line/check");

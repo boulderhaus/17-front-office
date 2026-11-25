@@ -228,7 +228,8 @@ const ownerSignupSchema = z.object({
   phone: z.string().trim().max(30).optional(),
   timezone: z.string().trim().max(100).optional(),
   serviceAreaTerms: z.string().trim().max(800).default(""),
-  operationMode: z.enum(["after_hours", "overflow", "always"]).default("overflow"),
+  // New shops start on "Otto answers every call": nothing to change on the phone. "Ring my phone first" is one tap away.
+  operationMode: z.enum(["after_hours", "overflow", "always"]).default("always"),
   greeting: z.string().trim().min(5).max(500).default("Thanks for calling. How can I help?"),
   weekdayStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("17:00"),
   weekdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("09:00"),
@@ -2483,6 +2484,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const family = state.carrier?.family ?? null;
     const plan = family ? forwardingPlan(family, lineNumber, config.operationMode, config.answerAfterRings) : null;
     const everyCall = family ? forwardingPlan(family, lineNumber, "always") : null;
+    const ringFirst = family ? forwardingPlan(family, lineNumber, "overflow", config.answerAfterRings) : null;
     await caller.start({
       callControlId,
       commandId: `setup-start:${envelope.data.id}`,
@@ -2500,6 +2502,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         ringSeconds: plan?.ringSeconds ?? null,
         forwardsAll: plan?.forwardsAll ?? false,
         everyCallCode: everyCall?.on ?? null,
+        ringFirstCode: ringFirst?.on ?? null,
+        ringFirstSeconds: ringFirst?.ringSeconds ?? null,
         phoneAnswersTest: forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "phone_answers",
       },
     }).then(() => log({ level: "info", event: "setup_call_started", tenantId }), async (error: unknown) => {

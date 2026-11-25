@@ -23,7 +23,7 @@ export interface SectionDef {
   render: () => ReactNode
 }
 
-const MODE_WORDS: Record<string, string> = { overflow: "Calls you miss", after_hours: "After hours", always: "Every call" }
+const MODE_WORDS: Record<string, string> = { always: "Otto answers every call", overflow: "Ring my phone first", after_hours: "After hours" }
 
 export const SECTIONS: SectionDef[] = [
   { id: "business", title: "Business details", icon: Store, form: true, description: "Name, greeting, where you work and what you fix.", summary: ({ text }) => text("businessName"), render: () => <BusinessSection /> },

@@ -78,6 +78,8 @@ export interface ApiDashboard {
       everyCallOn: boolean
       /** The last test proved plan.on itself is dialed in, so its ring time is real. */
       codeApplied: boolean
+      /** How long "Ring my phone first" rings for this carrier (GSM timer, Verizon ~30 s), or null when unknown. */
+      ringFirstSeconds?: number | null
     }
     confirmedAt: string | null
     check: {
