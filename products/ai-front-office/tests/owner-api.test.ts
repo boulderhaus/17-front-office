@@ -320,6 +320,8 @@ describe("Owner JSON API and React app serving", () => {
 
   it("keeps a team member out of shop settings: no read, no change", async () => {
     const owner = await signUp("a@synthetic.example");
+    // Inviting needs a proved email (a password sign-up proves nothing).
+    await store.markOwnerEmailVerified((await store.getOwnerAccountByEmail("a@synthetic.example"))!.id, clock.now().toISOString(), null);
     const account = (await store.getOwnerAccountByEmail("a@synthetic.example"))!;
     const teams = new TeamService(store, clock);
     await teams.accept(owner.tenantId, await teams.invite(account, "member@synthetic.example"), "Synthetic Member", "long-password-for-tests");

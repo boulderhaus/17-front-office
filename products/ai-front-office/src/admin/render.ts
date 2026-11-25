@@ -104,7 +104,7 @@ ${planCss}
     ...SIGNUP_FIELDS.filter((name) => fieldErrors[name]).map((name) => name === "email" && emailTaken ? { message: `${SIGNUP_EMAIL_TAKEN} Sign in instead.`, href: "/login" } : { message: fieldErrors[name]!, field: SIGNUP_FIELD_IDS[name] }),
     ...(error ? [{ message: error }] : []),
   ], !firstBad);
-  const providers = verified ? "" : providerButtons(options.providers ?? {});
+  const providers = verified ? "" : providerButtons({ ...options.providers, picks: { plan: values.plan, unlimited: values.unlimited === "yes", trade: values.trade } });
   const providerStart = providers ? `${providers}<p class="ordivider">or</p>` : "";
   // Optional, unchecked, separate from the terms and from paying (10DLC / Telnyx opt-in checklist).
   const optIn = `<div class="optin"><label class="check"><input name="ownerSmsConsent" type="checkbox" value="yes" ${values.ownerSmsConsent === "yes" ? "checked" : ""}><span>Send me Call Otto account notifications by text (new calls, appointments)—optional</span></label><small>By checking this, you agree to receive SMS account notifications from Call Otto by Dutchworks LLC. Msg frequency varies. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. We won’t share mobile info with third parties for marketing. Not required to sign up. <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></small></div><div class="optin"><label class="check"><input name="ownerCallConsent" type="checkbox" value="yes" ${values.ownerCallConsent === "yes" ? "checked" : ""}><span>${escapeHtml(OWNER_CALL_CONSENT_LABEL)}</span></label><small>${escapeHtml(OWNER_CALL_CONSENT_DETAIL)}</small></div>`;
@@ -163,9 +163,16 @@ const GOOGLE_G = `<svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
 /** Microsoft's four-square logo. */
 const MICROSOFT_LOGO = `<svg viewBox="0 0 21 21" aria-hidden="true" focusable="false"><path fill="#f25022" d="M1 1h9v9H1z"/><path fill="#7fba00" d="M11 1h9v9h-9z"/><path fill="#00a4ef" d="M1 11h9v9H1z"/><path fill="#ffb900" d="M11 11h9v9h-9z"/></svg>`;
 
-/** "Continue with Google" / "Continue with Microsoft", in that order; empty when neither is set up. */
-export function providerButtons(options: SignInProviders & { next?: string | null }): string {
-  const query = options.next ? `?next=${encodeURIComponent(options.next)}` : "";
+/**
+ * "Continue with Google" / "Continue with Microsoft", in that order; empty when neither is set up. On sign-up they
+ * carry the pricing page's picks (plan, Unlimited, trade), which the sign-in checks and hands back to sign-up.
+ */
+export function providerButtons(options: SignInProviders & { next?: string | null; picks?: { plan?: string | undefined; unlimited?: boolean; trade?: string | undefined } }): string {
+  const picks = new URLSearchParams();
+  if (options.picks?.plan) picks.set("plan", options.picks.plan);
+  if (options.picks?.unlimited) picks.set("unlimited", "1");
+  if (options.picks?.trade) picks.set("trade", options.picks.trade);
+  const query = options.next ? `?next=${encodeURIComponent(options.next)}` : picks.toString() ? escapeHtml(`?${picks.toString()}`) : "";
   const buttons = `${options.google ? `<a class="google" href="/auth/google${query}">${GOOGLE_G}<span>Continue with Google</span></a>` : ""}${options.microsoft ? `<a class="microsoft" href="/auth/microsoft${query}">${MICROSOFT_LOGO}<span>Continue with Microsoft</span></a>` : ""}`;
   return buttons ? `<div class="idp">${buttons}</div>` : "";
 }
@@ -252,8 +259,9 @@ export function renderOwnerLogin(error = "", options: LoginPageOptions = {}): st
 }
 
 /** After "Email me a sign-in link": the same answer whether or not the email has an account. */
-export function renderSignInLinkSent(email: string): string {
-  return authPage("Check your email", { header: "signup", style: SIGN_IN_STYLE, eyebrow: "Your calls. Your rules.", heading: "Check your email", lede: `<p>We sent a sign-in link to <strong>${escapeHtml(email)}</strong>. It works once, for 15 minutes.</p>`, body: `<p class="authnote">Nothing yet? Check spam, or <a class="textlink" href="/login">send a new link</a>.</p>` });
+/** `note`: one line on why a link went out instead (Google or Microsoft couldn't vouch for the address). */
+export function renderSignInLinkSent(email: string, note?: string): string {
+  return authPage("Check your email", { header: "signup", style: SIGN_IN_STYLE, eyebrow: "Your calls. Your rules.", heading: "Check your email", lede: `${note ? `<p>${escapeHtml(note)}</p>` : ""}<p>We sent a sign-in link to <strong>${escapeHtml(email)}</strong>. It works once, for 15 minutes.</p>`, body: `<p class="authnote">Nothing yet? Check spam, or <a class="textlink" href="/login">send a new link</a>.</p>` });
 }
 
 /** The page behind the emailed link. Signing in takes a tap, so link scanners that open it don't use it up. */

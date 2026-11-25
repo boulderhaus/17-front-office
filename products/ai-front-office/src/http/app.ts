@@ -35,6 +35,7 @@ import { approvedAnswer } from "../domain/approved-answer.js";
 import { isExplicitHumanRequest } from "../domain/human-request.js";
 import { saveAssistantConfig } from "../adapters/assistant-config.js";
 import { DataDeletionService } from "../application/data-deletion.js";
+import { TeamService } from "../application/team-service.js";
 import { formatEmailBody } from "../adapters/resend.js";
 import { anyGoogleClient, clientForAttempt, clientForNewConnections, encodeGoogleConnection, GOOGLE_CALENDAR_SCOPES, missingCalendarPermissions, oauthAttemptKey, type GoogleOAuthClient } from "../adapters/google-oauth-clients.js";
 import { redactError, withTimeout } from "../application/retry.js";
@@ -52,7 +53,7 @@ import { AMD_ENDED_EVENT, FORWARDING_CHECK_SPEECH, forwardingCheckState, GREETIN
 import { setupHelpState, setupSorrySpeech, TelnyxSetupCaller, type SetupCallFacts } from "../adapters/telnyx-setup-call.js";
 import { FOUNDER_GOOGLE_SCOPES, FounderCalendarReadError, FounderCalendars, FounderConnectError } from "../adapters/founder-calendar.js";
 import { FounderFollowup, type FounderBookingFacts } from "../application/founder-followup.js";
-import { founderConnectToken, founderConnectTokenValid, ownerFirstName, prettyPhone, readFounderBookingToken } from "../domain/founder-booking.js";
+import { founderConnectTokenValid, ownerFirstName, prettyPhone, readFounderBookingToken } from "../domain/founder-booking.js";
 import { renderFounderBooking, renderFounderCalendars } from "../admin/founder.js";
 import { ensureReviewAccount, isLinkPreview, REVIEW_NO_LINE, ReviewAccountError, reviewAccountTokenValid } from "../application/review-account.js";
 import { renderReviewAccount } from "../admin/review-account.js";
@@ -122,11 +123,11 @@ import {
 
 /** Brock's founder-calendar connect: its own cookie on the shared Google redirect path, never the owner's. */
 const FOUNDER_OAUTH_COOKIE = "afo_google_founder";
-/** The signed link (k) the connect started with, carried to Google's return so it goes back with that same link. */
+/** The signed link (k) the connect started with, carried to Google's return so it goes back with that same link (or FOUNDER_RETURN_ADMIN). */
 const FOUNDER_RETURN_COOKIE = "afo_google_founder_k";
 const FOUNDER_OAUTH_PATH = "/app/integrations/google";
-/** An admin-session connect gets a link this short for the trip back (the admin cookie is SameSite=Strict). */
-const FOUNDER_ADMIN_RETURN_MS = 15 * 60_000;
+/** The return cookie of a connect started with admin access: no link, just "go back to the admin page". */
+const FOUNDER_RETURN_ADMIN = "admin";
 
 /** Otto's AI setup helper's call to an owner, as the help endpoint and the call's webhooks write it. */
 interface SetupCallRecord {
@@ -948,9 +949,14 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (password !== form.get("confirm")) return sendHtml(response, 400, renderResetPassword(token, "The two passwords don’t match. Type the same one twice.", dependencies.env.SUPPORT_EMAIL ?? null, "confirm"));
       const accountId = token ? await dependencies.store.consumePasswordReset(hashPasswordResetToken(token), dependencies.clock.now().toISOString()) : null;
       if (!accountId) return sendHtml(response, 400, renderForgotPassword({ emailEnabled: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL), supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, error: "That reset link is expired or already used. Ask for a new one." }));
+      const before = await dependencies.store.getOwnerAccountById(accountId);
       await dependencies.store.updateOwnerPassword(accountId, await hashOwnerPassword(password), dependencies.clock.now().toISOString());
       // The reset link reached the account email, so the owner controls it: this password stays when they later use Google.
       await dependencies.store.markOwnerEmailVerified(accountId, dependencies.clock.now().toISOString(), null);
+      // The first proof: whoever signed up with this email before loses the teammates and invitations they made.
+      if (before && !before.emailVerifiedAt && before.role !== "member") {
+        log({ level: "info", event: "owner_unproven_team_revoked", method: "reset", accountId, removed: await new TeamService(dependencies.store, dependencies.clock).reclaim(before.tenantId) });
+      }
       log({ level: "info", event: "owner_password_reset", accountId });
       response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/login");
@@ -2598,7 +2604,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const token = (form ? form.get("t") : url.searchParams.get("t"))!;
     const facts = await founderBookingFacts(account);
     const booked = (slot: { start: string; end: string }, justBooked: boolean) => renderFounderBooking({ state: "booked", slot, timeZone: facts.timezone, callNumber: prettyPhone(facts.callNumber), justBooked });
-    const existing = await founder.existingBooking(account.tenantId);
+    // An existing booking also gets its confirmation queued here, if a failure skipped it (queued once).
+    const existing = await founder.bookedCall(account.tenantId, facts);
     if (existing) return sendHtml(response, 200, booked(existing, false));
     let taken = false;
     if (form) {
@@ -2698,9 +2705,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         code_challenge: attempt.challenge,
         code_challenge_method: "S256",
       }).toString();
-      // The way back: the link this connect started with, never a fresh one. A connect from the admin session gets
-      // a 15-minute link, since the SameSite=Strict admin cookie doesn't survive the trip through Google.
-      const returnLink = viaLink ? k! : founderConnectToken(signingKey, now, FOUNDER_ADMIN_RETURN_MS);
+      // The way back: the link this connect started with, never a fresh one. A connect with admin access mints no
+      // link at all (one in the address would sit in history and logs and work without the session).
+      const returnLink = viaLink ? k! : FOUNDER_RETURN_ADMIN;
       response.setHeader("set-cookie", [
         `${FOUNDER_OAUTH_COOKIE}=${value}; Path=${FOUNDER_OAUTH_PATH}; HttpOnly; SameSite=Lax; Max-Age=600${secure ? "; Secure" : ""}`,
         `${FOUNDER_RETURN_COOKIE}=${encodeURIComponent(returnLink)}; Path=${FOUNDER_OAUTH_PATH}; HttpOnly; SameSite=Lax; Max-Age=600${secure ? "; Secure" : ""}`,
@@ -2765,20 +2772,26 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     // can't renew itself here), and none once it has run out.
     const returnLink = readCookie(request, FOUNDER_RETURN_COOKIE);
     const linked = returnLink && founderConnectTokenValid(signingKey, returnLink, now) ? returnLink : null;
-    const back = (query: string): string => `/admin/founder-calendars?${linked ? `k=${encodeURIComponent(linked)}&` : ""}${query}`;
+    const back = (query: string): void => {
+      const target = `/admin/founder-calendars?${linked ? `k=${encodeURIComponent(linked)}&` : ""}${query}`;
+      if (linked || returnLink !== FOUNDER_RETURN_ADMIN) return redirect(response, target);
+      // Started with admin access: a redirect at the end of Google's trip leaves the SameSite=Strict admin cookie
+      // behind, but this page's own refresh is a same-site navigation, so the admin session opens the page.
+      sendHtml(response, 200, `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${target}"><title>Founder calendars</title><p><a href="${target}">Back to your calendars</a></p>`);
+    };
     const code = url.searchParams.get("code");
     if (url.searchParams.has("error") || !code) {
-      redirect(response, back("error=declined"));
+      back("error=declined");
       return true;
     }
     try {
       const result = await founderCalendars.exchangeCode(attempt.client, code, attempt.result, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app/integrations/google/callback`);
       const account = await founderCalendars.connect({ client: attempt.client, ...result });
       log({ level: "info", event: "founder_calendar_connected", accountId: account.id, calendars: account.calendarsSource });
-      redirect(response, back("done=connected"));
+      back("done=connected");
     } catch (error) {
       log({ level: "warn", event: "founder_calendar_connect_failed", error: safeError(error) });
-      redirect(response, back(`error=${error instanceof FounderConnectError ? "partial" : "failed"}`));
+      back(`error=${error instanceof FounderConnectError ? "partial" : "failed"}`);
     }
     return true;
   }

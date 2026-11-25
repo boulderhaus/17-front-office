@@ -14,9 +14,9 @@ const clock = { now: () => new Date("2026-11-30T13:00:00Z") };
 
 type Answer = Record<string, { busy?: Array<{ start: string; end: string }>; errors?: Array<{ reason: string }> }>;
 
-async function calendars(answers: Record<string, Answer>) {
+async function calendars(answers: Record<string, Answer>, listed: Record<string, string[]> = {}) {
   const store = new InMemoryStore();
-  const accounts = Object.keys(answers).map((id) => ({ id, email: `${id}@synthetic.example`, bookHere: id === "a", calendars: ["primary"], calendarsSource: "primary", connectedAt: clock.now().toISOString() }));
+  const accounts = Object.keys(answers).map((id) => ({ id, email: `${id}@synthetic.example`, bookHere: id === "a", calendars: listed[id] ?? ["primary"], calendarsSource: listed[id] ? "list" : "primary", connectedAt: clock.now().toISOString() }));
   await store.saveIntegrationSecret(PLATFORM_TENANT_ID, FOUNDER_GOOGLE_PROVIDER, "accounts", JSON.stringify(accounts));
   for (const { id } of accounts) await store.saveIntegrationSecret(PLATFORM_TENANT_ID, FOUNDER_GOOGLE_PROVIDER, `token:${id}`, JSON.stringify({ v: 1, client: "legacy", refreshToken: `refresh-${id}` }));
   const logs: Array<Record<string, unknown>> = [];
@@ -63,5 +63,25 @@ describe("which calendar blocks bookings", () => {
     await founder.busy("2026-11-30T00:00:00Z", "2026-12-12T00:00:00Z");
     expect(founder.lastBusyByAccount.get("a")).toEqual([block]);
     expect(founder.lastBusyByAccount.get("m")).toEqual([allWeek]);
+  });
+});
+
+describe("secondary calendars", () => {
+  it("skips one that's gone or no longer shared, and fails closed when one can't be read right now", async () => {
+    const shared = "team@group.calendar.google.com";
+    const read = async (answer: Answer) => {
+      const { founder, logs } = await calendars({ a: { primary: { busy: [block] }, ...answer } }, { a: ["primary", shared] });
+      return { result: await founder.busy("2026-11-30T00:00:00Z", "2026-12-05T00:00:00Z").catch((caught: unknown) => caught), logs };
+    };
+    for (const reason of ["notFound", "forbidden"]) {
+      const { result, logs } = await read({ [shared]: { errors: [{ reason }] } });
+      expect(result).toEqual([block]);
+      expect(logs).toEqual([expect.objectContaining({ event: "founder_calendar_skipped", calendar: "secondary", reasons: reason })]);
+    }
+    for (const answer of [{ [shared]: { errors: [{ reason: "internalError" }] } }, { [shared]: { errors: [{ reason: "backendError" }] } }, {}]) {
+      const { result } = await read(answer);
+      expect(result).toBeInstanceOf(FounderCalendarReadError);
+      expect((result as FounderCalendarReadError).account).toBe("a***@synthetic.example");
+    }
   });
 });

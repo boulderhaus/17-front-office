@@ -687,7 +687,7 @@ describe("connecting Brock's calendars", () => {
     expect(await made.store.getIntegrationSecret(PLATFORM_TENANT_ID, FOUNDER_GOOGLE_PROVIDER, "token:b")).toBeNull();
   });
 
-  it("Google's return never renews a link: same link back, none once it ran out, and an admin connect gets 15 minutes", async () => {
+  it("Google's return never renews a link: same link back, and none once it ran out", async () => {
     const made = await app({ setupCalls: false });
     const k = founderConnectToken(KEY, made.clock.now(), 60 * 60_000);
     const begin = async (headers: Record<string, string>, query = "") => {
@@ -716,13 +716,6 @@ describe("connecting Brock's calendars", () => {
     const late = await begin({}, `?k=${encodeURIComponent(short)}`);
     made.clock.at = new Date(made.clock.at.getTime() + 2 * 60_000);
     expect(await finish(late, late.returnCookie)).toBe("/admin/founder-calendars?error=declined");
-
-    // Started with admin access (no link): a 15-minute link for the way back, since the admin cookie stays behind.
-    const admin = await begin({ authorization: `Bearer ${baseEnv().ADMIN_TOKEN}` });
-    const minted = decodeURIComponent(admin.returnCookie.slice(admin.returnCookie.indexOf("=") + 1));
-    expect(founderConnectTokenValid(KEY, minted, made.clock.now())).toBe(true);
-    expect(founderConnectTokenValid(KEY, minted, new Date(made.clock.at.getTime() + 15 * 60_000 + 1))).toBe(false);
-    expect(await finish(admin, admin.returnCookie)).toBe(`/admin/founder-calendars?k=${encodeURIComponent(minted)}&error=declined`);
   });
 
   it("leaves the owner's own calendar connect exactly as it was, with or without a stray founder cookie", async () => {
@@ -747,5 +740,98 @@ describe("connecting Brock's calendars", () => {
     // Signed out, with only a stray founder cookie: still the owner sign-in redirect, as before.
     const signedOut = await fetch(`${made.baseUrl}/app/integrations/google/callback?state=x&code=y`, { redirect: "manual", headers: { cookie: "afo_google_founder=stray-value" } });
     expect(signedOut.headers.get("location")).toBe("/login");
+  });
+});
+
+describe("founder review fixes", () => {
+  it("an admin connect goes back with no link in the address: its own page hops back, so the admin session opens it", async () => {
+    const made = await app({ setupCalls: false });
+    const begin = async () => {
+      const start = await fetch(`${made.baseUrl}/admin/founder-calendars/connect`, { redirect: "manual", headers: { authorization: `Bearer ${baseEnv().ADMIN_TOKEN}` } });
+      expect(start.status).toBe(303);
+      const [cookie, returnCookie] = start.headers.getSetCookie().map((value) => value.split(";")[0]!);
+      // Nothing in the return cookie works as a link either.
+      expect(founderConnectTokenValid(KEY, decodeURIComponent(returnCookie!.slice(returnCookie!.indexOf("=") + 1)), made.clock.now())).toBe(false);
+      return { state: new URL(start.headers.get("location")!).searchParams.get("state")!, cookies: `${cookie}; ${returnCookie}` };
+    };
+    const finish = async (attempt: { state: string; cookies: string }, params: Record<string, string>) => {
+      const callback = new URL(`${made.baseUrl}/app/integrations/google/callback`);
+      callback.searchParams.set("state", attempt.state);
+      for (const [name, value] of Object.entries(params)) callback.searchParams.set(name, value);
+      return fetch(callback, { redirect: "manual", headers: { cookie: attempt.cookies } });
+    };
+    const idToken = `x.${Buffer.from(JSON.stringify({ sub: "google-sub-1", email: "brock.personal@example.com" })).toString("base64url")}.y`;
+    made.setTokenReply({ refresh_token: "refresh-new", scope: "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/calendar.freebusy https://www.googleapis.com/auth/calendar.events.owned", id_token: idToken });
+    for (const [params, query] of [[{ code: "synthetic-code" }, "done=connected"], [{ error: "access_denied" }, "error=declined"]] as const) {
+      const done = await finish(await begin(), params);
+      expect(done.status).toBe(200);
+      expect(done.headers.get("location")).toBeNull();
+      const html = await done.text();
+      expect(html).toContain(`<meta http-equiv="refresh" content="0;url=/admin/founder-calendars?${query}">`);
+      expect(html).not.toMatch(/[?&;]k=/);
+    }
+    expect(JSON.parse((await made.store.getIntegrationSecret(PLATFORM_TENANT_ID, FOUNDER_GOOGLE_PROVIDER, "accounts"))!)).toHaveLength(1);
+  });
+
+  it("a booking whose confirmation can't be queued still books, and reopening the link queues it once", async () => {
+    const made = await app({ setupCalls: false, founders: BROCK });
+    const { account, api } = await made.owner();
+    await api("/api/app/line/help", { device: "iphone" });
+    const link = `${made.baseUrl}/book-setup?t=${/book-setup\?t=(\S+)/.exec(made.founderEmails(account.tenantId)[0]!.body)![1]}`;
+    const offered = [...(await (await fetch(link)).text()).matchAll(/name="start" value="([^"]+)"/g)].map((match) => match[1]!);
+    const enqueue = made.store.enqueueNotification.bind(made.store);
+    let failConfirmation = true;
+    made.store.enqueueNotification = async (notification) => {
+      if (failConfirmation && notification.idempotencyKey.endsWith(":confirmation")) {
+        failConfirmation = false;
+        throw new Error("outbox unavailable");
+      }
+      return enqueue(notification);
+    };
+    const booked = await fetch(`${made.baseUrl}/book-setup`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ t: new URL(link).searchParams.get("t")!, start: offered[0]! }) });
+    expect(booked.status).toBe(200);
+    expect(await booked.text()).toContain("<h1>You’re set.</h1>");
+    expect(made.logs.some((entry) => entry.event === "founder_confirmation_failed" && entry.level === "error")).toBe(true);
+    const confirmations = () => made.founderEmails(account.tenantId).filter((item) => item.idempotencyKey.endsWith(":confirmation"));
+    expect(confirmations()).toHaveLength(0);
+    for (let open = 0; open < 2; open += 1) expect(await (await fetch(link)).text()).toContain("<h1>You’re set.</h1>");
+    expect(confirmations()).toHaveLength(1);
+  });
+
+  it("a booking cut off before the shop's record was saved books the same time on retry, never 'taken' by its own hold", async () => {
+    const made = await app({ setupCalls: false, founders: BROCK });
+    const first = await made.owner();
+    const second = await made.owner("second@synthetic.example", "Bay Plumbing");
+    await first.api("/api/app/line/help", { device: "iphone" });
+    await second.api("/api/app/line/help", { device: "iphone" });
+    const linkFor = (tenantId: string) => new URL(`${made.baseUrl}/book-setup?t=${/book-setup\?t=(\S+)/.exec(made.founderEmails(tenantId)[0]!.body)![1]}`);
+    const firstLink = linkFor(first.account.tenantId);
+    const offered = [...(await (await fetch(firstLink)).text()).matchAll(/name="start" value="([^"]+)"/g)].map((match) => match[1]!);
+    const post = (link: URL, start: string) => fetch(`${made.baseUrl}/book-setup`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ t: link.searchParams.get("t")!, start }) });
+    const save = made.store.saveIntegrationSecret.bind(made.store);
+    let dies = true;
+    made.store.saveIntegrationSecret = async (tenantId, provider, key, value) => {
+      if (dies && provider === "founder" && key === "booking") {
+        dies = false;
+        throw new Error("process died");
+      }
+      return save(tenantId, provider, key, value);
+    };
+    expect((await post(firstLink, offered[0]!)).status).toBe(503);
+    const retry = await post(firstLink, offered[0]!);
+    expect(retry.status).toBe(200);
+    expect(await retry.text()).toContain("<h1>You’re set.</h1>");
+    const inserts = made.recorded.filter((call) => call.url.includes("/calendars/primary/events")).map((call) => (call.body as { id: string }).id);
+    expect(new Set(inserts).size).toBe(1);
+    expect(made.founderEmails(first.account.tenantId).filter((item) => item.idempotencyKey.endsWith(":confirmation"))).toHaveLength(1);
+
+    // A hold left behind by an older cut-off booking never blocks its own shop, and still blocks every other shop.
+    const held = offered[2]!;
+    const stored = JSON.parse((await made.store.getIntegrationSecret(PLATFORM_TENANT_ID, FOUNDER_GOOGLE_PROVIDER, "booked"))!) as Array<Record<string, string>>;
+    await made.store.saveIntegrationSecret(PLATFORM_TENANT_ID, FOUNDER_GOOGLE_PROVIDER, "booked", JSON.stringify([...stored, { start: held, end: new Date(Date.parse(held) + 10 * 60_000).toISOString(), tenantId: second.account.tenantId }]));
+    const third = await made.owner("third@synthetic.example", "Cove Electric");
+    await third.api("/api/app/line/help", { device: "iphone" });
+    expect((await post(linkFor(third.account.tenantId), held)).status).toBe(409);
+    expect((await post(linkFor(second.account.tenantId), held)).status).toBe(200);
   });
 });

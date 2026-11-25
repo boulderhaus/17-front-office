@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { Environment } from "../config/environment.js";
 import type { OwnerAccount } from "../domain/models.js";
 import type { Clock, Store } from "../ports.js";
-import { TeamService } from "../application/team-service.js";
+import { EmailNotProvedError, TeamService } from "../application/team-service.js";
 import { renderJoinPage, renderTeamPage } from "../admin/team.js";
 import { mintOwnerSession, ownerSessionCookie, verifyOwnerCsrf, type OwnerSession } from "../security/owner-auth.js";
 import { HttpError, parseForm, readBody, redirect, sendHtml } from "./security.js";
@@ -46,7 +46,10 @@ export async function teamRoutes(request: IncomingMessage, response: ServerRespo
   if (url.pathname === "/app/team/invite") {
     const email = z.string().trim().toLowerCase().email().max(254).safeParse(form.get("email"));
     if (!email.success) throw new HttpError(400, "Enter your teammate’s email");
-    const token = await teams.invite(account, email.data).catch(() => { throw new HttpError(409, "Email already has an account or the team is full"); });
+    const token = await teams.invite(account, email.data).catch((error: unknown) => {
+      if (error instanceof EmailNotProvedError) throw new HttpError(403, "Confirm your email before inviting a teammate: sign out, then sign in with an emailed link.");
+      throw new HttpError(409, "Email already has an account or the team is full");
+    });
     const inviteUrl = `${context.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/join?shop=${encodeURIComponent(account.tenantId)}&token=${encodeURIComponent(token)}`;
     return sendHtml(response, 200, await page(inviteUrl));
   }

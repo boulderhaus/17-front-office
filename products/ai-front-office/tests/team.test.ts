@@ -8,7 +8,7 @@ import type { BookingAttempt, OwnerAccount } from "../src/domain/models.js";
 
 const now = "2026-01-15T08:00:00.000Z";
 const clock = { now: () => new Date(now) };
-function owner(tenantId: string): OwnerAccount { return { id: randomUUID(), tenantId, email: "owner@synthetic.example", displayName: "Synthetic Owner", passwordHash: "synthetic", role: "owner", status: "active", createdAt: now, updatedAt: now }; }
+function owner(tenantId: string): OwnerAccount { return { id: randomUUID(), tenantId, email: "owner@synthetic.example", displayName: "Synthetic Owner", passwordHash: "synthetic", role: "owner", status: "active", emailVerifiedAt: now, createdAt: now, updatedAt: now }; }
 
 describe("team invitations and calendar rotation", () => {
   it("creates an isolated teammate from an expiring single-use invitation", async () => {
@@ -17,6 +17,7 @@ describe("team invitations and calendar rotation", () => {
     const account = owner(tenantId);
     await store.createOwnerWorkspace({ account, config: createDemoConfig(tenantId), ownerPhone: null });
     const teams = new TeamService(store, clock);
+    await expect(teams.invite({ ...account, emailVerifiedAt: null }, "member@synthetic.example")).rejects.toThrow("Confirm the account email");
     const token = await teams.invite(account, "member@synthetic.example");
     expect(await teams.invitation(`shop_${randomUUID()}`, token)).toBeNull();
     const member = await teams.accept(tenantId, token, "Synthetic Member", "long-test-password-123");
