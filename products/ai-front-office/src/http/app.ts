@@ -1871,7 +1871,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
       const subscription = await dependencies.store.getSubscription(account.tenantId);
       // A browser goes back to Plan and billing, which says what happened in one line; other clients get the JSON error.
-      if (isCompStatus(subscription?.status)) throw new HttpError(409, "This is a complimentary review account. There’s no billing to manage.");
+      if (isCompStatus(subscription?.status)) {
+        if (wantsPage(request)) return redirect(response, "/app/settings/plan?billing=none");
+        throw new HttpError(409, "This is a complimentary review account. There’s no billing to manage.");
+      }
       if (!stripeClient || !subscription?.providerCustomerId) {
         if (wantsPage(request)) return redirect(response, "/app/settings/plan?billing=none");
         throw new HttpError(409, "No paid subscription to manage yet");
