@@ -55,3 +55,13 @@ describe("reading Brock's connected calendars", () => {
     expect((error as FounderCalendarReadError).reason).toContain("internalError");
   });
 });
+
+describe("which calendar blocks bookings", () => {
+  it("keeps each account's busy blocks from the last read", async () => {
+    const allWeek = { start: "2026-11-30T00:00:00Z", end: "2026-12-12T00:00:00Z" };
+    const { founder } = await calendars({ a: { primary: { busy: [block] } }, m: { primary: { busy: [allWeek] } } });
+    await founder.busy("2026-11-30T00:00:00Z", "2026-12-12T00:00:00Z");
+    expect(founder.lastBusyByAccount.get("a")).toEqual([block]);
+    expect(founder.lastBusyByAccount.get("m")).toEqual([allWeek]);
+  });
+});

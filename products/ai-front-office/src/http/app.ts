@@ -2599,7 +2599,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (method !== "GET" || url.pathname !== "/admin/founder-calendars") throw new HttpError(404, "Not found");
     const accounts = await founderCalendars.accounts();
     let readError: string | null = null;
-    const preview = accounts.length === 0 ? [] : await founder.openSlots().catch((error: unknown) => {
+    let perAccount: Record<string, number> = {};
+    const preview = accounts.length === 0 ? [] : await founder.openSlotsByAccount().then((result) => {
+      perAccount = result.perAccount;
+      return result.all;
+    }).catch((error: unknown) => {
       log({ level: "warn", event: "founder_slots_failed", error: safeError(error), ...(error instanceof FounderCalendarReadError ? { accountId: error.accountId, reason: error.reason } : {}) });
       if (error instanceof FounderCalendarReadError) readError = `Couldn't read ${error.account} (${error.reason}). Disconnect it or connect it again.`;
       return null;
@@ -2614,6 +2618,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       timeZone: dependencies.env.FOUNDER_TIMEZONE,
       preview,
       readError,
+      perAccount,
       notice: notices[url.searchParams.get("done") ?? ""],
       error: errors[url.searchParams.get("error") ?? ""],
     }));

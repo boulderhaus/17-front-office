@@ -143,9 +143,14 @@ export class FounderCalendars {
    * Busy across every connected account (each account's listed calendars), plus setup calls already booked here
    * that Google may not report yet. Fails rather than guessing when an account can't be read.
    */
+  /** Busy blocks from the last busy() read, per account id, so the admin page can show which calendar blocks what. */
+  lastBusyByAccount = new Map<string, BusyPeriod[]>();
+
   async busy(timeMin: string, timeMax: string): Promise<BusyPeriod[]> {
     const busy: BusyPeriod[] = [];
+    const byAccount = new Map<string, BusyPeriod[]>();
     for (const account of await this.accounts()) {
+      const before = busy.length;
       const label = account.email ? maskEmail(account.email) : "a Google account";
       const accessToken = await this.accessToken(account.id).catch((error: unknown) => {
         throw new FounderCalendarReadError(account.id, label, error instanceof Error ? error.message : "token refresh failed");
@@ -175,7 +180,9 @@ export class FounderCalendars {
         }
         throw new FounderCalendarReadError(account.id, label, reasons.length > 0 ? `main calendar: ${reasons.join(", ")}` : "main calendar missing from Google's answer");
       }
+      byAccount.set(account.id, busy.slice(before));
     }
+    this.lastBusyByAccount = byAccount;
     return [...busy, ...await this.booked()];
   }
 
