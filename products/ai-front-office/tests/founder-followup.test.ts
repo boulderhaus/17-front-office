@@ -238,6 +238,8 @@ async function app(options: { setupCalls?: boolean; failDial?: boolean; failHelp
   const busy: Record<string, Array<{ start: string; end: string }>> = {};
   let tokenReply: Record<string, unknown> = {};
   let dialFails = options.failDial ?? false;
+  /** Events inserted on each founder account's main calendar, keyed by account id then event id. Google's busy times show them. */
+  const events: Record<string, Map<string, { start: string; end: string; status: string }>> = {};
   /** While set, Google's event insert waits on it: holds a booking mid-flight. */
   let eventGate: Promise<void> | null = null;
   const fake = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -261,14 +263,23 @@ async function app(options: { setupCalls?: boolean; failDial?: boolean; failHelp
     }
     if (url === "https://oauth2.googleapis.com/revoke") return new Response("", { status: 200 });
     if (url.startsWith("https://www.googleapis.com/calendar/v3/users/me/calendarList")) return json({ error: { code: 403 } }, 403);
+    const account = (headers.authorization ?? "").replace("Bearer at-refresh-", "");
     if (url === "https://www.googleapis.com/calendar/v3/freeBusy") {
-      const account = (headers.authorization ?? "").replace("Bearer at-refresh-", "");
       const items = (body as { items: Array<{ id: string }> }).items;
-      return json({ calendars: Object.fromEntries(items.map((item) => [item.id, { busy: busy[account] ?? [] }])) });
+      const inserted = [...(events[account]?.values() ?? [])].filter((event) => event.status !== "cancelled").map(({ start, end }) => ({ start, end }));
+      return json({ calendars: Object.fromEntries(items.map((item) => [item.id, { busy: [...(busy[account] ?? []), ...(item.id === "primary" ? inserted : [])] }])) });
     }
-    if (url.startsWith("https://www.googleapis.com/calendar/v3/calendars/primary/events")) {
+    if (url.startsWith("https://www.googleapis.com/calendar/v3/calendars/primary/events/") && method === "GET") {
+      const event = events[account]?.get(url.slice(url.lastIndexOf("/") + 1));
+      return event ? json({ ...event, start: { dateTime: event.start }, end: { dateTime: event.end } }) : json({ error: { code: 404 } }, 404);
+    }
+    if (url.startsWith("https://www.googleapis.com/calendar/v3/calendars/primary/events") && method === "POST") {
       if (eventGate) await eventGate;
-      return json({ id: (body as { id: string }).id });
+      const event = body as { id: string; start: { dateTime: string }; end: { dateTime: string } };
+      const calendar = events[account] ??= new Map();
+      if (calendar.has(event.id)) return json({ error: { code: 409 } }, 409);
+      calendar.set(event.id, { start: event.start.dateTime, end: event.end.dateTime, status: "confirmed" });
+      return json({ id: event.id });
     }
     throw new Error(`Unexpected outbound request in test: ${method} ${url}`);
   }) as typeof fetch;
@@ -314,7 +325,7 @@ async function app(options: { setupCalls?: boolean; failDial?: boolean; failHelp
     return fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(body, keys.privateKey, clock.now()), body });
   };
   const dialState = () => (recorded.filter((call) => call.url === "https://api.telnyx.com/v2/calls").at(-1)?.body as { client_state: string }).client_state;
-  return { store, clock, baseUrl, handler, recorded, busy, logs, owner, founderEmails, webhook, dialState, setTokenReply: (value: Record<string, unknown>) => { tokenReply = value; }, setDialFails: (value: boolean) => { dialFails = value; },
+  return { store, clock, baseUrl, handler, recorded, busy, events, logs, owner, founderEmails, webhook, dialState, setTokenReply: (value: Record<string, unknown>) => { tokenReply = value; }, setDialFails: (value: boolean) => { dialFails = value; },
     holdEvents: () => { let release = () => {}; eventGate = new Promise<void>((resolve) => { release = () => { eventGate = null; resolve(); }; }); return release; } };
 }
 
@@ -541,7 +552,7 @@ describe("booking a call with Brock", () => {
     const booked = await fetch(`${made.baseUrl}/book-setup`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ t: new URL(link).searchParams.get("t")!, start: picked }) });
     expect(booked.status).toBe(200);
     expect(await booked.text()).toContain("Mon, Nov 30 at 9:00 AM CST");
-    const insert = made.recorded.find((call) => call.url.includes("/calendars/primary/events"))!;
+    const insert = made.recorded.find((call) => call.method === "POST" && call.url.includes("/calendars/primary/events"))!;
     expect(insert.url).toContain("sendUpdates=none");
     expect(insert.auth).toBe("Bearer at-refresh-a");
     const event = insert.body as Record<string, unknown>;
@@ -579,7 +590,7 @@ describe("booking a call with Brock", () => {
     const [one, two] = await Promise.all([post(firstLink, offered[1]!), post(secondLink, offered[1]!)]);
     const statuses = [one.status, two.status].sort();
     expect(statuses).toEqual([200, 409]);
-    expect(made.recorded.filter((call) => call.url.includes("/calendars/primary/events"))).toHaveLength(1);
+    expect(made.recorded.filter((call) => call.method === "POST" && call.url.includes("/calendars/primary/events"))).toHaveLength(1);
   });
 
   it("a double tap books once: another time or the same one shows the booked call, never a second event", async () => {
@@ -592,7 +603,7 @@ describe("booking a call with Brock", () => {
     // The first tap is mid-booking (Google hasn't answered yet) when the second, for another time, arrives.
     const release = made.holdEvents();
     const firstTap = post(offered[0]!);
-    while (!made.recorded.some((call) => call.url.includes("/calendars/primary/events"))) await new Promise((resolve) => setTimeout(resolve, 5));
+    while (!made.recorded.some((call) => call.method === "POST" && call.url.includes("/calendars/primary/events"))) await new Promise((resolve) => setTimeout(resolve, 5));
     const secondTap = post(offered[1]!);
     await new Promise((resolve) => setTimeout(resolve, 50));
     release();
@@ -606,7 +617,7 @@ describe("booking a call with Brock", () => {
     const retap = await post(offered[0]!);
     expect(retap.status).toBe(200);
     expect(await retap.text()).not.toContain("just got taken");
-    expect(made.recorded.filter((call) => call.url.includes("/calendars/primary/events"))).toHaveLength(1);
+    expect(made.recorded.filter((call) => call.method === "POST" && call.url.includes("/calendars/primary/events"))).toHaveLength(1);
     expect(made.founderEmails(account.tenantId).filter((item) => item.idempotencyKey.endsWith(":confirmation"))).toHaveLength(1);
   });
 
@@ -818,11 +829,15 @@ describe("founder review fixes", () => {
       return save(tenantId, provider, key, value);
     };
     expect((await post(firstLink, offered[0]!)).status).toBe(503);
+    // Google's busy times now show the shop's own event: the retry finds it's theirs instead of calling the time taken.
+    expect([...made.events.a!.values()].map((event) => event.start)).toEqual([offered[0]!]);
     const retry = await post(firstLink, offered[0]!);
     expect(retry.status).toBe(200);
     expect(await retry.text()).toContain("<h1>You’re set.</h1>");
-    const inserts = made.recorded.filter((call) => call.url.includes("/calendars/primary/events")).map((call) => (call.body as { id: string }).id);
+    const inserts = made.recorded.filter((call) => call.method === "POST" && call.url.includes("/calendars/primary/events")).map((call) => (call.body as { id: string }).id);
     expect(new Set(inserts).size).toBe(1);
+    expect(made.recorded.filter((call) => call.method === "GET" && call.url.endsWith(`/calendars/primary/events/${inserts[0]!}`))).toHaveLength(1);
+    expect(made.events.a!.size).toBe(1);
     expect(made.founderEmails(first.account.tenantId).filter((item) => item.idempotencyKey.endsWith(":confirmation"))).toHaveLength(1);
 
     // A hold left behind by an older cut-off booking never blocks its own shop, and still blocks every other shop.

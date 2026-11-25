@@ -727,6 +727,36 @@ describe("sign-up picks through Google and Microsoft", () => {
     h.claims = googleClaims(junk.nonce, h.now(), { email: "junk@synthetic.example" });
     expect((await finishGoogle(h, junk)).headers.get("location")).toBe("/signup");
   });
+
+  it("keeps the plan, Unlimited and trade through the emailed link when Google can't vouch for a new address", async () => {
+    const h = await harness();
+    const attempt = await startAt(h, "/auth/google?plan=team&unlimited=1&trade=hvac");
+    h.claims = googleClaims(attempt.nonce, h.now(), { email: "new-person@synthetic.example", hd: undefined });
+    expect((await finishGoogle(h, attempt)).status).toBe(200);
+    const [link] = await queuedLinks(h);
+    const emailed = new URL(link!.url);
+    expect(Object.fromEntries(emailed.searchParams)).toEqual({ token: link!.token, plan: "team", unlimited: "1", trade: "hvac" });
+    const opened = await fetch(`${h.baseUrl}${emailed.pathname}${emailed.search}`);
+    const page = await opened.text();
+    const picks = /name="picks" value="([^"]+)"/.exec(page)![1]!.replaceAll("&amp;", "&");
+    const done = await postLink(h, { token: link!.token, picks }, { cookie: cookieOf(opened, "afo_sign_in_link")! });
+    expect(done.status).toBe(303);
+    const landing = new URL(done.headers.get("location")!, BASE);
+    expect(landing.pathname).toBe("/signup");
+    expect(Object.fromEntries(landing.searchParams)).toEqual({ plan: "team", unlimited: "1", trade: "hvac" });
+    const signup = await (await fetch(`${h.baseUrl}${landing.pathname}${landing.search}`, { headers: { cookie: cookieOf(done, "afo_pending_identity")! } })).text();
+    expect(signup).toContain('value="new-person@synthetic.example" readonly');
+    expect(signup).toContain('<option value="hvac" selected>');
+    // Picks that aren't real plans or trades never ride along, from the link or the form.
+    expect(await (await fetch(`${h.baseUrl}/login/link?token=${link!.token}&plan=platinum&trade=%3Cscript%3E`)).text()).not.toContain('name="picks"');
+    h.store.notifications.clear();
+    const again = await startAt(h, "/auth/google");
+    h.claims = googleClaims(again.nonce, h.now(), { email: "new-person@synthetic.example", hd: undefined });
+    await finishGoogle(h, again);
+    const [second] = await queuedLinks(h);
+    const bind = cookieOf(await fetch(`${h.baseUrl}/login/link?token=${second!.token}`), "afo_sign_in_link")!;
+    expect((await postLink(h, { token: second!.token, picks: "plan=platinum&unlimited=yes" }, { cookie: bind })).headers.get("location")).toBe("/signup");
+  });
 });
 
 describe("Google and Microsoft only vouch for mail they run", () => {
@@ -825,14 +855,27 @@ describe("reclaiming an account someone else signed up with", () => {
     return { account, squatterCookie, cronyCookie, openInvite };
   }
 
-  it("an owner whose email isn't proved can't invite teammates", async () => {
+  it("an owner whose email isn't proved can't invite teammates, and is sent to a password reset, which keeps their password", async () => {
     const h = await harness();
-    const { squatterCookie } = await squatted(h, "owner@synthetic.example");
+    const { account, squatterCookie } = await squatted(h, "owner@synthetic.example");
     const team = await (await fetch(`${h.baseUrl}/app/team`, { headers: { cookie: squatterCookie } })).text();
+    // No invite form to fail on; the way out is a reset, not an emailed sign-in link (that switches the password off).
+    expect(team).not.toContain('action="/app/team/invite"');
+    expect(team).toContain('First confirm your email: use <a href="/forgot">Forgot your password?</a>');
     const csrf = /name="csrf" value="([^"]+)"/.exec(team)![1]!;
     const invite = await fetch(`${h.baseUrl}/app/team/invite`, { method: "POST", headers: { cookie: squatterCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, email: "helper@synthetic.example" }) });
     expect(invite.status).toBe(403);
-    expect(await invite.text()).toContain("Confirm your email before inviting a teammate");
+    const message = await invite.text();
+    expect(message).toContain("Confirm your email before inviting a teammate: use “Forgot your password?”");
+    expect(message).not.toContain("sign in with an emailed link");
+
+    const { token, tokenHash } = (await import("../src/security/owner-auth.js")).createPasswordResetToken();
+    await h.store.createPasswordReset(account.id, tokenHash, new Date(h.now() + 30 * 60_000).toISOString());
+    expect((await fetch(`${h.baseUrl}/reset`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token, password: "owner-password-789", confirm: "owner-password-789" }) })).status).toBe(303);
+    const signedIn = await fetch(`${h.baseUrl}/login`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@synthetic.example", password: "owner-password-789" }) });
+    const cookie = cookieOf(signedIn, "afo_owner")!;
+    expect(cookie).toBeTruthy();
+    expect(await (await fetch(`${h.baseUrl}/app/team`, { headers: { cookie } })).text()).toContain('action="/app/team/invite"');
   });
 
   it("removes the squatter's teammates and kills their invitations, whether the owner proves it by Google or a reset link", async () => {
@@ -857,5 +900,43 @@ describe("reclaiming an account someone else signed up with", () => {
     const owner = { ...(await h.store.getOwnerAccountByEmail("owner@synthetic.example"))! };
     const fresh = await new TeamService(h.store, { now: () => new Date(h.now()) }).invite(owner, "real-teammate@synthetic.example");
     expect((await fetch(`${h.baseUrl}/join?shop=${owner.tenantId}&token=${fresh}`)).status).toBe(200);
+  });
+
+  it("a teammate cleanup that fails leaves the email unproved, so the next Google sign-in or reset link runs it again", async () => {
+    const h = await harness();
+    const byGoogle = await squatted(h, "owner@synthetic.example");
+    const byReset = await squatted(h, "reset@synthetic.example");
+    const list = h.store.listTeamAccounts.bind(h.store);
+    let blips = 0;
+    h.store.listTeamAccounts = async (tenantId) => {
+      if (blips > 0) {
+        blips -= 1;
+        throw new Error("database blip");
+      }
+      return list(tenantId);
+    };
+    const google = async () => {
+      const attempt = await start(h, "google");
+      h.claims = googleClaims(attempt.nonce, h.now());
+      return finishGoogle(h, attempt);
+    };
+    const reset = async () => {
+      const { token, tokenHash } = (await import("../src/security/owner-auth.js")).createPasswordResetToken();
+      await h.store.createPasswordReset(byReset.account.id, tokenHash, new Date(h.now() + 30 * 60_000).toISOString());
+      return fetch(`${h.baseUrl}/reset`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token, password: "fresh-password-456", confirm: "fresh-password-456" }) });
+    };
+
+    for (const [reclaimed, prove] of [[byGoogle, google], [byReset, reset]] as const) {
+      blips = 1;
+      expect((await prove()).status).toBe(500);
+      expect((await h.store.getOwnerAccountById(reclaimed.account.id))!.emailVerifiedAt).toBeNull();
+      expect((await fetch(`${h.baseUrl}/api/app/dashboard`, { headers: { cookie: reclaimed.cronyCookie } })).status).toBe(200);
+      // The next proof finds the email still unproved and cleans up.
+      expect((await prove()).status).toBe(303);
+      expect((await h.store.getOwnerAccountById(reclaimed.account.id))!.emailVerifiedAt).toBeTruthy();
+      expect((await fetch(`${h.baseUrl}/api/app/dashboard`, { headers: { cookie: reclaimed.cronyCookie } })).status).toBe(401);
+      expect((await h.store.listTeamAccounts(reclaimed.account.tenantId)).filter((member) => member.role === "member").map((member) => member.status)).toEqual(["suspended"]);
+      expect((await fetch(`${h.baseUrl}/join?shop=${reclaimed.account.tenantId}&token=${reclaimed.openInvite}`)).status).toBe(410);
+    }
   });
 });

@@ -265,9 +265,10 @@ export function renderSignInLinkSent(email: string, note?: string): string {
 }
 
 /** The page behind the emailed link. Signing in takes a tap, so link scanners that open it don't use it up. */
-export function renderSignInLinkConfirm(token: string, next: string | null = null): string {
+export function renderSignInLinkConfirm(token: string, next: string | null = null, picks = ""): string {
   const nextField = next ? `<input type="hidden" name="next" value="${escapeHtml(next)}">` : "";
-  return authPage("Sign in", { header: "signup", style: SIGN_IN_STYLE, eyebrow: "Your calls. Your rules.", heading: "One tap and you’re in.", body: `<form class="publicform signinform" method="post" action="/login/link"><input type="hidden" name="token" value="${escapeHtml(token)}">${nextField}<button>Sign me in</button></form>` });
+  const picksField = picks ? `<input type="hidden" name="picks" value="${escapeHtml(picks)}">` : "";
+  return authPage("Sign in", { header: "signup", style: SIGN_IN_STYLE, eyebrow: "Your calls. Your rules.", heading: "One tap and you’re in.", body: `<form class="publicform signinform" method="post" action="/login/link"><input type="hidden" name="token" value="${escapeHtml(token)}">${nextField}${picksField}<button>Sign me in</button></form>` });
 }
 
 export function renderForgotPassword(input: { sent?: boolean; emailEnabled: boolean; supportEmail?: string | null; error?: string; email?: string }): string {

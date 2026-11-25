@@ -950,13 +950,14 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const accountId = token ? await dependencies.store.consumePasswordReset(hashPasswordResetToken(token), dependencies.clock.now().toISOString()) : null;
       if (!accountId) return sendHtml(response, 400, renderForgotPassword({ emailEnabled: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL), supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, error: "That reset link is expired or already used. Ask for a new one." }));
       const before = await dependencies.store.getOwnerAccountById(accountId);
-      await dependencies.store.updateOwnerPassword(accountId, await hashOwnerPassword(password), dependencies.clock.now().toISOString());
-      // The reset link reached the account email, so the owner controls it: this password stays when they later use Google.
-      await dependencies.store.markOwnerEmailVerified(accountId, dependencies.clock.now().toISOString(), null);
       // The first proof: whoever signed up with this email before loses the teammates and invitations they made.
+      // Before the email counts as proved, so a failure here leaves it unproved and the next proof runs it again.
       if (before && !before.emailVerifiedAt && before.role !== "member") {
         log({ level: "info", event: "owner_unproven_team_revoked", method: "reset", accountId, removed: await new TeamService(dependencies.store, dependencies.clock).reclaim(before.tenantId) });
       }
+      await dependencies.store.updateOwnerPassword(accountId, await hashOwnerPassword(password), dependencies.clock.now().toISOString());
+      // The reset link reached the account email, so the owner controls it: this password stays when they later use Google.
+      await dependencies.store.markOwnerEmailVerified(accountId, dependencies.clock.now().toISOString(), null);
       log({ level: "info", event: "owner_password_reset", accountId });
       response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/login");

@@ -47,7 +47,7 @@ export async function teamRoutes(request: IncomingMessage, response: ServerRespo
     const email = z.string().trim().toLowerCase().email().max(254).safeParse(form.get("email"));
     if (!email.success) throw new HttpError(400, "Enter your teammate’s email");
     const token = await teams.invite(account, email.data).catch((error: unknown) => {
-      if (error instanceof EmailNotProvedError) throw new HttpError(403, "Confirm your email before inviting a teammate: sign out, then sign in with an emailed link.");
+      if (error instanceof EmailNotProvedError) throw new HttpError(403, "Confirm your email before inviting a teammate: use “Forgot your password?” and set your password from the emailed link.");
       throw new HttpError(409, "Email already has an account or the team is full");
     });
     const inviteUrl = `${context.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/join?shop=${encodeURIComponent(account.tenantId)}&token=${encodeURIComponent(token)}`;

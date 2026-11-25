@@ -225,7 +225,7 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     try {
       const claims = await verifyIdToken(provider, provider.client, await exchangeCode(provider, provider.client, code, attempt.verifier), attempt.nonce);
       const { identity, vouched } = trustedIdentity(provider, claims);
-      if (!vouched) return await proveByEmail(request, response, provider, identity, attempt.next, cookies);
+      if (!vouched) return await proveByEmail(request, response, provider, identity, attempt.next, cookies, attempt.picks);
       return await finish(request, response, identity, attempt.next, cookies, attempt.picks);
     } catch (error) {
       if (!(error instanceof SignInError)) throw error;
@@ -299,14 +299,17 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     return { identity: { provider: provider.name, email: email.data, name }, vouched };
   }
 
-  /** The provider can't vouch for the address: the emailed link proves it, same limits as "Email me a sign-in link". */
-  async function proveByEmail(request: IncomingMessage, response: ServerResponse, provider: ProviderConfig, identity: VerifiedIdentity, next: string | null, cookies: string[]): Promise<void> {
+  /**
+   * The provider can't vouch for the address: the emailed link proves it, same limits as "Email me a sign-in link".
+   * The link carries the sign-up picks, so a new address still lands on sign-up with its plan.
+   */
+  async function proveByEmail(request: IncomingMessage, response: ServerResponse, provider: ProviderConfig, identity: VerifiedIdentity, next: string | null, cookies: string[], picks: string): Promise<void> {
     response.setHeader("set-cookie", cookies);
     log({ level: "info", event: "owner_sign_in_email_check", provider: provider.name });
     if (!emailEnabled) return loginPage(request, response, 403, `${provider.label} can’t vouch for that address. Try another way in.`);
     if (limiter.allow(`owner-login-link-email:${identity.email}`, 5, 60 * 60_000)) {
       const account = await store.getOwnerAccountByEmail(identity.email);
-      if (account?.status !== "suspended") await sendLink(identity.email, account, next);
+      if (account?.status !== "suspended") await sendLink(identity.email, account, next, picks);
     }
     return sendHtml(response, 200, renderSignInLinkSent(identity.email, `${provider.label} can’t vouch for that address, so we emailed you a sign-in link.`));
   }
@@ -315,16 +318,17 @@ export function createOwnerSignIn(deps: SignInDependencies) {
   async function finish(request: IncomingMessage, response: ServerResponse, identity: VerifiedIdentity, next: string | null, cookies: string[], picks = ""): Promise<void> {
     let account = await store.getOwnerAccountByEmail(identity.email);
     if (account && account.status !== "suspended" && !account.emailVerifiedAt) {
-      // The first proof that this person controls the email. A password typed at sign-up (maybe by someone else
-      // using their email) stops working and its sessions end. "Forgot your password?" sets a new one.
-      const dropPassword = !isPasswordless(account.passwordHash);
-      await store.markOwnerEmailVerified(account.id, clock.now().toISOString(), dropPassword ? PASSWORDLESS_HASH : null);
-      if (dropPassword) log({ level: "info", event: "owner_unproven_password_dropped", method: identity.provider, accountId: account.id });
-      // And whoever that was loses the teammates and invitation links they made.
+      // The first proof that this person controls the email. Whoever signed up with it before (maybe someone else
+      // using their email) loses the teammates and invitation links they made. First, so a failure here leaves the
+      // email unproved and the next sign-in runs it again.
       if (account.role !== "member") {
         const removed = await new TeamService(store, clock).reclaim(account.tenantId);
         log({ level: "info", event: "owner_unproven_team_revoked", method: identity.provider, accountId: account.id, removed });
       }
+      // A password typed at sign-up stops working and its sessions end. "Forgot your password?" sets a new one.
+      const dropPassword = !isPasswordless(account.passwordHash);
+      await store.markOwnerEmailVerified(account.id, clock.now().toISOString(), dropPassword ? PASSWORDLESS_HASH : null);
+      if (dropPassword) log({ level: "info", event: "owner_unproven_password_dropped", method: identity.provider, accountId: account.id });
       account = await store.getOwnerAccountByEmail(identity.email);
     }
     if (account) {
@@ -361,12 +365,12 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     return sendHtml(response, 200, renderSignInLinkSent(email));
   }
 
-  async function sendLink(email: string, account: OwnerAccount | null, next: string | null): Promise<void> {
+  async function sendLink(email: string, account: OwnerAccount | null, next: string | null, picks = ""): Promise<void> {
     const { token, tokenHash } = createSignInLinkToken();
     const now = clock.now();
     await store.createSignInLink(tokenHash, email, new Date(now.getTime() + LINK_TTL_MS).toISOString(), now.toISOString());
     // The page they asked from (say, deleting the shop) opens after the tap.
-    const link = `${base}/login/link?token=${encodeURIComponent(token)}${next ? `&next=${encodeURIComponent(next)}` : ""}`;
+    const link = `${base}/login/link?token=${encodeURIComponent(token)}${next ? `&next=${encodeURIComponent(next)}` : ""}${picks ? `&${picks}` : ""}`;
     await store.enqueueNotification({
       id: randomUUID(), tenantId: account?.tenantId ?? SIGN_IN_LINK_OUTBOX_TENANT, callId: null, channel: "email", destinationRef: `email:${email}`,
       body: formatEmailBody("Your Call Otto sign-in link", `Tap this link to sign in to Call Otto. It works once, for 15 minutes:\n\n${link}\n\nIf you didn't ask for this, ignore this email.`),
@@ -389,7 +393,7 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     }
     const email = await store.consumeSignInLink(hashSignInLinkToken(token), clock.now().toISOString());
     if (!email) return expired();
-    return finish(request, response, { provider: "email", email, name: null }, safeNext(form.get("next")), [linkCookie("", 0)]);
+    return finish(request, response, { provider: "email", email, name: null }, safeNext(form.get("next")), [linkCookie("", 0)], signupPicks(new URLSearchParams(form.get("picks") ?? "")));
   }
 
   /** Handles /auth/* and the email-link routes; false for anything else. */
@@ -403,7 +407,7 @@ export function createOwnerSignIn(deps: SignInDependencies) {
       if (LINK_TOKEN.test(token)) {
         // Opening the link only shows a button (mail scanners open links too); this cookie ties the tap to this browser.
         response.setHeader("set-cookie", linkCookie(sign("owner-sign-in-link", token), LINK_TTL_MS / 1_000));
-        sendHtml(response, 200, renderSignInLinkConfirm(token, safeNext(url.searchParams.get("next"))));
+        sendHtml(response, 200, renderSignInLinkConfirm(token, safeNext(url.searchParams.get("next")), signupPicks(url.searchParams)));
       } else loginPage(request, response, 400, "That link doesn’t work. Send a new one.", { errorField: "linkToken" });
     } else if (method === "POST" && path === "/login/link") await useLink(request, response, ip);
     else return false;

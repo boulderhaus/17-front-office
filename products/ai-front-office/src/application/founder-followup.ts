@@ -203,11 +203,13 @@ export class FounderFollowup {
       }
       const slot = founderSlotAllowed(start, { now: clock.now(), windows: this.windows, timeZone: env.FOUNDER_TIMEZONE });
       if (!slot) return { status: "invalid" } as const;
-      // This shop's own hold never blocks it: a booking cut off before its record was saved left one behind.
-      if (!await calendars.isFree(slot, FOUNDER_BUFFER_MINUTES, tenantId)) return { status: "taken" } as const;
+      // This shop's own hold never blocks it, and neither does its own event: a booking cut off after Google took
+      // the event (before the shop's record was saved) shows busy with that very event, so it's finished, not refused.
+      const key = bookingKey(tenantId, slot.start);
+      if (!await calendars.isFree(slot, FOUNDER_BUFFER_MINUTES, tenantId) && !await calendars.eventExists(key)) return { status: "taken" } as const;
       // The event id comes from this key, so a retry of a cut-off booking lands on the same event.
       await calendars.createEvent({
-        key: bookingKey(tenantId, slot.start), start: slot.start, end: slot.end,
+        key, start: slot.start, end: slot.end,
         summary: `Call Otto setup: ${facts.businessName} (10 min)`,
         description: [
           `Owner: ${facts.ownerName ?? "not given"}`,

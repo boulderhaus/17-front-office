@@ -238,6 +238,23 @@ export class FounderCalendars {
     return id;
   }
 
+  /**
+   * True when the "book here" account's main calendar still has the event made from this key: a booking cut off
+   * after Google took it shows busy with that very event. Throws when Google can't say, rather than guessing.
+   */
+  async eventExists(key: string): Promise<boolean> {
+    const account = (await this.accounts()).find((item) => item.bookHere);
+    if (!account) return false;
+    const accessToken = await this.accessToken(account.id);
+    const response = await withTimeout(this.fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${googleEventId(key)}`, {
+      headers: { authorization: `Bearer ${accessToken}` },
+    }), 5_000);
+    if (response.status === 404 || response.status === 410) return false;
+    if (!response.ok) throw new Error(`Google Calendar read failed with HTTP ${response.status}`);
+    const event = await response.json().catch(() => ({})) as { status?: unknown };
+    return event.status !== "cancelled";
+  }
+
   /** Calendars the account owns or has switched on. Google only lists them with a broader grant; else just "primary". */
   private async calendarIds(account: { id: string; client: GoogleOAuthClient; refreshToken: string }): Promise<{ ids: string[]; source: "list" | "primary" }> {
     const accessToken = await this.refresh(account.id, account.client, account.refreshToken);
