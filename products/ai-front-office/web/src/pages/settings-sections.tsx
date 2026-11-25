@@ -218,6 +218,7 @@ export function CalendarSection() {
         ) : (
           <p className="text-[15px]">Not available yet. Until it is, Call Otto takes the time the caller asks for and you confirm it. Those jobs show as <strong className="font-semibold">Confirm time</strong> in Calls.</p>
         )}
+        {i.googleConnected || i.googleAvailable ? <a className="text-sm text-muted-foreground underline underline-offset-4" href="/privacy#google-calendar">How Call Otto uses Google Calendar data</a> : null}
       </SettingsCard>
       <SettingsCard title="Appointment hours" description="Times callers can ask for.">
         <Pair>

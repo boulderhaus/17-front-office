@@ -6,6 +6,34 @@ export interface GoogleOAuthClient { name: GoogleClientName; id: string; secret:
 const CLIENT_NAMES: GoogleClientName[] = ["legacy", "next"];
 
 /**
+ * The only Google permissions Call Otto asks for: busy times (never event details) and
+ * events on calendars the person owns (Otto adds bookings to their own calendar and reads
+ * back only the events it created). Both consent flows, /app and /admin, use this list.
+ */
+export const GOOGLE_CALENDAR_SCOPES = [
+  "https://www.googleapis.com/auth/calendar.events.owned",
+  "https://www.googleapis.com/auth/calendar.freebusy",
+] as const;
+
+const GRANTS_EVENTS = new Set(["https://www.googleapis.com/auth/calendar.events.owned", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/calendar"]);
+const GRANTS_FREEBUSY = new Set(["https://www.googleapis.com/auth/calendar.freebusy", "https://www.googleapis.com/auth/calendar.events.freebusy", "https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar"]);
+
+/**
+ * Google's consent screen lets people untick a permission. Without busy times Otto can't offer
+ * open slots, and without events it can't book, so a partial grant must not count as connected.
+ * `granted` is the space-separated `scope` from Google's token response; when Google omits it,
+ * nothing is assumed missing.
+ */
+export function missingCalendarPermissions(granted: string | undefined): Array<"events" | "freebusy"> {
+  if (granted === undefined) return [];
+  const scopes = granted.split(/\s+/).filter(Boolean);
+  const missing: Array<"events" | "freebusy"> = [];
+  if (!scopes.some((scope) => GRANTS_EVENTS.has(scope))) missing.push("events");
+  if (!scopes.some((scope) => GRANTS_FREEBUSY.has(scope))) missing.push("freebusy");
+  return missing;
+}
+
+/**
  * Two Google OAuth clients can coexist during a project migration. A refresh
  * token only works with the client that issued it, so the token and its client
  * are stored together as one value. Plain values saved before this are legacy.

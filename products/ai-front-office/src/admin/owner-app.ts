@@ -4,6 +4,7 @@ import { fairUseCalls, money, perCall } from "../domain/plans.js";
 import { isPaidStatus } from "../domain/billing.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, OutboxNotification, OwnerAccount, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import { escapeHtml as e } from "./render.js";
+import type { CallPath, CallPathStep } from "../domain/call-path.js";
 
 export type OwnerView = "today" | "pipeline" | "calendar" | "settings" | "call";
 
@@ -224,6 +225,7 @@ export function renderOwnerCallRecord(input: {
   recordingUrl: string | null;
   csrf: string;
   canDelete: boolean;
+  path: CallPath | null;
 }): string {
   const call = input.call;
   const tz = input.config.timezone;
@@ -248,7 +250,7 @@ export function renderOwnerCallRecord(input: {
     ...(task ? [["Follow-up", `${task.reason} · ${task.status === "completed" ? "handled" : `due ${compactDate(task.dueAt, tz)}`}`] as [string, string]] : []),
   ];
   const alerts = input.notifications.filter((item) => item.channel === "sms").map((item) => `<li><span>${item.priority === "high" ? "Urgent text" : "Text"}</span><span>${e(notificationWords(item.state))}</span></li>`).join("");
-  const body = `<section class="fo-card fo-detail standalone"><a class="fo-back" href="/app">${ownerIcon("back")}Back</a><div class="fo-detail-head"><div><h2>${e(call.fields.callerName ?? "Unknown caller")}</h2><p>${e(call.fields.problemDescription || "No problem summary captured")}</p></div><span class="fo-pill ${call.emergency?.emergency ? "danger" : call.outcome === "booked" ? "good" : ""}">${e(call.emergency?.severity === "life_safety" ? "Emergency" : call.emergency?.emergency ? "Urgent" : outcomeWords(call.outcome))}</span></div>${call.emergency?.immediateInstruction ? `<p class="fo-safety">${ownerIcon("alert")}${e(call.emergency.immediateInstruction)}</p>` : ""}<div class="fo-detail-actions">${phone ? `<a class="fo-btn" href="tel:${e(phone)}">${ownerIcon("phone")}Call back</a><a class="fo-ghost" href="sms:${e(phone)}">Text</a>` : ""}${address ? `<a class="fo-ghost" href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(address)}" target="_blank" rel="noreferrer">${ownerIcon("map")}Map</a>` : ""}${taskActions}</div><dl class="fo-facts">${facts.map(([key, value]) => `<div><dt>${e(key)}</dt><dd>${e(value)}</dd></div>`).join("")}</dl>${input.recordingUrl ? `<a class="fo-ghost wide" href="${e(input.recordingUrl)}" rel="noreferrer">${ownerIcon("play")}Play recording</a>` : ""}<details class="fo-transcript" open><summary>Read the call</summary><p>${e(call.transcript ?? "Transcript unavailable")}</p></details>${alerts ? `<h3>Alerts sent</h3><ul class="fo-alerts">${alerts}</ul>` : ""}</section>${input.canDelete ? `<details class="fo-card fo-danger-zone"><summary>Delete this call record</summary><form method="post" action="/app/calls/${encodeURIComponent(call.id)}/delete">${csrfField}<p>This permanently removes the call record, transcript, recording, callback, tool events, notifications, and any customer record whose latest call is this one. Appointments already on your calendar stay on your calendar.</p><label class="fo-check"><input name="confirm" type="checkbox" value="delete" required> I understand this can’t be undone.</label><button class="fo-btn danger">Delete permanently</button></form></details>` : ""}`;
+  const body = `<section class="fo-card fo-detail standalone"><a class="fo-back" href="/app">${ownerIcon("back")}Back</a><div class="fo-detail-head"><div><h2>${e(call.fields.callerName ?? "Unknown caller")}</h2><p>${e(call.fields.problemDescription || "No problem summary captured")}</p></div><span class="fo-pill ${call.emergency?.emergency ? "danger" : call.outcome === "booked" ? "good" : ""}">${e(call.emergency?.severity === "life_safety" ? "Emergency" : call.emergency?.emergency ? "Urgent" : outcomeWords(call.outcome))}</span></div>${call.emergency?.immediateInstruction ? `<p class="fo-safety">${ownerIcon("alert")}${e(call.emergency.immediateInstruction)}</p>` : ""}<div class="fo-detail-actions">${phone ? `<a class="fo-btn" href="tel:${e(phone)}">${ownerIcon("phone")}Call back</a><a class="fo-ghost" href="sms:${e(phone)}">Text</a>` : ""}${address ? `<a class="fo-ghost" href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(address)}" target="_blank" rel="noreferrer">${ownerIcon("map")}Map</a>` : ""}${taskActions}</div>${input.path ? renderCallPath(call.id, input.path) : ""}<dl class="fo-facts">${facts.map(([key, value]) => `<div><dt>${e(key)}</dt><dd>${e(value)}</dd></div>`).join("")}</dl>${input.recordingUrl ? `<a class="fo-ghost wide" href="${e(input.recordingUrl)}" rel="noreferrer">${ownerIcon("play")}Play recording</a>` : ""}<details class="fo-transcript" open><summary>Read the call</summary><p>${e(call.transcript ?? "Transcript unavailable")}</p></details>${alerts ? `<h3>Alerts sent</h3><ul class="fo-alerts">${alerts}</ul>` : ""}</section>${input.canDelete ? `<details class="fo-card fo-danger-zone"><summary>Delete this call record</summary><form method="post" action="/app/calls/${encodeURIComponent(call.id)}/delete">${csrfField}<p>This permanently removes the call record, transcript, recording, callback, tool events, notifications, and any customer record whose latest call is this one. Appointments already on your calendar stay on your calendar.</p><label class="fo-check"><input name="confirm" type="checkbox" value="delete" required> I understand this can’t be undone.</label><button class="fo-btn danger">Delete permanently</button></form></details>` : ""}`;
   return ownerShell({
     title: "Call",
     view: "call",
@@ -259,6 +261,68 @@ export function renderOwnerCallRecord(input: {
     needsAttention: 0,
   });
 }
+
+/**
+ * Otto's path through the call: every checkpoint, checked off as the server records it. While the call is
+ * live, /app/call-path.js swaps in a fresh copy every two seconds so the owner watches it tick.
+ */
+export function renderCallPath(callId: string, path: CallPath): string {
+  const clock = (at: string): string => {
+    const seconds = Math.max(0, Math.round((Date.parse(at) - Date.parse(path.startedAt)) / 1000));
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  };
+  const mark: Record<CallPathStep["state"], string> = { done: ownerIcon("check"), waiting: ownerIcon("clock"), flagged: ownerIcon("alert"), current: "<i></i>", todo: "", skipped: "" };
+  const words: Record<CallPathStep["state"], string> = { done: "done", waiting: "waiting on you", flagged: "needs attention", current: "happening now", todo: "not yet", skipped: "skipped" };
+  const item = (step: CallPathStep<string>, index: number | null): string =>
+    `<li class="${step.state}"><span class="fo-path-mark" aria-hidden="true">${mark[step.state] || (index === null ? "" : String(index + 1))}</span><span class="fo-path-text"><strong>${e(step.label)}</strong>${step.note ? `<small>${e(step.note)}</small>` : ""}</span><span class="fo-path-time">${step.at && (step.state === "done" || step.state === "waiting" || step.state === "flagged") ? `<time datetime="${e(step.at)}">${clock(step.at)}</time>` : `<span class="fo-sr">${words[step.state]}</span>`}</span></li>`;
+  const live = path.live ? ` data-live-path="/app/calls/${encodeURIComponent(callId)}/path"` : "";
+  return `<section class="fo-path${path.live ? " live" : ""}"${live} aria-label="Otto's path through this call"><div class="fo-path-head"><h3>Otto’s path</h3><span>${path.live ? '<i></i>Live · ' : ""}${path.done} of ${path.steps.length}</span></div><ol>${path.steps.map((step, index) => item(step, index)).join("")}</ol>${path.extras.length ? `<p class="fo-path-any">Also came up</p><ul>${path.extras.map((step) => item(step, null)).join("")}</ul>` : ""}${path.live ? '<script src="/app/call-path.js" defer></script>' : ""}</section>`;
+}
+
+/** Polls the live path while the call is on; reloads once when it ends so the full record shows. */
+export const CALL_PATH_SCRIPT = `(() => {
+  let failures = 0;
+  let timer = 0;
+  const section = () => document.querySelector("[data-live-path]");
+  const stop = (words) => {
+    const current = section();
+    if (!current) return;
+    current.removeAttribute("data-live-path");
+    current.classList.remove("live");
+    const badge = current.querySelector(".fo-path-head span");
+    if (badge) badge.textContent = words;
+  };
+  const schedule = (ms) => { clearTimeout(timer); timer = setTimeout(tick, ms); };
+  const tick = async () => {
+    const current = section();
+    if (!current) return;
+    if (document.hidden) return;
+    try {
+      const response = await fetch(current.getAttribute("data-live-path"), { credentials: "same-origin", cache: "no-store" });
+      if (response.status === 401 || response.status === 403 || response.status === 404) return stop("Refresh for the latest");
+      if (response.status === 429) {
+        const wait = Number(response.headers.get("retry-after"));
+        return schedule(Number.isFinite(wait) && wait > 0 ? wait * 1000 : 10000);
+      }
+      if (!response.ok) throw new Error(String(response.status));
+      const data = await response.json();
+      failures = 0;
+      if (!data.live) return location.reload();
+      const holder = document.createElement("div");
+      holder.innerHTML = data.html;
+      const next = holder.querySelector("[data-live-path]");
+      if (next) current.replaceWith(next);
+      schedule(2000);
+    } catch {
+      failures += 1;
+      if (failures >= 5) return stop("Refresh for the latest");
+      schedule(Math.min(30000, 2000 * 2 ** failures));
+    }
+  };
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) schedule(0); });
+  schedule(2000);
+})();
+`;
 
 /** Owner settings: grouped, plain-language, phone first. Field names match configFromForm. */
 export function renderOwnerSettings(input: {
@@ -281,9 +345,10 @@ export function renderOwnerSettings(input: {
   if (!leadOptions.some(([value]) => value === c.minimumLeadTimeMinutes)) leadOptions.push([c.minimumLeadTimeMinutes, `${c.minimumLeadTimeMinutes} minutes`]);
   const addOn = (name: string, enabled: boolean, available: boolean | undefined, title: string, price: string, text: string): string =>
     `<label class="fo-option"><input type="checkbox" name="${name}"${checked(enabled)}${available ? "" : " disabled"}><span><strong>${title} <em>${price}</em></strong><small>${text}</small>${available ? "" : "<small class=\"fo-warn\">Not available yet.</small>"}</span></label>`;
+  const googleDataLink = `<p class="fo-muted"><a href="/privacy#google-calendar">How Call Otto uses Google Calendar data</a></p>`;
   const calendar = i.googleConnected
-    ? `<p class="fo-ok">${ownerIcon("check")}Google Calendar connected</p><a class="fo-ghost" href="/app/integrations/google/start">Reconnect</a>`
-    : i.googleAvailable ? `<p>Connect the calendar your jobs live on so Call Otto can offer real open times.</p><a class="fo-btn" href="/app/integrations/google/start">Connect Google Calendar</a>` : `<p class="fo-muted">Calendar connection isn’t available yet.</p>`;
+    ? `<p class="fo-ok">${ownerIcon("check")}Google Calendar connected</p><a class="fo-ghost" href="/app/integrations/google/start">Reconnect</a>${googleDataLink}`
+    : i.googleAvailable ? `<p>Connect the calendar your jobs live on so Call Otto can offer real open times.</p><a class="fo-btn" href="/app/integrations/google/start">Connect Google Calendar</a>${googleDataLink}` : `<p class="fo-muted">Calendar connection isn’t available yet.</p>`;
   const paid = isPaidStatus(input.subscription?.status);
   const form = `<form class="fo-form" method="post" action="/app/config">${csrfField}<input type="hidden" name="flatMonthlyPrice" value="${Math.round(c.flatMonthlyPriceCents / 100)}">
 <section class="fo-card fo-group"><h2>Answering</h2>
@@ -380,6 +445,7 @@ export function ownerIcon(name: string): string {
     check: '<path d="M20 6L9 17l-5-5"/>',
     back: '<path d="M15 18l-6-6 6-6"/>',
     map: '<path d="M12 21s-7-6.3-7-11a7 7 0 0 1 14 0c0 4.7-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     alert: '<path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>',
     play: '<path d="M7 4l13 8-13 8z"/>',
   };
@@ -474,6 +540,24 @@ button{font:inherit;cursor:pointer}svg{width:20px;height:20px;flex:none}
 .fo-facts dt{color:var(--muted);font-size:13px;font-weight:700}.fo-facts dd{margin:0;font-size:14px;overflow-wrap:anywhere}
 .fo-transcript{border:1px solid var(--line);border-radius:12px}.fo-transcript summary{min-height:var(--tap);display:flex;align-items:center;padding:0 14px;font-weight:750;cursor:pointer}
 .fo-transcript p{padding:0 14px 14px;white-space:pre-wrap;font-size:14px;color:#2b3445}
+.fo-path{border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:grid;gap:8px}
+.fo-path-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.fo-path-head h3{font-size:15px}.fo-path-head span{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700;color:var(--muted)}
+.fo-path-head i,.fo-path li.current .fo-path-mark i{width:8px;height:8px;border-radius:50%;background:var(--red);animation:fo-pulse 1.2s ease-in-out infinite}
+.fo-path ol,.fo-path ul{margin:0;padding:0;list-style:none;display:grid;gap:2px}
+.fo-path li{display:grid;grid-template-columns:28px 1fr auto;align-items:center;gap:10px;min-height:40px;padding:4px 6px;border-radius:10px}
+.fo-path-mark{display:grid;place-items:center;width:26px;height:26px;border-radius:50%;border:1.5px solid var(--line);color:var(--muted);font-size:12px;font-weight:800;background:var(--card)}
+.fo-path-mark svg{width:15px;height:15px;stroke-width:3}
+.fo-path li.done .fo-path-mark{background:var(--green);border-color:var(--green);color:#fff}
+.fo-path li.flagged .fo-path-mark{background:var(--red);border-color:var(--red);color:#fff}
+.fo-path li.waiting .fo-path-mark{background:var(--amber);border-color:var(--amber);color:#fff}
+.fo-path li.current{background:#f1f4e0}.fo-path li.current .fo-path-mark{border-color:var(--ink)}
+.fo-path:not(.live) li.current{background:none}.fo-path:not(.live) li.current .fo-path-mark i{animation:none;background:var(--muted)}
+.fo-path li.skipped .fo-path-text,.fo-path li.todo .fo-path-text{color:var(--muted)}.fo-path li.skipped strong{font-weight:600}
+.fo-path-text{display:grid;min-width:0}.fo-path-text strong{font-size:14px}.fo-path-text small{font-size:12px;color:var(--muted)}
+.fo-path-time{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.fo-path-any{font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding-top:4px}
+.fo-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+@keyframes fo-pulse{50%{opacity:.35}}@media (prefers-reduced-motion:reduce){.fo-path i{animation:none}}
 .fo-alerts{margin:0;padding:0;list-style:none;display:grid;gap:4px}.fo-alerts li{display:flex;justify-content:space-between;font-size:14px;padding:6px 0;border-top:1px solid var(--line)}
 .fo-danger-zone summary{font-weight:750;color:#a51d0d;cursor:pointer;min-height:40px;display:flex;align-items:center}.fo-danger-zone form{display:grid;gap:12px;margin-top:10px}.fo-danger-zone p{font-size:14px;color:var(--muted)}
 .fo-check{display:flex;gap:10px;align-items:center;font-weight:650}.fo-check input{width:22px;height:22px}
