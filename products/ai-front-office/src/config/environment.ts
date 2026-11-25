@@ -79,6 +79,9 @@ const schema = z.object({
   GOOGLE_CLIENT_SECRET_NEXT: z.preprocess((value) => value === "" ? undefined : value, z.string().optional()),
   GOOGLE_OAUTH_NEW_CONNECTIONS: z.enum(["legacy", "next"]).default("legacy"),
   GOOGLE_REFRESH_TOKEN: z.string().optional(),
+  /** "Continue with Microsoft" on sign-in and sign-up (Entra app, redirect URI PUBLIC_BASE_URL/auth/microsoft/callback). Unset hides the button. */
+  MICROSOFT_CLIENT_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional()),
+  MICROSOFT_CLIENT_SECRET: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional()),
   GOOGLE_CALENDAR_ID: z.string().default("primary"),
   OWNER_DESTINATIONS_JSON: z.string().default("{}"),
   FOUNDING_CHECKOUT_URL: z.preprocess(
@@ -178,6 +181,7 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
   if (Boolean(parsed.RESEND_API_KEY) !== Boolean(parsed.RESEND_FROM_EMAIL)) {
     throw new Error("RESEND_API_KEY and RESEND_FROM_EMAIL must be configured together");
   }
+  if (Boolean(parsed.MICROSOFT_CLIENT_ID) !== Boolean(parsed.MICROSOFT_CLIENT_SECRET)) throw new Error("MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET must be configured together");
   if (parsed.GOOGLE_OAUTH_NEW_CONNECTIONS === "next" && !(parsed.GOOGLE_CLIENT_ID_NEXT && parsed.GOOGLE_CLIENT_SECRET_NEXT)) {
     throw new Error("GOOGLE_OAUTH_NEW_CONNECTIONS=next requires GOOGLE_CLIENT_ID_NEXT and GOOGLE_CLIENT_SECRET_NEXT");
   }
