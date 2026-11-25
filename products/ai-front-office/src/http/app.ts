@@ -50,7 +50,7 @@ import { MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_ROUTES, toolFailure
 import { callScreeningSetting, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import { FORWARDING_CHECK_SPEECH, forwardingCheckState, TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
 import { setupHelpState, setupSorrySpeech, TelnyxSetupCaller, type SetupCallFacts } from "../adapters/telnyx-setup-call.js";
-import { FOUNDER_GOOGLE_SCOPES, FounderCalendars, FounderConnectError } from "../adapters/founder-calendar.js";
+import { FOUNDER_GOOGLE_SCOPES, FounderCalendarReadError, FounderCalendars, FounderConnectError } from "../adapters/founder-calendar.js";
 import { FounderFollowup, type FounderBookingFacts } from "../application/founder-followup.js";
 import { founderConnectToken, founderConnectTokenValid, ownerFirstName, prettyPhone, readFounderBookingToken } from "../domain/founder-booking.js";
 import { renderFounderBooking, renderFounderCalendars } from "../admin/founder.js";
@@ -460,7 +460,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   const signedInRecently = (session: OwnerSession): boolean => dependencies.clock.now().getTime() - ownerSessionIssuedAt(session) <= RECENT_SIGN_IN_MS;
   const telemetry = dependencies.telemetry ?? noopTelemetry;
   /** Brock's Google calendars and his personal follow-up when the AI setup helper can't finish. */
-  const founderCalendars = new FounderCalendars({ store: dependencies.store, env: dependencies.env, clock: dependencies.clock, fetcher: dependencies.fetcher });
+  const founderCalendars = new FounderCalendars({ store: dependencies.store, env: dependencies.env, clock: dependencies.clock, fetcher: dependencies.fetcher, log });
   const founder = new FounderFollowup({ store: dependencies.store, env: dependencies.env, clock: dependencies.clock, calendars: founderCalendars, log });
   const graceContext: GraceContext = { store: dependencies.store, env: dependencies.env, clock: dependencies.clock, fetcher: dependencies.fetcher, log };
   const analyticsPage = (html: string, loader = true): string => injectAnalytics(html, { key: dependencies.env.POSTHOG_KEY, ingestionHost: dependencies.env.POSTHOG_HOST, loader });
@@ -2598,8 +2598,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     }
     if (method !== "GET" || url.pathname !== "/admin/founder-calendars") throw new HttpError(404, "Not found");
     const accounts = await founderCalendars.accounts();
+    let readError: string | null = null;
     const preview = accounts.length === 0 ? [] : await founder.openSlots().catch((error: unknown) => {
-      log({ level: "warn", event: "founder_slots_failed", error: safeError(error) });
+      log({ level: "warn", event: "founder_slots_failed", error: safeError(error), ...(error instanceof FounderCalendarReadError ? { accountId: error.accountId, reason: error.reason } : {}) });
+      if (error instanceof FounderCalendarReadError) readError = `Couldn't read ${error.account} (${error.reason}). Disconnect it or connect it again.`;
       return null;
     });
     const notices: Record<string, string> = { connected: "Connected. Connect another account, or pick which one takes bookings.", "book-here": "Saved. New setup calls go on that calendar.", disconnected: "Disconnected." };
@@ -2611,6 +2613,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       windows: dependencies.env.FOUNDER_BOOKING_WINDOWS,
       timeZone: dependencies.env.FOUNDER_TIMEZONE,
       preview,
+      readError,
       notice: notices[url.searchParams.get("done") ?? ""],
       error: errors[url.searchParams.get("error") ?? ""],
     }));
