@@ -64,7 +64,7 @@ function fakeTelnyx(options: { available?: Record<string, string[]>; orderStatus
       return json({ data: { phone_number: number, carrier: { name: carrier.name, type: carrier.type }, portability: { line_type: carrier.type } } });
     }
     if (url.endsWith("/v2/calls") && method === "POST") return json({ data: { call_control_id: "v3:check-call" } });
-    if (/\/calls\/[^/]+\/actions\/hangup$/.test(url)) return json({ data: { result: "ok" } });
+    if (/\/calls\/[^/]+\/actions\/(hangup|speak)$/.test(url)) return json({ data: { result: "ok" } });
     if (method === "DELETE") return json({ data: {} });
     if (url.endsWith("/10dlc/phone_number_campaigns")) return json({ phoneNumber: body?.phoneNumber, campaignId: body?.campaignId });
     throw new Error(`Unexpected outbound request in test: ${method} ${url}`);
@@ -330,7 +330,7 @@ describe("owner one-tap go-live", () => {
         return fetch(`${made.baseUrl}${path}`, { method: "POST", headers: { cookie: made.cookie, "content-type": "application/json", "x-csrf-token": token }, body: JSON.stringify(body) });
       };
       const dashboard = async () => (await (await fetch(`${made.baseUrl}/api/app/dashboard`, { headers: { cookie: made.cookie } })).json()) as {
-        line: { business: { number: string | null; carrier: { family: string; name: string | null } | null; plan: { on: string | null; off: string | null; dialLink: string | null } | null }; confirmedAt: string | null; check: { status: string; method: string | null }; helpRequestedAt: string | null };
+        line: { business: { number: string | null; carrier: { family: string; name: string | null } | null; plan: { on: string | null; off: string | null; dialLink: string | null } | null }; confirmedAt: string | null; check: { status: string; method: string | null; answeredAfterSec: number | null; callerId: string | null }; helpRequestedAt: string | null };
       };
       expect((await api("/api/app/line/go-live")).status).toBe(200);
       return { ...made, api, dashboard };
@@ -392,6 +392,80 @@ describe("owner one-tap go-live", () => {
       const ended = JSON.stringify({ data: { record_type: "event", event_type: "call.conversation.ended", id: "evt-check-end", occurred_at: clock.now().toISOString(), payload: { assistant_id: "assistant-1", call_control_id: "v3:forwarded-check", from: "+15555550199", duration_sec: 4, messages: [] } } });
       expect((await fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(ended, privateKey, clock.now()), body: ended })).status).toBe(200);
       expect(await store.listCalls(account.tenantId, 10)).toHaveLength(0);
+    });
+
+    describe("says exactly what happened to the test call", () => {
+      async function started() {
+        const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection" } });
+        await made.api("/api/app/line/business-number", { number: "9415550177" });
+        await made.api("/api/app/line/check");
+        // Webhooks for our check leg: Telnyx echoes the client_state we dialed with on every event.
+        const send = async (event: string, secondsAfter: number, extra: Record<string, unknown> = {}) => {
+          const at = new Date(made.clock.now().getTime() + secondsAfter * 1_000);
+          const body = JSON.stringify({ data: { record_type: "event", event_type: event, id: `evt-${event}-${secondsAfter}`, occurred_at: at.toISOString(), payload: { call_control_id: "v3:check-call", client_state: Buffer.from(`forwarding-check:${made.account.tenantId}`).toString("base64"), ...extra } } });
+          return fetch(`${made.baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(body, made.privateKey, made.clock.now()), body });
+        };
+        return { ...made, send };
+      }
+
+      it("picked up in 2 seconds (call screening): says what the call is instead of dead air, hangs up, and names the fix", async () => {
+        const { send, telnyx, dashboard, store, account } = await started();
+        expect((await dashboard()).line.check).toMatchObject({ status: "calling", callerId: "+15555550199" });
+        expect((await send("call.answered", 2)).status).toBe(200);
+        const spoke = telnyx.calls.find((call) => call.url.endsWith("/calls/v3%3Acheck-call/actions/speak"));
+        expect((spoke?.body as { payload: string }).payload).toContain("testing your call forwarding");
+        await send("call.speak.ended", 12);
+        expect(telnyx.calls.some((call) => call.url.endsWith("/calls/v3%3Acheck-call/actions/hangup"))).toBe(true);
+        expect((await dashboard()).line.check.status).toBe("calling");
+        await send("call.hangup", 13, { hangup_cause: "normal_clearing" });
+        expect((await dashboard()).line.check).toMatchObject({ status: "picked_up", answeredAfterSec: 2 });
+        expect((await dashboard()).line.confirmedAt).toBeNull();
+        expect(await store.listCalls(account.tenantId, 10)).toHaveLength(0);
+      });
+
+      it("picked up after 25 seconds with no forward: their voicemail has it", async () => {
+        const { send, dashboard } = await started();
+        await send("call.answered", 25);
+        await send("call.hangup", 40, { hangup_cause: "normal_clearing" });
+        expect((await dashboard()).line.check.status).toBe("voicemail");
+      });
+
+      it("rang out with nobody picking up: not reached, as soon as the call ends", async () => {
+        const { send, dashboard } = await started();
+        await send("call.hangup", 60, { hangup_cause: "timeout" });
+        expect((await dashboard()).line.check.status).toBe("not_reached");
+      });
+
+      it("declined but nothing forwarded it", async () => {
+        const { send, dashboard } = await started();
+        await send("call.hangup", 6, { hangup_cause: "call_rejected" });
+        expect((await dashboard()).line.check.status).toBe("declined");
+      });
+
+      it("forwarded to Call Otto: passes, and says nothing on our leg", async () => {
+        const { send, telnyx, dashboard, baseUrl, privateKey, clock } = await started();
+        const init = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id: "evt-fwd", occurred_at: clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: "+15555550199", call_control_id: "v3:forwarded-check", assistant_id: "assistant-1" } } });
+        await fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, privateKey, clock.now()), body: init });
+        await send("call.answered", 24);
+        await send("call.hangup", 25, { hangup_cause: "normal_clearing" });
+        expect(telnyx.calls.some((call) => call.url.endsWith("/actions/speak"))).toBe(false);
+        expect((await dashboard()).line.check.status).toBe("passed");
+      });
+
+      it("an older test call finishing late never rewrites the newest test", async () => {
+        const { dashboard, baseUrl, privateKey, clock, account } = await started();
+        const stale = JSON.stringify({ data: { record_type: "event", event_type: "call.hangup", id: "evt-stale", occurred_at: clock.now().toISOString(), payload: { call_control_id: "v3:older-call", hangup_cause: "timeout", client_state: Buffer.from(`forwarding-check:${account.tenantId}`).toString("base64") } } });
+        expect((await fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(stale, privateKey, clock.now()), body: stale })).status).toBe(200);
+        expect((await dashboard()).line.check.status).toBe("calling");
+      });
+    });
+
+    it("the owner calling their own Call Otto number from the business phone is not proof that forwarding works", async () => {
+      const { api, dashboard, baseUrl, privateKey, clock } = await liveShop();
+      await api("/api/app/line/business-number", { number: "9415550177" });
+      const init = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id: "evt-self", occurred_at: clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: "+19415550177", call_control_id: "v3:self", assistant_id: "assistant-1" } } });
+      await fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, privateKey, clock.now()), body: init });
+      expect((await dashboard()).line.confirmedAt).toBeNull();
     });
 
     it("falls back to calling yourself, and says so plainly when the call never reaches us", async () => {

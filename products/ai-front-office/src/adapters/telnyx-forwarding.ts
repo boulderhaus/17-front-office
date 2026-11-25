@@ -1,5 +1,22 @@
 import { withTimeout } from "../application/retry.js";
 
+const CHECK_STATE_PREFIX = "forwarding-check:";
+
+/**
+ * What our check call says when something picks it up. If forwarding works, Call Otto's own line
+ * answers and we hang up at once, so only a phone, a call screener or a voicemail ever hears this.
+ */
+export const FORWARDING_CHECK_SPEECH = "Hi, this is Call Otto, testing your call forwarding. Your phone picked up this test call, so it did not reach Call Otto. Please hang up, and follow the steps on your screen.";
+
+/** The shop whose forwarding check this Call Control leg is, or null for any other call. */
+export function forwardingCheckTenant(clientState: unknown): string | null {
+  if (typeof clientState !== "string" || !clientState) return null;
+  const decoded = Buffer.from(clientState, "base64").toString("utf8");
+  if (!decoded.startsWith(CHECK_STATE_PREFIX)) return null;
+  const tenantId = decoded.slice(CHECK_STATE_PREFIX.length);
+  return /^[\w-]{1,80}$/.test(tenantId) ? tenantId : null;
+}
+
 /** Carrier lookup and the "Test my forwarding" call, so owners never have to know their carrier or test by hand. */
 export class TelnyxForwardingClient {
   constructor(private readonly options: { apiKey: string; fetcher?: typeof fetch }) {}
@@ -20,8 +37,8 @@ export class TelnyxForwardingClient {
 
   /**
    * Ring the owner's business number from our line. If forwarding works, the call lands on the
-   * shop's Call Otto number and the assistant webhook marks the check passed. The call ends by
-   * itself after `time_limit_secs`.
+   * shop's Call Otto number and the assistant webhook marks the check passed. If anything else picks it
+   * up, it says what it is and hangs up; otherwise it ends by itself after `time_limit_secs`.
    */
   async placeCheckCall(input: { connectionId: string; from: string; to: string; webhookUrl: string; tenantId: string }): Promise<string | null> {
     const result = await this.request<{ data?: { call_control_id?: unknown } }>("/calls", {
@@ -30,13 +47,22 @@ export class TelnyxForwardingClient {
         connection_id: input.connectionId,
         to: input.to,
         from: input.from,
-        timeout_secs: 45,
-        time_limit_secs: 75,
+        // Carriers forward an unanswered call after 20–30 s; ring long enough for that to happen.
+        timeout_secs: 60,
+        time_limit_secs: 90,
         webhook_url: input.webhookUrl,
-        client_state: Buffer.from(`forwarding-check:${input.tenantId}`).toString("base64"),
+        client_state: Buffer.from(`${CHECK_STATE_PREFIX}${input.tenantId}`).toString("base64"),
       }),
     });
     return typeof result.data?.call_control_id === "string" ? result.data.call_control_id : null;
+  }
+
+  /** Say something on our check call, so whoever picked it up hears what it is instead of dead air. */
+  async speak(callControlId: string, text: string, commandId: string): Promise<void> {
+    await this.request(`/calls/${encodeURIComponent(callControlId)}/actions/speak`, {
+      method: "POST",
+      body: JSON.stringify({ payload: text, voice: "AWS.Polly.Joanna", language: "en-US", command_id: commandId }),
+    }, [404, 422]);
   }
 
   async hangUp(callControlId: string): Promise<void> {

@@ -30,8 +30,10 @@ export interface ForwardingPlan {
   what: string;
   /** Short tips shown under the code. */
   tips: string[];
-  /** Shown only on iPhones: Live Voicemail answers before carrier forwarding can. */
+  /** Shown only on iPhones: call screening and Live Voicemail answer before carrier forwarding can. */
   iphoneTip: string | null;
+  /** What the owner sees or hears once the code goes through, so they know it took. */
+  confirm: string | null;
 }
 
 /** Families an owner can pick when the lookup is unsure, in the words they'd use. */
@@ -58,7 +60,7 @@ export function carrierFamily(name: string | null | undefined, lineType: string 
 export function forwardingPlan(family: CarrierFamily, frontOfficeNumber: string, mode: ForwardingMode): ForwardingPlan {
   const digits = frontOfficeNumber.replace(/^\+1/, "").replace(/\D/g, "");
   const always = mode === "always";
-  const iphoneTip = "On an iPhone, also turn off Live Voicemail: Settings › Apps › Phone › Live Voicemail. Otherwise your iPhone answers before we can.";
+  const iphoneTip = "Open Settings › Apps › Phone. Set Screen Unknown Callers to Never, and turn off Live Voicemail. Otherwise your iPhone picks up new customers’ calls before Call Otto can. Call Otto screens those calls for you.";
   const ringTip = "Calls ring your phone first. If you don’t pick up, we answer.";
   if (family === "verizon") {
     const on = `${always ? "*72" : "*71"}${digits}`;
@@ -66,6 +68,7 @@ export function forwardingPlan(family: CarrierFamily, frontOfficeNumber: string,
       family, on, off: "*73", dialLink: telLink(on), offDialLink: telLink("*73"),
       what: always ? "Every call goes straight to Call Otto." : ringTip,
       tips: [], iphoneTip,
+      confirm: "You’ll hear a tone or a short message. Hang up, come back here and test it.",
     };
   }
   if (family === "gsm") {
@@ -77,6 +80,7 @@ export function forwardingPlan(family: CarrierFamily, frontOfficeNumber: string,
       family, on, off, dialLink: telLink(on), offDialLink: telLink(off),
       what: always ? "Every call goes straight to Call Otto." : `${ringTip} Same if you tap Decline or have no signal.`,
       tips: [], iphoneTip,
+      confirm: "You’ll see “Setting Registration Succeeded” (Android: “Call forwarding”). Tap Dismiss, come back here and test it.",
     };
   }
   if (family === "office") {
@@ -87,12 +91,13 @@ export function forwardingPlan(family: CarrierFamily, frontOfficeNumber: string,
         : `In your phone company’s website or app, find Call Forwarding › “when not answered” (or “no answer”) and forward to ${pretty(frontOfficeNumber)}.`,
       tips: ["Not sure where that is? Tap “Set it up with me” and we’ll do it together on the phone."],
       iphoneTip: null,
+      confirm: null,
     };
   }
   return {
     family, on: null, off: null, dialLink: null, offDialLink: null,
     what: "Which phone company do you pay for this number?",
-    tips: [], iphoneTip: null,
+    tips: [], iphoneTip: null, confirm: null,
   };
 }
 

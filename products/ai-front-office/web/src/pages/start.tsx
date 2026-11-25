@@ -82,7 +82,9 @@ export function StartPage() {
   // A standard back arrow, top-left, on every step after paying: All set goes back to forwarding, and
   // forwarding (the card is already paid) goes back to Calls, where "Continue setup" brings the owner back.
   const back: Step | "calls" | null = step === "done" ? "forward" : step === "forward" ? "calls" : null
-  const done = step === "done"
+  // "All set" only once missed calls really reach Call Otto (or the line is still waiting on approval).
+  const forwardingOn = Boolean(dashboard.line.confirmedAt) && (dashboard.line.check.status === "idle" || dashboard.line.check.status === "passed")
+  const done = step === "done" && (forwardingOn || !dashboard.line.number)
 
   return (
     <div className="min-h-svh bg-brand-paper">
@@ -98,7 +100,7 @@ export function StartPage() {
         </div>
         <div className="mx-auto grid max-w-xl gap-1.5 px-4 pb-3" aria-label={done ? "Setup complete" : `Step ${current.n} of ${STEP_COUNT}: ${current.label}`}>
           <span className={cn("flex items-center gap-1.5 text-[13px] font-semibold", done && "text-emerald-800")}>
-            {done ? <><span className="grid size-[18px] place-items-center rounded-full bg-emerald-600 text-white"><Check className="size-3" strokeWidth={3.5} /></span>All set</> : `Step ${current.n} of ${STEP_COUNT} · ${current.label}`}
+            {done ? <><span className="grid size-[18px] place-items-center rounded-full bg-emerald-600 text-white"><Check className="size-3" strokeWidth={3.5} /></span>All set</> : step === "done" ? `Step ${STEP_COUNT} of ${STEP_COUNT} · Forwarding not on yet` : `Step ${current.n} of ${STEP_COUNT} · ${current.label}`}
           </span>
           <ol className="grid grid-cols-3 gap-1.5" aria-hidden>
             {Array.from({ length: STEP_COUNT }, (_, index) => index + 1).map((n) => <li key={n} className={cn("h-1.5 rounded-full", done ? "bg-emerald-600" : n <= current.n ? "bg-brand-ink" : "bg-brand-ink/15")} />)}
@@ -109,7 +111,7 @@ export function StartPage() {
         {step === "card" && <CardStep dashboard={dashboard} confirming={confirming} cancelled={params.get("checkout") === "cancelled"} note={activation && activation !== "running" && activation.status !== "live" ? activation.message : null} />}
         {step === "forward" && activation && <ActivationNote activation={activation} dashboard={dashboard} retry={() => void activate()} />}
         {step === "forward" && <ForwardStep dashboard={dashboard} next={() => go("done")} />}
-        {step === "done" && <DoneStep dashboard={dashboard} activation={activation} />}
+        {step === "done" && <DoneStep dashboard={dashboard} activation={activation} toForward={() => go("forward")} />}
       </main>
     </div>
   )
@@ -261,7 +263,7 @@ function ForwardStep({ dashboard, next }: { dashboard: ApiDashboard; next: () =>
   )
 }
 
-function DoneStep({ dashboard, activation }: { dashboard: ApiDashboard; activation: Activation | "running" | null }) {
+function DoneStep({ dashboard, activation, toForward }: { dashboard: ApiDashboard; activation: Activation | "running" | null; toForward: () => void }) {
   const navigate = useNavigate()
   const { reload } = useMode()
   const [busy, setBusy] = useState(false)
@@ -272,6 +274,9 @@ function DoneStep({ dashboard, activation }: { dashboard: ApiDashboard; activati
     navigate("/app")
   }
   const waiting = !dashboard.line.number
+  // Skipped forwarding (or the last test failed): the line answers, but no missed call reaches it yet. Say so.
+  const forwarding = Boolean(dashboard.line.confirmedAt) && (dashboard.line.check.status === "idle" || dashboard.line.check.status === "passed")
+  const notForwarding = !waiting && !forwarding
   const trialEnds = dashboard.billing.trialEndsAt
     ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: dashboard.shop.timezone }).format(new Date(dashboard.billing.trialEndsAt))
     : null
@@ -283,10 +288,18 @@ function DoneStep({ dashboard, activation }: { dashboard: ApiDashboard; activati
   ]
   return (
     <>
-      <div className="grid justify-items-start gap-4">
-        <span className="grid size-14 place-items-center rounded-full bg-emerald-600 text-white shadow-[0_0_0_6px_rgba(5,150,105,.15)]"><Check className="size-8" strokeWidth={3} /></span>
-        <Heading title={<span className="marker">You’re set!</span>}>{waiting ? "Your setup is saved. We’ll turn your line on as soon as it’s approved and let you know." : "Missed calls now get answered. New jobs show up in Calls."}</Heading>
-      </div>
+      {notForwarding ? (
+        <div className="grid justify-items-start gap-4">
+          <span className="grid size-14 place-items-center rounded-full bg-amber-500 text-white shadow-[0_0_0_6px_rgba(245,158,11,.15)]"><PhoneCall className="size-7" strokeWidth={2.5} /></span>
+          <Heading title="One step left">Your Call Otto line is on, but we haven’t seen one of your missed calls reach it yet. Turn on forwarding and test it to finish.</Heading>
+          <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} onClick={toForward}>Turn on forwarding<ArrowRight /></Button>
+        </div>
+      ) : (
+        <div className="grid justify-items-start gap-4">
+          <span className="grid size-14 place-items-center rounded-full bg-emerald-600 text-white shadow-[0_0_0_6px_rgba(5,150,105,.15)]"><Check className="size-8" strokeWidth={3} /></span>
+          <Heading title={<span className="marker">You’re set!</span>}>{waiting ? "Your setup is saved. We’ll turn your line on as soon as it’s approved and let you know." : "Missed calls now get answered. New jobs show up in Calls."}</Heading>
+        </div>
+      )}
       <Card>
         <CardContent className="grid gap-0 divide-y">
           {rows.map((row) => (

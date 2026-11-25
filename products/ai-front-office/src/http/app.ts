@@ -47,9 +47,9 @@ import { clearOwnerSessionCookie, createPasswordResetToken, hashOwnerPassword, h
 import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
 import { MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_ROUTES, toolFailure, toolLimitReached, withinToolBudget, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
 import { callScreeningSetting, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
-import { TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
+import { FORWARDING_CHECK_SPEECH, forwardingCheckTenant, TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
 import { carrierFamily, forwardingOffInstruction, type CarrierFamily, type CarrierInfo } from "../domain/forwarding.js";
-import { FORWARDING_CHECK_WINDOW_MS, type ForwardingState } from "./owner-api-model.js";
+import { FORWARDING_CHECK_WINDOW_MS, type ForwardingCheckRecord, type ForwardingState } from "./owner-api-model.js";
 import {
   clearGrace,
   describeCaller,
@@ -1047,6 +1047,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       guarantee: await guarantee.status(account.tenantId),
       onboarding: { hoursSet: Boolean(hoursSetAt), completed: Boolean(completedAt) },
       forwarding: await readForwarding(account.tenantId),
+      checkCallerId: dependencies.env.TELNYX_CHECK_CONNECTION_ID && !dependencies.env.PROVIDER_TEST_MODE ? dependencies.env.TELNYX_FROM_NUMBER ?? null : null,
       checkoutConfigured: Boolean(stripeClient || dependencies.env.FOUNDING_CHECKOUT_URL),
       now: dependencies.clock.now().toISOString(),
       preview: false,
@@ -2245,8 +2246,45 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "help_requested_at"),
     ]);
     const parse = <T>(value: string | null): T | null => { try { return value ? JSON.parse(value) as T : null; } catch { return null; } };
-    const check = parse<{ startedAt: string; method: "auto" | "manual" }>(checkJson);
-    return { businessNumber, carrier: parse<CarrierInfo>(carrierJson), confirmedAt, check: check ? { startedAt: check.startedAt, method: check.method } : null, helpRequestedAt };
+    const check = parse<ForwardingCheckRecord>(checkJson);
+    return {
+      businessNumber, carrier: parse<CarrierInfo>(carrierJson), confirmedAt,
+      check: check ? { startedAt: check.startedAt, method: check.method, answeredAt: check.answeredAt ?? null, endedAt: check.endedAt ?? null, hangupCause: check.hangupCause ?? null } : null,
+      helpRequestedAt,
+    };
+  }
+
+  /**
+   * Steps of our check call. Answered: unless the forwarded call already reached Call Otto (then we
+   * hung this leg up), say what this call is, so a person or a call screener never hears dead air,
+   * and note when it was picked up. Done speaking: hang up. Hung up: note how it ended. How fast it was
+   * picked up tells the owner what went wrong (their phone or a screener vs. their voicemail).
+   */
+  async function continueForwardingCheck(tenantId: string, envelope: ReturnType<typeof parseTelnyxEnvelope>): Promise<void> {
+    const callControlId = envelope.data.payload.call_control_id;
+    if (typeof callControlId !== "string") return;
+    let check: ForwardingCheckRecord | null = null;
+    try { check = JSON.parse(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "check") ?? "null") as ForwardingCheckRecord | null; } catch { check = null; }
+    // Only the latest check's leg; an older leg finishing late never rewrites a newer test.
+    if (!check || check.callControlId !== callControlId) return;
+    const at = envelope.data.occurred_at ?? dependencies.clock.now().toISOString();
+    const client = dependencies.env.TELNYX_API_KEY
+      ? new TelnyxForwardingClient({ apiKey: dependencies.env.TELNYX_API_KEY, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })
+      : null;
+    const type = envelope.data.event_type;
+    if (type === "call.answered") {
+      if (!check.answeredAt) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check", JSON.stringify({ ...check, answeredAt: at }));
+      const confirmedAt = await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "confirmed_at");
+      if (confirmedAt && confirmedAt >= check.startedAt) return;
+      await client?.speak(callControlId, FORWARDING_CHECK_SPEECH, `check-speak:${envelope.data.id}`);
+      log({ level: "info", event: "forwarding_check_answered_by_phone", tenantId, afterMs: Date.parse(at) - Date.parse(check.startedAt) });
+    } else if (type === "call.speak.ended") {
+      await client?.hangUp(callControlId);
+    } else if (type === "call.hangup") {
+      const cause = typeof envelope.data.payload.hangup_cause === "string" ? envelope.data.payload.hangup_cause.slice(0, 40) : null;
+      if (!check.endedAt) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check", JSON.stringify({ ...check, endedAt: at, hangupCause: cause }));
+      log({ level: "info", event: "forwarding_check_ended", tenantId, answered: Boolean(check.answeredAt), cause });
+    }
   }
 
   /**
@@ -2265,6 +2303,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const open = check && now.getTime() - Date.parse(check.startedAt) < FORWARDING_CHECK_WINDOW_MS;
     // Some carriers show the forwarding phone's own number; trust that only for our automatic check call.
     const fromCheck = callerPhone === dependencies.env.TELNYX_FROM_NUMBER || (check?.method === "auto" && businessNumber !== null && callerPhone === businessNumber);
+    // The owner dialing their Call Otto number from the business phone is a direct call, not a forwarded one.
+    if (!(open && fromCheck) && businessNumber !== null && callerPhone === businessNumber) return "customer";
     await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "confirmed_at", now.toISOString());
     if (!open || !fromCheck) return "customer";
     await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check_inbound_call", callControlId);
@@ -2464,6 +2504,15 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       return sendJson(response, 200, { received: true });
     }
     const envelope = parseTelnyxEnvelope(rawBody);
+    const checkTenant = forwardingCheckTenant(envelope.data.payload.client_state);
+    if (checkTenant) {
+      // Our "Test my forwarding" call to the owner's business phone. Never a customer call record.
+      await continueForwardingCheck(checkTenant, envelope).catch((error) => {
+        log({ level: "error", event: "forwarding_check_step_failed", tenantId: checkTenant, step: envelope.data.event_type, error: safeError(error) });
+        throw new HttpError(502, "Forwarding check step failed");
+      });
+      return sendJson(response, 200, { received: true, forwardingCheck: true });
+    }
     const ownerAlert = ownerAlertState(envelope.data.payload.client_state);
     if (ownerAlert) {
       // Our urgent call to an owner: speak when answered, hang up when done. Never a customer call record.

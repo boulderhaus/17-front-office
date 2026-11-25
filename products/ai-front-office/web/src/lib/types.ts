@@ -49,6 +49,7 @@ export interface ForwardingPlan {
   what: string
   tips: string[]
   iphoneTip: string | null
+  confirm: string | null
 }
 
 export interface ApiDashboard {
@@ -67,7 +68,13 @@ export interface ApiDashboard {
       suggested: string | null
     }
     confirmedAt: string | null
-    check: { status: "idle" | "calling" | "passed" | "not_reached"; method: "auto" | "manual" | null; startedAt: string | null }
+    check: {
+      status: "idle" | "calling" | "passed" | "picked_up" | "voicemail" | "declined" | "not_reached"
+      method: "auto" | "manual" | null
+      startedAt: string | null
+      answeredAfterSec: number | null
+      callerId: string | null
+    }
     helpRequestedAt: string | null
   }
   csrf: string
