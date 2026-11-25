@@ -51,8 +51,18 @@ export interface ApiDashboard {
     business: { number: string | null; carrier: CarrierInfo | null; plan: ForwardingPlan | null; choices: typeof CARRIER_CHOICES; suggested: string | null };
     /** When a call last proved forwarding works. */
     confirmedAt: string | null;
-    check: { status: "idle" | "calling" | "passed" | "not_reached"; method: "auto" | "manual" | null; startedAt: string | null };
+    check: {
+      status: ForwardingCheckStatus;
+      method: "auto" | "manual" | null;
+      startedAt: string | null;
+      /** Seconds from dialing until something picked our test call up (a phone, a screener, a voicemail). */
+      answeredAfterSec: number | null;
+      /** The number our test call comes from, so the owner knows which call to let ring. */
+      callerId: string | null;
+    };
     helpRequestedAt: string | null;
+    /** Otto's AI setup helper's last call to the owner: where and when. */
+    helpCall: { to: string; startedAt: string } | null;
   };
   csrf: string;
   now: string;
@@ -166,11 +176,12 @@ export function apiDashboard(input: {
   plans?: ApiPlan[] | undefined;
   guarantee?: GuaranteeStatus | undefined;
   onboarding?: { hoursSet: boolean; completed: boolean } | undefined;
+  checkCallerId?: string | null | undefined;
 }): ApiDashboard {
   const c = input.config;
   const lineNumber = input.lineNumber ?? null;
   return {
-    line: lineModel(lineNumber, c.operationMode, input.forwarding, input.now, input.account.role === "member" ? null : input.ownerMobile ?? null),
+    line: lineModel(lineNumber, c.operationMode, input.forwarding, input.now, input.account.role === "member" ? null : input.ownerMobile ?? null, input.checkCallerId ?? null),
     csrf: input.csrf,
     now: input.now,
     preview: input.preview,
@@ -220,24 +231,53 @@ export function apiDashboard(input: {
   };
 }
 
+/**
+ * passed: the test call reached Call Otto. picked_up: the business phone (a person, a call screener,
+ * a watch or car) answered it, so it never forwarded. voicemail: their voicemail answered it.
+ * declined: it was declined but nothing forwarded it. not_reached: it rang out and never reached us.
+ */
+export type ForwardingCheckStatus = "idle" | "calling" | "passed" | "picked_up" | "voicemail" | "declined" | "not_reached";
+
+/** The stored check, as the check endpoint and the check call's webhooks write it. */
+export interface ForwardingCheckRecord {
+  startedAt: string;
+  method: "auto" | "manual";
+  callControlId?: string | null;
+  answeredAt?: string | null;
+  endedAt?: string | null;
+  hangupCause?: string | null;
+}
+
 export interface ForwardingState {
   businessNumber: string | null;
   carrier: CarrierInfo | null;
   confirmedAt: string | null;
-  check: { startedAt: string; method: "auto" | "manual" } | null;
+  check: { startedAt: string; method: "auto" | "manual"; answeredAt?: string | null; endedAt?: string | null; hangupCause?: string | null } | null;
   helpRequestedAt: string | null;
+  helpCall?: { to: string; startedAt: string } | null;
 }
 
-/** How long a check waits for the forwarded call before saying it didn't reach us. */
-export const FORWARDING_CHECK_WINDOW_MS = 90_000;
+/** How long a check waits for the forwarded call before saying it didn't reach us (our call rings up to 60 s). */
+export const FORWARDING_CHECK_WINDOW_MS = 100_000;
+/** Picked up sooner than this: the phone itself (a person, a screener). Later: a voicemail. */
+const PHONE_PICKUP_MS = 12_000;
 
-function lineModel(lineNumber: string | null, mode: BusinessConfig["operationMode"], state: ForwardingState | undefined, now: string, ownerMobile: string | null): ApiDashboard["line"] {
+function forwardingCheckStatus(check: ForwardingState["check"], confirmedAt: string | null, now: string): ForwardingCheckStatus {
+  if (!check) return "idle";
+  if (confirmedAt && confirmedAt >= check.startedAt) return "passed";
+  const finished = Boolean(check.endedAt) || Date.parse(now) - Date.parse(check.startedAt) >= FORWARDING_CHECK_WINDOW_MS;
+  if (!finished) return "calling";
+  if (check.method !== "auto") return "not_reached";
+  if (check.answeredAt) return Date.parse(check.answeredAt) - Date.parse(check.startedAt) < PHONE_PICKUP_MS ? "picked_up" : "voicemail";
+  if (check.hangupCause === "user_busy" || check.hangupCause === "call_rejected") return "declined";
+  return "not_reached";
+}
+
+function lineModel(lineNumber: string | null, mode: BusinessConfig["operationMode"], state: ForwardingState | undefined, now: string, ownerMobile: string | null, checkCallerId: string | null): ApiDashboard["line"] {
   const check = state?.check ?? null;
   const confirmedAt = state?.confirmedAt ?? null;
-  const status: ApiDashboard["line"]["check"]["status"] = !check ? "idle"
-    : confirmedAt && confirmedAt >= check.startedAt ? "passed"
-    : Date.parse(now) - Date.parse(check.startedAt) < FORWARDING_CHECK_WINDOW_MS ? "calling"
-    : "not_reached";
+  const status = forwardingCheckStatus(check, confirmedAt, now);
+  const answeredAfterSec = check?.answeredAt ? Math.max(0, Math.round((Date.parse(check.answeredAt) - Date.parse(check.startedAt)) / 1_000)) : null;
   return {
     number: lineNumber,
     mode,
@@ -250,8 +290,9 @@ function lineModel(lineNumber: string | null, mode: BusinessConfig["operationMod
       suggested: state?.businessNumber ? null : ownerMobile,
     },
     confirmedAt,
-    check: { status, method: check?.method ?? null, startedAt: check?.startedAt ?? null },
+    check: { status, method: check?.method ?? null, startedAt: check?.startedAt ?? null, answeredAfterSec, callerId: checkCallerId },
     helpRequestedAt: state?.helpRequestedAt ?? null,
+    helpCall: state?.helpCall ?? null,
   };
 }
 
