@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { BusinessConfig, CallRecord, CallbackTask, OutboxNotification } from "../domain/models.js";
 import type { Clock, Store } from "../ports.js";
 import { formatEmailBody } from "../adapters/resend.js";
-import { isPaidStatus } from "../domain/billing.js";
+import { isCompStatus, isPaidStatus } from "../domain/billing.js";
 
 export class OwnerSummaryService {
   constructor(
@@ -30,7 +30,8 @@ export class OwnerSummaryService {
       this.store.listCallbackTasks(tenantId, 200),
       this.store.listCalls(tenantId, 250),
     ]);
-    if (!account || account.status === "suspended") return { smsQueued: 0, emailQueued: 0 };
+    // A complimentary shop (the Google review account) gets no recap or weekly email.
+    if (!account || account.status === "suspended" || isCompStatus(subscription?.status)) return { smsQueued: 0, emailQueued: 0 };
     const local = localParts(now, config.timezone);
     const openTasks = tasks.filter((task) => task.status === "open" || (task.status === "snoozed" && Date.parse(task.dueAt) <= now.getTime()));
     const upcoming = upcomingBookedCalls(calls, now, 7);

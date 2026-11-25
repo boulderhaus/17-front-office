@@ -265,7 +265,12 @@ export interface SubscriptionRecord {
   tenantId: string;
   providerCustomerId: string | null;
   providerSubscriptionId: string | null;
-  status: "not_started" | "incomplete" | "trialing" | "active" | "past_due" | "canceled" | "unpaid";
+  /**
+   * Stripe's status, except "comp": a complimentary account we made ourselves (the Google OAuth review account),
+   * written only by the signed admin link and never by Stripe or an owner. It opens the owner app as if paid,
+   * but is never billed, never gets a phone line and never sends anything (see domain/billing.ts).
+   */
+  status: "not_started" | "incomplete" | "trialing" | "active" | "past_due" | "canceled" | "unpaid" | "comp";
   currentPeriodEnd: string | null;
   providerEventCreatedAt: string;
   createdAt: string;

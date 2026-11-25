@@ -19,7 +19,7 @@ import { joinTeam, teamRoutes } from "./team-routes.js";
 import { renderQuickSetup } from "../admin/setup.js";
 import { CALL_PATH_SCRIPT, renderCallPath, renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
 import { buildCallPath, type CallPath } from "../domain/call-path.js";
-import { chargeSentence, isPaidStatus } from "../domain/billing.js";
+import { chargeSentence, hasPlanAccess, isCompStatus, isPaidStatus } from "../domain/billing.js";
 import { currentPlan, hasUnlimitedPrice, introCouponId, knownPlans, legacyPlanPriceIds, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, unlimitedPriceIds, type Plan, type PlanId } from "../domain/plans.js";
 import { GuaranteeError, LeadGuaranteeService, recordFirstPaid, recordUnlimitedObservation, type UnlimitedItem } from "../application/billing-jobs.js";
 import { callbackLinkMatches, OWNER_SMS_OPT_IN_CONFIRMATION, readCallbackLinkToken } from "../domain/owner-sms.js";
@@ -54,6 +54,8 @@ import { FOUNDER_GOOGLE_SCOPES, FounderCalendarReadError, FounderCalendars, Foun
 import { FounderFollowup, type FounderBookingFacts } from "../application/founder-followup.js";
 import { founderConnectToken, founderConnectTokenValid, ownerFirstName, prettyPhone, readFounderBookingToken } from "../domain/founder-booking.js";
 import { renderFounderBooking, renderFounderCalendars } from "../admin/founder.js";
+import { ensureReviewAccount, isLinkPreview, REVIEW_NO_LINE, ReviewAccountError, reviewAccountTokenValid } from "../application/review-account.js";
+import { renderReviewAccount } from "../admin/review-account.js";
 import { dialsBackToOtto } from "../application/forwarding-loop.js";
 import { carrierFamily, forwardingChoice, forwardingOffInstruction, forwardsBackToOtto, parseTestedFor, type CarrierFamily, type CarrierInfo, forwardingPlan, type ForwardingMode, type TestedFor } from "../domain/forwarding.js";
 import { FORWARDING_CHECK_WINDOW_MS, forwardingCheckStatus, type ForwardingCheckRecord, type ForwardingState } from "./owner-api-model.js";
@@ -1167,6 +1169,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const method = request.method ?? "GET";
     const owner = account.role !== "member";
     if (method === "GET" && url.pathname === "/api/app/dashboard") return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    // The review account has no line: no number, carrier lookup, test call or setup-helper call, ever.
+    if (method === "POST" && /^\/api\/app\/line\/(?:business-number|check|help|go-live)$/.test(url.pathname) && isCompStatus((await dependencies.store.getSubscription(account.tenantId))?.status)) {
+      throw new HttpError(409, REVIEW_NO_LINE);
+    }
     if (method === "POST" && url.pathname === "/api/app/push/subscribe") {
       if (!vapid) throw new HttpError(404, "Call alerts on this phone aren’t available yet.");
       const subscription = parsePushSubscription(await readApiJson(request, session, 4_000));
@@ -1468,7 +1474,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           const current = currentPlan(known, config.planId);
           return {
             id: current.id, label: current.label, flatMonthlyPriceCents: config.flatMonthlyPriceCents, includedCalls: config.includedCalls, overageCentsPerCall: config.overageCentsPerCall,
-            paid: isPaidStatus(subscription?.status), plans: apiPlans(config.timezone),
+            paid: hasPlanAccess(subscription?.status), plans: apiPlans(config.timezone),
             // Legacy Pro keeps working but is no longer sold: the owner sees it as current and can move to Solo, Team or Fleet.
             sold: current.sold,
             unlimited: config.unlimitedCalls === true,
@@ -1767,6 +1773,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
       const subscription = await dependencies.store.getSubscription(account.tenantId);
+      if (isCompStatus(subscription?.status)) throw new HttpError(409, "This is a complimentary review account. There’s no billing to manage.");
       if (!stripeClient || !subscription?.providerCustomerId) throw new HttpError(409, "No paid subscription to manage yet");
       const portalUrl = await stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`)
         .catch(() => { throw new HttpError(502, "Billing could not be opened. Please retry; your subscription has not changed."); });
@@ -1775,6 +1782,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (method === "POST" && url.pathname === "/app/billing/checkout") {
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
+      // Complimentary: nothing to pay, and never a Stripe session or the founding link.
+      if (isCompStatus((await dependencies.store.getSubscription(account.tenantId))?.status)) return redirect(response, "/app");
       if (!stripeClient) {
         if (dependencies.env.FOUNDING_CHECKOUT_URL) {
           telemetry.capture("checkout_started", account.id, account.tenantId, { result: "founding_link" });
@@ -1991,7 +2000,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     return dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
       const subscription = await dependencies.store.getSubscription(account.tenantId);
       const app = `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app${returnTo === "start" ? "/start" : ""}`;
-      if (isPaidStatus(subscription?.status)) return app;
+      if (hasPlanAccess(subscription?.status)) return app;
       if (subscription?.providerCustomerId && (subscription.status === "past_due" || subscription.status === "unpaid")) {
         // Fix payment on the existing subscription instead of starting a second one.
         return stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`)
@@ -2050,7 +2059,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
    */
   async function confirmCheckout(account: OwnerAccount, sessionId: string): Promise<void> {
     if (!stripeClient) return;
-    if (isPaidStatus((await dependencies.store.getSubscription(account.tenantId))?.status)) return;
+    // Paid already, or complimentary (never read from or written by Stripe).
+    if (hasPlanAccess((await dependencies.store.getSubscription(account.tenantId))?.status)) return;
     const checkout = await stripeClient.retrieveCheckoutSession(sessionId).catch((error) => {
       log({ level: "warn", event: "checkout_return_lookup_failed", tenantId: account.tenantId, error: safeError(error) });
       return null;
@@ -2061,7 +2071,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const subscriptionId = checkout.subscriptionId;
     await dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
       const existing = await dependencies.store.getSubscription(account.tenantId);
-      if (isPaidStatus(existing?.status)) return;
+      if (hasPlanAccess(existing?.status)) return;
       const live = await stripeClient.retrieveSubscription(subscriptionId)
         .catch(() => { throw new HttpError(502, "We couldn’t confirm your card with Stripe just now. Try again in a moment."); });
       if (live.tenantId && live.tenantId !== account.tenantId) throw new HttpError(400, "That subscription belongs to a different account");
@@ -2178,7 +2188,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   async function activateLine(account: OwnerAccount): Promise<{ status: "live" | "waiting" | "blocked" | "failed"; message: string | null }> {
     const lineNumber = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number");
     if (account.status === "active" && lineNumber) return { status: "live", message: null };
-    if (!isPaidStatus((await dependencies.store.getSubscription(account.tenantId))?.status)) {
+    const status = (await dependencies.store.getSubscription(account.tenantId))?.status;
+    if (isCompStatus(status)) return { status: "blocked", message: REVIEW_NO_LINE };
+    if (!isPaidStatus(status)) {
       return { status: "blocked", message: "We haven’t seen your card yet. Add it to turn your line on." };
     }
     if (!limiter.allow(`go-live:${account.tenantId}`, 6, 60 * 60_000)) {
@@ -2226,6 +2238,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         isGoogleConnected(dependencies.env, dependencies.store, account.tenantId),
         dependencies.store.getSubscription(account.tenantId),
       ]);
+      // Never a number for the review account, whatever else is set up.
+      if (isCompStatus(subscription?.status)) throw new HttpError(409, REVIEW_NO_LINE);
       const shopBlockers = shopActivationBlockers({
         ownerPhoneConfigured: Boolean(ownerPhone),
         googleConnected,
@@ -2612,6 +2626,38 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     }
     if (slots.length === 0) return sendHtml(response, 200, renderFounderBooking({ state: "reply", reason: "nothing_open" }));
     return sendHtml(response, taken ? 409 : 200, renderFounderBooking({ state: "pick", token, businessName: facts.businessName, timeZone: facts.timezone, slots, taken }));
+  }
+
+  /**
+   * /admin/review-account?k=...: makes the Google OAuth review account (or gives it a new password) and shows the
+   * password once. Only a signed link (purpose "review-account", at most 24 hours) opens it; no admin session.
+   */
+  async function handleReviewAccount(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    if (request.method !== "GET") throw new HttpError(405, "Method not allowed");
+    const signingKey = dependencies.env.SESSION_SIGNING_KEY!;
+    const k = url.searchParams.get("k");
+    // Never indexed, cached or sent on as a referrer: the page carries a password.
+    response.setHeader("x-robots-tag", "noindex, nofollow, noarchive");
+    response.setHeader("cache-control", "no-store");
+    response.setHeader("referrer-policy", "no-referrer");
+    if (!reviewAccountTokenValid(signingKey, k, dependencies.clock.now())) {
+      if (k && !limiter.allow(`${requestIp(request)}:review-link`, 20, 15 * 60_000)) throw new HttpError(429, "Too many requests");
+      return sendHtml(response, 401, renderLogin());
+    }
+    // A chat app's link preview must not reset the password Brock just copied: it gets a page that changes nothing.
+    if (isLinkPreview(request.headers["user-agent"])) {
+      return sendHtml(response, 200, renderReviewAccount({ state: "error", message: "Open this link in a browser to see the review account." }));
+    }
+    try {
+      const result = await ensureReviewAccount(dependencies.store, dependencies.clock);
+      // The password is never logged.
+      log({ level: "warn", event: result.created ? "review_account_created" : "review_account_password_reset", tenantId: result.tenantId });
+      return sendHtml(response, 200, renderReviewAccount({ state: "ready", email: result.email, password: result.password, loginUrl: `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/login`, created: result.created }));
+    } catch (error) {
+      if (!(error instanceof ReviewAccountError)) throw error;
+      log({ level: "error", event: "review_account_refused", error: safeError(error) });
+      return sendHtml(response, 409, renderReviewAccount({ state: "error", message: error.message }));
+    }
   }
 
   /**
@@ -3015,6 +3061,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       // so a slow stale read can never overwrite a newer state.
       await dependencies.store.withLock(`billing:${tenantId}`, async () => {
         const existing = await dependencies.store.getSubscription(tenantId);
+        if (isCompStatus(existing?.status)) {
+          // A complimentary shop never takes a Stripe status (it never had a checkout): ignored, and said so.
+          log({ level: "error", event: "stripe_event_for_comp_shop_ignored", tenantId, stripeEventType: event.type });
+          return;
+        }
         const now = dependencies.clock.now().toISOString();
         const subscriptionId = event.type.startsWith("customer.subscription.")
           ? (typeof object.id === "string" ? object.id : null)
@@ -3427,6 +3478,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
 
     // Brock's setup-call calendars: the admin session, or the signed link from scripts/founder-connect-link.ts.
     if (url.pathname === "/admin/founder-calendars" || url.pathname.startsWith("/admin/founder-calendars/")) return handleFounderCalendars(request, response, url);
+    // The Google OAuth review account: only the signed link from scripts/review-account-link.ts.
+    if (url.pathname === "/admin/review-account") return handleReviewAccount(request, response, url);
 
     const session = readCookie(request, "afo_admin");
     const bearer = bearerMatches(request, dependencies.env.ADMIN_TOKEN);
