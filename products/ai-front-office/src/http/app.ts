@@ -49,6 +49,10 @@ import { MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_ROUTES, toolFailure
 import { callScreeningSetting, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import { FORWARDING_CHECK_SPEECH, forwardingCheckState, TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
 import { setupHelpState, TelnyxSetupCaller, type SetupCallFacts } from "../adapters/telnyx-setup-call.js";
+import { FOUNDER_GOOGLE_SCOPES, FounderCalendars, FounderConnectError } from "../adapters/founder-calendar.js";
+import { FounderFollowup, type FounderBookingFacts } from "../application/founder-followup.js";
+import { founderConnectToken, founderConnectTokenValid, ownerFirstName, prettyPhone, readFounderBookingToken } from "../domain/founder-booking.js";
+import { renderFounderBooking, renderFounderCalendars } from "../admin/founder.js";
 import { carrierFamily, forwardingOffInstruction, type CarrierFamily, type CarrierInfo, forwardingPlan } from "../domain/forwarding.js";
 import { FORWARDING_CHECK_WINDOW_MS, type ForwardingCheckRecord, type ForwardingState } from "./owner-api-model.js";
 import {
@@ -110,6 +114,10 @@ import {
   verifyCsrf,
   verifyGoogleOAuthAttempt,
 } from "./security.js";
+
+/** Brock's founder-calendar connect: its own cookie on the shared Google redirect path, never the owner's. */
+const FOUNDER_OAUTH_COOKIE = "afo_google_founder";
+const FOUNDER_OAUTH_PATH = "/app/integrations/google";
 
 const dateTime = z.string().datetime({ offset: true });
 const baseToolSchema = z.object({
@@ -383,6 +391,8 @@ function ownerDashboardView(value: string | null): "today" | "pipeline" | "calen
 export type FrontOfficeHandler = RequestListener & {
   /** Background activation: waiting paid shops go live, and opted-in owners get the opt-in text once texting is approved. */
   runActivationJobs(): Promise<{ activated: number; blocked: number; optInConfirmations: number }>;
+  /** Brock's follow-up email for shops whose forwarding still isn't confirmed 20 minutes after asking for setup help. */
+  runFounderFollowups(): Promise<{ queued: number }>;
 };
 
 export function createRequestHandler(dependencies: AppDependencies): FrontOfficeHandler {
@@ -410,6 +420,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   const limiter = new RateLimiter();
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));
   const telemetry = dependencies.telemetry ?? noopTelemetry;
+  /** Brock's Google calendars and his personal follow-up when the AI setup helper can't finish. */
+  const founderCalendars = new FounderCalendars({ store: dependencies.store, env: dependencies.env, clock: dependencies.clock, fetcher: dependencies.fetcher });
+  const founder = new FounderFollowup({ store: dependencies.store, env: dependencies.env, clock: dependencies.clock, calendars: founderCalendars, log });
   const graceContext: GraceContext = { store: dependencies.store, env: dependencies.env, clock: dependencies.clock, fetcher: dependencies.fetcher, log };
   const analyticsPage = (html: string, loader = true): string => injectAnalytics(html, { key: dependencies.env.POSTHOG_KEY, ingestionHost: dependencies.env.POSTHOG_HOST, loader });
   let ownerWebIndex: Promise<string | null> | null = null;
@@ -456,7 +469,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       else sendJson(response, status, { error: message, request_id: requestId });
     });
   };
-  return Object.assign(listener, { runActivationJobs });
+  return Object.assign(listener, { runActivationJobs, runFounderFollowups: () => founder.runOnce() });
 
   /**
    * The provider only hands a tool's body to the model on 2xx, so every voice tool failure answers 200 with
@@ -665,6 +678,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const phone = [call.fields.callbackNumber, call.fromNumber].find((value) => value && /^\+[1-9]\d{7,14}$/.test(value)) ?? null;
       return sendHtml(response, 200, renderCallbackLink({ shop: config.businessName, callerName: call.fields.callerName, problem: call.fields.problemDescription, address: call.fields.address, phone, urgent: call.emergency?.emergency === true, callId: call.id }));
     }
+    // The link in Brock's follow-up email: book a 10-minute setup call with him. Signed for this shop, 7 days.
+    if (url.pathname === "/book-setup" && (method === "GET" || method === "POST")) return handleFounderBooking(request, response, url);
     if (url.pathname === "/join" && (method === "GET" || method === "POST")) {
       if (!limiter.allow(`${ip}:team-join`, 12, 60 * 60_000)) throw new HttpError(429, "Too many invitation attempts");
       return joinTeam(request, response, url, dependencies);
@@ -859,6 +874,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/");
     }
+    // Founder calendar connect returns to the one registered Google redirect URI. Handled here, before the owner
+    // session gate, only with its own cookie and a founder-signed state; anything else falls through unchanged.
+    if (method === "GET" && url.pathname === "/app/integrations/google/callback" && readCookie(request, FOUNDER_OAUTH_COOKIE) && await finishFounderConnect(request, response, url)) return;
     if (url.pathname.startsWith("/app")) return handleOwner(request, response, url);
     // Retire the old qualification form without breaking saved links.
     if (url.pathname === "/start") return redirect(response, "/signup");
@@ -1157,7 +1175,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (method === "POST" && url.pathname === "/api/app/line/help") {
       if (!owner) throw new HttpError(403, "Only the owner can ask for setup help");
       const helpRequest = await readApiJson(request, session, 1_000) as { device?: unknown };
-      if (!limiter.allow(`forwarding-help:${account.tenantId}`, 4, 24 * 60 * 60_000)) throw new HttpError(429, "Otto has called you a few times today. A person from Call Otto will follow up by email.");
+      if (!limiter.allow(`forwarding-help:${account.tenantId}`, 4, 24 * 60 * 60_000)) {
+        // Brock's email (at most one a day) carries it from here.
+        await founder.queueSafely(account.tenantId, "limit");
+        throw new HttpError(429, "Otto has called you a few times today. Brock, our founder, emailed you a link to book a 10-minute call.");
+      }
       const [config, state, ownerPhone, lineNumber] = await Promise.all([
         dependencies.store.getConfig(account.tenantId),
         readForwarding(account.tenantId),
@@ -1166,7 +1188,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       ]);
       const now = dependencies.clock.now().toISOString();
       await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "help_requested_at", now);
-      // Otto's AI setup helper calls right away; the email below stays as a backup for a person to follow up.
+      // Otto's AI setup helper calls right away. If it can't, Brock emails the owner a link to book a call with him;
+      // the support email below tells us the request came in.
       const device = helpRequest.device === "iphone" || helpRequest.device === "android" ? helpRequest.device : "other";
       const callTo = ownerPhone && /^\+1[2-9]\d{9}$/.test(ownerPhone) ? ownerPhone : state.businessNumber;
       let calling: string | null = null;
@@ -1178,6 +1201,12 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           calling = callTo;
           await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "setup_call", JSON.stringify({ startedAt: now, callControlId, device, to: callTo }));
         }
+      }
+      if (!calling) {
+        // No call is coming (not set up, no number, or the dial failed): clear any older call so the app shows
+        // Brock's email, and send it now.
+        await dependencies.store.deleteIntegrationSecret(account.tenantId, "forwarding", "setup_call");
+        await founder.queueSafely(account.tenantId, "call_unavailable");
       }
       if (dependencies.env.SUPPORT_EMAIL) {
         await dependencies.store.enqueueNotification({
@@ -2301,10 +2330,16 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const clientState = typeof envelope.data.payload.client_state === "string" ? envelope.data.payload.client_state : "";
     // Only our apology ends in a hang-up; nothing the helper itself says ever does.
     if (phase === "sorry") { if (envelope.data.event_type === "call.speak.ended") await caller.hangUp(callControlId); return; }
-    if (envelope.data.event_type !== "call.answered") return;
-    let call: { callControlId?: string; device?: SetupCallFacts["device"] } | null = null;
+    if (envelope.data.event_type !== "call.answered" && envelope.data.event_type !== "call.hangup") return;
+    let call: { callControlId?: string; device?: SetupCallFacts["device"]; answeredAt?: string } | null = null;
     try { call = JSON.parse(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call") ?? "null"); } catch { call = null; }
     if (!call || call.callControlId !== callControlId) return;
+    if (envelope.data.event_type === "call.hangup") {
+      // Rang out, busy or declined: the helper never got to talk, so Brock emails now.
+      if (!call.answeredAt) await founder.queueSafely(tenantId, "no_answer");
+      return;
+    }
+    await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...call, answeredAt: dependencies.clock.now().toISOString() }));
     const [config, state, lineNumber] = await Promise.all([
       dependencies.store.getConfig(tenantId),
       readForwarding(tenantId),
@@ -2329,10 +2364,183 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         device: call.device ?? "other",
       },
     }).then(() => log({ level: "info", event: "setup_call_started", tenantId }), async (error: unknown) => {
-      // Never leave the owner on a silent line: apologize, hang up when that's said, and let the email backup carry it.
+      // Never leave the owner on a silent line: queue Brock's email first, so the apology can say he just sent it,
+      // then apologize and hang up when that's said.
       log({ level: "error", event: "setup_call_start_failed", tenantId, error: safeError(error) });
+      await founder.queueSafely(tenantId, "helper_failed");
       await caller.apologize(callControlId, `setup-sorry:${envelope.data.id}`, tenantId);
     });
+  }
+
+  /** What Brock's calendar event and confirmation need about the shop. */
+  async function founderBookingFacts(account: OwnerAccount): Promise<FounderBookingFacts> {
+    const [config, state, ownerPhone, lineNumber] = await Promise.all([
+      dependencies.store.getConfig(account.tenantId),
+      readForwarding(account.tenantId),
+      dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary"),
+      dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
+    ]);
+    const family = state.carrier?.family ?? null;
+    const plan = family && lineNumber ? forwardingPlan(family, lineNumber, config.operationMode) : null;
+    return {
+      ownerName: ownerFirstName(account.displayName) ? account.displayName : null,
+      email: account.email,
+      businessName: config.businessName,
+      timezone: config.timezone,
+      callNumber: ownerPhone ?? state.businessNumber,
+      businessNumber: state.businessNumber,
+      carrier: state.carrier?.name ?? null,
+      forwardingCode: plan?.on ?? null,
+      ottoNumber: lineNumber,
+    };
+  }
+
+  /** /book-setup: the owner picks a 10-minute call with Brock (GET), or books the time they tapped (POST). */
+  async function handleFounderBooking(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    const method = request.method ?? "GET";
+    response.setHeader("cache-control", "private, no-store");
+    const form = method === "POST" ? parseForm(await readBody(request, 4_000)) : null;
+    const key = dependencies.env.SESSION_SIGNING_KEY;
+    const parsed = key ? readFounderBookingToken(key, form ? form.get("t") : url.searchParams.get("t"), dependencies.clock.now()) : null;
+    const account = parsed ? await dependencies.store.getOwnerAccountByTenant(parsed.tenantId) : null;
+    if (!parsed || !account || account.status === "suspended") return sendHtml(response, 404, renderFounderBooking({ state: "expired" }));
+    const token = (form ? form.get("t") : url.searchParams.get("t"))!;
+    const facts = await founderBookingFacts(account);
+    const booked = (slot: { start: string; end: string }, justBooked: boolean) => renderFounderBooking({ state: "booked", slot, timeZone: facts.timezone, callNumber: prettyPhone(facts.callNumber), justBooked });
+    const existing = await founder.existingBooking(account.tenantId);
+    if (existing) return sendHtml(response, 200, booked(existing, false));
+    let taken = false;
+    if (form) {
+      if (!limiter.allow(`${requestIp(request)}:book-setup`, 20, 10 * 60_000)) throw new HttpError(429, "Too many tries. Please wait a few minutes.");
+      try {
+        const result = await founder.book(account.tenantId, form.get("start") ?? "", facts);
+        if (result.status === "booked") return sendHtml(response, 200, booked(result.slot, true));
+        if (result.status === "no_calendar") return sendHtml(response, 200, renderFounderBooking({ state: "reply", reason: "no_calendar" }));
+        taken = true;
+      } catch (error) {
+        log({ level: "error", event: "founder_booking_failed", tenantId: account.tenantId, error: safeError(error) });
+        return sendHtml(response, 503, renderFounderBooking({ state: "reply", reason: "unavailable" }));
+      }
+    }
+    if (!await founderCalendars.connected()) {
+      log({ level: "warn", event: "founder_calendar_not_connected", tenantId: account.tenantId });
+      return sendHtml(response, 200, renderFounderBooking({ state: "reply", reason: "no_calendar" }));
+    }
+    let slots;
+    try {
+      slots = await founder.openSlots();
+    } catch (error) {
+      log({ level: "error", event: "founder_slots_failed", tenantId: account.tenantId, error: safeError(error) });
+      return sendHtml(response, 503, renderFounderBooking({ state: "reply", reason: "unavailable" }));
+    }
+    if (slots.length === 0) return sendHtml(response, 200, renderFounderBooking({ state: "reply", reason: "nothing_open" }));
+    return sendHtml(response, taken ? 409 : 200, renderFounderBooking({ state: "pick", token, businessName: facts.businessName, timeZone: facts.timezone, slots, taken }));
+  }
+
+  /**
+   * /admin/founder-calendars: connect Brock's Google accounts, pick which one takes bookings, see his windows.
+   * Open with the admin session, or with a signed link (k) that lasts at most 24 hours; on a form, k is the CSRF proof.
+   */
+  async function handleFounderCalendars(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+    const method = request.method ?? "GET";
+    const signingKey = dependencies.env.SESSION_SIGNING_KEY!;
+    const now = dependencies.clock.now();
+    const session = readCookie(request, "afo_admin");
+    const bearer = bearerMatches(request, dependencies.env.ADMIN_TOKEN);
+    const adminSession = verifyAdminSession(session, signingKey);
+    const form = method === "POST" ? parseForm(await readBody(request, 4_000)) : null;
+    const k = form ? form.get("k") : url.searchParams.get("k");
+    const linked = founderConnectTokenValid(signingKey, k, now);
+    if (!bearer && !adminSession && !linked) {
+      if (k && !limiter.allow(`${requestIp(request)}:founder-link`, 20, 15 * 60_000)) throw new HttpError(429, "Too many requests");
+      return sendHtml(response, 401, renderLogin());
+    }
+    const viaLink = linked && !bearer && !adminSession;
+    const back = (query: string): string => `/admin/founder-calendars?${viaLink ? `k=${encodeURIComponent(k!)}&` : ""}${query}`;
+    if (method === "GET" && url.pathname === "/admin/founder-calendars/connect") {
+      const client = clientForNewConnections(dependencies.env);
+      if (!client) throw new HttpError(503, "Google OAuth is not configured on the server");
+      const secure = dependencies.env.NODE_ENV === "production";
+      const attempt = createGoogleOAuthAttempt(oauthAttemptKey(`${signingKey}:founder-calendar`, client.name), secure, now.getTime(), FOUNDER_OAUTH_PATH);
+      const value = attempt.cookie.slice(attempt.cookie.indexOf("=") + 1, attempt.cookie.indexOf(";"));
+      const authorization = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+      authorization.search = new URLSearchParams({
+        client_id: client.id,
+        redirect_uri: `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app/integrations/google/callback`,
+        response_type: "code",
+        access_type: "offline",
+        prompt: "consent",
+        scope: FOUNDER_GOOGLE_SCOPES.join(" "),
+        state: attempt.state,
+        code_challenge: attempt.challenge,
+        code_challenge_method: "S256",
+      }).toString();
+      response.setHeader("set-cookie", `${FOUNDER_OAUTH_COOKIE}=${value}; Path=${FOUNDER_OAUTH_PATH}; HttpOnly; SameSite=Lax; Max-Age=600${secure ? "; Secure" : ""}`);
+      return redirect(response, authorization.toString());
+    }
+    if (form) {
+      if (!linked && !bearer && !(session && verifyCsrf(session, form.get("csrf"), signingKey))) throw new HttpError(403, "Invalid CSRF token");
+      const accountId = form.get("account") ?? "";
+      if (url.pathname === "/admin/founder-calendars/book-here") {
+        const done = await founderCalendars.setBookHere(accountId);
+        return redirect(response, back(done ? "done=book-here" : "error=missing"));
+      }
+      if (url.pathname === "/admin/founder-calendars/disconnect") {
+        await founderCalendars.disconnect(accountId);
+        log({ level: "info", event: "founder_calendar_disconnected" });
+        return redirect(response, back("done=disconnected"));
+      }
+      throw new HttpError(404, "Not found");
+    }
+    if (method !== "GET" || url.pathname !== "/admin/founder-calendars") throw new HttpError(404, "Not found");
+    const accounts = await founderCalendars.accounts();
+    const preview = accounts.length === 0 ? [] : await founder.openSlots().catch((error: unknown) => {
+      log({ level: "warn", event: "founder_slots_failed", error: safeError(error) });
+      return null;
+    });
+    const notices: Record<string, string> = { connected: "Connected. Connect another account, or pick which one takes bookings.", "book-here": "Saved. New setup calls go on that calendar.", disconnected: "Disconnected." };
+    const errors: Record<string, string> = { declined: "Google sign-in was cancelled. Connect again when you're ready.", partial: "That account isn't connected. Leave both calendar boxes ticked and connect again.", failed: "Couldn't connect that account. Try again.", missing: "That account isn't connected anymore." };
+    return sendHtml(response, 200, renderFounderCalendars({
+      accounts,
+      auth: viaLink ? { k: k! } : { csrf: session && adminSession ? csrfForSession(session, signingKey) : "bearer-auth" },
+      connectHref: viaLink ? `/admin/founder-calendars/connect?k=${encodeURIComponent(k!)}` : "/admin/founder-calendars/connect",
+      windows: dependencies.env.FOUNDER_BOOKING_WINDOWS,
+      timeZone: dependencies.env.FOUNDER_TIMEZONE,
+      preview,
+      notice: notices[url.searchParams.get("done") ?? ""],
+      error: errors[url.searchParams.get("error") ?? ""],
+    }));
+  }
+
+  /**
+   * Google's return from a founder calendar connect, at the shared redirect URI. False (handled elsewhere, as
+   * today) unless the state was signed for a founder connect and matches this browser's founder cookie.
+   */
+  async function finishFounderConnect(request: IncomingMessage, response: ServerResponse, url: URL): Promise<boolean> {
+    const signingKey = dependencies.env.SESSION_SIGNING_KEY;
+    if (!signingKey) return false;
+    const now = dependencies.clock.now();
+    const attempt = clientForAttempt(dependencies.env, `${signingKey}:founder-calendar`, (key) => verifyGoogleOAuthAttempt(url.searchParams.get("state"), readCookie(request, FOUNDER_OAUTH_COOKIE), key, now.getTime()));
+    if (!attempt) return false;
+    const secure = dependencies.env.NODE_ENV === "production";
+    response.setHeader("set-cookie", `${FOUNDER_OAUTH_COOKIE}=; Path=${FOUNDER_OAUTH_PATH}; HttpOnly; SameSite=Lax; Max-Age=0${secure ? "; Secure" : ""}`);
+    // A fresh signed link back to the calendars page, so it works without an admin session.
+    const back = (query: string): string => `/admin/founder-calendars?k=${encodeURIComponent(founderConnectToken(signingKey, now, 60 * 60_000))}&${query}`;
+    const code = url.searchParams.get("code");
+    if (url.searchParams.has("error") || !code) {
+      redirect(response, back("error=declined"));
+      return true;
+    }
+    try {
+      const result = await founderCalendars.exchangeCode(attempt.client, code, attempt.result, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app/integrations/google/callback`);
+      const account = await founderCalendars.connect({ client: attempt.client, ...result });
+      log({ level: "info", event: "founder_calendar_connected", accountId: account.id, calendars: account.calendarsSource });
+      redirect(response, back("done=connected"));
+    } catch (error) {
+      log({ level: "warn", event: "founder_calendar_connect_failed", error: safeError(error) });
+      redirect(response, back(`error=${error instanceof FounderConnectError ? "partial" : "failed"}`));
+    }
+    return true;
   }
 
   async function continueForwardingCheck(tenantId: string, startedAt: string | null, envelope: ReturnType<typeof parseTelnyxEnvelope>): Promise<void> {
@@ -2920,6 +3128,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       response.setHeader("set-cookie", clearGoogleOAuthCookie(dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/admin/config");
     }
+
+    // Brock's setup-call calendars: the admin session, or the signed link from scripts/founder-connect-link.ts.
+    if (url.pathname === "/admin/founder-calendars" || url.pathname.startsWith("/admin/founder-calendars/")) return handleFounderCalendars(request, response, url);
 
     const session = readCookie(request, "afo_admin");
     const bearer = bearerMatches(request, dependencies.env.ADMIN_TOKEN);

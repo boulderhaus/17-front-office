@@ -211,7 +211,7 @@ export function ForwardingCard({ dashboard, footer }: { dashboard: ApiDashboard;
                 <span><strong>Otto is calling you now at <span className="whitespace-nowrap">{formatPhone(line.helpCall!.to)}</span>.</strong> Pick up{callerId ? <> (it’s from <span className="whitespace-nowrap">{callerId}</span>)</> : null}. Otto, our AI setup helper, walks you through it and answers your questions.</span>
               </p>
             ) : helpAsked && !line.helpCall ? (
-              <p className="flex items-center gap-2 text-sm"><Check className="size-4 text-emerald-700" />Got it. A person from Call Otto will email you today to set this up together.</p>
+              <p className="flex items-center gap-2 text-sm"><Check className="size-4 text-emerald-700" />Brock, our founder, just emailed you a link to book a 10-minute call.</p>
             ) : null}
             {!helpCalling && (
               <p className="text-sm text-muted-foreground">

@@ -1,5 +1,6 @@
 import { withTimeout } from "../application/retry.js";
 import { DEFAULT_TELNYX_VOICE } from "../voice/system-prompt.js";
+import { PLATFORM_TENANT_ID } from "../ports.js";
 
 /**
  * "Set it up with me": Otto's AI setup helper calls the owner right away and walks them through call
@@ -8,7 +9,7 @@ import { DEFAULT_TELNYX_VOICE } from "../voice/system-prompt.js";
  * The assistant has no booking tools and no dynamic-variables webhook, so it never becomes a shop call.
  */
 const STATE_PREFIX = "setup-help:";
-const PLATFORM_TENANT = "platform";
+const PLATFORM_TENANT = PLATFORM_TENANT_ID;
 
 export interface SetupCallFacts {
   businessName: string;
@@ -70,7 +71,7 @@ export function setupInstructions(facts: SetupCallFacts): string {
     if (facts.confirm) steps.push(`What they should see or hear: ${facts.confirm}`);
     steps.push("They can't dial the code while on this call. So once the settings are done and they understand the code, tell them to hang up, dial it, then come back to the Call Otto screen and tap Call me now under Test it. When our test call rings, they should not answer: let it ring until it stops. A green check means it works.");
   } else if (facts.family === "office") {
-    steps.push(`Their business number is an office or landline phone. Forwarding is set in their phone company's website or app: find Call Forwarding, then the option for when a call is not answered (or no answer), and forward to their Call Otto number, ${pretty(facts.ottoNumber)}. You can't see their portal: if they get stuck, say a person from Call Otto will follow up by email today.`);
+    steps.push(`Their business number is an office or landline phone. Forwarding is set in their phone company's website or app: find Call Forwarding, then the option for when a call is not answered (or no answer), and forward to their Call Otto number, ${pretty(facts.ottoNumber)}. You can't see their portal: if they get stuck, say Brock, our founder, will email them a link to book a 10-minute call.`);
   } else {
     steps.push("We don't know their phone company yet. Ask which company they pay for this number, then tell them to pick it on the Call Otto screen; the right code shows up there. Don't make up a code.");
   }
@@ -92,11 +93,14 @@ export function setupInstructions(facts: SetupCallFacts): string {
     "Rules:",
     "- Only give the codes and settings written above. Never invent a code, a setting path, a price or a promise.",
     "- Their phone still rings first. Only calls they miss, decline, or can't get (no signal) go to Call Otto.",
-    "- If something isn't covered here (billing, a carrier that refuses the code, an error message you don't recognize), say a person from Call Otto will follow up by email today, then wrap up.",
+    "- If something isn't covered here (billing, a carrier that refuses the code, an error message you don't recognize), say Brock, our founder, will email them a link to book a 10-minute call, then wrap up.",
     "- If they say it's a bad time, say they can tap \"Set it up with me\" again anytime, then say goodbye and hang up.",
     "- When they're done or say goodbye, say a short goodbye and hang up in the same turn.",
   ].join("\n");
 }
+
+/** Read when the helper can't start. Brock's email with a booking link is queued before this is said. */
+export const SETUP_SORRY_SPEECH = "Hi, this is Call Otto. Our setup helper couldn't start just now. Brock, our founder, just emailed you a link to book a quick 10 minute call. Sorry about that. Goodbye.";
 
 export class TelnyxSetupCaller {
   constructor(private readonly options: {
@@ -144,7 +148,7 @@ export class TelnyxSetupCaller {
     await this.request(`/calls/${encodeURIComponent(callControlId)}/actions/speak`, {
       method: "POST",
       body: JSON.stringify({
-        payload: "Hi, this is Call Otto. Our setup helper couldn't start just now. A person from Call Otto will email you today to set up your call forwarding. Sorry about that. Goodbye.",
+        payload: SETUP_SORRY_SPEECH,
         voice: "AWS.Polly.Joanna", language: "en-US", command_id: commandId, client_state: clientState,
       }),
     }, [404, 422]);

@@ -51,6 +51,7 @@ let nextSummaryAt = 0;
 let nextGraceAt = 0;
 let nextOverageAt = 0;
 let nextActivationAt = 0;
+let nextFounderAt = 0;
 const runWorker = async (): Promise<void> => {
   if (workerActive) return;
   workerActive = true;
@@ -103,6 +104,13 @@ const runWorker = async (): Promise<void> => {
       nextActivationAt = Date.now() + 10 * 60_000;
       const activation = await handler.runActivationJobs();
       if (activation.activated + activation.blocked + activation.optInConfirmations > 0) logger({ level: "info", event: "activation_cycle", ...activation });
+    }
+    if (Date.now() >= nextFounderAt) {
+      // Brock's email when forwarding still isn't confirmed 20 minutes after "Set it up with me". Locked per shop
+      // and keyed in the outbox, so every replica may run it.
+      nextFounderAt = Date.now() + 60_000;
+      const founder = await handler.runFounderFollowups();
+      if (founder.queued > 0) logger({ level: "info", event: "founder_followup_cycle", ...founder });
     }
     if (Date.now() >= nextOverageAt) {
       // Hourly: a period closes at most once a month per shop; locked and idempotent across replicas.

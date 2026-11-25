@@ -16,6 +16,12 @@ import type {
   UsageSummary,
 } from "./domain/models.js";
 
+/**
+ * The tenant id for Call Otto's own secrets, not any shop's: the setup helper's assistant id and the founder's
+ * Google calendars. Shop ids are always "shop_<uuid>" or the configured default, so it can't collide.
+ */
+export const PLATFORM_TENANT_ID = "platform";
+
 export interface Store {
   ping(): Promise<void>;
   withLock<T>(key: string, task: () => Promise<T>): Promise<T>;
@@ -23,6 +29,7 @@ export interface Store {
   listTenantIds(): Promise<string[]>;
   getConfig(tenantId: string): Promise<BusinessConfig>;
   saveConfig(config: BusinessConfig): Promise<void>;
+  /** Encrypted per-shop secrets. Tenant PLATFORM_TENANT_ID holds platform-wide ones and needs no shop record. */
   getIntegrationSecret(tenantId: string, provider: string, key: string): Promise<string | null>;
   saveIntegrationSecret(tenantId: string, provider: string, key: string, value: string): Promise<void>;
   deleteIntegrationSecret(tenantId: string, provider: string, key: string): Promise<void>;
