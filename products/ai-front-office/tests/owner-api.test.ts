@@ -127,7 +127,7 @@ describe("Owner JSON API and React app serving", () => {
     const response = await fetch(`${baseUrl}${path}`, { headers: { cookie: owner.cookie } });
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("text/csv; charset=utf-8");
-    expect(response.headers.get("content-disposition")).toMatch(/^attachment; filename="front-office-calls-2026-01-15\.csv"$/);
+    expect(response.headers.get("content-disposition")).toMatch(/^attachment; filename="call-otto-calls-2026-01-15\.csv"$/);
     const lines = (await response.text()).replace(/^﻿/, "").trimEnd().split("\r\n");
     expect(lines[0]).toBe('"Date","Caller name","Callback number","Address","Problem","Outcome"');
     expect(lines[1]).toBe('"01/15/2026, 2:30 AM","Synthetic Caller","(212) 555-0177","100 Main St, Albany, NY 12207","No heat overnight","Call back"');

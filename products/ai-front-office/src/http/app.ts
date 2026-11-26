@@ -22,7 +22,7 @@ import { chargeSentence, hasPlanAccess, isCompStatus, isPaidStatus } from "../do
 import { currentPlan, hasUnlimitedPrice, introCouponId, knownPlans, legacyPlanPriceIds, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, unlimitedPriceIds, type Plan, type PlanId } from "../domain/plans.js";
 import { GuaranteeError, LeadGuaranteeService, recordFirstPaid, recordUnlimitedObservation, type UnlimitedItem } from "../application/billing-jobs.js";
 import { callbackLinkMatches, OWNER_SMS_OPT_IN_CONFIRMATION, readCallbackLinkToken } from "../domain/owner-sms.js";
-import { callsCsv } from "./calls-csv.js";
+import { callsCsv, callsCsvFileName } from "./calls-csv.js";
 import { hoursFromChoice } from "../domain/hours.js";
 import { SMS_CONSENT_VERSION } from "../admin/footer.js";
 import { renderDialHandoff, renderErrorPage } from "../admin/error-page.js";
@@ -1644,10 +1644,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         dependencies.store.getConfig(account.tenantId),
         dependencies.store.listCalls(account.tenantId, 100_000),
       ]);
-      const body = callsCsv(calls, config.timezone);
+      const body = callsCsv(calls, config.timezone, dependencies.clock.now());
       response.writeHead(200, {
         "content-type": "text/csv; charset=utf-8",
-        "content-disposition": `attachment; filename="front-office-calls-${dependencies.clock.now().toISOString().slice(0, 10)}.csv"`,
+        "content-disposition": `attachment; filename="${callsCsvFileName(dependencies.clock.now())}"`,
         "cache-control": "no-store",
         "content-length": Buffer.byteLength(body),
       });
