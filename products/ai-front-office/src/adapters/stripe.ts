@@ -45,6 +45,17 @@ export interface CardOnFile { brand: string; last4: string; expMonth: number; ex
 /** One past bill. pdfUrl is Stripe's own invoice PDF. */
 export interface BillLine { id: string; at: string; amountCents: number; status: "paid" | "failed" | "due"; pdfUrl: string | null }
 
+/** A saved payment method's id and when it was saved (Stripe's created, in seconds). */
+export interface SavedCard { id: string; created: number }
+
+function savedCardFrom(value: unknown): SavedCard | null {
+  if (typeof value === "string") return { id: value, created: 0 };
+  if (!value || typeof value !== "object") return null;
+  const method = value as { id?: unknown; created?: unknown };
+  if (typeof method.id !== "string") return null;
+  return { id: method.id, created: typeof method.created === "number" ? method.created : 0 };
+}
+
 function cardFrom(value: unknown): CardOnFile | null {
   if (!value || typeof value !== "object") return null;
   const card = (value as { card?: { brand?: unknown; last4?: unknown; exp_month?: unknown; exp_year?: unknown } }).card;
@@ -365,20 +376,40 @@ export class StripeBillingClient {
   }
 
   /** A finished card-setup session: whose it is and the card it saved (null until the owner finished). */
-  async retrieveCardSetup(sessionId: string): Promise<{ tenantId: string | null; customerId: string | null; paymentMethodId: string | null; isCardUpdate: boolean }> {
-    const session = await this.get(`checkout/sessions/${encodeURIComponent(sessionId)}?expand[]=setup_intent`) as {
+  async retrieveCardSetup(sessionId: string): Promise<{ tenantId: string | null; customerId: string | null; paymentMethodId: string | null; paymentMethodCreated: number | null; isCardUpdate: boolean }> {
+    const session = await this.get(`checkout/sessions/${encodeURIComponent(sessionId)}?expand[]=setup_intent.payment_method`) as {
       id?: string; mode?: string; status?: string; customer?: string | { id?: string } | null; metadata?: Record<string, string>;
-      setup_intent?: string | { status?: string; payment_method?: string | { id?: string } | null; metadata?: Record<string, string> } | null;
+      setup_intent?: string | { status?: string; payment_method?: string | { id?: string; created?: number } | null; metadata?: Record<string, string> } | null;
     };
     if (session.id !== sessionId) throw new Error("Stripe card setup lookup returned another session");
     const intent = typeof session.setup_intent === "object" && session.setup_intent ? session.setup_intent : null;
     const method = intent?.status === "succeeded" ? (typeof intent.payment_method === "string" ? intent.payment_method : intent.payment_method?.id ?? null) : null;
+    const created = typeof intent?.payment_method === "object" && typeof intent.payment_method?.created === "number" ? intent.payment_method.created : null;
     return {
       tenantId: session.metadata?.tenant_id ?? intent?.metadata?.tenant_id ?? null,
       customerId: typeof session.customer === "string" ? session.customer : session.customer?.id ?? null,
       paymentMethodId: session.status === "complete" ? method : null,
+      paymentMethodCreated: session.status === "complete" ? created : null,
       isCardUpdate: session.mode === "setup" && session.metadata?.front_office === CARD_UPDATE_TAG,
     };
+  }
+
+  /**
+   * Which saved card the subscription and the customer pay with now, each with when it was saved, so a late or
+   * repeated card change never puts back an older card. Read only.
+   */
+  async currentDefaultCards(customerId: string, subscriptionId: string): Promise<{ subscription: SavedCard | null; customer: SavedCard | null }> {
+    const [subscription, customer] = await Promise.all([
+      this.get(`subscriptions/${encodeURIComponent(subscriptionId)}?expand[]=default_payment_method`) as Promise<{ default_payment_method?: unknown }>,
+      this.get(`customers/${encodeURIComponent(customerId)}?expand[]=invoice_settings.default_payment_method`) as Promise<{ invoice_settings?: { default_payment_method?: unknown } }>,
+    ]);
+    return { subscription: savedCardFrom(subscription.default_payment_method), customer: savedCardFrom(customer.invoice_settings?.default_payment_method) };
+  }
+
+  /** Make a saved card the one the subscription pays with (the subscription only). */
+  async setSubscriptionCard(subscriptionId: string, paymentMethodId: string): Promise<void> {
+    const update = await this.post(`subscriptions/${encodeURIComponent(subscriptionId)}`, new URLSearchParams({ default_payment_method: paymentMethodId }));
+    if (!update.ok) throw new Error(`Stripe default card update failed with HTTP ${update.status}${update.payload.error?.message ? `: ${update.payload.error.message}` : ""}`);
   }
 
   /**

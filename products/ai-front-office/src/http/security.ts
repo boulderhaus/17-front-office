@@ -32,8 +32,8 @@ export function parseForm(raw: string): URLSearchParams {
  * js.stripe.com, its frames and the calls they make, and its card-brand images. Nothing else gains anything.
  */
 const STRIPE_EMBED = {
-  script: " https://js.stripe.com",
-  frame: "; frame-src https://js.stripe.com https://checkout.stripe.com https://hooks.stripe.com",
+  script: " https://js.stripe.com https://*.js.stripe.com",
+  frame: "; frame-src https://js.stripe.com https://*.js.stripe.com https://checkout.stripe.com https://hooks.stripe.com",
   connect: " https://api.stripe.com https://checkout.stripe.com",
   img: " https://*.stripe.com",
 };

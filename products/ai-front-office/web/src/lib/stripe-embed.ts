@@ -42,7 +42,8 @@ function loadStripe(uiMode: keyof typeof SCRIPTS, timeoutMs = 10_000): Promise<S
 export async function mountEmbeddedCheckout(input: { publishableKey: string; clientSecret: string; uiMode: keyof typeof SCRIPTS; target: HTMLElement; onComplete: () => void }): Promise<EmbeddedCheckout> {
   const factory = await loadStripe(input.uiMode)
   const stripe = factory(input.publishableKey)
-  const init = stripe.initEmbeddedCheckout ?? stripe.createEmbeddedCheckoutPage
+  // Each script has its own name for the form; the newer script keeps the old name only as a stub that throws.
+  const init = input.uiMode === "embedded_page" ? stripe.createEmbeddedCheckoutPage : stripe.initEmbeddedCheckout
   if (!init) throw new Error("This Stripe script has no embedded Checkout")
   const checkout = await init.call(stripe, { fetchClientSecret: async () => input.clientSecret, onComplete: input.onComplete })
   checkout.mount(input.target)

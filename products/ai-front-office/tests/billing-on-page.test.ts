@@ -24,6 +24,7 @@ function fakeStripe() {
     sessionComplete: true,
     refuse: new Set<string>(),
     uiModeRefused: false,
+    newCardCreated: 2_000,
   };
   const fetcher = (async (input: string | URL, init?: RequestInit) => {
     const request: Recorded = { method: init?.method ?? "GET", url: String(input), body: new URLSearchParams(init?.body instanceof URLSearchParams ? init.body.toString() : typeof init?.body === "string" ? init.body : "") };
@@ -47,14 +48,14 @@ function fakeStripe() {
       if (state.uiModeRefused && request.body.get("ui_mode") === "embedded") return json({ error: { message: "Invalid ui_mode: must be one of hosted_page, embedded_page", param: "ui_mode" } }, 400);
       return json({ id: "cs_setup_synthetic", client_secret: "cs_setup_synthetic_secret_abc" });
     }
-    if (request.method === "GET" && path === "checkout/sessions/cs_setup_synthetic?expand[]=setup_intent") return json({
+    if (request.method === "GET" && path === "checkout/sessions/cs_setup_synthetic?expand[]=setup_intent.payment_method") return json({
       id: "cs_setup_synthetic", mode: "setup", status: state.sessionComplete ? "complete" : "open", customer: "cus_synthetic",
       metadata: { tenant_id: state.sessionTenant, front_office: "card_update" },
-      setup_intent: { id: "seti_synthetic", status: state.sessionComplete ? "succeeded" : "requires_payment_method", payment_method: state.sessionComplete ? "pm_new" : null },
+      setup_intent: { id: "seti_synthetic", status: state.sessionComplete ? "succeeded" : "requires_payment_method", payment_method: state.sessionComplete ? { id: "pm_new", created: state.newCardCreated } : null },
     });
     if (request.method === "POST" && path === "subscriptions/sub_synthetic") {
       if (request.body.has("cancel_at_period_end")) state.cancelling = request.body.get("cancel_at_period_end") === "true";
-      if (request.body.has("default_payment_method")) state.subscriptionCard = { id: request.body.get("default_payment_method"), card: { brand: "mastercard", last4: "5555", exp_month: 1, exp_year: 2031 } };
+      if (request.body.has("default_payment_method")) state.subscriptionCard = { id: request.body.get("default_payment_method"), created: request.body.get("default_payment_method") === "pm_new" ? state.newCardCreated : 3_000, card: { brand: "mastercard", last4: "5555", exp_month: 1, exp_year: 2031 } };
       return json({ id: "sub_synthetic" });
     }
     if (request.method === "POST" && path === "customers/cus_synthetic") return json({ id: "cus_synthetic" });
@@ -138,7 +139,7 @@ describe("Plan and billing on our own page: card, bills, card change, cancel", (
     const app = await start({ STRIPE_PUBLISHABLE_KEY: PUBLISHABLE });
     const owner = await app.shop("owner@example.test");
     const member = await app.teammate(owner);
-    const routes = ["/api/app/billing/card", "/api/app/billing/card/complete", "/api/app/billing/cancel", "/api/app/billing/keep"];
+    const routes = ["/api/app/billing/card", "/api/app/billing/card/complete", "/api/app/billing/card/sync", "/api/app/billing/cancel", "/api/app/billing/keep"];
     expect((await fetch(`${app.baseUrl}/api/app/billing/details`)).status).toBe(401);
     for (const route of routes) expect((await fetch(`${app.baseUrl}${route}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: "cs_setup_synthetic" }) })).status, route).toBe(401);
     expect((await owner.get("/api/app/billing/details", member.cookie)).status).toBe(403);
@@ -147,7 +148,7 @@ describe("Plan and billing on our own page: card, bills, card change, cancel", (
     expect((await owner.post("/api/app/billing/cancel", {}, owner.cookie, "wrong")).status).toBe(403);
     const comp = await app.shop("comp@example.test", "comp");
     expect(await (await comp.get("/api/app/billing/details")).json()).toEqual({ card: null, invoices: [], cardChange: null });
-    for (const route of ["/api/app/billing/card", "/api/app/billing/cancel", "/api/app/billing/keep"]) expect((await comp.post(route)).status, route).toBe(409);
+    for (const route of ["/api/app/billing/card", "/api/app/billing/card/sync", "/api/app/billing/cancel", "/api/app/billing/keep"]) expect((await comp.post(route)).status, route).toBe(409);
     expect(app.stripe.requests.filter((request) => request.method === "POST")).toHaveLength(0);
   });
 
@@ -234,6 +235,47 @@ describe("Plan and billing on our own page: card, bills, card change, cancel", (
     expect(await app.store.getSubscription(owner.account.tenantId)).toMatchObject({ status: "active" });
   });
 
+  it("never puts back an older card: a late or repeated completion after a newer card is paying writes nothing", async () => {
+    const app = await start({ STRIPE_PUBLISHABLE_KEY: PUBLISHABLE });
+    const owner = await app.shop("owner@example.test");
+    app.stripe.state.sessionTenant = owner.account.tenantId;
+    // Card B (saved later) already pays; the webhook for card A arrives late.
+    app.stripe.state.subscriptionCard = { id: "pm_newer", created: 5_000, card: { brand: "visa", last4: "1881", exp_month: 2, exp_year: 2032 } };
+    const late = await app.webhook({ id: "evt_setup_late", type: "checkout.session.completed", created: PERIOD_END - 86_400, data: { object: { id: "cs_setup_synthetic", object: "checkout.session", mode: "setup", status: "complete", subscription: null, customer: "cus_synthetic", metadata: { tenant_id: owner.account.tenantId, front_office: "card_update" } } } });
+    expect(late.status).toBe(200);
+    expect(app.stripe.writes("/v1/subscriptions/sub_synthetic")).toHaveLength(0);
+    expect(app.stripe.writes("/v1/customers/cus_synthetic")).toHaveLength(0);
+    // The same card again (a duplicate) is harmless: it stays the one paying.
+    app.stripe.state.subscriptionCard = { id: "pm_new", created: 2_000, card: { brand: "mastercard", last4: "5555", exp_month: 1, exp_year: 2031 } };
+    expect((await owner.post("/api/app/billing/card/complete", { sessionId: "cs_setup_synthetic" })).status).toBe(200);
+    expect(Object.fromEntries(app.stripe.writes("/v1/subscriptions/sub_synthetic")[0]!.body)).toEqual({ default_payment_method: "pm_new" });
+  });
+
+  it("back from Stripe's own card page, switches the plan to the card saved there, and only to a newer one", async () => {
+    const app = await start();
+    const owner = await app.shop("owner@example.test");
+    // The subscription still pays with its own older card; Stripe's page saved a newer one for the customer.
+    app.stripe.state.subscriptionCard = { id: "pm_sub_old", created: 1_000, card: { brand: "visa", last4: "4242", exp_month: 8, exp_year: 2028 } };
+    app.stripe.state.customerCard = { id: "pm_portal", created: 4_000, card: { brand: "discover", last4: "1117", exp_month: 12, exp_year: 2030 } };
+    const synced = await owner.post("/api/app/billing/card/sync");
+    expect(synced.status).toBe(200);
+    expect(Object.fromEntries(app.stripe.writes("/v1/subscriptions/sub_synthetic")[0]!.body)).toEqual({ default_payment_method: "pm_portal" });
+    // Already the same card: nothing written.
+    app.stripe.state.subscriptionCard = { id: "pm_portal", created: 4_000, card: { brand: "discover", last4: "1117", exp_month: 12, exp_year: 2030 } };
+    expect((await owner.post("/api/app/billing/card/sync")).status).toBe(200);
+    // The subscription's card is newer than the customer's: left alone.
+    app.stripe.state.subscriptionCard = { id: "pm_sub_newest", created: 9_000, card: { brand: "visa", last4: "1881", exp_month: 2, exp_year: 2032 } };
+    expect((await owner.post("/api/app/billing/card/sync")).status).toBe(200);
+    expect(app.stripe.writes("/v1/subscriptions/sub_synthetic")).toHaveLength(1);
+    // Never a charge, and Stripe refusing is said plainly.
+    expect(app.stripe.requests.filter((request) => request.method === "POST" && /\/v1\/(invoices|payment_intents|refunds|customers)/.test(request.url))).toHaveLength(0);
+    app.stripe.state.subscriptionCard = { id: "pm_sub_old", created: 1_000, card: { brand: "visa", last4: "4242", exp_month: 8, exp_year: 2028 } };
+    app.stripe.state.refuse.add("POST subscriptions/sub_synthetic");
+    const refused = await owner.post("/api/app/billing/card/sync");
+    expect(refused.status).toBe(502);
+    expect(((await refused.json()) as { error: string }).error).toBe("Your new card is saved, but we couldn’t switch to it. Try again in a minute.");
+  });
+
   it("cancels at the end of the paid month on our page, shows the end date, and Keep my plan undoes it", async () => {
     const app = await start();
     const owner = await app.shop("owner@example.test");
@@ -258,8 +300,8 @@ describe("Plan and billing on our own page: card, bills, card change, cancel", (
   it("allows Stripe's script and frames only on owner-app pages, and only once a publishable key is set", async () => {
     const keyed = await start({ STRIPE_PUBLISHABLE_KEY: PUBLISHABLE });
     const appCsp = (await fetch(`${keyed.baseUrl}/app/settings/plan`, { redirect: "manual" })).headers.get("content-security-policy") ?? "";
-    expect(appCsp).toContain("script-src 'self' https://js.stripe.com;");
-    expect(appCsp).toContain("frame-src https://js.stripe.com https://checkout.stripe.com https://hooks.stripe.com");
+    expect(appCsp).toContain("script-src 'self' https://js.stripe.com https://*.js.stripe.com;");
+    expect(appCsp).toContain("frame-src https://js.stripe.com https://*.js.stripe.com https://checkout.stripe.com https://hooks.stripe.com");
     expect(appCsp).toContain("connect-src 'self' https://api.stripe.com https://checkout.stripe.com");
     expect(appCsp).toContain("frame-ancestors 'none'");
     const signupCsp = (await fetch(`${keyed.baseUrl}/signup`)).headers.get("content-security-policy") ?? "";

@@ -927,24 +927,29 @@ export function PlanSection() {
       .catch(() => { if (alive) setSummary({ lastPaid: null, next: null, endsAt: null, monthlyCents: 0 }) })
     return () => { alive = false }
   }, [plan.paid, comp, plan.id, plan.unlimited])
+  // Back from Stripe's form after a bank check (card=done), or from Stripe's own card page (card=back):
+  // say "Card updated" by itself and tidy the address.
+  const cardReturn = params.get("card")
+  const cardSession = params.get("session_id")
+  const returningWithCard = cardReturn === "done" || cardReturn === "back"
   useEffect(() => {
-    if (!plan.paid || comp) return
+    // While a returning card is being switched, wait: the card shown afterwards is the new one.
+    if (!plan.paid || comp || returningWithCard) return
     let alive = true
     api<BillingDetails>("/api/app/billing/details")
       .then((value) => { if (alive) setDetails(value) })
       .catch(() => { if (alive) setDetails({ card: null, invoices: [], cardChange: null }) })
     return () => { alive = false }
-  }, [plan.paid, comp])
-  // Back from Stripe's form after a bank check (card=done), or from Stripe's own card page (card=back):
-  // say "Card updated" by itself and tidy the address.
-  const cardReturn = params.get("card")
-  const cardSession = params.get("session_id")
+  }, [plan.paid, comp, returningWithCard])
   useEffect(() => {
     if (cardReturn !== "done" && cardReturn !== "back") return
     const tidy = () => setParams((current) => { const next = new URLSearchParams(current); next.delete("card"); next.delete("session_id"); return next }, { replace: true })
-    if (cardReturn === "back") { toast.success("Card updated"); tidy(); return }
-    if (!cardSession) { tidy(); return }
-    api<BillingDetails>("/api/app/billing/card/complete", { method: "POST", body: { sessionId: cardSession } })
+    if (cardReturn === "done" && !cardSession) { tidy(); return }
+    // Stripe's own card page saves the card for the customer only: the plan is switched to it here, then "Card updated".
+    const finished = cardReturn === "back"
+      ? api<BillingDetails>("/api/app/billing/card/sync", { method: "POST", body: {} })
+      : api<BillingDetails>("/api/app/billing/card/complete", { method: "POST", body: { sessionId: cardSession } })
+    finished
       .then((value) => { setDetails(value); toast.success("Card updated") })
       .catch((error) => toast.error(error instanceof Error ? error.message : "We couldn’t switch to the new card. Try again."))
       .finally(tidy)

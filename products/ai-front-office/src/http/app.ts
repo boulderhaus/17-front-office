@@ -1805,6 +1805,13 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       await finishCardChange(account, sessionId);
       return sendJson(response, 200, await billingDetails(account));
     }
+    if (method === "POST" && url.pathname === "/api/app/billing/card/sync") {
+      if (!owner) throw new HttpError(403, "Only the owner can change the card");
+      await readApiJson(request, session, 1_000);
+      if (!limiter.allow(`card-change:${account.tenantId}`, 20, 60 * 60_000)) throw new HttpError(429, "Please try again in a bit.");
+      await syncHostedCard(account);
+      return sendJson(response, 200, await billingDetails(account));
+    }
     if (method === "POST" && (url.pathname === "/api/app/billing/cancel" || url.pathname === "/api/app/billing/keep")) {
       if (!owner) throw new HttpError(403, "Only the owner can cancel the plan");
       await readApiJson(request, session, 1_000);
@@ -2737,11 +2744,39 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (!setup.isCardUpdate || setup.tenantId !== account.tenantId || (setup.customerId && setup.customerId !== customerId)) throw new HttpError(403, "That card form belongs to another account.");
     if (!setup.paymentMethodId) throw new HttpError(409, "The new card isn’t saved yet. Finish the form, then try again.");
     await dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
+      // A late or repeated completion (the webhook after the page, or an older form after a newer one) never puts back
+      // an older card: a card saved after this one already paying wins.
+      const current = await client.currentDefaultCards(customerId, subscriptionId).catch(() => null);
+      const paying = current?.subscription ?? null;
+      if (paying && paying.id !== setup.paymentMethodId && setup.paymentMethodCreated !== null && paying.created > setup.paymentMethodCreated) {
+        log({ level: "info", event: "card_change_superseded", tenantId: account.tenantId });
+        return;
+      }
       const result = await client.setDefaultCard({ customerId, subscriptionId, paymentMethodId: setup.paymentMethodId! }).catch((error) => {
         log({ level: "error", event: "card_default_update_failed", tenantId: account.tenantId, error: safeError(error) });
         throw new HttpError(502, "Your new card is saved, but we couldn’t switch to it. Try again in a minute.");
       });
       if (!result.customerUpdated) log({ level: "warn", event: "card_customer_default_failed", tenantId: account.tenantId });
+    });
+  }
+
+  /**
+   * Back from Stripe's own card page: it saves the new card as the customer's default only, so the subscription (which
+   * may carry its own older default) is switched to it here. Only ever moves to a card saved later than the one paying.
+   */
+  async function syncHostedCard(account: OwnerAccount): Promise<void> {
+    const { client, subscriptionId, customerId } = await billedSubscription(account);
+    await dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
+      const current = await client.currentDefaultCards(customerId, subscriptionId);
+      const saved = current.customer;
+      if (!saved || saved.id === current.subscription?.id) return;
+      if (current.subscription && current.subscription.created > saved.created) return;
+      await client.setSubscriptionCard(subscriptionId, saved.id);
+      log({ level: "info", event: "card_hosted_synced", tenantId: account.tenantId });
+    }).catch((error) => {
+      if (error instanceof HttpError) throw error;
+      log({ level: "error", event: "card_hosted_sync_failed", tenantId: account.tenantId, error: safeError(error) });
+      throw new HttpError(502, "Your new card is saved, but we couldn’t switch to it. Try again in a minute.");
     });
   }
 
