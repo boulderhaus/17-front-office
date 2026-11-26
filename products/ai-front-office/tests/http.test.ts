@@ -1172,8 +1172,8 @@ describe("HTTP boundary", () => {
     expect(termsHtml).not.toContain("By continuing, you consent");
     // Public business details for carrier (10DLC) review: company, business address, phone and email, and nothing personal.
     const company = "Call Otto is a product of Dutchworks LLC, 16192 Coastal Highway, Lewes, DE 19958. Phone <a href=\"tel:+19296108092\">(929) 610-8092</a>, email <a href=\"mailto:hello@bydutchworks.com\">hello@bydutchworks.com</a>.";
-    expect(privacyHtml).toContain(`<h2>Who we are</h2><p>${company}</p>`);
-    expect(termsHtml).toContain(`<h2>Who we are</h2><p>${company}</p>`);
+    expect(privacyHtml).toContain(`<h2 id="who-we-are">Who we are</h2><p>${company}</p>`);
+    expect(termsHtml).toContain(`<h2 id="who-we-are">Who we are</h2><p>${company}</p>`);
     expect(termsHtml).toContain("Call Otto, a product of Dutchworks LLC, sends account notifications");
     // Carrier review: "notifications", never "alerts", and a real support contact instead of a placeholder.
     for (const page of [termsHtml, privacyHtml]) {
