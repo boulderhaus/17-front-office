@@ -182,6 +182,12 @@ function fromNumberProblem(value: unknown): string | null {
 const providerFromNumber = z.string().refine((value) => fromNumberProblem(value) === null).transform((value) => value.trim()).catch(UNKNOWN_CALLER);
 /** An optional field the model got wrong is dropped, not fatal: the tool still runs on its required fields. */
 const lenient = <T extends z.ZodType>(schema: T) => schema.optional().catch(undefined);
+const FLAG_TEXT: ReadonlyMap<string, boolean> = new Map([["true", true], ["yes", true], ["false", false], ["no", false]]);
+/**
+ * A yes/no the caller's rights hang on (wants a person, objects to recording, accepts a fee). The model may
+ * send it as text; it is read, never dropped: an unreadable value fails the call instead of losing it.
+ */
+const flag = z.preprocess((value) => typeof value === "string" ? FLAG_TEXT.get(value.trim().toLowerCase()) ?? value : value, z.boolean()).optional();
 const availabilitySchema = baseToolSchema.extend({
   window_start: dateTime,
   window_end: dateTime,
@@ -224,11 +230,11 @@ const intakeSchema = baseToolSchema.extend({
   problem_description: z.string().min(1).max(2_000),
   equipment_details: lenient(z.string().max(1_000)),
   access_notes: lenient(z.string().max(1_000)),
-  diagnostic_fee_accepted: lenient(z.boolean()),
-  human_requested: lenient(z.boolean()),
+  diagnostic_fee_accepted: flag,
+  human_requested: flag,
   confidence: lenient(z.number().min(0).max(1)),
   recording_disclosure_given: lenient(z.boolean()),
-  recording_disclosure_declined: lenient(z.boolean()),
+  recording_disclosure_declined: flag,
 });
 const pilotSignupSchema = z.object({
   ownerName: z.string().trim().min(2).max(120),

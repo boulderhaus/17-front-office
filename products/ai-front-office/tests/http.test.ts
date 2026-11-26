@@ -233,16 +233,32 @@ describe("HTTP boundary", () => {
     const intake = await fetch(`${baseUrl}/tools/save-intake`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ provider_call_id: "bad-optional-intake", from_number: "+15555550110", caller_name: "Sam", confidence: "My number is 555-555-0142", human_requested: "yes", problem_description: "Routine maintenance" }),
+      body: JSON.stringify({ provider_call_id: "bad-optional-intake", from_number: "+15555550110", caller_name: "Sam", confidence: "My number is 555-555-0142", company_name: 42, problem_description: "Routine maintenance" }),
     });
     expect(await intake.json()).toMatchObject({ status: "saved" });
-    expect((await store.getCallByProviderId("bad-optional-intake"))?.fields).toMatchObject({ callerName: "Sam", problemDescription: "Routine maintenance", humanRequested: false });
+    expect((await store.getCallByProviderId("bad-optional-intake"))?.fields).toMatchObject({ callerName: "Sam", problemDescription: "Routine maintenance", companyName: null });
     const repaired = logs.filter((entry) => entry.event === "tool_input_repaired");
     expect(repaired).toEqual([
       expect.objectContaining({ tool: "triage_call", dropped: "caller_name,llm_score" }),
-      expect.objectContaining({ tool: "save_intake", dropped: "human_requested,confidence" }),
+      expect.objectContaining({ tool: "save_intake", dropped: "company_name,confidence" }),
     ]);
-    expect(JSON.stringify(repaired)).not.toMatch(/0142|NNNN|yes/);
+    expect(JSON.stringify(repaired)).not.toMatch(/0142|NNNN|42/);
+  });
+
+  it("reads a yes or no sent as text, and never drops a request for a person or a recording objection", async () => {
+    const headers = { authorization: `Bearer ${toolToken}`, "content-type": "application/json" };
+    const save = (id: string, fields: Record<string, unknown>) => fetch(`${baseUrl}/tools/save-intake`, {
+      method: "POST", headers, body: JSON.stringify({ provider_call_id: id, from_number: "+15555550110", problem_description: "Routine maintenance", ...fields }),
+    });
+    expect(await (await save("text-flags", { human_requested: "Yes", recording_disclosure_declined: "true", diagnostic_fee_accepted: "no" })).json()).toMatchObject({ status: "saved" });
+    const call = await store.getCallByProviderId("text-flags");
+    expect(call?.fields).toMatchObject({ humanRequested: true, diagnosticFeeAccepted: false });
+    expect(call?.consentState).toBe("declined");
+
+    expect(await (await save("unreadable-flag", { human_requested: "maybe" })).json()).toMatchObject({ ok: false, status: "unavailable" });
+    expect(await (await save("unreadable-objection", { recording_disclosure_declined: 1 })).json()).toMatchObject({ ok: false, status: "unavailable" });
+    expect(logs.filter((entry) => entry.event === "tool_request_failed").map((entry) => entry.fields)).toEqual(["human_requested:invalid_type", "recording_disclosure_declined:invalid_type"]);
+    expect(await store.getCallByProviderId("unreadable-flag")).toBeNull();
   });
 
   it("logs which field a rejected tool call failed on, never what was said", async () => {
