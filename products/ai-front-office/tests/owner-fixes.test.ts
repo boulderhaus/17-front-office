@@ -19,7 +19,7 @@ describe("owner app fixes (walk 70039f169)", () => {
     at = now;
     store = new InMemoryStore();
     await store.saveConfig(createDemoConfig());
-    const env = demoEnvironment({ PUBLIC_BASE_URL: "http://127.0.0.1:8787" });
+    const env = demoEnvironment({ PUBLIC_BASE_URL: "http://127.0.0.1:8787", RESEND_API_KEY: "re_synthetic", RESEND_FROM_EMAIL: "alerts@front-office.example" });
     server = createServer(createRequestHandler({ env, store, calendar: new InMemoryCalendar(), clock: { now: () => at }, integrations: {}, logger: () => undefined }));
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
@@ -85,7 +85,8 @@ describe("owner app fixes (walk 70039f169)", () => {
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "business_number", "+19415550177");
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "T-Mobile USA", lineType: "mobile", family: "gsm", chosen: false }));
     const { url } = await (await post("/api/app/line/handoff")).json() as { url: string };
-    expect(url).toMatch(/^http:\/\/127\.0\.0\.1:8787\/dial\/[\w-]+\.[\w-]+$/);
+    // Short (about 30 characters), so the QR is small and sparse enough for a phone camera.
+    expect(url).toMatch(/^http:\/\/127\.0\.0\.1:8787\/d\/[A-Za-z0-9]{8}$/);
     const path = new URL(url).pathname;
     const phone = await fetch(`${baseUrl}${path}`, { headers: { "user-agent": "Mozilla/5.0 (Linux; Android 14) Chrome/130 Mobile" } });
     expect(phone.status).toBe(200);
@@ -97,13 +98,36 @@ describe("owner app fixes (walk 70039f169)", () => {
     // iOS never turns the code into a phone link (press and hold must offer Copy).
     expect(html).toContain('<meta name="format-detection" content="telephone=no">');
     expect(html).not.toContain("clear it");
-    // A changed token is refused.
+    expect(html.match(/class="code"/g)).toHaveLength(1);
+    // A changed token is refused, and so is one past its 15 minutes.
     const forged = await fetch(`${baseUrl}${path.slice(0, -2)}xx`);
     expect(forged.status).toBe(410);
     expect(await forged.text()).toContain("Reload the page on your computer, then scan the new QR.");
+    at = new Date(now.getTime() + 16 * 60_000);
+    expect((await fetch(`${baseUrl}${path}`)).status).toBe(410);
   });
 
-  it("the QR page shows the clear-it-first code when leaving every call for ring first, as the computer does", async () => {
+  it("Email me these steps sends the owner's own email a day-long link to the same page", async () => {
+    const { account, post } = await signUp("qr-mail@synthetic.example", "(941) 555-0147");
+    await store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", "+13125550147");
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "business_number", "+19415550180");
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "T-Mobile USA", lineType: "mobile", family: "gsm", chosen: false }));
+    const sent = await post("/api/app/line/handoff/email");
+    expect(sent.status).toBe(200);
+    expect(await sent.json()).toEqual({ sentTo: "qr-mail@synthetic.example" });
+    const email = [...store.notifications.values()].find((item) => item.destinationRef === "email:qr-mail@synthetic.example" && item.body.includes("forwarding code"));
+    const link = /http:\/\/127\.0\.0\.1:8787(\/d\/[A-Za-z0-9]{8})/.exec(email?.body ?? "")?.[1];
+    expect(link).toBeTruthy();
+    at = new Date(now.getTime() + 3 * 60 * 60_000);
+    const page = await (await fetch(`${baseUrl}${link}`, { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148" } })).text();
+    expect(page).toContain("**21*13125550147#");
+    // iPhone: copy and paste in Phone (never a tel: link), and what the carrier shows before they dial.
+    expect(page).toContain("tap Paste, then Call");
+    expect(page).toContain("gray box that says Succeeded. Tap Dismiss");
+    expect(page).not.toContain("tel:");
+  });
+
+  it("the QR page shows one code at a time: the clear code only after a test found every call still forwarded, then Next", async () => {
     const { account, post } = await signUp("qr-clear@synthetic.example", "(941) 555-0146");
     await store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", "+13125550146");
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "business_number", "+19415550179");
@@ -111,11 +135,24 @@ describe("owner app fixes (walk 70039f169)", () => {
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "confirmed_at", now.toISOString());
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "tested_for", JSON.stringify({ mode: "every-call", code: "**21*13125550146#", at: now.toISOString() }));
     await store.saveConfig({ ...await store.getConfig(account.tenantId), operationMode: "overflow" });
+    const android = { headers: { "user-agent": "Mozilla/5.0 (Linux; Android 14) Chrome/130 Mobile" } };
     const { url } = await (await post("/api/app/line/handoff")).json() as { url: string };
-    const html = await (await fetch(`${baseUrl}${new URL(url).pathname}`, { headers: { "user-agent": "Mozilla/5.0 (Linux; Android 14) Chrome/130 Mobile" } })).text();
-    expect(html).toContain("First dial this to clear it:</p><div class=\"code\">##002#</div>");
-    expect(html).toContain('href="tel:%23%23002%23"');
-    expect(html.indexOf("##002#")).toBeLessThan(html.indexOf("**004*13125550146"));
+    const path = new URL(url).pathname;
+    // Switching to ring first alone: just the ring-first code, never two codes on one screen.
+    const plain = await (await fetch(`${baseUrl}${path}`, android)).text();
+    expect(plain).toContain("**004*13125550146");
+    expect(plain).not.toContain("##002#");
+    // Our ring-first test reached Otto with no ring: every call is still forwarded. Clear code alone, then Next.
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "check", JSON.stringify({ startedAt: now.toISOString(), method: "auto", choice: "ring-first", code: "**004*13125550146**10#", forwardedAfterMs: 2_000, atOnce: true }));
+    const clear = await (await fetch(`${baseUrl}${path}`, android)).text();
+    expect(clear).toContain("Every call is still being forwarded.");
+    expect(clear).toContain('<div class="code">##002#</div>');
+    expect(clear).toContain('href="tel:%23%23002%23"');
+    expect(clear).not.toContain("**004*");
+    expect(clear).toContain(`href="${path}?step=code"`);
+    const next = await (await fetch(`${baseUrl}${path}?step=code`, android)).text();
+    expect(next).toContain("**004*13125550146");
+    expect(next).not.toContain("##002#");
   });
 
   it("Cancel ends a running test, and a test our call couldn't place says why", async () => {

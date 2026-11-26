@@ -487,7 +487,7 @@ describe("Brock emails when the AI setup helper can't finish", () => {
     for (let attempt = 0; attempt < 3; attempt += 1) await linked.api("/api/app/line/help", { device: "iphone" });
     const limited = await linked.api("/api/app/line/help", { device: "iphone" });
     expect(limited.status).toBe(429);
-    expect(((await limited.json()) as { error: string }).error).toBe("Otto has called you a few times today. Brock, our founder, emailed you a link to book a 10-minute call.");
+    expect(((await limited.json()) as { error: string }).error).toBe("Otto has called you a few times today. Our team emailed you a link to book a 10-minute call.");
     await new Promise<void>((resolve) => server!.close(() => resolve()));
     server = null;
 
@@ -498,7 +498,7 @@ describe("Brock emails when the AI setup helper can't finish", () => {
     expect(line.founderEmail).toEqual({ sentAt: noCalendar.clock.now().toISOString(), link: false });
     for (let attempt = 0; attempt < 3; attempt += 1) await unlinked.api("/api/app/line/help", { device: "iphone" });
     const limitedNoLink = await unlinked.api("/api/app/line/help", { device: "iphone" });
-    expect(((await limitedNoLink.json()) as { error: string }).error).toBe("Otto has called you a few times today. Brock, our founder, emailed you to set up a quick call.");
+    expect(((await limitedNoLink.json()) as { error: string }).error).toBe("Otto has called you a few times today. Our team emailed you to set up a quick call.");
     await new Promise<void>((resolve) => server!.close(() => resolve()));
     server = null;
 

@@ -11,7 +11,7 @@ import { dialsBackToOtto } from "../src/application/forwarding-loop.js";
 type Call = { url: string; method: string; body: Record<string, unknown> | null; key: string | undefined };
 
 /** A fake Telnyx that sells numbers, creates assistants and routes numbers, recording every request. */
-function fakeTelnyx(options: { available?: Record<string, string[]>; orderStatuses?: string[]; failAssistantCreate?: boolean | undefined; failConnect?: boolean | undefined; carriers?: Record<string, { name: string; type: string }> | undefined; failTexmlApp?: "always" | "once" | "ignored" | undefined } = {}) {
+function fakeTelnyx(options: { available?: Record<string, string[]>; orderStatuses?: string[]; failAssistantCreate?: boolean | undefined; failConnect?: boolean | undefined; carriers?: Record<string, { name: string; type: string }> | undefined; failTexmlApp?: "always" | "once" | "ignored" | undefined; onAssistantCreate?: (() => Promise<void>) | undefined } = {}) {
   const calls: Call[] = [];
   const orders = [...(options.orderStatuses ?? ["pending", "success"])];
   const owned = new Map<string, { id: string; connection_id: string | null; screening?: string }>();
@@ -28,6 +28,7 @@ function fakeTelnyx(options: { available?: Record<string, string[]>; orderStatus
     if (url.endsWith("/ai/assistants/template-assistant") && method === "GET") return json({ data: { id: "template-assistant", model: "synthetic/model", voice_settings: { voice: "synthetic-voice" } } });
     if (url.endsWith("/ai/assistants") && method === "POST") {
       if (options.failAssistantCreate) return json({ errors: [{ detail: "down" }] }, 503);
+      await options.onAssistantCreate?.();
       assistants += 1;
       return json({ data: { id: `assistant-${assistants}` } });
     }
@@ -145,8 +146,8 @@ describe("owner one-tap go-live", () => {
   let server: Server | null = null;
   afterEach(async () => { if (server) await new Promise<void>((resolve) => server!.close(() => resolve())); server = null; });
 
-  async function shop(options: { live?: boolean; failAssistantCreate?: boolean | undefined; failConnect?: boolean | undefined; failTexmlApp?: "always" | "once" | "ignored" | undefined; env?: Record<string, string>; carriers?: Record<string, { name: string; type: string }> | undefined } = {}) {
-    const telnyx = fakeTelnyx({ available: { "941": ["+19415550123", "+19415550124"] }, failAssistantCreate: options.failAssistantCreate, failConnect: options.failConnect, failTexmlApp: options.failTexmlApp, carriers: options.carriers });
+  async function shop(options: { live?: boolean; failAssistantCreate?: boolean | undefined; failConnect?: boolean | undefined; failTexmlApp?: "always" | "once" | "ignored" | undefined; env?: Record<string, string>; carriers?: Record<string, { name: string; type: string }> | undefined; onAssistantCreate?: (() => Promise<void>) | undefined } = {}) {
+    const telnyx = fakeTelnyx({ available: { "941": ["+19415550123", "+19415550124"] }, failAssistantCreate: options.failAssistantCreate, failConnect: options.failConnect, failTexmlApp: options.failTexmlApp, carriers: options.carriers, onAssistantCreate: options.onAssistantCreate });
     const logs: Array<Record<string, unknown>> = [];
     const store = new InMemoryStore();
     await store.saveConfig(createDemoConfig());
@@ -227,6 +228,27 @@ describe("owner one-tap go-live", () => {
     // The owner sees a plain retry line, never Telnyx's own error text.
     const page = await (await fetch(`${baseUrl}/app`, { headers: { cookie } })).text();
     expect(page).not.toContain("Telnyx internal TeXML detail");
+  });
+
+  it("a 'Ring my phone first' tap while the line is turning on sticks (go-live never writes back its old copy)", async () => {
+    // The walk: right after paying, the owner tapped Ring my phone first while go-live was still buying the number;
+    // go-live then saved the settings it had read before, and the radio snapped back to every call.
+    let picked: Response | null = null;
+    let made: Awaited<ReturnType<typeof shop>> | null = null;
+    made = await shop({
+      onAssistantCreate: async () => {
+        const csrf = ((await (await fetch(`${made!.baseUrl}/api/app/dashboard`, { headers: { cookie: made!.cookie } })).json()) as { csrf: string }).csrf;
+        picked = await fetch(`${made!.baseUrl}/api/app/line/mode`, { method: "POST", headers: { cookie: made!.cookie, "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify({ mode: "overflow" }) });
+      },
+    });
+    const csrf = ((await (await fetch(`${made.baseUrl}/api/app/dashboard`, { headers: { cookie: made.cookie } })).json()) as { csrf: string }).csrf;
+    const live = await fetch(`${made.baseUrl}/api/app/line/go-live`, { method: "POST", headers: { cookie: made.cookie, "content-type": "application/json", "x-csrf-token": csrf }, body: "{}" });
+    expect(live.status).toBe(200);
+    expect(picked!.status).toBe(200);
+    const config = await made.store.getConfig(made.account.tenantId);
+    expect(config.operationMode).toBe("overflow");
+    expect(config.paused).toBe(false);
+    expect(((await live.json()) as { line: { mode: string } }).line.mode).toBe("overflow");
   });
 
   it("buys a local number, creates and routes the shop's assistant, and shows forwarding codes", async () => {
@@ -604,6 +626,57 @@ describe("owner one-tap go-live", () => {
         expect((await dashboard()).line.check.status).toBe("passed");
       });
 
+      describe("ring first is timed by our own call", () => {
+        async function ringFirstTest() {
+          const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } }, ringFirst: true });
+          await made.api("/api/app/line/business-number", { number: "9415550177" });
+          await made.api("/api/app/line/check");
+          const arrives = async (afterSec: number, id: string) => {
+            made.clock.at = new Date(made.clock.at.getTime() + afterSec * 1_000);
+            const init = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id, occurred_at: made.clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: "+15555550199", call_control_id: `v3:${id}`, assistant_id: "assistant-1" } } });
+            return fetch(`${made.baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, made.privateKey, made.clock.now()), body: init });
+          };
+          type Line = { check: { status: string; forwardedAfterSec: number | null }; business: { update: { clearFirst: string | null } | null; lastTest: { mode: string; rangSeconds: number | null } | null; mayForwardAll: boolean } };
+          const line = async () => ((await made.dashboard()) as unknown as { line: Line }).line;
+          return { ...made, arrives, line };
+        }
+
+        it("reached Otto in 2 seconds with ring first picked: every call is still forwarded, so the one clear code shows", async () => {
+          const made = await ringFirstTest();
+          expect((await made.arrives(2, "fast")).status).toBe(200);
+          const line = await made.line();
+          expect(line.check).toMatchObject({ status: "forwards_all", forwardedAfterSec: 2 });
+          expect(line.business).toMatchObject({ update: { clearFirst: "##002#" }, lastTest: null, mayForwardAll: true });
+          // Then they clear it, redial the ring-first code and test again: the phone rings 12 s first.
+          made.clock.at = new Date(made.clock.at.getTime() + 60_000);
+          await made.api("/api/app/line/check");
+          await made.arrives(12, "rang");
+          const after = await made.line();
+          expect(after.check.status).toBe("passed");
+          expect(after.business).toMatchObject({ update: null, lastTest: { mode: "ring-first", rangSeconds: 12 }, mayForwardAll: false });
+        });
+
+        it("nothing reaches Otto 45 seconds after our call went out: not forwarding", async () => {
+          const made = await ringFirstTest();
+          made.clock.at = new Date(made.clock.at.getTime() + 44_000);
+          expect((await made.line()).check.status).toBe("calling");
+          made.clock.at = new Date(made.clock.at.getTime() + 2_000);
+          expect((await made.line()).check.status).toBe("not_reached");
+        });
+
+        it("every call picked: a quick arrival is exactly right and passes", async () => {
+          const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } } });
+          await made.api("/api/app/line/business-number", { number: "9415550177" });
+          await made.api("/api/app/line/check");
+          made.clock.at = new Date(made.clock.at.getTime() + 2_000);
+          const init = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id: "always-fast", occurred_at: made.clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: "+15555550199", call_control_id: "v3:always-fast", assistant_id: "assistant-1" } } });
+          await fetch(`${made.baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, made.privateKey, made.clock.now()), body: init });
+          const line = (await made.dashboard()).line as unknown as { check: { status: string }; business: { lastTest: { mode: string; rangSeconds: number | null } | null } };
+          expect(line.check.status).toBe("passed");
+          expect(line.business.lastTest).toMatchObject({ mode: "every-call", rangSeconds: null });
+        });
+      });
+
       it("a pick-up that beats our own save of the test is retried by Telnyx, not dropped", async () => {
         const { baseUrl, privateKey, clock, account, dashboard } = await started();
         const ahead = new Date(clock.now().getTime() + 60_000).toISOString();
@@ -700,7 +773,9 @@ describe("owner one-tap go-live", () => {
     });
 
     describe("when the phone answers the test itself", () => {
-      const forwarded = async (made: Awaited<ReturnType<typeof liveShop>>, id: string) => {
+      // Our test call reaching Otto. By default after a 10-second ring, as ring first does when it works.
+      const forwarded = async (made: Awaited<ReturnType<typeof liveShop>>, id: string, rangFor = 10) => {
+        made.clock.at = new Date(made.clock.at.getTime() + rangFor * 1_000);
         const init = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id, occurred_at: made.clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: "+15555550199", call_control_id: `v3:${id}`, assistant_id: "assistant-1" } } });
         return fetch(`${made.baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, made.privateKey, made.clock.now()), body: init });
       };
@@ -1004,6 +1079,7 @@ describe("owner one-tap go-live", () => {
           expect(await testedFor(made)).toBeNull();
           // With our automatic test open, the same caller ID is the test coming through (some carriers show it).
           await made.api("/api/app/line/check");
+          later(made, 10);
           expect(await made.arrives("check-shows-business", "+19415550199")).toBe("forwarding_check");
           expect((await line(made)).confirmedAt).toBeTruthy();
           expect(await testedFor(made)).toMatchObject({ mode: "ring-first" });

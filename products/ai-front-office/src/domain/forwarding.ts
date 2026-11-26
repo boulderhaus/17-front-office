@@ -93,13 +93,37 @@ export function forwardingChoice(mode: ForwardingMode): ForwardingChoice {
 /**
  * What the owner was set up for when a test last passed: their choice and the code on screen then. Also written,
  * as every call, when the owner leaves every call before any test proved it (they may have dialed forward-all).
- * The owner's choice is the source of truth; we never work out which code is on from how long a call took (a
- * Decline forwards as fast as forward-all, and a 15 s timer can't be told from a 25 s one).
+ * A ring-first test is also timed (ringFirstVerdict): a call that reached Otto with no ring means every call is
+ * still forwarded. The owner is told never to answer or decline the test, so a fast arrival is never a Decline.
  */
 export interface TestedFor {
   mode: ForwardingChoice;
   code: string | null;
   at: string;
+  /** Ring first, tested by our own call: about how long the owner's phone rang before Otto answered. */
+  rangSeconds?: number | null;
+}
+
+/**
+ * Ring-first test, timed by our own check call: from placing the call to the forwarded call reaching Otto.
+ * Forward-all (or a phone that rejects the call at once) gets there in about 2-4 s with no ring; the shortest
+ * carrier no-answer timer is 5 s on top of call setup, so a ring-first that works takes about 8 s or more.
+ * Under this many ms the phone never rang: every call is still being forwarded.
+ */
+export const RING_FIRST_AT_ONCE_MS = 6_000;
+/** Nothing reached Otto this long after our test call went out (Verizon's ~30 s ring included): it isn't forwarding. */
+export const NOT_FORWARDING_AFTER_MS = 45_000;
+
+export type RingFirstVerdict = "at_once" | "rang";
+
+/** What a ring-first test's timing proves: forwarded at once (forward-all still on) or rang first. */
+export function ringFirstVerdict(afterMs: number): RingFirstVerdict {
+  return Number.isFinite(afterMs) && afterMs >= RING_FIRST_AT_ONCE_MS ? "rang" : "at_once";
+}
+
+/** About how long the phone rang, in whole seconds, for "it rang about N seconds". */
+export function rangSeconds(afterMs: number): number {
+  return Math.max(1, Math.round(afterMs / 1_000));
 }
 
 export function parseTestedFor(value: string | null | undefined): TestedFor | null {
@@ -107,7 +131,7 @@ export function parseTestedFor(value: string | null | undefined): TestedFor | nu
   try {
     const parsed = JSON.parse(value) as Partial<TestedFor> | null;
     if (!parsed || (parsed.mode !== "every-call" && parsed.mode !== "ring-first")) return null;
-    return { mode: parsed.mode, code: typeof parsed.code === "string" ? parsed.code : null, at: typeof parsed.at === "string" ? parsed.at : "" };
+    return { mode: parsed.mode, code: typeof parsed.code === "string" ? parsed.code : null, at: typeof parsed.at === "string" ? parsed.at : "", rangSeconds: typeof parsed.rangSeconds === "number" && Number.isFinite(parsed.rangSeconds) ? parsed.rangSeconds : null };
   } catch {
     return null;
   }

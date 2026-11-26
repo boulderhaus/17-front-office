@@ -109,7 +109,7 @@ describe("what the owner was set up for when a test last passed", () => {
     expect(forwardingChoice("always")).toBe("every-call");
     expect(forwardingChoice("overflow")).toBe("ring-first");
     expect(forwardingChoice("after_hours")).toBe("ring-first");
-    expect(parseTestedFor(JSON.stringify(tested("every-call", all.on)))).toEqual(tested("every-call", all.on));
+    expect(parseTestedFor(JSON.stringify(tested("every-call", all.on)))).toEqual({ ...tested("every-call", all.on), rangSeconds: null });
     expect(parseTestedFor(JSON.stringify({ mode: "office", code: null }))).toBeNull();
     expect(parseTestedFor("not json")).toBeNull();
     expect(parseTestedFor(null)).toBeNull();
@@ -418,5 +418,20 @@ describe("the pause warning in Settings", () => {
     expect(pauseHint({ active: true, paused: false, mayForwardAll: true, off: "##002#" })).toBeUndefined();
     expect(pauseHint({ active: true, paused: true, mayForwardAll: false, off: "##002#" })).toBeUndefined();
     expect(pauseHint({ active: false, paused: true, mayForwardAll: true, off: "##002#" })).toBe("Your line turns on after it’s approved. Until then it stays paused.");
+  });
+});
+
+describe("timing a ring-first test", () => {
+  it("under about 6 seconds never rang (every call still forwarded); about 8 or more rang first", async () => {
+    const { ringFirstVerdict, rangSeconds, RING_FIRST_AT_ONCE_MS, NOT_FORWARDING_AFTER_MS } = await import("../src/domain/forwarding.js");
+    expect(ringFirstVerdict(1_500)).toBe("at_once");
+    expect(ringFirstVerdict(3_900)).toBe("at_once");
+    expect(ringFirstVerdict(RING_FIRST_AT_ONCE_MS - 1)).toBe("at_once");
+    expect(ringFirstVerdict(RING_FIRST_AT_ONCE_MS)).toBe("rang");
+    expect(ringFirstVerdict(8_000)).toBe("rang");
+    expect(ringFirstVerdict(Number.NaN)).toBe("at_once");
+    expect(rangSeconds(12_400)).toBe(12);
+    expect(rangSeconds(200)).toBe(1);
+    expect(NOT_FORWARDING_AFTER_MS).toBe(45_000);
   });
 });
