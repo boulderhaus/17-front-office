@@ -149,8 +149,8 @@ describe("system prompt budget", () => {
       'Never say "goodbye" without immediately invoking',
       'If the caller goes silent after your question, repeat it once in a few words. If still silent, ask once, "Are you still there?"',
       // Hearing and urgency (walk 3)
-      "Missed or half heard an answer? Say so and ask that one thing again, once. Never guess.",
-      "Never ask how urgent or serious it is; judge it yourself.",
+      "Missed an answer? Say so and re-ask that one thing once. Never guess.",
+      "Never ask how urgent or serious it is; judge it from their words and call triage_call.",
       "Any tool may return wrap_up=true once the call has run about five minutes",
       'say exactly "I\'ve got everything I need; the owner will call you back."',
     ];

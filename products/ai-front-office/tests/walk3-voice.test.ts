@@ -21,7 +21,7 @@ describe("Otto works out urgency itself", () => {
 
   it("never tells Otto to ask the caller how urgent or serious it is", () => {
     expect(prompt).not.toMatch(/and how urgent it is/);
-    expect(prompt).toContain("Never ask how urgent or serious it is; judge it yourself.");
+    expect(prompt).toContain("Never ask how urgent or serious it is; judge it from their words and call triage_call.");
     expect(prompt).toContain('Ask one plain fact only if it matters ("Is water still coming in?").');
   });
 
@@ -42,7 +42,7 @@ describe("Otto never leaves dead air and re-asks what it missed", () => {
   });
 
   it("re-asks the one thing it missed, once, instead of guessing or going quiet", () => {
-    expect(prompt).toContain("Missed or half heard an answer? Say so and ask that one thing again, once. Never guess.");
+    expect(prompt).toContain("Missed an answer? Say so and re-ask that one thing once. Never guess.");
     expect(prompt).toContain("If the caller goes silent after your question, repeat it once in a few words.");
     expect(prompt.indexOf("repeat it once in a few words")).toBeLessThan(prompt.indexOf('"Are you still there?"'));
   });
