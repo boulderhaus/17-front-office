@@ -65,6 +65,7 @@ import { ensureReviewAccount, isLinkPreview, REVIEW_NO_LINE, ReviewAccountError,
 import { renderReviewAccount } from "../admin/review-account.js";
 import { dialsBackToOtto } from "../application/forwarding-loop.js";
 import { carrierFamily, forwardingChoice, forwardingOffInstruction, forwardsBackToOtto, parseTestedFor, everyCallVerdict, rangSeconds, ringFirstVerdict, SETUP_CALL_STALE_MS, type CarrierFamily, type CarrierInfo, forwardingPlan, type ForwardingMode, type TestedFor } from "../domain/forwarding.js";
+import { forwardingSteps, forwardToDigits, settingsStepsText } from "../domain/forwarding-steps.js";
 import { FORWARDING_CHECK_WINDOW_MS, forwardingCheckStatus, forwardingUpdate, type ForwardingCheckRecord, type ForwardingState } from "./owner-api-model.js";
 import {
   clearGrace,
@@ -758,6 +759,13 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       response.statusCode = 200;
       response.setHeader("content-type", "text/javascript; charset=utf-8");
       response.setHeader("cache-control", "public, max-age=3600");
+      response.end(asset);
+      return;
+    }
+    if (method === "GET" && url.pathname === "/assets/copy-number.js") {
+      const asset = await readFile(resolve(process.cwd(), "public/assets/copy-number.js"));
+      response.setHeader("content-type", "text/javascript; charset=utf-8");
+      response.setHeader("cache-control", "public, max-age=86400");
       response.end(asset);
       return;
     }
@@ -1503,9 +1511,16 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (!dependencies.env.RESEND_API_KEY || !dependencies.env.RESEND_FROM_EMAIL) throw new HttpError(503, "Email isn’t switched on yet. Scan the code instead.");
       const link = await newHandoffLink(account.tenantId, EMAILED_HANDOFF_TTL_MS);
       const now = dependencies.clock.now().toISOString();
+      // The same steps the computer shows: every call on an iPhone (GSM family) is the Settings switch, with the
+      // link for the rest (the code, for Verizon-family phones and odd carriers).
+      const { plan, lineNumber } = await handoffPlan(account.tenantId);
+      const iphone = plan && lineNumber && forwardingSteps({ device: "desktop", family: plan.family, everyCall: plan.forwardsAll }).on === "settings";
+      const body = iphone
+        ? formatEmailBody("Your Call Otto forwarding steps", `${settingsStepsText(lineNumber)}\n\nNot an iPhone, or no Call Forwarding? Open this on the phone your customers call:\n\n${link}\n\nThe link works for 24 hours.`)
+        : formatEmailBody("Your Call Otto forwarding code", `Open this on the phone your customers call. It shows your code and how to dial it:\n\n${link}\n\nThe link works for 24 hours.`);
       const queued = await dependencies.store.enqueueNotification({
         id: randomUUID(), tenantId: account.tenantId, callId: null, channel: "email", destinationRef: `email:${account.email}`,
-        body: formatEmailBody("Your Call Otto forwarding code", `Open this on the phone your customers call. It shows your code and how to dial it:\n\n${link}\n\nThe link works for 24 hours.`),
+        body,
         priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
         idempotencyKey: `handoff-email:${account.tenantId}:${now}`, providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
       });
@@ -1879,24 +1894,33 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       ? (isShortHandoffId(short) ? readShortHandoff(await dependencies.store.getIntegrationSecret(PLATFORM_TENANT_ID, HANDOFF_PROVIDER, short), dependencies.clock.now()) : null)
       : readDialHandoffToken(dependencies.env.SESSION_SIGNING_KEY!, decodeURIComponent(url.pathname.slice("/dial/".length)), dependencies.clock.now());
     if (!handoff) return sendHtml(response, 410, renderErrorPage({ status: 410, title: "This code link expired", message: "Open the setup page on your computer for a new one.", back: { href: "/login", label: "Sign in instead" } }));
-    const [config, state, lineNumber] = await Promise.all([
-      dependencies.store.getConfig(handoff.tenantId),
-      readForwarding(handoff.tenantId),
-      dependencies.store.getIntegrationSecret(handoff.tenantId, "telnyx", "inbound_number"),
-    ]);
-    const plan = lineNumber && state.businessNumber && state.carrier && state.carrier.family !== "unknown" ? forwardingPlan(state.carrier.family, lineNumber, config.operationMode, config.answerAfterRings) : null;
-    if (!plan || !state.businessNumber) return sendHtml(response, 409, renderErrorPage({ status: 409, title: "No code yet", message: "Finish the forwarding step on your computer first, then scan again.", back: { href: "/login", label: "Sign in instead" } }));
+    const { config, state, lineNumber, plan } = await handoffPlan(handoff.tenantId);
+    if (!plan || !state.businessNumber || !lineNumber) return sendHtml(response, 409, renderErrorPage({ status: 409, title: "No code yet", message: "Finish the forwarding step on your computer first, then scan again.", back: { href: "/login", label: "Sign in instead" } }));
     const agent = String(request.headers["user-agent"] ?? "");
     const device = /iPhone|iPad|iPod/i.test(agent) ? "iphone" : /Android/i.test(agent) && !/Firefox/i.test(agent) ? "android" : "other";
     // The same steps the computer shows, one code per screen: when our last test found every call still forwarded,
     // the clear code first, then (Next) the shop's code. An office line does it in the phone company's website.
+    // An iPhone on a GSM-family carrier uses its Settings switch for every call (and to clear it), code behind a link.
     const update = forwardingUpdate(plan, config.operationMode, state.testedFor ?? null);
     const forwardsAll = forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "forwards_all";
-    const clearFirst = forwardsAll && plan.off && url.searchParams.get("step") !== "code" ? { code: plan.off, dialLink: plan.offDialLink } : null;
+    const steps = forwardingSteps({ device: device === "other" ? "phone" : device, family: plan.family, everyCall: plan.forwardsAll, leavingEveryCall: Boolean(update?.leavingEveryCall) });
+    const clearFirst = (forwardsAll || steps.clearFirst) && plan.off && url.searchParams.get("step") !== "code" ? { code: plan.off, dialLink: plan.offDialLink } : null;
+    const settings = (clearFirst ? steps.clear : steps.on) === "settings" ? { ottoNumber: prettyPhone(lineNumber) ?? lineNumber, digits: forwardToDigits(lineNumber) } : null;
     const what = (forwardsAll || update?.leavingEveryCall) && !plan.on && plan.family === "office"
       ? `In your phone company’s website or app, turn off forward all calls. Then forward calls you don’t answer to ${prettyPhone(lineNumber) ?? lineNumber}.`
       : plan.what;
-    return sendHtml(response, 200, renderDialHandoff({ businessNumber: prettyPhone(state.businessNumber) ?? state.businessNumber, code: plan.on, what, dialLink: plan.dialLink, device, family: plan.family, clearFirst, nextHref: clearFirst ? `${url.pathname}?step=code` : null }));
+    return sendHtml(response, 200, renderDialHandoff({ businessNumber: prettyPhone(state.businessNumber) ?? state.businessNumber, code: plan.on, what, dialLink: plan.dialLink, device, family: plan.family, clearFirst, nextHref: clearFirst ? `${url.pathname}?step=code` : null, settings }));
+  }
+
+  /** This shop's forwarding plan for the phone page and the emailed steps (null until the carrier is known). */
+  async function handoffPlan(tenantId: string) {
+    const [config, state, lineNumber] = await Promise.all([
+      dependencies.store.getConfig(tenantId),
+      readForwarding(tenantId),
+      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
+    ]);
+    const plan = lineNumber && state.businessNumber && state.carrier && state.carrier.family !== "unknown" ? forwardingPlan(state.carrier.family, lineNumber, config.operationMode, config.answerAfterRings) : null;
+    return { config, state, lineNumber, plan };
   }
 
   /** Otto's path for one call, from everything the server recorded about it. The caller checks the tenant. */

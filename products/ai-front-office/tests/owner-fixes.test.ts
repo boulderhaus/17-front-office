@@ -132,16 +132,60 @@ describe("owner app fixes (walk 70039f169)", () => {
     const sent = await post("/api/app/line/handoff/email");
     expect(sent.status).toBe(200);
     expect(await sent.json()).toEqual({ sentTo: "qr-mail@synthetic.example" });
-    const email = [...store.notifications.values()].find((item) => item.destinationRef === "email:qr-mail@synthetic.example" && item.body.includes("forwarding code"));
+    const email = [...store.notifications.values()].find((item) => item.destinationRef === "email:qr-mail@synthetic.example" && item.body.includes("forwarding steps"));
+    // Every call on a GSM-family number: the iPhone Settings switch steps, the same words as the screens, Otto's number as digits.
+    expect(email?.body).toContain("On an iPhone, Otto's number is 3125550147:");
+    expect(email?.body).toContain("1. Open Settings › Apps › Phone.");
+    expect(email?.body).toContain("3. Tap Forward To and paste the number.");
+    expect(email?.body).not.toContain("**21");
     const link = /http:\/\/127\.0\.0\.1:8787(\/d\/[A-Za-z0-9]{8})/.exec(email?.body ?? "")?.[1];
     expect(link).toBeTruthy();
     at = new Date(now.getTime() + 3 * 60 * 60_000);
     const page = await (await fetch(`${baseUrl}${link}`, { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148" } })).text();
-    expect(page).toContain("**21*13125550147#");
-    // iPhone: copy and paste in Phone (never a tel: link), and what the carrier shows before they dial.
-    expect(page).toContain("tap Paste, then Call");
-    expect(page).toContain("gray box that says Succeeded. Tap Dismiss");
+    // iPhone, every call: the Settings switch is the way (no gray box), Otto's number with a Copy button.
+    expect(page).toContain("Forward calls on (941) 555-0180");
+    expect(page).toContain('<div class="num">(312) 555-0147</div>');
+    expect(page).toContain('data-copy="3125550147"');
+    expect(page).toContain("<li>Open Settings › Apps › Phone.</li><li>Tap Call Forwarding and turn it on.</li><li>Tap Forward To and paste the number.</li>");
+    expect(page).toContain('<script src="/assets/copy-number.js" defer></script>');
+    // The code flow stays, unchanged, behind the quiet link (and only there does the gray box come up).
+    const [switchPart, fallback] = page.split("<details><summary>Don’t see Call Forwarding?</summary>");
+    expect(switchPart).not.toContain("gray box");
+    expect(switchPart).not.toContain("**21");
+    expect(fallback).toContain("**21*13125550147#");
+    expect(fallback).toContain("tap Paste, then Call");
+    expect(fallback).toContain("gray box that says Succeeded. Tap Dismiss");
     expect(page).not.toContain("tel:");
+    expect((await fetch(`${baseUrl}/assets/copy-number.js`)).status).toBe(200);
+    // Android keeps today's code flow, no switch.
+    const android = await (await fetch(`${baseUrl}${link}`, { headers: { "user-agent": "Mozilla/5.0 (Linux; Android 14) Chrome/130 Mobile" } })).text();
+    expect(android).toContain("Dial this on (941) 555-0180");
+    expect(android).not.toContain("Call Forwarding");
+    expect(android).toContain("Tap to dial");
+  });
+
+  it("Email me these steps for a Verizon number, or ring first, sends the code page as before", async () => {
+    const { account, post } = await signUp("qr-mail-vz@synthetic.example", "(941) 555-0149");
+    await store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", "+13125550149");
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "business_number", "+19415550182");
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "Verizon Wireless", lineType: "mobile", family: "verizon", chosen: false }));
+    expect((await post("/api/app/line/handoff/email")).status).toBe(200);
+    const email = [...store.notifications.values()].find((item) => item.destinationRef === "email:qr-mail-vz@synthetic.example");
+    expect(email?.body).toContain("Your Call Otto forwarding code");
+    expect(email?.body).not.toContain("Call Forwarding");
+    const link = /(\/d\/[A-Za-z0-9]{8})/.exec(email?.body ?? "")?.[1];
+    const page = await (await fetch(`${baseUrl}${link}`, { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148" } })).text();
+    expect(page).toContain("Dial this on (941) 555-0182");
+    expect(page).toContain("*723125550149");
+    expect(page).not.toContain("Call Forwarding");
+    // Ring first on a GSM iPhone: still the code, with the heads-up about the gray box.
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "T-Mobile USA", lineType: "mobile", family: "gsm", chosen: false }));
+    await store.saveConfig({ ...await store.getConfig(account.tenantId), operationMode: "overflow" });
+    const ring = await (await fetch(`${baseUrl}${link}`, { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148" } })).text();
+    expect(ring).toContain("Dial this on (941) 555-0182");
+    expect(ring).toContain("**004*13125550149");
+    expect(ring).toContain("gray box that says Succeeded. Tap Dismiss");
+    expect(ring).not.toContain("data-copy");
   });
 
   it("the QR page shows one code at a time: the clear code only after a test found every call still forwarded, then Next", async () => {
@@ -170,6 +214,38 @@ describe("owner app fixes (walk 70039f169)", () => {
     const next = await (await fetch(`${baseUrl}${path}?step=code`, android)).text();
     expect(next).toContain("**004*13125550146");
     expect(next).not.toContain("##002#");
+    // iPhone: clear it with the Settings switch, the clear code behind the quiet link, then Next to the ring-first code.
+    const iphone = { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148" } };
+    const off = await (await fetch(`${baseUrl}${path}`, iphone)).text();
+    expect(off).toContain("Clear the old forwarding on (941) 555-0179");
+    expect(off).toContain("<p>Open Settings › Apps › Phone. Tap Call Forwarding and turn it off.</p>");
+    expect(off.split("<details>")[0]).not.toContain("##002#");
+    expect(off.split("<details>")[1]).toContain('<div class="code">##002#</div>');
+    expect(off.match(/Next: your code/g)).toHaveLength(1);
+    const ringCode = await (await fetch(`${baseUrl}${path}?step=code`, iphone)).text();
+    expect(ringCode).toContain("Dial this on (941) 555-0179");
+    expect(ringCode).toContain("**004*13125550146");
+    expect(ringCode).toContain("gray box that says Succeeded. Tap Dismiss");
+    expect(ringCode).not.toContain("Call Forwarding");
+  });
+
+  it("an iPhone leaving every call for ring first turns the Settings switch off first, before any test", async () => {
+    const { account, post } = await signUp("qr-leave@synthetic.example", "(941) 555-0150");
+    await store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", "+13125550150");
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "business_number", "+19415550183");
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "T-Mobile USA", lineType: "mobile", family: "gsm", chosen: false }));
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "confirmed_at", now.toISOString());
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "tested_for", JSON.stringify({ mode: "every-call", code: "**21*13125550150#", at: now.toISOString() }));
+    await store.saveConfig({ ...await store.getConfig(account.tenantId), operationMode: "overflow" });
+    const { url } = await (await post("/api/app/line/handoff")).json() as { url: string };
+    const path = new URL(url).pathname;
+    const iphone = await (await fetch(`${baseUrl}${path}`, { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148" } })).text();
+    expect(iphone).toContain("Open Settings › Apps › Phone. Tap Call Forwarding and turn it off.");
+    expect(iphone).toContain(`href="${path}?step=code"`);
+    // Android is unchanged: just the ring-first code.
+    const android = await (await fetch(`${baseUrl}${path}`, { headers: { "user-agent": "Mozilla/5.0 (Linux; Android 14) Chrome/130 Mobile" } })).text();
+    expect(android).toContain("**004*13125550150");
+    expect(android).not.toContain("##002#");
   });
 
   it("Cancel ends a running test, and a test our call couldn't place says why", async () => {

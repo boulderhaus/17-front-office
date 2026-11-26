@@ -341,11 +341,11 @@ function ForwardingRow({ dashboard }: { dashboard: ApiDashboard }) {
       <span className="flex min-w-0 items-center gap-2.5">
         <PhoneForwarded className="size-5 shrink-0" />
         <span className="grid min-w-0">
-          <strong className="text-[15px] font-semibold">{update ? "Dial your new code" : "Forwarding isn’t on"}</strong>
-          <span className="text-sm">{update ? "Your change is on once you dial it." : "Otto won’t get calls until it is."}</span>
+          <strong className="text-[15px] font-semibold">{update ? "Finish your change" : "Forwarding isn’t on"}</strong>
+          <span className="text-sm">{update ? "Your change is on once you finish setup." : "Otto won’t get calls until it is."}</span>
         </span>
       </span>
-      <span className="flex shrink-0 items-center text-[15px] font-semibold">{update ? "Show code" : "Finish"}<ChevronRight className="size-4" /></span>
+      <span className="flex shrink-0 items-center text-[15px] font-semibold">{update ? "Show how" : "Finish"}<ChevronRight className="size-4" /></span>
     </Link>
   )
 }

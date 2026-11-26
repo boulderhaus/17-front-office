@@ -9,7 +9,8 @@ import { createDemoConfig } from "../src/domain/config.js";
 import { carrierFamily, forwardingChoice, forwardingOffInstruction, forwardingPlan, forwardsBackToOtto, isForwardAllCode, mayForwardAll, parseTestedFor, RING_CHOICES, ringChoicesWith, ringSeconds, type TestedFor } from "../src/domain/forwarding.js";
 import { forwardingCheckStatus, forwardingUpdate } from "../src/http/owner-api-model.js";
 import { NotificationHeldError } from "../src/ports.js";
-import { afterDialLine, codeChunks, copyText, dialHref, dialPlatform, pasteLine, RING_CHOICES as WEB_RING_CHOICES, ringChoicesWith as webRingChoicesWith, ringSeconds as webRingSeconds, spokenCode, VERIZON_RING_LINE } from "../web/src/lib/dial.js";
+import { afterDialLine, codeChunks, copyText, dialHref, dialPlatform, forwardingSteps as webForwardingSteps, pasteLine, RING_CHOICES as WEB_RING_CHOICES, ringChoicesWith as webRingChoicesWith, ringSeconds as webRingSeconds, spokenCode, VERIZON_RING_LINE } from "../web/src/lib/dial.js";
+import { forwardingSteps, forwardToDigits, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, settingsStepsText, type SetupDevice } from "../src/domain/forwarding-steps.js";
 import { pauseHint } from "../web/src/lib/pause-hint.js";
 import { loginReturningHere } from "../web/src/lib/login-next.js";
 import { safeNext } from "../src/http/owner-sign-in.js";
@@ -405,5 +406,56 @@ describe("timing a ring-first test", () => {
     expect(everyCallVerdict(9_000)).toBe("at_once");
     expect(everyCallVerdict(EVERY_CALL_RANG_MS)).toBe("rang");
     expect(everyCallVerdict(30_000)).toBe("rang");
+  });
+});
+
+describe("iPhone Settings switch or carrier code (forwardingSteps)", () => {
+  const steps = (device: SetupDevice, family: string | null, everyCall: boolean, leavingEveryCall = false) => forwardingSteps({ device, family, everyCall, leavingEveryCall });
+
+  it("every call on an iPhone with a GSM-family or unknown carrier is the Settings switch, on and off", () => {
+    expect(steps("iphone", "gsm", true)).toEqual({ on: "settings", clear: "settings", off: "settings", clearFirst: false });
+    expect(steps("iphone", "unknown", true)).toEqual({ on: "settings", clear: "settings", off: "settings", clearFirst: false });
+    expect(steps("iphone", null, true)).toEqual({ on: "settings", clear: "settings", off: "settings", clearFirst: false });
+  });
+
+  it("ring first on that iPhone stays a code (no switch for it), but clearing every call is the switch", () => {
+    expect(steps("iphone", "gsm", false)).toEqual({ on: "code", clear: "settings", off: "code", clearFirst: false });
+    expect(steps("iphone", "unknown", false)).toEqual({ on: "code", clear: "settings", off: "code", clearFirst: false });
+    // Leaving every call: switch it off first, before any test.
+    expect(steps("iphone", "gsm", false, true)).toEqual({ on: "code", clear: "settings", off: "code", clearFirst: true });
+  });
+
+  it("Verizon family (no switch on those iPhones), office lines and Android keep today's codes in both modes", () => {
+    for (const [device, family] of [["iphone", "verizon"], ["iphone", "office"], ["android", "gsm"], ["android", "verizon"], ["android", "unknown"], ["phone", "gsm"]] as const) {
+      for (const everyCall of [true, false]) expect(steps(device, family, everyCall, true)).toEqual({ on: "code", clear: "code", off: "code", clearFirst: false });
+    }
+  });
+
+  it("a computer shows the iPhone switch steps for every call on GSM family (the owner then picks up the phone)", () => {
+    expect(steps("desktop", "gsm", true)).toEqual({ on: "settings", clear: "settings", off: "settings", clearFirst: false });
+    expect(steps("desktop", "gsm", false)).toEqual({ on: "code", clear: "settings", off: "code", clearFirst: false });
+    expect(steps("desktop", "verizon", true)).toEqual({ on: "code", clear: "code", off: "code", clearFirst: false });
+  });
+
+  it("the owner app uses the very same decision and words", () => {
+    expect(webForwardingSteps).toBe(forwardingSteps);
+  });
+
+  it("copies Otto's number as the 10 digits Forward To takes, and the emailed steps match the screens", () => {
+    expect(forwardToDigits("+13125550144")).toBe("3125550144");
+    expect(forwardToDigits("(312) 555-0144")).toBe("3125550144");
+    expect(settingsStepsText("+13125550144")).toBe([
+      "On an iPhone, Otto's number is 3125550144:",
+      "1. Open Settings › Apps › Phone.",
+      "2. Tap Call Forwarding and turn it on.",
+      "3. Tap Forward To and paste the number.",
+      "Older iPhones: Settings › Phone.",
+    ].join("\n"));
+    // The switch path never mentions the gray box: there is none.
+    expect([...SETTINGS_ON_STEPS, SETTINGS_OFF_LINE].join(" ")).not.toMatch(/gray|Dismiss/i);
+  });
+
+  it("keeps the gray-box heads-up for codes dialed on an iPhone (ring first, and the fallback)", () => {
+    expect(afterDialLine("gsm", "iphone")).toBe("Your carrier shows a gray box that says Succeeded. Tap Dismiss and come back.");
   });
 });

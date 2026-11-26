@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
-import { afterDialLine, codeChunks, copyText, dialHref, dialPlatform, pasteLine, spokenCode, VERIZON_RING_LINE } from "@/lib/dial"
+import { afterDialLine, codeChunks, copyText, dialHref, dialPlatform, forwardingSteps, forwardToDigits, NO_SWITCH_LINK, NO_SWITCH_LINK_DESKTOP, OLDER_IPHONE_LINE, pasteLine, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, spokenCode, VERIZON_RING_LINE } from "@/lib/dial"
 import { formatPhone } from "@/lib/format"
 import { checkStatus } from "@/lib/line-status"
 import { useMode } from "@/lib/mode"
@@ -47,6 +47,8 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
   const [cleared, setCleared] = useState<string | null>(null)
   // A choice picked on this visit: step 1 shows done (so does a code copied or a test run).
   const [picked, setPicked] = useState(false)
+  // iPhone: the owner opened "Don't see Call Forwarding?" and wants the carrier code instead of the Settings switch.
+  const [codeWay, setCodeWay] = useState(false)
   const codeRef = useRef<HTMLDivElement>(null)
   const testRef = useRef<HTMLButtonElement>(null)
   const checking = line.check.status === "calling"
@@ -105,12 +107,23 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
   // Proven for today's choice: nothing left to dial or test.
   const current = confirmed && !business.update
   const family = business.carrier?.family ?? null
-  // The clear code until it's dialed, then the shop's own code again. Never both on one screen.
-  const clearing = forwardsAll && Boolean(plan?.off) && cleared !== plan?.off
+  // Settings switch or code, for this device, carrier and choice (one tested decision: forwardingSteps).
+  const steps = plan ? forwardingSteps({ device: platform, family: plan.family, everyCall: plan.forwardsAll, leavingEveryCall: Boolean(business.update?.leavingEveryCall) }) : null
+  const ottoDigits = line.number ? forwardToDigits(line.number) : null
+  // The clear code (or switch) until it's done, then the shop's own code again. Never both on one screen.
+  const clearing = (forwardsAll || Boolean(steps?.clearFirst)) && Boolean(plan?.off) && cleared !== plan?.off
   const dialCode = clearing ? plan!.off! : plan?.on ?? null
   const dialLink = clearing ? plan!.offDialLink : plan?.dialLink ?? null
+  // This step can be the iPhone's Call Forwarding switch; the code stays behind "Don't see Call Forwarding?".
+  const hasSwitch = Boolean(ottoDigits) && (clearing ? steps?.clear : steps?.on) === "settings"
+  const viaSettings = hasSwitch && !codeWay
+  const onViaSettings = Boolean(ottoDigits) && steps?.on === "settings" && !codeWay
+  const offViaSettings = steps?.off === "settings" && !codeWay
+  const noSwitchLink = platform === "desktop" ? NO_SWITCH_LINK_DESKTOP : NO_SWITCH_LINK
   // A copy on a computer isn't a dial (the code still has to go into the phone), so it never checks off step 2.
-  const dialed = Boolean(dialCode) && copied === dialCode && platform !== "desktop"
+  const dialed = viaSettings
+    ? !clearing && copied === ottoDigits && platform !== "desktop"
+    : Boolean(dialCode) && copied === dialCode && platform !== "desktop"
 
   // Back on this page after dialing in the Phone app: the next step is the test, so bring it into view.
   useEffect(() => {
@@ -214,20 +227,25 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
                   {ringFirst && !isAndroid && family !== "office" && <IphoneSettings />}
                 </Step>
 
-                <Step n={2} done={dialed && !clearing} title={<>{clearing ? "Clear the old forwarding on " : plan.on ? "Dial this on " : "Set it up for "}<span className="tabular whitespace-nowrap">{formatPhone(business.number!)}</span> · {change}</>}>
+                <Step n={2} done={dialed && !clearing} title={<>{clearing ? "Clear the old forwarding on " : viaSettings ? "Forward calls on " : plan.on ? "Dial this on " : "Set it up for "}<span className="tabular whitespace-nowrap">{formatPhone(business.number!)}</span> · {change}</>}>
                   {forwardsAll && (
                     <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">
                       <strong className="font-semibold">Your phone never rang.</strong> Otto answered {line.check.forwardedAfterSec != null ? `in ${Math.max(1, line.check.forwardedAfterSec)} seconds` : "right away"}, so every call is still being forwarded.{" "}
-                      {plan.off ? (clearing ? "Dial this code to clear it." : "Now dial your code again.") : "Turn off forward all calls in your phone company’s website."}
+                      {plan.off ? (clearing ? (viaSettings ? "Turn off Call Forwarding to clear it." : "Dial this code to clear it.") : "Now dial your code again.") : "Turn off forward all calls in your phone company’s website."}
                       {!isAndroid && family !== "office" ? <span className="mt-1.5 block">Declined the test, or your iPhone silences unknown callers? Fix that and test again instead.</span> : null}
                     </p>
                   )}
-                  {dialCode
-                    ? <DialCode key={dialCode} code={dialCode} dialLink={dialLink} family={family} codeRef={codeRef} copied={copied === dialCode} onCopied={() => setCopied(dialCode)} />
-                    : <p className="text-sm">{what}</p>}
+                  {viaSettings && ottoDigits
+                    ? (clearing ? <SwitchOff before={!forwardsAll} /> : <SettingsSwitch number={line.number!} digits={ottoDigits} codeRef={codeRef} copied={copied === ottoDigits} onCopied={() => setCopied(ottoDigits)} />)
+                    : dialCode
+                      ? <DialCode key={dialCode} code={dialCode} dialLink={dialLink} family={family} codeRef={codeRef} copied={copied === dialCode} onCopied={() => setCopied(dialCode)} />
+                      : <p className="text-sm">{what}</p>}
                   {/* Always there while clearing: the code may be dialed from the QR page, typed by hand, or after a reload. */}
                   {clearing && (
-                    <Button type="button" size="tap" variant="outline" className={cn(fullButton, outlineButton)} onClick={() => setCleared(dialCode)}>I dialed it. Next: your code</Button>
+                    <Button type="button" size="tap" variant="outline" className={cn(fullButton, outlineButton)} onClick={() => setCleared(dialCode)}>{viaSettings ? "I turned it off. Next: your code" : "I dialed it. Next: your code"}</Button>
+                  )}
+                  {hasSwitch && (
+                    <Button type="button" variant="link" className={linkButton} aria-expanded={codeWay} onClick={() => setCodeWay(!codeWay)}>{codeWay ? "Use iPhone Settings instead" : noSwitchLink}</Button>
                   )}
                 </Step>
 
@@ -245,13 +263,13 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
                     </div>
                   ) : (
                     <>
-                      {!forwardsAll && <CheckResult status={status} plan={plan} />}
+                      {!forwardsAll && <CheckResult status={status} plan={plan} viaSettings={onViaSettings} />}
                       {fixOffer && (
                         <Button size="tap" variant="brand" className={fullButton} disabled={busy === "mode"} onClick={() => void switchToEveryCall()}>
                           {busy === "mode" ? <Loader2 className="motion-safe:animate-spin" /> : null}Switch to Otto answers every call
                         </Button>
                       )}
-                      <p className="text-[15px] font-semibold">{clearing ? "After both codes, test again." : plan.forwardsAll ? `${tapWord} ${testLabel}. Your phone won’t ring.` : `${tapWord} ${testLabel}. Your phone will ring. Don’t answer or decline it.`}</p>
+                      <p className="text-[15px] font-semibold">{clearing ? (viaSettings ? "After both steps, test again." : "After both codes, test again.") : plan.forwardsAll ? `${tapWord} ${testLabel}. Your phone won’t ring.` : `${tapWord} ${testLabel}. Your phone will ring. Don’t answer or decline it.`}</p>
                       <Button ref={testRef} size="tap" variant={fixOffer || clearing ? "outline" : "brand"} className={cn(fullButton, (fixOffer || clearing) && outlineButton)} disabled={busy === "check"} onClick={startTest}>
                         {busy === "check" ? <><Loader2 className="motion-safe:animate-spin" />Starting…</> : testLabel}
                       </Button>
@@ -272,8 +290,18 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
                   <details className="group">
                     <summary className="cursor-pointer font-semibold underline underline-offset-4">How to turn forwarding off</summary>
                     <div className="mt-2 grid gap-2">
-                      <p>On {formatPhone(business.number!)}, dial <code className="rounded bg-muted px-1.5 py-0.5 font-mono font-semibold">{plan.off}</code> and press Call.</p>
-                      {dialHref(platform, plan.offDialLink) && <Button size="tap" variant="outline" className={fullButton} asChild><a href={dialHref(platform, plan.offDialLink)!}>Tap to dial {plan.off}</a></Button>}
+                      {offViaSettings ? (
+                        // Every call was the iPhone's Settings switch: the same switch turns it off. The code stays behind the link.
+                        <p>{platform === "desktop" ? "On your iPhone: " : ""}{SETTINGS_OFF_LINE}</p>
+                      ) : (
+                        <>
+                          <p>On {formatPhone(business.number!)}, dial <code className="rounded bg-muted px-1.5 py-0.5 font-mono font-semibold">{plan.off}</code> and press Call.</p>
+                          {dialHref(platform, plan.offDialLink) && <Button size="tap" variant="outline" className={fullButton} asChild><a href={dialHref(platform, plan.offDialLink)!}>Tap to dial {plan.off}</a></Button>}
+                        </>
+                      )}
+                      {steps?.off === "settings" && (
+                        <Button type="button" variant="link" className={linkButton} aria-expanded={codeWay} onClick={() => setCodeWay(!codeWay)}>{codeWay ? "Use iPhone Settings instead" : noSwitchLink}</Button>
+                      )}
                     </div>
                   </details>
                 )}
@@ -425,6 +453,47 @@ function copyNow(code: string): Promise<boolean> {
 }
 
 /**
+ * Every call on an iPhone (GSM family): the phone's own Call Forwarding switch, no code and no gray box. Otto's
+ * number big, one Copy button that says Copied, then the steps. A computer shows the same steps for the iPhone,
+ * plus the QR and "Email me these steps".
+ */
+function SettingsSwitch({ number, digits, codeRef, copied, onCopied }: { number: string; digits: string; codeRef?: Ref<HTMLDivElement>; copied: boolean; onCopied: () => void }) {
+  const [failed, setFailed] = useState(false)
+  const copy = () => void copyNow(digits).then((ok) => { if (ok) { setFailed(false); onCopied() } else setFailed(true) })
+  const desktop = platform === "desktop"
+  return (
+    <div className="grid gap-2.5">
+      {desktop && <p className="text-[15px] font-semibold">On your iPhone:</p>}
+      <div ref={codeRef} className="tabular scroll-mt-24 rounded-xl border-2 border-brand-ink bg-brand-yellow px-2 py-3 text-center text-xl leading-snug font-bold whitespace-nowrap select-all sm:text-2xl">
+        <span className="sr-only">Otto’s number: </span>{formatPhone(number)}
+      </div>
+      <Button type="button" size="tap" variant={copied || desktop ? "outline" : "brand"} className={cn(fullButton, (copied || desktop) && outlineButton)} onClick={copy} aria-live="polite">
+        {copied ? <><Check />Copied</> : <><Copy />Copy number</>}
+      </Button>
+      {failed && <p className="text-sm font-medium" role="status">Couldn’t copy. Type the number in Forward To instead.</p>}
+      <ol className="grid list-decimal gap-1.5 pl-5 text-[15px] font-medium">
+        {SETTINGS_ON_STEPS.map((step) => <li key={step}>{step}</li>)}
+      </ol>
+      <p className="text-sm text-muted-foreground">{OLDER_IPHONE_LINE}</p>
+      {desktop && <PhoneHandoff />}
+    </div>
+  )
+}
+
+/** Leaving every call on an iPhone: the same Settings switch, off. `before`: no test found it on yet, so say why. */
+function SwitchOff({ before }: { before: boolean }) {
+  const desktop = platform === "desktop"
+  return (
+    <div className="grid gap-2.5">
+      {desktop && <p className="text-[15px] font-semibold">On your iPhone:</p>}
+      <p className="text-[15px] font-medium">{SETTINGS_OFF_LINE}</p>
+      {before && <p className="text-sm text-muted-foreground">Ring first can’t work while it’s on.</p>}
+      {desktop && <PhoneHandoff />}
+    </div>
+  )
+}
+
+/**
  * The code to dial, the way this device can dial it: the big code, one button, and two short lines (where to paste
  * it, and what the carrier shows). A computer also gets the QR and "Email me these steps".
  */
@@ -506,7 +575,7 @@ function PhoneHandoff() {
       {link && (
         <div className="flex flex-wrap items-center gap-4">
           <div className="rounded-md bg-white p-2"><QrCode value={link} size={184} label="QR code that opens this code on your phone" /></div>
-          <p className="min-w-40 flex-1 text-sm">Point your phone’s camera here. Tap the link that pops up to see this code there.</p>
+          <p className="min-w-40 flex-1 text-sm">Point your phone’s camera here. Tap the link that pops up to see these steps there.</p>
         </div>
       )}
       <Button type="button" size="tap" variant="outline" className={cn(fullButton, outlineButton)} disabled={mail.state === "sending" || mail.state === "sent"} onClick={() => void email()}>
@@ -519,16 +588,18 @@ function PhoneHandoff() {
 }
 
 /** What happened to the last test call, in a line or two, with the one fix that matches it. */
-function CheckResult({ status, plan }: { status: Status; plan: ForwardingPlan }) {
+function CheckResult({ status, plan, viaSettings = false }: { status: Status; plan: ForwardingPlan; viaSettings?: boolean }) {
   if (status === "idle" || status === "passed" || status === "calling" || status === "forwards_all") return null
   if (plan.forwardsAll && status === "phone_answers") {
     // Most often they just switched to every call after the phone picked up a ring-first test: not a new failure.
-    return <p role="status" className="rounded-md border border-brand-ink/15 bg-accent px-3 py-2.5 text-sm text-accent-foreground"><strong className="font-semibold">Now dial the new code above,</strong> then test again.</p>
+    return <p role="status" className="rounded-md border border-brand-ink/15 bg-accent px-3 py-2.5 text-sm text-accent-foreground"><strong className="font-semibold">{viaSettings ? "Now turn on Call Forwarding above," : "Now dial the new code above,"}</strong> then test again.</p>
   }
   const lines: string[] = status === "rings_first"
-    ? ["Your phone rang first, so the every-call code isn’t on yet.", plan.on ? "Dial the code above, then test again." : "Turn on forward all calls with your phone company, then test again."]
+    ? (viaSettings
+      ? ["Your phone rang first, so Call Forwarding isn’t on yet.", "Turn it on in Settings, then test again."]
+      : ["Your phone rang first, so the every-call code isn’t on yet.", plan.on ? "Dial the code above, then test again." : "Turn on forward all calls with your phone company, then test again."])
     : plan.forwardsAll
-    ? ["That test didn’t reach Otto.", plan.on ? "Dial the code above, then test again." : "Check forwarding is on with your phone company, then test again."]
+    ? ["That test didn’t reach Otto.", viaSettings ? "Check Call Forwarding is on and Forward To is Otto’s number, then test again." : plan.on ? "Dial the code above, then test again." : "Check forwarding is on with your phone company, then test again."]
     : status === "phone_answers"
       ? ["Your phone picked up the test itself.", settingsFix()]
       : status === "voicemail"

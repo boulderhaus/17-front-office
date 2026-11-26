@@ -55,9 +55,10 @@ export function lineStatus(data: LineStatusInput): LineStatus {
   // Calls reach Otto, but not the way the owner picked: our test found every call forwarded, or the phone ringing first.
   const status = checkStatus(line)
   if (line.confirmedAt && status === "forwards_all") return { tone: "pending", label: "Dial your new code", detail: "Every call goes to Otto until you do.", to: forward }
-  if (line.confirmedAt && status === "rings_first") return { tone: "pending", label: "Dial your new code", detail: "Your phone still rings first.", to: forward }
+  // Every call can be the iPhone's Settings switch, not a code: "Finish your change" fits both.
+  if (line.confirmedAt && status === "rings_first") return { tone: "pending", label: "Finish your change", detail: "Your phone still rings first.", to: forward }
   if (!forwardingOn(line)) return { tone: "pending", label: "Not getting calls yet", detail: "Finish forwarding.", to: forward }
-  if (line.business.update) return { tone: "pending", label: "Dial your new code", detail: "Your change is on once you dial it.", to: forward }
+  if (line.business.update) return { tone: "pending", label: "Finish your change", detail: "Your change is on once you finish setup.", to: forward }
   if (line.business.everyCallOn) return { tone: "on", label: "Answering every call", detail: "Your phone won’t ring for these.", to: "/app/settings/answering" }
   return { tone: "on", label: "Answering calls you miss", detail: "Your phone rings first.", to: "/app/settings/answering" }
 }

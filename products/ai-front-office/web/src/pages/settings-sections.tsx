@@ -253,7 +253,7 @@ export function AnsweringSection() {
   // calls nobody picks up, at any hour), so it shows as Ring my phone first.
   const everyCall = text("operationMode") === "always"
   const mode = everyCall ? "always" : "overflow"
-  const forwarding = dashboard?.line.number ? (forwardingOn(dashboard.line) ? (dashboard.line.business.update ? "Dial your new code" : "Works") : "Not on yet") : null
+  const forwarding = dashboard?.line.number ? (forwardingOn(dashboard.line) ? (dashboard.line.business.update ? "Finish your change" : "Works") : "Not on yet") : null
   return (
     <>
       <SettingsCard title="Answering">
@@ -274,12 +274,12 @@ export function AnsweringSection() {
         {!everyCall && <div className="sm:max-w-80"><RingFirstField rings={Number(text("answerAfterRings"))} onChange={(value) => set("answerAfterRings", value)} family={dashboard?.line.business.carrier?.family ?? null} confirmed={Boolean(dashboard?.line.confirmedAt)} /></div>}
         {dashboard?.line.business.update && (
           <p className="rounded-md border border-brand-ink/15 bg-accent px-3 py-2.5 text-sm text-accent-foreground" role="status">
-            Dial your new code once to apply this. <Link className="inline-flex min-h-11 items-center font-semibold underline underline-offset-4" to="/app/start?step=forward&from=settings">Show me the code</Link>
+            Finish your change to apply it. <Link className="inline-flex min-h-11 items-center font-semibold underline underline-offset-4" to="/app/start?step=forward&from=settings">Show me how</Link>
           </p>
         )}
         {forwarding && (
           <Link to="/app/start?step=forward&from=settings" className="group flex min-h-12 items-center justify-between gap-3 border-t pt-3 text-[15px]">
-            <span className="grid"><strong className="font-semibold group-hover:underline">Call forwarding</strong><span className="text-sm text-muted-foreground">{forwarding}. See, test or turn off the code.</span></span>
+            <span className="grid"><strong className="font-semibold group-hover:underline">Call forwarding</strong><span className="text-sm text-muted-foreground">{forwarding}. See, test or turn it off.</span></span>
             <ChevronRight className="size-5 shrink-0 text-muted-foreground" />
           </Link>
         )}
