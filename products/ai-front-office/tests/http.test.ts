@@ -93,8 +93,17 @@ describe("HTTP boundary", () => {
     expect(logs.some((entry) => entry.event === "tool_request_failed" && entry.status === 401)).toBe(true);
   });
 
-  it("shows a public read-only owner dashboard with synthetic data", async () => {
-    const response = await fetch(`${baseUrl}/demo`);
+  it("closes the demo dashboard to visitors and keeps it, read-only, for the admin", async () => {
+    // A visitor is sent to the homepage from the demo and every page under it; its data answers 404.
+    for (const path of ["/demo", "/demo?view=pipeline", "/demo/jobs", "/demo/calendar", "/demo/calls/anything", "/demo/unknown"]) {
+      const visitor = await fetch(`${baseUrl}${path}`, { redirect: "manual" });
+      expect(visitor.status, path).toBe(303);
+      expect(visitor.headers.get("location"), path).toBe("/");
+    }
+    expect((await fetch(`${baseUrl}/api/demo/dashboard`)).status).toBe(404);
+    expect((await fetch(`${baseUrl}/demo`, { headers: { authorization: "Bearer wrong-token-abcdefghijklmnopqrstuvwxyz" }, redirect: "manual" })).status).toBe(303);
+    const asAdmin = { headers: { authorization: `Bearer ${adminToken}` } };
+    const response = await fetch(`${baseUrl}/demo`, asAdmin);
     expect(response.status).toBe(200);
     const html = await response.text();
     expect(html).toContain("Read-only demo");
@@ -111,14 +120,14 @@ describe("HTTP boundary", () => {
     expect(html).not.toContain("task/complete");
     expect(html).not.toContain('method="post"');
 
-    const pipeline = await fetch(`${baseUrl}/demo?view=pipeline`);
+    const pipeline = await fetch(`${baseUrl}/demo?view=pipeline`, asAdmin);
     const pipelineHtml = await pipeline.text();
     expect(pipelineHtml).toContain("Every job at a glance");
     expect(pipelineHtml).toContain("Needs reply");
     expect(pipelineHtml).toContain("Booked");
     expect(pipelineHtml).toContain('class="active" href="/demo?view=pipeline"');
 
-    const calendar = await fetch(`${baseUrl}/demo?view=calendar`);
+    const calendar = await fetch(`${baseUrl}/demo?view=calendar`, asAdmin);
     const calendarHtml = await calendar.text();
     expect(calendarHtml).toContain("Next seven days");
     expect(calendarHtml).toContain("Taylor S.");
@@ -866,7 +875,9 @@ describe("HTTP boundary", () => {
     const dashboard = await (await fetch(`${baseUrl}/app`, { headers: { cookie: ownerCookie } })).text();
     expect(dashboard).toContain("Set your call rules");
     expect(dashboard).toContain("Urgent alerts are off.");
-    expect(await (await fetch(`${baseUrl}/demo`)).text()).not.toContain("Urgent alerts are off.");
+    const demoPage = await fetch(`${baseUrl}/demo`, { headers: { authorization: `Bearer ${adminToken}` } });
+    expect(demoPage.status).toBe(200);
+    expect(await demoPage.text()).not.toContain("Urgent alerts are off.");
     const teamPage = await (await fetch(`${baseUrl}/app/team`, { headers: { cookie: ownerCookie } })).text();
     const csrf = /name="csrf" value="([^"]+)"/.exec(teamPage)![1]!;
     const inviteTeammate = () => fetch(`${baseUrl}/app/team/invite`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, email: "teammate@synthetic.example" }) });

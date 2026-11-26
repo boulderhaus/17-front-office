@@ -770,6 +770,15 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       return sendHtml(response, 200, analyticsPage(renderLanding(config, undefined, { supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, trialDays: stripeClient ? trialDays : 0, plans, textsLive: dependencies.env.TELNYX_MESSAGING_APPROVED })));
     }
     if (method === "GET" && url.pathname.startsWith("/web/assets/")) return serveWebAsset(response, url.pathname.slice("/web/assets/".length));
+    // The demo account is closed to visitors (founder decision 2026-11-26): its pages send them to the homepage
+    // and its data answers 404. Only a request that proves it is the admin still reaches the demo below: the admin
+    // bearer token today (the admin sign-in cookie is scoped to /admin, so browsers do not send it here).
+    if (url.pathname === "/demo" || url.pathname.startsWith("/demo/") || url.pathname.startsWith("/api/demo/")) {
+      const key = dependencies.env.SESSION_SIGNING_KEY;
+      const admin = bearerMatches(request, dependencies.env.ADMIN_TOKEN) || Boolean(key && verifyAdminSession(readCookie(request, "afo_admin"), key));
+      if (!admin && url.pathname.startsWith("/api/demo/")) throw new HttpError(404, "Not found");
+      if (!admin) return redirect(response, "/");
+    }
     if (url.pathname.startsWith("/api/demo/")) return handleDemoApi(request, response, url);
     if (url.pathname.startsWith("/api/app/")) return handleOwnerApi(request, response, url);
     if (method === "GET" && isDemoAppPath(url.pathname) && await sendOwnerWeb(response)) return;
