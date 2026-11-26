@@ -11,7 +11,7 @@
 export const REPEAT_CALLER_DAILY_LIMIT = 10;
 
 // Whole words only, so "gutter" or "skill saw" never trip them.
-const NOT_A_SERVICE = /\b(?:hitm[ae]n|hit ?m[ae]n|assassins?|assassination|murders?|kill(?:ing|s)?|kidnap\w*|drugs?|cocaine|heroin|meth|fentanyl|escorts?|prostitut\w*|sex|porn\w*|weapons?|firearms?|explosives?|bombs?|launder\w*|hack(?:ing|er|s)?|fake ids?|counterfeit\w*|stolen)\b/i;
+const NOT_A_SERVICE = /\b(?:hitm[ae]n|hit ?m[ae]n|assassination|murders?|kidnap\w*|drugs?|cocaine|heroin|fentanyl|escorts?|prostitut\w*|sex|porn\w*|weapons?|firearms?|explosives?|bombs?|launder\w*|fake ids?|counterfeit\w*|stolen)\b/i;
 
 /** One problem with the "Other" services an owner typed, in words they can act on; null when they're fine. */
 export function otherServiceProblem(items: string[]): string | null {

@@ -16,11 +16,11 @@ export const OWNER_CALL_CONSENT_DETAIL = "By choosing this, you agree that Call 
 export const OWNER_CALL_CONSENT_SIGNUP_VERSION = "owner-urgent-calls-signup-2026-11-26";
 export const OWNER_CALL_CONSENT_SIGNUP_LABEL = "Call Otto may call my mobile with an automated voice message when a caller has an emergency. Optional; press 9 to stop.";
 /**
- * The Settings switch: one line that says what turning it on does, with the same consent terms (automated message,
- * this number, emergencies only, how to stop). Recorded under its own wording version.
+ * The Settings switch: one line that says what turning it on does, with the same consent terms (who calls, automated
+ * message, this number, emergencies only, optional, how to stop). Recorded under its own wording version.
  */
-export const OWNER_CALL_CONSENT_SETTINGS_VERSION = "owner-urgent-calls-settings-2026-11-26";
-export const OWNER_CALL_CONSENT_SETTINGS_DETAIL = "Otto calls this mobile with an automated, artificial-voice message the moment a caller has an emergency. Press 9 on that call, or turn this off, to stop.";
+export const OWNER_CALL_CONSENT_SETTINGS_VERSION = "owner-urgent-calls-settings-2026-11-26b";
+export const OWNER_CALL_CONSENT_SETTINGS_DETAIL = "Call Otto (Dutchworks LLC) calls this mobile with an automated, artificial-voice message when a caller has an emergency. Optional. Press 9 on that call, or turn this off, to stop.";
 /** Integration secret (provider "notifications") holding the active consent; absent means no automated calls. */
 export const OWNER_CALL_CONSENT_KEY = "owner_call_consent";
 /** Every grant ever given and how it ended, kept after a stop as proof of the consent behind earlier calls. */

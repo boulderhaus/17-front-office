@@ -1741,8 +1741,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         // A shop that only has a whole state ("FL") gets its own area offered, from the mobile's area code.
         areaSuggestion: (() => {
           const area = areaForPhone(ownerPhone);
-          const onlyStates = config.serviceAreaTerms.length > 0 && config.serviceAreaTerms.every((term) => /^[A-Z]{2}$/.test(term));
-          return area && onlyStates ? area.join(", ") : null;
+          // One whole state, and the area code's cities are in it; several states would lose the others.
+          const [only] = config.serviceAreaTerms;
+          const oneState = config.serviceAreaTerms.length === 1 && /^[A-Z]{2}$/.test(only ?? "");
+          return area && oneState && area.every((city) => city.endsWith(` ${only}`)) ? area.join(", ") : null;
         })(),
         status: account.status,
         // No password (Google, Microsoft or email link): deleting needs a sign-in from the last 10 minutes instead.
@@ -4505,7 +4507,12 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams, surface:
     bookingMode,
     warmTransferEnabled: form.get("warmTransferEnabled") === "on",
     serviceAreaTerms: (() => { const area = normalizeServiceAreaInput(form.get("serviceAreaTerms") ?? ""); if (area.errors.length > 0) throw new HttpError(400, serviceAreaMessage(area.errors)); return area.terms; })(),
-    emergencyKeywords: list("emergencyKeywords"),
+    emergencyKeywords: (() => {
+      // Every box ticked is about 100 phrases; Other adds a few. Refuse a list too long instead of dropping words.
+      const words = (form.get("emergencyKeywords") ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+      if (words.length > 200) throw new HttpError(400, "That’s too many emergency words. Untick a few or shorten Other.");
+      return words;
+    })(),
     emergencyThreshold,
     minimumLeadTimeMinutes,
     maxCallsPerCallerPerDay,
@@ -4515,17 +4522,24 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams, surface:
       if (surface !== "owner") return services;
       if (services.length === 0) throw new HttpError(400, "Pick at least one thing you fix.");
       // Only what's new is checked, so an old entry never blocks saving another page.
-      const problem = otherServiceProblem(services.filter((item) => !current.serviceCategories.some((saved) => saved.toLowerCase() === item.toLowerCase())));
+      // Services that come with a trade tick box aren't typed by the owner, so they never count against Other.
+      const known = new Set([...current.serviceCategories, ...TRADES.flatMap((trade) => trade.services)].map((item) => item.toLowerCase()));
+      const problem = otherServiceProblem(services.filter((item) => !known.has(item.toLowerCase())));
       if (problem) throw new HttpError(400, problem);
       return services;
     })(),
     priceSnippets: parseLines(form.get("priceSnippets") ?? "", 50).map((line) => {
       const [label, ...rest] = line.split(":");
-      return { label: label!.trim().slice(0, 120), text: rest.join(":").trim().slice(0, 1_000) };
+      const item = { label: label!.trim().slice(0, 120), text: rest.join(":").trim().slice(0, 1_000) };
+      // A half-filled row in the owner app would vanish on save: say which one instead.
+      if (surface === "owner" && Boolean(item.label) !== Boolean(item.text)) throw new HttpError(400, item.label ? `Add a price for “${item.label}”, or remove that row.` : "A price is missing its service. Fill it in, or remove that row.");
+      return item;
     }).filter((item) => item.label && item.text),
     approvedKnowledge: parseLines(form.get("approvedKnowledge") ?? "", 50).map((line) => {
       const [topic, ...rest] = line.split(":");
-      return { topic: topic!.trim().slice(0, 120), text: rest.join(":").trim().slice(0, 1_000) };
+      const item = { topic: topic!.trim().slice(0, 120), text: rest.join(":").trim().slice(0, 1_000) };
+      if (surface === "owner" && Boolean(item.topic) !== Boolean(item.text)) throw new HttpError(400, item.topic ? `Add an answer for “${item.topic}”, or remove that row.` : "An answer is missing its question. Fill it in, or remove that row.");
+      return item;
     }).filter((item) => item.topic && item.text),
     pronunciations: parseLines(form.get("pronunciations") ?? "", 100).map((line) => {
       const [term, ...rest] = line.split(":");

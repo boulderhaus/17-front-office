@@ -162,8 +162,8 @@ export function BusinessSection() {
   const savedName = String(settings.values.businessName ?? "").trim()
   const newName = text("businessName").trim()
   const staleGreeting = savedName.length > 1 && newName.length > 1 && newName !== savedName && text("greeting").includes(savedName)
-  // Only a whole state ("FL") so far: offer the owner's own area, from their mobile's area code.
-  const suggestion = settings.areaSuggestion && /^\s*[A-Za-z]{2}(\s*,\s*[A-Za-z]{2})*\s*$/.test(text("serviceAreaTerms")) ? settings.areaSuggestion : null
+  // Only one whole state ("FL") so far: offer the owner's own area, from their mobile's area code.
+  const suggestion = settings.areaSuggestion && /^\s*[A-Za-z]{2}\s*$/.test(text("serviceAreaTerms")) ? settings.areaSuggestion : null
   return (
     <>
       <SettingsCard title="Your business">
@@ -256,7 +256,7 @@ export function AnsweringSection() {
   return (
     <>
       <SettingsCard title="Answering">
-        <ToggleRow id="serviceState" label="Otto answers calls" checked={!paused} onChange={(on) => set("serviceState", on ? "active" : "paused")}
+        <ToggleRow id="serviceState" label="Otto answers calls" checked={settings.status === "active" && !paused} disabled={settings.status !== "active"} onChange={(on) => set("serviceState", on ? "active" : "paused")}
           hint={hint ?? (paused ? "Paused. Otto isn’t taking calls." : "Turn off to pause Otto.")} />
         <div className="border-t pt-4"><fieldset className="grid gap-2">
           <legend className="mb-1.5 text-[15px] font-medium">When customers call</legend>
@@ -310,7 +310,7 @@ function EmergenciesSection() {
           <Input className={fieldClass} value={picks.otherText} onChange={(event) => picks.setOther(event.target.value)} placeholder="basement flooding" />
         </Field>
       )}
-      {catalog?.alwaysOnLine && <p className="text-sm text-muted-foreground">{catalog.alwaysOnLine}</p>}
+      {catalog?.alwaysOnLine && <p className="text-sm text-muted-foreground">{catalog.alwaysOnLine} Otto also flags burst pipes, flooding, sewage and no heat or AC.</p>}
       <div className="border-t pt-4"><fieldset className="grid gap-2">
         <legend className="mb-1.5 text-[15px] font-medium">For everything else, flag</legend>
         <RadioGroup value={String(level)} onValueChange={(value) => set("emergencyThreshold", value)} className="gap-1">
@@ -376,6 +376,7 @@ function PairList({ name, columns, placeholders, addLabel }: { name: string; col
       </div>
       {rows.map(([left, right], index) => (
         <div key={index} className="grid grid-cols-[minmax(0,1fr)_2.75rem] gap-x-3 gap-y-2 border-b pb-3 last:border-b-0 sm:grid-cols-[minmax(0,2fr)_minmax(0,3fr)_2.75rem] sm:border-b-0 sm:pb-0">
+          {Boolean(left.trim()) !== Boolean(right.trim()) && <p role="alert" className="col-span-2 row-start-3 text-sm text-amber-900 sm:col-span-3 sm:row-start-2">Fill in both boxes, or remove this row.</p>}
           <Input aria-label={columns[0]} className={cn(fieldClass, "col-start-1 row-start-1")} placeholder={index === 0 ? placeholders[0] : undefined} value={left} onChange={(event) => update(rows.map((row, at) => (at === index ? [event.target.value.replace(/:/g, ""), row[1]] : row)))} />
           <Input aria-label={columns[1]} className={cn(fieldClass, "col-span-2 col-start-1 row-start-2 sm:col-span-1 sm:col-start-2 sm:row-start-1")} placeholder={index === 0 ? placeholders[1] : undefined} value={right} onChange={(event) => update(rows.map((row, at) => (at === index ? [row[0], event.target.value] : row)))} />
           <Button type="button" variant="ghost" size="icon" aria-label={`Remove ${left || "this row"}`} className="col-start-2 row-start-1 size-11 text-muted-foreground sm:col-start-3" onClick={() => update(rows.length > 1 ? rows.filter((_, at) => at !== index) : [["", ""]])}><X className="size-5" /></Button>
@@ -480,9 +481,9 @@ export function AlertsSection() {
             hint={<>
               {urgent.disclosure}
               {/* The mobile is the business number and may send every call to Otto: Otto can't ring it, so it says why. */}
-              {urgent.on && urgent.held && <span className="mt-1 block font-medium text-amber-900">Otto can’t ring this number while it sends every call to Otto. You still get an alert and an email.</span>}
+              {urgent.on && urgent.held && <span className="mt-1 block font-medium text-amber-900">On, but waiting: Otto can’t ring this number while it sends every call to Otto. You still get an alert and an email.</span>}
             </>}
-            onChange={(on) => void toggleUrgentCalls(on).then(flashUrgentSaved)} />
+            onChange={(on) => void toggleUrgentCalls(on).then((ok) => { if (ok) flashUrgentSaved() })} />
         </SettingsCard>
       )}
       <SettingsCard id="texts" title="Texts" action={textsSaved}>
@@ -570,7 +571,7 @@ export function CalendarSection() {
           <Field label="Typical job length">
             <NativeSelect {...bind("defaultServiceDurationMinutes")}>{unique([30, 45, 60, 90, 120, 180, 240, Number(text("defaultServiceDurationMinutes"))]).map((value) => <option key={value} value={value}>{value < 60 ? `${value} min` : `${value / 60} hr${value === 60 ? "" : "s"}`}</option>)}</NativeSelect>
           </Field>
-          <Field label="Notice you need" hint="From the call to the start of the job. Drive time included."><NativeSelect {...bind("minimumLeadTimeMinutes")}>{notice.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</NativeSelect></Field>
+          <Field label="Notice you need" hint="From the call to the job start. Count your drive time in this."><NativeSelect {...bind("minimumLeadTimeMinutes")}>{notice.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</NativeSelect></Field>
         </Pair>
         {i.directBookingAvailable ? (
           <Field label="When a caller picks a time"><NativeSelect {...bind("bookingMode")}><option value="confirm">Take the details; I’ll confirm</option><option value="direct">Book it on my calendar</option></NativeSelect></Field>

@@ -53,7 +53,7 @@ export function emergencyChoicesFor<T extends { key: string; trades: string[] }>
 }
 
 // Same rule as the server (src/domain/owner-inputs.ts; a test keeps them equal).
-const NOT_A_SERVICE = /\b(?:hitm[ae]n|hit ?m[ae]n|assassins?|assassination|murders?|kill(?:ing|s)?|kidnap\w*|drugs?|cocaine|heroin|meth|fentanyl|escorts?|prostitut\w*|sex|porn\w*|weapons?|firearms?|explosives?|bombs?|launder\w*|hack(?:ing|er|s)?|fake ids?|counterfeit\w*|stolen)\b/i
+const NOT_A_SERVICE = /\b(?:hitm[ae]n|hit ?m[ae]n|assassination|murders?|kidnap\w*|drugs?|cocaine|heroin|fentanyl|escorts?|prostitut\w*|sex|porn\w*|weapons?|firearms?|explosives?|bombs?|launder\w*|fake ids?|counterfeit\w*|stolen)\b/i
 
 /** One problem with the "Other" services, in words the owner can act on; null when they're fine. */
 export function otherServiceProblem(list: string[]): string | null {

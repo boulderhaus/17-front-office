@@ -57,7 +57,8 @@ export interface SettingsContextValue {
   reload: () => Promise<void>
   /** Automated emergency calls: saved on its own, right away (it records or withdraws the owner's consent). */
   urgentBusy: boolean
-  toggleUrgentCalls: (on: boolean) => Promise<void>
+  /** True once the server has it; false when it refused (the toast says why). */
+  toggleUrgentCalls: (on: boolean) => Promise<boolean>
   /** Keeps what a save-on-its-own control changed (text consent, the mobile) when moving between pages; edits stay. */
   patchSettings: (patch: (current: ApiSettings) => ApiSettings) => void
 }
@@ -79,14 +80,16 @@ export function SettingsArea() {
   const [saving, setSaving] = useState(false)
   const [urgentBusy, setUrgentBusy] = useState(false)
   // Saved on its own, right away: it records (or withdraws) the owner's consent to automated calls.
-  const toggleUrgentCalls = async (on: boolean) => {
+  const toggleUrgentCalls = async (on: boolean): Promise<boolean> => {
     setUrgentBusy(true)
     try {
       const result = await api<{ urgentCalls: NonNullable<ApiSettings["urgentCalls"]> }>("/api/app/alerts/urgent-calls", { method: "POST", body: { on } })
       if (settings.data) settings.setData({ ...settings.data, urgentCalls: result.urgentCalls })
       toast.success(on ? "We’ll call your mobile about emergencies." : "Emergency calls are off.")
+      return true
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "That didn’t change. Please try again.")
+      return false
     } finally {
       setUrgentBusy(false)
     }

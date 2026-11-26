@@ -91,15 +91,49 @@ describe("What you fix", () => {
     expect(otherServiceProblem(["Hitman"])).toContain("isn’t a service");
     expect(otherServiceProblem(["Pool repair", "Gutter cleaning"])).toBeNull();
   });
+
+  it("lets real trade work through the junk check", () => {
+    for (const item of ["Weed killing", "Rodent killing", "Kill switch install", "Hack saw", "Meth lab cleanup", "Assassin bug treatment"]) {
+      expect(otherServiceProblem([item]), item).toBeNull();
+      expect(webOtherServiceProblem([item]), item).toBeNull();
+    }
+  });
 });
 
 describe("Retention", () => {
-  it("keeps every call; only webhooks and the tool ledger expire", async () => {
+  const now = new Date("2026-11-26T12:00:00.000Z");
+  function fakeStore(tenants: Record<string, { account: boolean; sub?: { status: string; updatedAt: string } }>) {
+    return {
+      listTenantIds: async () => Object.keys(tenants),
+      getConfig: async () => ({ ...createDemoConfig(), dataRetentionDays: 30 }),
+      getOwnerAccountByTenant: async (tenantId: string) => (tenants[tenantId]!.account ? ({ tenantId } as never) : null),
+      getSubscription: async (tenantId: string) => (tenants[tenantId]!.sub ?? null) as never,
+      purgeWebhookEvents: async () => 0,
+      purgeToolLedger: async () => 0,
+    };
+  }
+
+  it("keeps every call of a live shop, and still clears demo and long-cancelled shops", async () => {
+    const cleared: string[] = [];
+    const deletion = { deleteExpired: async (tenantId: string) => { cleared.push(tenantId); return { deleted: 1, failed: 0 }; } };
+    const store = fakeStore({
+      live: { account: true, sub: { status: "active", updatedAt: "2025-01-01T00:00:00.000Z" } },
+      trial: { account: true },
+      justCancelled: { account: true, sub: { status: "canceled", updatedAt: "2026-11-20T00:00:00.000Z" } },
+      longCancelled: { account: true, sub: { status: "canceled", updatedAt: "2026-09-01T00:00:00.000Z" } },
+      demo: { account: false },
+    });
+    const result = await runRetentionCycle(store, now, deletion);
+    expect(cleared.sort()).toEqual(["demo", "longCancelled"]);
+    expect(result.purgedCalls).toBe(2);
+  });
+
+  it("keeps a live shop's old call in the real store", async () => {
     const store = new InMemoryStore();
     await store.saveConfig({ ...createDemoConfig(), dataRetentionDays: 7 });
     const call = { id: "33333333-3333-4333-8333-333333333333", tenantId: "demo", providerCallId: "v3:old", fromNumber: "+15555550123", fromNumberVerified: true, startedAt: "2025-01-01T10:00:00.000Z", endedAt: "2025-01-01T10:05:00.000Z", durationSeconds: 300, fields: {}, emergency: null, outcome: "message_taken", transcript: "Synthetic", recordingUrl: null, consentState: "unknown", billingDisposition: "billable", qualityFlags: [], createdAt: "2025-01-01T10:00:00.000Z", updatedAt: "2025-01-01T10:05:00.000Z" } as unknown as CallRecord;
     await store.saveCall(call);
-    await runRetentionCycle(store, new Date("2026-11-26T12:00:00.000Z"));
+    await runRetentionCycle(store, now);
     expect(await store.getCall(call.id)).not.toBeNull();
   });
 });
@@ -146,6 +180,37 @@ describe("Owner settings API", () => {
     await store.saveConfig({ ...await store.getConfig(shop.tenantId), serviceAreaTerms: ["FL"] });
     const settings = await (await fetch(`${baseUrl}/api/app/settings`, { headers: { cookie: shop.cookie } })).json() as { areaSuggestion: string | null };
     expect(settings.areaSuggestion).toBe("Sarasota FL, Bradenton FL, Venice FL, North Port FL");
+  });
+
+  it("never offers one state's cities to a shop that covers several states", async () => {
+    const shop = await signUp("(941) 555-0142");
+    await store.saveIntegrationSecret(shop.tenantId, "notifications", "owner-primary", "+19415550142");
+    for (const terms of [["FL", "GA"], ["GA"]]) {
+      await store.saveConfig({ ...await store.getConfig(shop.tenantId), serviceAreaTerms: terms });
+      const settings = await (await fetch(`${baseUrl}/api/app/settings`, { headers: { cookie: shop.cookie } })).json() as { areaSuggestion: string | null };
+      expect(settings.areaSuggestion, terms.join()).toBeNull();
+    }
+  });
+
+  it("saves several trades ticked at once, and every emergency box without dropping Other", async () => {
+    const shop = await signUp("(941) 555-0142");
+    const services = TRADES.filter((trade) => trade.key !== "other").flatMap((trade) => trade.services);
+    const every = [...EMERGENCY_CHOICES.flatMap((choice) => choice.words), ...ALWAYS_ON_WORDS, "basement flooding"];
+    const saved = await shop.put({ ...shop.settings.values, serviceCategories: [...new Set(services)].join(", "), emergencyKeywords: every.join(", ") });
+    expect(saved.status).toBe(200);
+    const config = await store.getConfig(shop.tenantId);
+    expect(config.emergencyKeywords).toContain("basement flooding");
+    expect(config.emergencyKeywords.length).toBe(every.length);
+    expect(config.serviceCategories.length).toBe(new Set(services).size);
+  });
+
+  it("refuses a half-filled price or answer instead of dropping it", async () => {
+    const shop = await signUp("(941) 555-0142");
+    const price = await shop.put({ ...shop.settings.values, priceSnippets: "Service call: $89\nTune-up: " });
+    expect(price.status).toBe(400);
+    expect(((await price.json()) as { error: string }).error).toContain("Tune-up");
+    expect((await shop.put({ ...shop.settings.values, approvedKnowledge: ": We service all brands." })).status).toBe(400);
+    expect((await shop.put({ ...shop.settings.values, priceSnippets: "Service call: $89" })).status).toBe(200);
   });
 
   it("no longer shows or changes the repeat-caller limit or call retention", async () => {
