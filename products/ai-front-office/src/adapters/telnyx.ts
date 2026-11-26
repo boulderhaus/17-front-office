@@ -1,7 +1,7 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { z } from "zod";
 import { withTimeout } from "../application/retry.js";
-import type { CallSummaryInput, CollectedCallFields, OutboxNotification } from "../domain/models.js";
+import type { CallRecord, CallSummaryInput, CollectedCallFields, OutboxNotification } from "../domain/models.js";
 import { NotificationHeldError, type NotificationPort } from "../ports.js";
 import { brandOwnerSms, hasStopLanguage, withOwnerSmsCompliance } from "../domain/owner-sms.js";
 
@@ -539,5 +539,199 @@ export class TelnyxAssistantMessenger {
     if (response.status === 404 || payload.errors?.some((error) => CALL_GONE_CODES.has(String(error.code)))) return "call_ended";
     if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) return "rejected";
     throw new Error(`Telnyx add-messages failed with HTTP ${response.status}${payload.errors?.[0]?.code ? ` (code ${String(payload.errors[0].code)})` : ""}`);
+  }
+}
+
+/**
+ * What Telnyx says about a call right now. "ended": it said so outright. "gone": it no longer knows the call
+ * (status is kept only about ten minutes after a call ends), which alone does not prove a young call is over.
+ * "unknown": it could not say (an error), so ask again later.
+ */
+export interface TelnyxCallState {
+  status: "alive" | "ended" | "gone" | "unknown";
+  durationSeconds: number | null;
+  endedAt: string | null;
+}
+
+/** One call's AI conversation as Telnyx stored it, oldest message first, in the shape of an end-of-call payload. */
+export interface TelnyxConversationHistory {
+  conversationId: string;
+  /** The caller's number as Telnyx recorded it on the conversation, when it is a plain E.164 number. */
+  endUserTarget: string | null;
+  lastMessageAt: string | null;
+  messages: TelnyxConversationEndedEnvelope["data"]["payload"]["messages"];
+}
+
+const HISTORY_PAGE_SIZE = 100;
+/** A seven-minute call is a few dozen messages; this only bounds a runaway loop. */
+const HISTORY_MAX_PAGES = 20;
+
+/**
+ * Reads a call back from Telnyx when its end-of-call callback never arrived: the call's status
+ * (GET /v2/calls/{call_control_id}, kept about ten minutes after the call ends) and its AI conversation
+ * (GET /v2/ai/conversations filtered on metadata->call_control_id, then its messages, paged).
+ */
+export class TelnyxCallHistoryClient {
+  constructor(private readonly apiKey: string, private readonly fetcher: typeof fetch = fetch) {}
+
+  async callState(callControlId: string): Promise<TelnyxCallState> {
+    const response = await withTimeout(this.fetcher(`https://api.telnyx.com/v2/calls/${encodeURIComponent(callControlId)}`, {
+      headers: { authorization: `Bearer ${this.apiKey}` },
+    }), 4_000);
+    const payload = await response.json().catch(() => ({})) as { data?: Record<string, unknown>; errors?: Array<{ code?: unknown }> };
+    if (response.status === 404 || payload.errors?.some((error) => CALL_GONE_CODES.has(String(error.code)))) return { status: "gone", durationSeconds: null, endedAt: null };
+    if (!response.ok) return { status: "unknown", durationSeconds: null, endedAt: null };
+    const data = payload.data ?? {};
+    if (data.is_alive === true) return { status: "alive", durationSeconds: null, endedAt: null };
+    if (data.is_alive !== false) return { status: "unknown", durationSeconds: null, endedAt: null };
+    const duration = typeof data.call_duration === "number" && Number.isFinite(data.call_duration) && data.call_duration >= 0 ? Math.round(data.call_duration) : null;
+    return { status: "ended", durationSeconds: duration, endedAt: isoOrNull(data.end_time) };
+  }
+
+  /** The call's conversation, or null when Telnyx has none (yet). Throws when Telnyx could not be read. */
+  async conversation(callControlId: string): Promise<TelnyxConversationHistory | null> {
+    const list = new URL("https://api.telnyx.com/v2/ai/conversations");
+    list.searchParams.set("metadata->call_control_id", `eq.${callControlId}`);
+    list.searchParams.set("order", "created_at.desc");
+    list.searchParams.set("limit", "5");
+    const found = await this.get<{ data?: Array<Record<string, unknown>> }>(list);
+    // Never trust the filter alone: the conversation must name this exact call.
+    const conversation = found.data?.find((item) => objectData(item.metadata).call_control_id === callControlId);
+    const conversationId = typeof conversation?.id === "string" ? conversation.id : null;
+    if (!conversation || !conversationId) return null;
+    const raw: unknown[] = [];
+    for (let page = 1; page <= HISTORY_MAX_PAGES; page += 1) {
+      const url = new URL(`https://api.telnyx.com/v2/ai/conversations/${encodeURIComponent(conversationId)}/messages`);
+      url.searchParams.set("page[number]", String(page));
+      url.searchParams.set("page[size]", String(HISTORY_PAGE_SIZE));
+      const result = await this.get<{ data?: unknown[]; meta?: { total_pages?: unknown } }>(url);
+      raw.push(...(result.data ?? []));
+      const totalPages = typeof result.meta?.total_pages === "number" ? result.meta.total_pages : null;
+      if ((result.data ?? []).length === 0 || (totalPages === null ? (result.data ?? []).length < HISTORY_PAGE_SIZE : page >= totalPages)) break;
+    }
+    const endUser = objectData(conversation.metadata).telnyx_end_user_target;
+    return {
+      conversationId,
+      endUserTarget: typeof endUser === "string" && /^\+[1-9]\d{7,14}$/.test(endUser) ? endUser : null,
+      lastMessageAt: isoOrNull(conversation.last_message_at),
+      messages: historyMessages(raw),
+    };
+  }
+
+  private async get<T>(url: URL): Promise<T> {
+    const response = await withTimeout(this.fetcher(url, { headers: { authorization: `Bearer ${this.apiKey}` } }), 6_000);
+    const payload = await response.json().catch(() => ({})) as T & { errors?: Array<{ detail?: string }> };
+    if (!response.ok) throw new Error(`Telnyx conversation history failed with HTTP ${response.status}`);
+    return payload;
+  }
+}
+
+/**
+ * Conversation-history messages (role, text, tool_calls, sent_at/created_at) as end-of-call messages
+ * (role, content, timestamp), oldest first. Anything malformed is dropped rather than failing the call.
+ */
+function historyMessages(raw: unknown[]): TelnyxConversationHistory["messages"] {
+  const rows = raw.flatMap((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    const timestamp = isoOrNull(record.sent_at) ?? isoOrNull(record.created_at);
+    const toolCalls = Array.isArray(record.tool_calls) ? record.tool_calls.flatMap((call) => {
+      const fn = objectData(objectData(call).function);
+      if (typeof fn.name !== "string") return [];
+      const args = typeof fn.arguments === "string" ? fn.arguments : JSON.stringify(fn.arguments ?? {});
+      const id = objectData(call).id;
+      return [{ ...(typeof id === "string" ? { id } : {}), type: "function" as const, function: { name: fn.name, arguments: args } }];
+    }) : [];
+    const candidate = {
+      role: record.role,
+      ...(typeof record.text === "string" ? { content: record.text } : typeof record.content === "string" ? { content: record.content } : {}),
+      ...(timestamp ? { timestamp } : {}),
+      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+      ...(typeof record.tool_call_id === "string" ? { tool_call_id: record.tool_call_id } : {}),
+    };
+    const parsed = messageSchema.safeParse(candidate);
+    return parsed.success ? [{ message: parsed.data, at: timestamp ? Date.parse(timestamp) : null, index }] : [];
+  });
+  // Telnyx may list newest first: put the page order oldest first, then order by time (stable for equal stamps).
+  const stamped = rows.filter((row) => row.at !== null);
+  if (stamped.length > 1 && stamped[0]!.at! > stamped[stamped.length - 1]!.at!) rows.reverse();
+  return rows
+    .map((row, position) => ({ ...row, position }))
+    .sort((left, right) => (left.at !== null && right.at !== null && left.at !== right.at ? left.at - right.at : left.position - right.position))
+    .map((row) => row.message);
+}
+
+/**
+ * The call summary the normal end-of-call path builds, from the conversation Telnyx kept. `endedAt` and
+ * `durationSeconds` come from Telnyx's call status when it still has it; otherwise the call ended at its last
+ * message and ran from `startedAt` (when we answered) until then.
+ */
+export function toTelnyxHistoryCallSummary(input: {
+  history: TelnyxConversationHistory;
+  tenantId: string;
+  providerCallId: string;
+  startedAt: string;
+  endedAt?: string | null | undefined;
+  durationSeconds?: number | null | undefined;
+  receivedAt: Date;
+  recordingUrl: string | null;
+}): CallSummaryInput {
+  const stamps = input.history.messages.map((message) => message.timestamp).filter((value): value is string => Boolean(value)).map((value) => Date.parse(value));
+  const lastMessage = stamps.length > 0 ? new Date(Math.max(...stamps)).toISOString() : input.history.lastMessageAt;
+  const endedAt = input.endedAt ?? lastMessage ?? input.receivedAt.toISOString();
+  const span = Math.round((Date.parse(endedAt) - Date.parse(input.startedAt)) / 1_000);
+  const durationSeconds = input.durationSeconds ?? (Number.isFinite(span) && span >= 0 ? span : null);
+  const envelope = conversationEndedSchema.parse({
+    data: {
+      record_type: "event",
+      event_type: "call.conversation.ended",
+      id: `provider-history:${input.providerCallId}`,
+      occurred_at: endedAt,
+      payload: {
+        assistant_id: "provider-history",
+        call_control_id: input.providerCallId,
+        conversation_id: input.history.conversationId,
+        ...(durationSeconds === null ? {} : { duration_sec: durationSeconds }),
+        messages: input.history.messages,
+      },
+    },
+  });
+  const summary = toTelnyxCallSummary(envelope, "", input.tenantId, input.receivedAt, input.recordingUrl);
+  // Like the TeXML callback, no caller ID rides on the payload: only fill a number the call record never got.
+  return { ...summary, fromNumber: input.history.endUserTarget ?? summary.fromNumber };
+}
+
+/** A Telnyx timestamp as ISO UTC. One without a zone is UTC (never the server's local time). */
+function isoOrNull(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const text = value.trim();
+  const zoned = /(?:z|[+-]\d{2}:?\d{2})$/i.test(text) || !/\d[T ]\d/.test(text);
+  const parsed = Date.parse(zoned ? text : `${text.replace(" ", "T")}Z`);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
+/** The provider side of call recovery (see application/call-recovery.ts), on Telnyx. */
+export class TelnyxProviderCallHistory {
+  readonly #client: TelnyxCallHistoryClient;
+
+  constructor(apiKey: string, fetcher: typeof fetch = fetch) {
+    this.#client = new TelnyxCallHistoryClient(apiKey, fetcher);
+  }
+
+  callState(providerCallId: string): Promise<TelnyxCallState> {
+    return this.#client.callState(providerCallId);
+  }
+
+  async summary(call: Pick<CallRecord, "tenantId" | "providerCallId" | "startedAt">, hints: { endedAt: string | null; durationSeconds: number | null }, now: Date): Promise<{ summary: CallSummaryInput; lastMessageAt: string | null; messages: number } | null> {
+    const history = await this.#client.conversation(call.providerCallId);
+    if (!history) return null;
+    const stamps = history.messages.map((message) => message.timestamp).filter((value): value is string => Boolean(value)).map((value) => Date.parse(value));
+    const lastMessageAt = stamps.length > 0 ? new Date(Math.max(...stamps)).toISOString() : history.lastMessageAt;
+    return {
+      summary: toTelnyxHistoryCallSummary({ history, tenantId: call.tenantId, providerCallId: call.providerCallId, startedAt: call.startedAt, endedAt: hints.endedAt, durationSeconds: hints.durationSeconds, receivedAt: now, recordingUrl: null }),
+      lastMessageAt,
+      // What a person would read: turns with words. Tool chatter alone is not a conversation yet.
+      messages: history.messages.filter((message) => (message.role === "user" || message.role === "assistant") && Boolean(message.content?.trim())).length,
+    };
   }
 }

@@ -55,7 +55,7 @@ export function CallPathCard({ path, stale, onRefresh }: { path: ApiCallPath; st
         ) : (
           <span className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-muted-foreground">
             {path.live && <i className="size-2 animate-pulse rounded-full bg-red-600" />}
-            {path.live ? "Live · " : ""}{path.done} of {path.steps.length}
+            {path.live ? "Live · " : "Ended · "}{path.done} of {path.steps.length}
           </span>
         )}
       </div>

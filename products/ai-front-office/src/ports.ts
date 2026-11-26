@@ -44,6 +44,11 @@ export interface Store {
   listCalls(tenantId: string, limit: number): Promise<CallRecord[]>;
   /** Every shop's calls still in progress that started at or after `startedAfter`, oldest first, at most `limit`. */
   listInProgressCalls(startedAfter: string, limit: number): Promise<CallRecord[]>;
+  /**
+   * Every shop's calls that never got an end (no end-of-call payload yet, whatever happened during the call)
+   * and started at or after `startedAfter`, oldest first, at most `limit`.
+   */
+  listUnfinishedCalls(startedAfter: string, limit: number): Promise<CallRecord[]>;
   /** Calls that started in [from, to), oldest first, at most `limit` (callers treat a full page as incomplete). */
   listCallsStartedBetween(tenantId: string, from: string, to: string, limit: number): Promise<CallRecord[]>;
   /** The callback tasks of exactly these calls. */

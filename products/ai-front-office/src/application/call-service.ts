@@ -25,6 +25,14 @@ import { listPushSubscriptions } from "../adapters/web-push.js";
 /** Sticky quality flag: a spam mark was refused or undone, so this call always counts and reaches the owner. */
 const SPAM_REFUSED = "spam_refused";
 
+/**
+ * The last resort: the call was closed with nothing from the provider (no transcript), and the owner and caller
+ * were told so. Anything that arrives later only repairs the record; nobody is alerted or texted twice.
+ */
+export const BLIND_CLOSURE_FLAG = "call_ended_without_final_provider_payload";
+/** The end-of-call callback never arrived, so the record was built from the provider's own conversation history. */
+export const PROVIDER_HISTORY_FLAG = "finalized_from_provider_history";
+
 type BookSlotResult = { status: "confirmed" | "pending" | "conflict" | "unknown"; message: string };
 
 /** A claimed write whose owner has been quiet this long is presumed dead and may be taken over. */
@@ -238,7 +246,7 @@ export class CallService {
     const existing = await this.store.getCallByProviderId(input.providerCallId);
     if (!existing || existing.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
     const incoming = completePartialFields(input.fields);
-    if (incoming.callbackNumber && !isAllowedCustomerNumber(incoming.callbackNumber)) incoming.callbackNumber = null;
+    incoming.callbackNumber = normalizeCustomerNumber(incoming.callbackNumber);
     const fields = mergeCollectedFields(existing.fields, incoming);
     const config = await this.store.getConfig(input.tenantId);
     const emergency = mergeEmergencyDecision(existing.emergency, triageEmergency(`${existing.fields.problemDescription}\n${fields.problemDescription}`, config));
@@ -614,13 +622,52 @@ export class CallService {
     return call;
   }
 
-  private async finalizeClaimed(input: CallSummaryInput): Promise<CallRecord> {
+  /**
+   * The end-of-call callback never arrived, so finish the call from the provider's conversation history through
+   * the same path the callback takes. Needs no webhook claim: under the call's lock it runs only while the call
+   * still needs it, so a callback that landed first (or a second replica) makes this a no-op.
+   * - "recover": the call never got an end. Everything happens as if the callback had arrived.
+   * - "repair": the call was already closed blind (BLIND_CLOSURE_FLAG). Only the stored record is repaired:
+   *   no owner alert, no text to the caller, no calendar write.
+   * Returns null when there was nothing to do.
+   */
+  async finalizeFromProviderHistory(input: CallSummaryInput, options: { mode: "recover" | "repair" }): Promise<CallRecord | null> {
+    const call = await this.store.withLock(`call:${input.providerCallId}`, async () => {
+      const current = await this.store.getCallByProviderId(input.providerCallId);
+      if (!current || current.tenantId !== input.tenantId) return null;
+      const needsIt = options.mode === "recover" ? current.endedAt === null : current.qualityFlags.includes(BLIND_CLOSURE_FLAG);
+      return needsIt ? this.finalizeClaimed(input, PROVIDER_HISTORY_FLAG) : null;
+    });
+    // A repair tells the owner nothing new; the next finalized call checks usage.
+    if (call && options.mode === "recover") await this.#usageAlerts.check(call.tenantId);
+    return call;
+  }
+
+  /**
+   * The provider says this call is over, though its final payload has not arrived. One call-path checkpoint, so
+   * the owner's screen stops showing the call as live while the record is still being fetched.
+   */
+  async noteProviderCallEnded(providerCallId: string): Promise<void> {
+    await this.store.withLock(`call:${providerCallId}`, async () => {
+      const call = await this.store.getCallByProviderId(providerCallId);
+      if (!call || call.endedAt !== null) return;
+      if ((await this.store.listToolEvents(call.id)).some((event) => event.tool === "call.end")) return;
+      await this.checkpoint(call, "call.end", this.clock.now(), {});
+    });
+  }
+
+  private async finalizeClaimed(input: CallSummaryInput, provenance: string | null = null): Promise<CallRecord> {
     if (await this.store.isProviderCallDeleted(input.providerCallId)) throw new Error("Provider call was deleted and cannot be recreated");
     const existing = await this.store.getCallByProviderId(input.providerCallId);
     if (existing && existing.tenantId !== input.tenantId) throw new Error("Provider call belongs to a different tenant");
     const config = await this.store.getConfig(input.tenantId);
+    // Already closed blind: the owner was alerted and the caller texted then. This pass only repairs the record.
+    const repair = existing?.qualityFlags.includes(BLIND_CLOSURE_FLAG) === true;
+    const provenanceFlags = provenance ? [provenance] : [];
     let call = existing ?? await this.createCall(input.tenantId, input.providerCallId, input.fromNumber, input.startedAt, false);
-    const fields = mergeCollectedFields(call.fields, input.fields);
+    // A callback number the model wrote its own way ("941-555-0110", "same number") must never replace the number
+    // that called: keep it only when it is a real number, in the one form every screen and text can use.
+    const fields = mergeCollectedFields(call.fields, { ...input.fields, callbackNumber: normalizeCustomerNumber(input.fields.callbackNumber) });
     // Triage what the caller said, never the assistant's own screening questions.
     const rawSafetyText = [fields.problemDescription, callerSpeech(input.transcript ?? call.transcript)].filter(Boolean).join("\n");
     const emergency = mergeEmergencyDecision(
@@ -636,7 +683,8 @@ export class CallService {
       ...call,
       fromNumber: call.fromNumber === "unknown" && isAllowedCustomerNumber(input.fromNumber) ? input.fromNumber : call.fromNumber,
       startedAt: earlierIso(call.startedAt, input.startedAt),
-      endedAt: call.endedAt ? laterIso(call.endedAt, input.endedAt) : input.endedAt,
+      // A blind closure stamped the time it gave up, not the time the call ended.
+      endedAt: call.endedAt && !repair ? laterIso(call.endedAt, input.endedAt) : input.endedAt,
       durationSeconds: Math.max(call.durationSeconds ?? 0, input.durationSeconds ?? 0) || null,
       fields,
       emergency,
@@ -648,7 +696,7 @@ export class CallService {
       updatedAt: this.clock.now().toISOString(),
     };
     if (spamExcluded) {
-      call = { ...call, outcome: "ignored_spam", qualityFlags: ["spam_excluded"], updatedAt: this.clock.now().toISOString() };
+      call = { ...call, outcome: "ignored_spam", qualityFlags: ["spam_excluded", ...provenanceFlags], updatedAt: this.clock.now().toISOString() };
       await this.store.saveCall(call);
       return call;
     }
@@ -685,7 +733,7 @@ export class CallService {
       && isInServiceArea(call.fields.address, config)
       && isConfiguredServiceCategory(call.fields.serviceCategory, config)
       && Boolean(call.fields.problemDescription.trim());
-    if (!booking && canAttemptDirectBooking) {
+    if (!booking && canAttemptDirectBooking && !repair) {
       booking = await this.#booking.book({
         tenantId: input.tenantId,
         callId: call.id,
@@ -699,12 +747,18 @@ export class CallService {
       });
     } else if (!booking && call.fields.requestedStart && call.fields.explicitSlotConfirmation && !emergency.emergency) {
       booking = await this.queuePendingBooking(call, call.fields.requestedStart, config,
-        config.bookingMode === "confirm" ? "Owner confirmation mode is active" : "Booking requirements were incomplete");
+        config.bookingMode === "confirm" ? "Owner confirmation mode is active"
+          // A repair never writes to the calendar: the owner confirms the time the caller asked for.
+          : repair && canAttemptDirectBooking ? "Recovered after the call; confirm the time with the caller"
+            : "Booking requirements were incomplete");
     }
 
     let confirmationQueued = false;
     if (booking?.status === "confirmed" && config.customerSmsEnabled) {
-      const confirmation = await this.enqueueCustomerConfirmation(call, booking, config);
+      // A repair never texts the caller: it only counts a confirmation that already went out.
+      const confirmation = repair
+        ? (await this.store.listNotifications(call.id)).find((item) => item.idempotencyKey === `customer-confirmation:${call.id}`)?.id ?? null
+        : await this.enqueueCustomerConfirmation(call, booking, config);
       confirmationQueued = confirmation !== null;
       if (confirmation && booking.confirmationNotificationId !== confirmation) {
         booking = { ...booking, confirmationNotificationId: confirmation, updatedAt: this.clock.now().toISOString() };
@@ -723,7 +777,8 @@ export class CallService {
       : booking?.status === "confirmed" && qualityFlags.length === 0
         ? "booked"
         : "pending_confirmation";
-    call = { ...call, outcome, qualityFlags, updatedAt: this.clock.now().toISOString() };
+    // Where the record came from is kept on the call only: it is not a gap the owner has to resolve.
+    call = { ...call, outcome, qualityFlags: [...qualityFlags, ...provenanceFlags], updatedAt: this.clock.now().toISOString() };
     await this.store.saveCall(call);
     if (outcome !== "booked") {
       await this.ensureCallbackTask(
@@ -735,17 +790,23 @@ export class CallService {
     } else {
       await this.completeCallbackTask(call.id, "verified_booking");
     }
-    await this.enqueueOwnerNotifications(call, booking?.requestedStart ?? call.fields.requestedStart, config);
+    if (!repair) await this.enqueueOwnerNotifications(call, booking?.requestedStart ?? call.fields.requestedStart, config);
     return call;
   }
 
-  async recoverStaleCalls(tenantId: string, staleAfterMs = 35 * 60_000): Promise<number> {
+  /**
+   * The last resort, for a call the provider has nothing on: 35 minutes with no end-of-call payload and no
+   * conversation history to rebuild it from (see CallRecovery, which runs first and keeps the transcript).
+   */
+  async recoverStaleCalls(tenantId: string, staleAfterMs = 35 * 60_000, lastChance?: (call: CallRecord) => Promise<boolean>): Promise<number> {
     const config = await this.store.getConfig(tenantId);
     const cutoff = this.clock.now().getTime() - staleAfterMs;
     const candidates = (await this.store.listCalls(tenantId, 200))
       .filter((call) => call.outcome === "in_progress" && Date.parse(call.updatedAt) <= cutoff);
     let recovered = 0;
     for (const candidate of candidates) {
+      // One more look at the provider's history first: a call it still has is finished properly, never closed blind.
+      if (lastChance && await lastChance(candidate).catch(() => false)) continue;
       await this.store.withLock(`call:${candidate.providerCallId}`, async () => {
         const current = await this.store.getCall(candidate.id);
         if (!current || current.outcome !== "in_progress") return;
@@ -757,7 +818,7 @@ export class CallService {
           emergency,
           outcome: "handoff_queued",
           billingDisposition: "not_billable",
-          qualityFlags: ["call_ended_without_final_provider_payload"],
+          qualityFlags: [BLIND_CLOSURE_FLAG],
           updatedAt: now,
         };
         await this.store.saveCall(call);
@@ -1117,6 +1178,17 @@ function validateAvailabilityWindow(windowStart: string, windowEnd: string, now:
 function isAllowedCustomerNumber(value: string): boolean {
   const match = /^\+1([2-9]\d{2})([2-9]\d{6})$/.exec(value.trim());
   return Boolean(match && match[1] !== "900");
+}
+
+/** A US callback number as +1XXXXXXXXXX however it was written ("941-555-0110", "1 (941) 555-0110"); anything else is null. */
+function normalizeCustomerNumber(value: string | null): string | null {
+  if (!value?.trim()) return null;
+  if (isAllowedCustomerNumber(value)) return value.trim();
+  // Words around the digits ("call after 5 at...") make it a note, not a number.
+  if (/[a-z]/i.test(value)) return null;
+  const digits = value.replace(/\D/g, "");
+  const candidate = `+1${digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits}`;
+  return isAllowedCustomerNumber(candidate) ? candidate : null;
 }
 
 function formatLocalDateTime(value: string, timeZone: string): string {

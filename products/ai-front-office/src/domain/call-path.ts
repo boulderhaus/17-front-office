@@ -98,7 +98,15 @@ export function buildCallPath(input: {
   // Not the outcome (a request for the owner changes it mid-call): the call's end, plus a short settle so the
   // page never freezes on a half-written finish.
   const sinceEnd = call.endedAt === null ? 0 : input.now.getTime() - Date.parse(call.endedAt);
-  const live = withinWindow && (call.endedAt === null || sinceEnd < CALL_PATH_SETTLE_MS || (booking?.status === "checking" && sinceEnd < CALL_PATH_BOOKING_SETTLE_MS));
+  // The provider said the call is over before its final payload arrived (call recovery): never show it as live.
+  const providerEnded = events.some((event) => event.tool === "call.end");
+  const live = withinWindow && !providerEnded && (call.endedAt === null || sinceEnd < CALL_PATH_SETTLE_MS || (booking?.status === "checking" && sinceEnd < CALL_PATH_BOOKING_SETTLE_MS));
+  // What the call record holds counts too: the end-of-call payload fills in details whose tool write failed or
+  // never ran mid-call, and a step the record proves is never shown as skipped. No time: nothing stamped it.
+  const hasProblem = problemCaptured(call);
+  const hasName = Boolean(call.fields.callerName?.trim());
+  const hasNumber = /^\+[1-9]\d{7,14}$/.test(call.fields.callbackNumber ?? call.fromNumber);
+  const hasAddress = Boolean(call.fields.address?.trim());
   const spam = call.billingDisposition === "spam_excluded" || call.outcome === "ignored_spam";
   const emergency = call.emergency?.emergency === true;
   const handedOff = call.outcome === "handoff_queued" || call.fields.humanRequested || emergency;
@@ -114,16 +122,22 @@ export function buildCallPath(input: {
   // 2. Service check: a vendor, robocall or wrong number ends the path here.
   const spamEvent = first((event) => event.tool === "call.mark_spam" && ok(event));
   const customer = first((event) => CUSTOMER_TOOLS.has(event.tool) && ok(event));
+  // Once the call is over, a caller whose problem, name or address is on the record was a customer.
+  const customerOnRecord = !live && (hasProblem || hasName || hasAddress);
   found.push(spam
     ? { state: "flagged", at: spamEvent?.completedAt ?? null, note: "Not a service call, so Otto ended it" }
-    : customer ? { state: "done", at: customer.completedAt, note: null } : null);
+    : customer ? { state: "done", at: customer.completedAt, note: null }
+      : customerOnRecord ? { state: "done", at: null, note: null } : null);
 
-  // 3. The problem, once Otto saved it (the transcript alone isn't proof).
+  // 3. The problem, once it is on the record (saved mid-call, or from the end-of-call payload).
   const problem = first((event) => (event.tool === "call.intake" && meta(event, "problem") === true) || event.tool === "call.triage");
-  found.push(problem ? { state: "done", at: problem.completedAt, note: null } : null);
+  found.push(problem ? { state: "done", at: problem.completedAt, note: null }
+    : !live && hasProblem ? { state: "done", at: null, note: null } : null);
 
-  // 4. Safety check: the server's triage rules run on every intake and on triage_call; emergencies flagged.
+  // 4. Safety check: the server's triage rules run on every intake, on triage_call and when the call ends; emergencies flagged.
   const triage = first((event) => event.tool === "call.triage") ?? (call.emergency ? intake("problem") : undefined);
+  // The end-of-call triage ran on the captured problem: it counts when there was one to check.
+  const checkedAtEnd = !live && call.emergency !== null && hasProblem;
   const caughtLive = first((event) => (event.tool === "call.triage" && meta(event, "emergency") === true) || (event.tool === "call.handoff" && meta(event, "reason") === "emergency"));
   if (emergency) {
     const kind = call.emergency?.severity === "life_safety" ? "Emergency" : "Urgent";
@@ -132,16 +146,19 @@ export function buildCallPath(input: {
       ? { state: "flagged", at: caughtLive.completedAt, note: `${kind}, ${alertWords(alert, "alert")}` }
       : { state: "flagged", at: call.endedAt, note: `${kind} found after the call, ${alertWords(alert, "alert")}` });
   } else {
-    found.push(triage ? { state: "done", at: triage.completedAt, note: "No emergency" } : null);
+    found.push(triage ? { state: "done", at: triage.completedAt, note: "No emergency" }
+      : checkedAtEnd ? { state: "done", at: null, note: "No emergency" } : null);
   }
 
-  // 5. Name and callback number (the caller ID counts once the caller says it's the best number).
+  // 5. Name and callback number (the caller ID counts once the caller says it's the best number, and once the
+  // call is over: it is the number on the record).
   const caller = first((event) => event.tool === "call.intake" && meta(event, "name") === true && meta(event, "callback") === true);
-  const named = intake("name");
-  const numbered = intake("callback");
+  const named = intake("name") !== undefined || hasName;
+  const numbered = intake("callback") !== undefined || hasNumber;
   found.push(caller ? { state: "done", at: caller.completedAt, note: null }
     : live ? null
-      : named || numbered ? { state: "skipped", at: null, note: named ? "Got the name, no callback number" : "Got the number, no name" } : null);
+      : named && numbered ? { state: "done", at: null, note: null }
+        : named || numbered ? { state: "skipped", at: null, note: named ? "Got the name, no callback number" : "Got the number, no name" } : null);
 
   // 6. Address, checked against the service area. The note follows the latest check (a corrected address).
   const coverage = (event: ToolEvent): boolean => event.tool === "coverage.check" && ok(event) && meta(event, "status") !== "incomplete";
@@ -150,7 +167,8 @@ export function buildCallPath(input: {
   const addressTaken = intake("address");
   found.push(firstCoverage && lastCoverage
     ? { state: "done", at: firstCoverage.completedAt, note: coverageWords(meta(lastCoverage, "status")) }
-    : addressTaken ? { state: "done", at: addressTaken.completedAt, note: "Address taken" } : null);
+    : addressTaken ? { state: "done", at: addressTaken.completedAt, note: "Address taken" }
+      : !live && hasAddress ? { state: "done", at: null, note: "Address taken" } : null);
 
   // 7 and 8. Open times and the booking, unless the call went to the owner instead.
   const availability = (event: ToolEvent): boolean => event.tool === "calendar.availability" && ok(event);
@@ -169,7 +187,7 @@ export function buildCallPath(input: {
 
   // 9. Recap and the owner's summary: a recap only when Otto captured something, a text only once it was sent.
   const recovered = call.qualityFlags.includes("call_ended_without_final_provider_payload");
-  const captured = events.some((event) => event.tool === "call.intake");
+  const captured = events.some((event) => event.tool === "call.intake") || hasProblem || hasName || hasAddress;
   found.push(call.endedAt === null || live ? null
     : recovered ? { state: "flagged", at: call.endedAt, note: `Call dropped, ${summaryWords(summary)}` }
       : !captured ? { state: "skipped", at: null, note: summary === "none" ? null : `Nothing to recap, ${summaryWords(summary)}` }
@@ -192,6 +210,25 @@ export function buildCallPath(input: {
   if (price) extras.push({ key: "price_question", label: "Price question", state: "done", at: price.completedAt, note: meta(price, "approved") === true ? "Gave your approved price" : "No approved price, took a message" });
   if (ownerAsk) extras.push({ key: "owner_request", label: "Asked for you", state: liveAlert === "failed" ? "flagged" : "done", at: ownerAsk.completedAt, note: alertWords(liveAlert, "callback alert") });
   return { steps, extras, live, done: steps.filter((step) => step.state === "done" || step.state === "waiting" || step.state === "flagged").length, startedAt: call.startedAt };
+}
+
+/**
+ * A problem Otto captured. When none was saved, the end-of-call payload fills the field with everything the
+ * caller said: that is the transcript (a "Hello?" on a hang-up), not a captured problem.
+ */
+function problemCaptured(call: Pick<CallRecord, "fields" | "transcript">): boolean {
+  const squash = (value: string): string => value.replace(/\s+/g, " ").trim();
+  const problem = squash(call.fields.problemDescription);
+  if (!problem) return false;
+  const transcript = call.transcript ?? "";
+  let callerTurn = false;
+  const said: string[] = [];
+  for (const line of transcript.split("\n")) {
+    const speaker = /^(Caller|Otto|AI assistant):/.exec(line);
+    if (speaker) callerTurn = speaker[1] === "Caller";
+    if (callerTurn) said.push(speaker ? line.slice(speaker[0].length) : line);
+  }
+  return problem !== squash(said.join(" ")) && problem !== squash(transcript);
 }
 
 function coverageWords(status: unknown): string {

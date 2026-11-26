@@ -248,6 +248,15 @@ export class PostgresStore implements Store {
     return result.rows.map((row) => this.mapCall(row as Row));
   }
 
+  async listUnfinishedCalls(startedAfter: string, limit: number): Promise<CallRecord[]> {
+    // Uses calls_unfinished_started_idx (migration 018): only calls without an end are in that partial index.
+    const result = await this.#pool.query(
+      "SELECT * FROM calls WHERE ended_at IS NULL AND started_at >= $1 ORDER BY started_at ASC LIMIT $2",
+      [startedAfter, limit],
+    );
+    return result.rows.map((row) => this.mapCall(row as Row));
+  }
+
   async listCallsStartedBetween(tenantId: string, from: string, to: string, limit: number): Promise<CallRecord[]> {
     // Uses calls_tenant_started_idx; the window bounds the scan, the limit only guards memory.
     const result = await this.#pool.query(
