@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { slotTouchesDayOff } from "../domain/days-off.js";
 import type { AvailabilitySlot, BookingAttempt, BusinessConfig } from "../domain/models.js";
 import type { CalendarPort, CallOptions, CreateEventOptions } from "../ports.js";
 import { withTimeout } from "../application/retry.js";
@@ -34,6 +35,7 @@ export class GoogleCalendarAdapter implements CalendarPort {
     bookableHours: BusinessConfig["bookableHours"];
     minimumLeadTimeMinutes: number;
     now: string;
+    daysOff?: BusinessConfig["daysOff"];
   }, options?: CallOptions): Promise<AvailabilitySlot[]> {
     const busy = await this.queryBusy(input.tenantId, input.windowStart, input.windowEnd, options?.signal);
     const slots: AvailabilitySlot[] = [];
@@ -45,6 +47,7 @@ export class GoogleCalendarAdapter implements CalendarPort {
       const end = cursor + durationMs;
       if (isWithinBookableHours(new Date(cursor), input.timezone, input.bookableHours)
         && isWithinBookableHours(new Date(end - 1), input.timezone, input.bookableHours)
+        && !slotTouchesDayOff(new Date(cursor), new Date(end), input.timezone, input.daysOff)
         && !busy.some((period) => cursor < Date.parse(period.end) && end > Date.parse(period.start))) {
         slots.push({ start: new Date(cursor).toISOString(), end: new Date(end).toISOString() });
       }

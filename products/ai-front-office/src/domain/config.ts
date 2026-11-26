@@ -3,6 +3,7 @@ import { DEFAULT_USAGE_ALERT_PERCENT, isValidUsageAlertPercent } from "./usage.j
 import { stateCode } from "./area-codes.js";
 import { DEFAULT_ANSWER_AFTER_RINGS } from "./forwarding.js";
 import { DEFAULT_OVERAGE_CENTS_PER_CALL, DEFAULT_PLANS, normalizePlanId } from "./plans.js";
+import { isCivilDate } from "./days-off.js";
 
 export function createDemoConfig(tenantId = "demo"): BusinessConfig {
   return {
@@ -37,6 +38,7 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
       weekends: false,
     },
     minimumLeadTimeMinutes: 120,
+    daysOff: [],
     priceSnippets: [],
     approvedKnowledge: [],
     pronunciations: [],
@@ -80,6 +82,7 @@ export function normalizeBusinessConfig(value: Partial<BusinessConfig> & Pick<Bu
     unlimitedCalls: value.unlimitedCalls === true,
     afterHours: { ...defaults.afterHours, ...value.afterHours },
     bookableHours: { ...defaults.bookableHours, ...value.bookableHours },
+    daysOff: Array.isArray(value.daysOff) ? value.daysOff.filter((entry) => typeof entry?.start === "string" && typeof entry?.end === "string" && isCivilDate(entry.start) && isCivilDate(entry.end) && entry.start <= entry.end).map(({ start, end }) => ({ start, end })) : [],
     usageAlertPercent: isValidUsageAlertPercent(Number(value.usageAlertPercent)) ? Number(value.usageAlertPercent) : defaults.usageAlertPercent,
     // Saved before owners could choose: every one of those was forced to "confirm", so it gets the new default once.
     ...((value.bookingDefaultsVersion ?? 1) < BOOKING_DEFAULTS_VERSION ? { bookingMode: defaults.bookingMode, bookingDefaultsVersion: BOOKING_DEFAULTS_VERSION } : {}),

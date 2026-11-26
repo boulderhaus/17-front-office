@@ -4,6 +4,7 @@ import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
 import { CARRIER_CHOICES, forwardingChoice, forwardingPlan, mayForwardAll, NOT_FORWARDING_AFTER_MS, ringFirstSeconds, type CarrierInfo, type ForwardingChoice, type ForwardingMode, type ForwardingPlan, type TestedFor } from "../domain/forwarding.js";
 import { hasPlanAccess } from "../domain/billing.js";
 import { describeHours } from "../domain/hours.js";
+import { formatDaysOff, localDate, upcomingDaysOff, type DayOff } from "../domain/days-off.js";
 import { fairUseCalls, type PlanId, type PriceQuote } from "../domain/plans.js";
 import { extraCalls } from "../domain/usage.js";
 import { COMPANY } from "../admin/footer.js";
@@ -116,6 +117,8 @@ export interface ApiDashboard {
     rulesSaved: boolean;
     greeting: string;
     hours: string;
+    /** Upcoming days off (whole days in the shop's time zone, both ends included). */
+    daysOff: DayOff[];
     flatMonthlyPriceCents: number;
     includedCalls: number;
     overageCentsPerCall: number;
@@ -242,6 +245,7 @@ export function apiDashboard(input: {
       rulesSaved: c.serviceAreaTerms.length > 0 && c.greeting.trim().length > 0,
       greeting: c.greeting,
       hours: describeHours(c.bookableHours),
+      daysOff: upcomingDaysOff(c.daysOff, localDate(new Date(input.now), c.timezone)),
       flatMonthlyPriceCents: c.flatMonthlyPriceCents,
       includedCalls: c.includedCalls,
       overageCentsPerCall: c.overageCentsPerCall,
@@ -424,7 +428,7 @@ export function forwardingUpdate(plan: ForwardingPlan | null, mode: ForwardingMo
 }
 
 /** The owner settings form as plain values; the client posts the same names back. */
-export function apiSettings(config: BusinessConfig): Record<string, string | boolean> {
+export function apiSettings(config: BusinessConfig, now: Date = new Date()): Record<string, string | boolean> {
   return {
     serviceState: config.paused ? "paused" : "active",
     operationMode: config.operationMode,
@@ -444,6 +448,8 @@ export function apiSettings(config: BusinessConfig): Record<string, string | boo
     defaultServiceDurationMinutes: String(config.defaultServiceDurationMinutes),
     minimumLeadTimeMinutes: String(config.minimumLeadTimeMinutes),
     bookableWeekends: config.bookableHours.weekends,
+    // Upcoming only: a day that has passed drops off the list on its own.
+    daysOff: formatDaysOff(upcomingDaysOff(config.daysOff, localDate(now, config.timezone))),
     bookingMode: config.bookingMode,
     requireDiagnosticFeeAcceptance: config.requireDiagnosticFeeAcceptance,
     priceSnippets: config.priceSnippets.map((item) => `${item.label}: ${item.text}`).join("\n"),
@@ -464,7 +470,7 @@ export function apiSettings(config: BusinessConfig): Record<string, string | boo
 
 // Not here on purpose: repeat-caller limits and call retention are fixed by Call Otto, not owner settings.
 const SETTINGS_FIELDS = new Set([
-  "serviceState", "operationMode", "answerAfterRings", "weekends", "weekdayStart", "weekdayEnd", "holidayDates", "businessName", "timezone", "greeting", "recordingNotice", "serviceAreaTerms", "serviceCategories", "bookableWeekdayStart", "bookableWeekdayEnd", "defaultServiceDurationMinutes", "minimumLeadTimeMinutes", "bookableWeekends", "bookingMode", "requireDiagnosticFeeAcceptance", "priceSnippets", "approvedKnowledge", "ownerPhone", "ownerDailySmsEnabled", "ownerDailySmsHour", "ownerRealtimeSmsEnabled", "ownerWeeklyEmailEnabled", "usageAlertPercent", "emergencyKeywords", "emergencyThreshold", "pronunciations", "supportEmail", "flatMonthlyPrice",
+  "serviceState", "operationMode", "answerAfterRings", "weekends", "weekdayStart", "weekdayEnd", "holidayDates", "businessName", "timezone", "greeting", "recordingNotice", "serviceAreaTerms", "serviceCategories", "bookableWeekdayStart", "bookableWeekdayEnd", "defaultServiceDurationMinutes", "minimumLeadTimeMinutes", "bookableWeekends", "daysOff", "bookingMode", "requireDiagnosticFeeAcceptance", "priceSnippets", "approvedKnowledge", "ownerPhone", "ownerDailySmsEnabled", "ownerDailySmsHour", "ownerRealtimeSmsEnabled", "ownerWeeklyEmailEnabled", "usageAlertPercent", "emergencyKeywords", "emergencyThreshold", "pronunciations", "supportEmail", "flatMonthlyPrice",
 ]);
 
 /**

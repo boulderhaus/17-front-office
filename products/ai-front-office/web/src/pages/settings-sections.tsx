@@ -567,6 +567,7 @@ export function CalendarSection() {
         </Pair>
         <ToggleRow id="bookableWeekends" label="Weekend appointments" hint={flag("bookableWeekends") ? "Saturdays and Sundays, same hours." : "Weekdays only."} checked={flag("bookableWeekends")} onChange={(value) => set("bookableWeekends", value)} />
       </SettingsCard>
+      <DaysOffCard />
       <SettingsCard title="Booking">
         <Pair>
           <Field label="Typical job length">
@@ -583,6 +584,75 @@ export function CalendarSection() {
         <Button size="tap" variant="outline" className={actionClass} asChild><a href="/app/team">Open the Team page</a></Button>
       </SettingsCard>
     </>
+  )
+}
+
+/** The most days off kept at once and the longest stretch: the server refuses more (src/domain/days-off.ts). */
+const MAX_DAYS_OFF = 30
+const MAX_DAYS_OFF_SPAN = 92
+const civil = (key: string) => { const [y, m, d] = key.split("-").map(Number); return new Date(Date.UTC(y!, m! - 1, d!)) }
+const dayLabel = (key: string, options: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat("en-US", { timeZone: "UTC", ...options }).format(civil(key))
+const spanDays = (start: string, end: string) => Math.round((civil(end).getTime() - civil(start).getTime()) / 86_400_000) + 1
+function shopToday(timeZone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date())
+    const read = (type: string) => parts.find((part) => part.type === type)?.value ?? ""
+    return `${read("year")}-${read("month")}-${read("day")}`
+  } catch {
+    return new Date().toISOString().slice(0, 10)
+  }
+}
+/** "2026-12-24" or "2026-12-24..2026-12-26", one per line: the form's daysOff value, as the server sends it. */
+function splitDaysOff(value: string): Array<{ start: string; end: string }> {
+  return value.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => { const [start = "", end = start] = line.split(".."); return { start, end } })
+}
+const joinDaysOff = (list: Array<{ start: string; end: string }>) => list.map(({ start, end }) => (start === end ? start : `${start}..${end}`)).join("\n")
+
+/** Holidays, a trade show, a week away: whole days Otto books nothing. Saved with the page's Save, like the hours. */
+function DaysOffCard() {
+  const { text, set } = useSettings()
+  const today = shopToday(text("timezone") || "America/New_York")
+  const list = splitDaysOff(text("daysOff")).filter((entry) => entry.end >= today).sort((left, right) => left.start.localeCompare(right.start))
+  const [first, setFirst] = useState("")
+  const [last, setLast] = useState("")
+  const end = last && last >= first ? last : first
+  const problem = !first ? null
+    : first < today ? "Pick today or a later day."
+    : last && last < first ? "The last day is before the first."
+    : spanDays(first, end) > MAX_DAYS_OFF_SPAN ? `Up to ${MAX_DAYS_OFF_SPAN} days in a row.`
+    : list.some((entry) => entry.start === first && entry.end === end) ? "That’s already on your list."
+    : list.length >= MAX_DAYS_OFF ? `You can keep up to ${MAX_DAYS_OFF}. Remove one first.`
+    : null
+  const add = () => {
+    if (!first || problem) return
+    set("daysOff", joinDaysOff([...list, { start: first, end }].sort((left, right) => left.start.localeCompare(right.start))))
+    setFirst("")
+    setLast("")
+  }
+  const words = (entry: { start: string; end: string }) => entry.start === entry.end
+    ? dayLabel(entry.start, { weekday: "short", month: "short", day: "numeric" })
+    : `${dayLabel(entry.start, { month: "short", day: "numeric" })} – ${dayLabel(entry.end, { month: "short", day: "numeric" })}`
+  return (
+    <SettingsCard title="Days off" description="Otto books nothing on these days. Emergencies still reach you.">
+      {list.length > 0 ? (
+        <ul className="divide-y rounded-lg border bg-card">
+          {list.map((entry) => (
+            <li key={`${entry.start}..${entry.end}`} className="flex min-h-14 items-center justify-between gap-3 py-1 pr-1 pl-4">
+              <span className="grid min-w-0">
+                <span className="tabular text-[15px] font-medium">{words(entry)}</span>
+                {entry.start !== entry.end && <span className="text-sm text-muted-foreground">{spanDays(entry.start, entry.end)} days</span>}
+              </span>
+              <Button type="button" variant="ghost" size="icon" aria-label={`Remove ${words(entry)}`} className="size-11 shrink-0 text-muted-foreground" onClick={() => set("daysOff", joinDaysOff(list.filter((item) => item !== entry)))}><X className="size-5" /></Button>
+            </li>
+          ))}
+        </ul>
+      ) : <p className="text-[15px] text-muted-foreground">No days off yet.</p>}
+      <Pair>
+        <Field label="First day off"><Input type="date" className={cn(fieldClass, "appearance-none")} min={today} value={first} onChange={(event) => { setFirst(event.target.value); if (last && event.target.value > last) setLast("") }} /></Field>
+        <Field label="Last day off" hint="Leave it empty for one day." error={problem}><Input type="date" className={cn(fieldClass, "appearance-none")} min={first || today} value={last} onChange={(event) => setLast(event.target.value)} /></Field>
+      </Pair>
+      <Button type="button" variant="outline" size="tap" className={actionClass} disabled={!first || Boolean(problem)} onClick={add}><Plus />Add days off</Button>
+    </SettingsCard>
   )
 }
 

@@ -35,6 +35,7 @@ import { otherServiceProblem, REPEAT_CALLER_DAILY_LIMIT } from "../domain/owner-
 import { MAX_USAGE_ALERT_PERCENT, MIN_USAGE_ALERT_PERCENT, currentBillingPeriod, isValidUsageAlertPercent } from "../domain/usage.js";
 
 export { currentBillingPeriod };
+import { localDate, parseDaysOff } from "../domain/days-off.js";
 import { apiCall, apiDashboard, apiSettings, apiTask, maskedPhone, settingsForm, textsOn, type ApiCallDetail, type ApiPlan } from "./owner-api-model.js";
 import { approvedAnswer } from "../domain/approved-answer.js";
 import { isExplicitHumanRequest } from "../domain/human-request.js";
@@ -1734,7 +1735,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         csrf: session.csrf,
         urgentCalls: await urgentCallsState(account.tenantId),
         texts: await textsState(account.tenantId),
-        values: apiSettings(config),
+        values: apiSettings(config, dependencies.clock.now()),
         // The tick boxes for "What you fix" and "What counts as an emergency" (the stored lists stay plain words).
         catalog: {
           // Walk 11-26 (SET-04): the same trade names as the website.
@@ -1938,7 +1939,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   async function saveOwnerSettingsLocked(account: OwnerAccount, form: URLSearchParams, ip: string | null): Promise<void> {
     await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
     const current = await dependencies.store.getConfig(account.tenantId);
-    const updated = configFromForm(current, form, "owner");
+    const updated = configFromForm(current, form, "owner", dependencies.clock.now());
     if (updated.operationMode !== current.operationMode || updated.answerAfterRings !== current.answerAfterRings) await rememberLegacyTestedFor(account.tenantId, current, updated.operationMode);
     // So "Keep my phone ringing first" can put back what they had (after hours stays after hours).
     if (updated.operationMode === "always" && current.operationMode !== "always") await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "mode_before_every_call", current.operationMode);
@@ -4467,7 +4468,7 @@ function serviceAreaMessage(errors: string[]): string {
     : "Add at least one city and state or 5-digit ZIP.";
 }
 
-function configFromForm(current: BusinessConfig, form: URLSearchParams, surface: "owner" | "platform"): BusinessConfig {
+function configFromForm(current: BusinessConfig, form: URLSearchParams, surface: "owner" | "platform", now: Date = new Date()): BusinessConfig {
   const required = (name: string): string => {
     const value = form.get(name)?.trim();
     if (!value) throw new HttpError(400, `${name} is required`);
@@ -4519,6 +4520,10 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams, surface:
   if (!isValidUsageAlertPercent(usageAlertPercent)) throw new HttpError(400, `Minutes alert must be between ${MIN_USAGE_ALERT_PERCENT}% and ${MAX_USAGE_ALERT_PERCENT}%`);
   const holidayDates = list("holidayDates");
   if (holidayDates.some((value) => !isIsoDate(value))) throw new HttpError(400, "Holiday dates must use valid YYYY-MM-DD values");
+  // Forms without the Days off list (the platform admin page) keep the saved days.
+  const daysOff = form.has("daysOff") ? (() => {
+    try { return parseDaysOff(form.get("daysOff") ?? "", localDate(now, timezone)); } catch (error) { throw new HttpError(400, error instanceof Error ? error.message : "Check your days off"); }
+  })() : current.daysOff ?? [];
   return {
     ...current,
     paused: serviceState === "paused",
@@ -4538,6 +4543,7 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams, surface:
     })(),
     emergencyThreshold,
     minimumLeadTimeMinutes,
+    daysOff,
     maxCallsPerCallerPerDay,
     defaultServiceDurationMinutes,
     serviceCategories: (() => {
