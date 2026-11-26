@@ -116,8 +116,9 @@ describe("call outcomes", () => {
     expect(call.outcome).toBe("pending_confirmation");
   });
 
-  it("defaults to owner-confirmation mode instead of promising an appointment", async () => {
+  it("keeps owner-confirmation mode when the owner chose it, instead of promising an appointment", async () => {
     await configureApprovedFee();
+    await store.saveConfig({ ...(await store.getConfig("demo")), bookingMode: "confirm" });
     await start("confirm-mode");
     const result = await book("confirm-mode", "2026-01-15T15:00:00Z");
     expect(result.status).toBe("pending");

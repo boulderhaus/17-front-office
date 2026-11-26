@@ -64,7 +64,8 @@ const schema = z.object({
   FOUNDER_WELCOME_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   SUPPORT_EMAIL: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
   // Owner-facing controls stay hidden until each capability passes live acceptance.
-  DIRECT_BOOKING_BETA: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  // On: owners choose "book it on my calendar" or "I'll confirm". "false" forces confirm on every settings save.
+  DIRECT_BOOKING_BETA: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
   WARM_TRANSFER_BETA: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   FOUNDER_WELCOME_FROM_NUMBER: z.preprocess(
     (value) => value === "" ? undefined : value,

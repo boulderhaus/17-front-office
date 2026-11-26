@@ -160,7 +160,13 @@ export interface BusinessConfig {
   pausedForBilling?: boolean;
   schedulingCalendars?: Array<{ accountId: string; enabled: boolean; hours: BusinessConfig["bookableHours"] }>;
   calendarConnectionRef: string | null;
+  /** "direct": Otto books open times on a connected calendar; without one it takes the details and the owner confirms. */
   bookingMode: "confirm" | "direct";
+  /**
+   * 2 once booking defaults are current. Shops saved before it were all forced to "confirm" (the owner never had
+   * the choice), so reading one without it moves it to "direct" once; an owner's later choice then sticks.
+   */
+  bookingDefaultsVersion?: number;
   operationMode: "after_hours" | "overflow" | "always";
   answerAfterRings: number;
   afterHours: {

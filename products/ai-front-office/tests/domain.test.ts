@@ -55,9 +55,11 @@ describe("coverage and voice policy", () => {
     expect(recordingSettings(recordingConfig)).toBe(false);
     expect(prompt).toContain("Quote only these approved snippets");
     expect(prompt).toContain("read the exact approved diagnostic fee");
-    expect(prompt).toContain("The booking mode is confirm");
+    expect(prompt).toContain("The booking mode is direct");
+    expect(prompt).toContain("triage_call found no emergency, book an offered slot they pick instead of promising a callback. Safety and wrap-up rules win.");
+    expect(buildVoiceSystemPrompt({ ...createDemoConfig(), bookingMode: "confirm" })).toContain("The booking mode is confirm. In confirm mode, save the preferred time but never claim it is booked.");
     expect(prompt).toContain("caller ID as {{caller_phone}}");
-    expect(prompt).toContain("Default to one or two short sentences");
+    expect(prompt).toContain("Most turns are one short sentence");
     expect(prompt).toContain("spokenSummary once");
     expect(prompt).toContain("call check_service_area before checking availability");
   });
@@ -104,11 +106,11 @@ describe("coverage and voice policy", () => {
     const prompt = buildVoiceSystemPrompt(config);
     expect(prompt).toContain("invoke the built-in hangup tool in the same turn");
     expect(prompt).toContain("Never say \"goodbye\" without immediately invoking");
-    expect(prompt).toContain("That is the natural closing pause");
+    expect(prompt).toContain('ask "Anything else?", and wait once.');
     const hangup = buildTelnyxTools(config, "https://front-office.example").find((tool) => tool.type === "hangup") as { hangup: { description: string } };
     expect(hangup.hangup.description).toContain("Immediately terminate");
     const update = buildTelnyxAssistantUpdate(config, "https://front-office.example") as { telephony_settings: { user_idle_timeout_secs: number; user_idle_reply_secs: number } };
-    expect(update.telephony_settings).toMatchObject({ user_idle_timeout_secs: 10, user_idle_reply_secs: 4 });
+    expect(update.telephony_settings).toMatchObject({ user_idle_timeout_secs: 10, user_idle_reply_secs: 3 });
   });
 
   it("tunes transcription for service terms, numbers, and ordinal addresses", () => {
@@ -189,8 +191,8 @@ describe("shop activation prerequisites", () => {
     expect(shopActivationBlockers({ ownerPhoneConfigured: true, googleConnected: false, bookingMode: "confirm", serviceAreaConfigured: true })).toEqual([]);
   });
 
-  it("needs Google Calendar only when the assistant books directly", () => {
-    expect(shopActivationBlockers({ ownerPhoneConfigured: true, googleConnected: false, bookingMode: "direct", serviceAreaConfigured: true })).toEqual(["Google Calendar"]);
+  it("never needs a calendar to go live: without one, direct booking takes a message", () => {
+    expect(shopActivationBlockers({ ownerPhoneConfigured: true, googleConnected: false, bookingMode: "direct", serviceAreaConfigured: true })).toEqual([]);
     expect(shopActivationBlockers({ ownerPhoneConfigured: false, googleConnected: true, bookingMode: "confirm", serviceAreaConfigured: false })).toEqual(["owner mobile number", "service area"]);
   });
 });

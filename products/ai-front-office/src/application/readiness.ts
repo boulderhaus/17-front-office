@@ -72,14 +72,13 @@ function check(id: string, label: string, passed: boolean, detail: string): Read
 export function shopActivationBlockers(input: {
   ownerPhoneConfigured: boolean;
   googleConnected: boolean;
-  /** "confirm": the owner confirms each job by text, so no calendar is needed to go live. */
+  /** Not a blocker either way: without a calendar, "direct" takes the details and the owner confirms by text. */
   bookingMode: BusinessConfig["bookingMode"];
   serviceAreaConfigured: boolean;
 }): string[] {
   // Text alerts are never required: consent to texts is not a condition of purchase (10DLC).
   return [
     !input.ownerPhoneConfigured && "owner mobile number",
-    input.bookingMode === "direct" && !input.googleConnected && "Google Calendar",
     !input.serviceAreaConfigured && "service area",
   ].filter((value): value is string => typeof value === "string");
 }

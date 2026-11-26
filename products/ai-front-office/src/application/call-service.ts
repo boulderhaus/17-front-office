@@ -10,7 +10,7 @@ import type {
   EmergencyDecision,
   OutboxNotification,
 } from "../domain/models.js";
-import { evaluateServiceArea, isInServiceArea } from "../domain/config.js";
+import { evaluateServiceArea, isInServiceArea, slotWithinBookableHours } from "../domain/config.js";
 import { triageEmergency } from "../domain/triage.js";
 import { audioRecordingEnabled, WRAP_UP_AFTER_SECONDS } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
@@ -37,6 +37,13 @@ export const PROVIDER_HISTORY_FLAG = "finalized_from_provider_history";
  * caller the disconnect text, so a callback that lands after the repair still only repairs the record.
  */
 export const REPAIRED_BLIND_FLAG = "closed_blind_then_repaired";
+/** A slot offered at the edge of the notice period stays bookable for the rest of the call (calls end by 7 minutes). */
+const OFFER_GRACE_MINUTES = 10;
+/** Per try; see checkAvailability. */
+export const AVAILABILITY_TRY_TIMEOUT_MS = 1_700;
+/** No calendar connected, or it failed: take the details, never a time. */
+export const CALENDAR_UNAVAILABLE_MESSAGE = "No calendar time can be offered. Never suggest a time. Ask what day and time suits them, put it in save_intake access_notes (\"Prefers: ...\"), and say the owner will confirm it.";
+export const NO_SLOTS_MESSAGE = "Nothing open then. If you have not yet, call check_availability once more with a window from the next day to a week out, and offer those. If still none, never suggest a time: ask what day and time suits them, put it in save_intake access_notes (\"Prefers: ...\"), and say the owner will confirm it.";
 
 type BookSlotResult = { status: "confirmed" | "pending" | "conflict" | "unknown"; message: string };
 
@@ -322,7 +329,9 @@ export class CallService {
           minimumLeadTimeMinutes: config.minimumLeadTimeMinutes,
           now: this.clock.now().toISOString(),
         }, { signal }),
-        { attempts: 2, baseDelayMs: 50, maxDelayMs: 100, timeoutMs: 2_500, shouldRetry: () => !signal?.aborted },
+        // Both tries plus the backoff (2 x 1.7 s + 0.1 s) end before the 4 s tool deadline, so a slow calendar
+        // still gets the take-a-message answer below instead of the deadline's wrap-up result.
+        { attempts: 2, baseDelayMs: 50, maxDelayMs: 100, timeoutMs: AVAILABILITY_TRY_TIMEOUT_MS, shouldRetry: () => !signal?.aborted },
       );
       // Slots offered after the deadline were never heard by the caller: book_slot must not accept them.
       signal?.throwIfAborted();
@@ -330,11 +339,11 @@ export class CallService {
       await this.audit(call, "calendar.availability", started, "success", { count: slots.length, offeredStarts: slots.map((slot) => slot.start) }, null);
       return slots.length > 0
         ? { slots, status: "available", message: "Read spokenSummary exactly once, then ask the caller to choose one of these exact slots.", spokenSummary, timezone: config.timezone }
-        : { slots: [], status: "pending", message: "No confirmed slot is available. Tell the caller the owner will follow up.", spokenSummary: null, timezone: config.timezone };
+        : { slots: [], status: "pending", message: NO_SLOTS_MESSAGE, spokenSummary: null, timezone: config.timezone };
     } catch (error) {
       signal?.throwIfAborted();
       await this.audit(call, "calendar.availability", started, "failed", {}, redactError(error));
-      return { slots: [], status: "pending", message: "The calendar could not be confirmed. Tell the caller the owner will follow up.", spokenSummary: null, timezone: config.timezone };
+      return { slots: [], status: "pending", message: CALENDAR_UNAVAILABLE_MESSAGE, spokenSummary: null, timezone: config.timezone };
     }
   }
 
@@ -461,6 +470,15 @@ export class CallService {
     const slotStart = Date.parse(input.slotStart);
     if (!Number.isFinite(slotStart) || slotStart < this.clock.now().getTime()) {
       return { status: "pending", message: "That time is invalid or in the past. Do not save or promise it; check current availability again." };
+    }
+    // Belt and braces on top of "offered on this call": the slot must still be inside the shop's hours and,
+    // allowing for the few minutes the call has run since the offer, its notice period.
+    const slotEnd = new Date(slotStart + config.defaultServiceDurationMinutes * 60_000);
+    const noticeFloor = this.clock.now().getTime() + (config.minimumLeadTimeMinutes - OFFER_GRACE_MINUTES) * 60_000;
+    // Team shops offer each teammate's own hours, so any enabled teammate's hours count.
+    const hoursToCheck = [config.bookableHours, ...(config.schedulingCalendars ?? []).filter((member) => member.enabled).map((member) => member.hours)];
+    if (!hoursToCheck.some((hours) => slotWithinBookableHours(new Date(slotStart), slotEnd, config.timezone, hours)) || slotStart < noticeFloor) {
+      return { status: "pending", message: "That time is outside the shop's hours or notice. Do not promise it; offer a returned slot or take a message." };
     }
     const availabilityEvents = (await this.store.listToolEvents(call.id))
       .filter((event) => event.tool === "calendar.availability" && event.result === "success")

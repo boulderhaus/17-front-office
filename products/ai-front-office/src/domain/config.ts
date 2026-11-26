@@ -19,7 +19,9 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     ownerTransferNumberRef: "owner-primary",
     warmTransferEnabled: false,
     calendarConnectionRef: "google-primary",
-    bookingMode: "confirm",
+    // Book open times when a calendar is connected; with none, check_availability fails and Otto takes a message.
+    bookingMode: "direct",
+    bookingDefaultsVersion: BOOKING_DEFAULTS_VERSION,
     operationMode: "after_hours",
     // 2 rings ≈ 10 seconds: the GSM forwarding timer (see ringSeconds in domain/forwarding.ts). Saved shops keep theirs.
     answerAfterRings: DEFAULT_ANSWER_AFTER_RINGS,
@@ -59,6 +61,9 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
   };
 }
 
+/** Bump only with a one-time move of saved shops in normalizeBusinessConfig. */
+export const BOOKING_DEFAULTS_VERSION = 2;
+
 export function normalizeBusinessConfig(value: Partial<BusinessConfig> & Pick<BusinessConfig, "tenantId">): BusinessConfig {
   const defaults = createDemoConfig(value.tenantId);
   // Configs saved before calls-based plans: "standard"/"plus" become Solo/Pro, and minutes give way to calls.
@@ -76,6 +81,8 @@ export function normalizeBusinessConfig(value: Partial<BusinessConfig> & Pick<Bu
     afterHours: { ...defaults.afterHours, ...value.afterHours },
     bookableHours: { ...defaults.bookableHours, ...value.bookableHours },
     usageAlertPercent: isValidUsageAlertPercent(Number(value.usageAlertPercent)) ? Number(value.usageAlertPercent) : defaults.usageAlertPercent,
+    // Saved before owners could choose: every one of those was forced to "confirm", so it gets the new default once.
+    ...((value.bookingDefaultsVersion ?? 1) < BOOKING_DEFAULTS_VERSION ? { bookingMode: defaults.bookingMode, bookingDefaultsVersion: BOOKING_DEFAULTS_VERSION } : {}),
   };
 }
 
@@ -189,4 +196,27 @@ export function normalizeServiceAreaInput(raw: string): { terms: string[]; error
     else errors.push(term);
   }
   return { terms: [...new Set(terms)].slice(0, 100), errors };
+}
+
+/**
+ * True when a job from start to end sits inside the shop's bookable hours (the same rule the calendar
+ * adapters use to build offered slots). End is exclusive.
+ */
+export function slotWithinBookableHours(start: Date, end: Date, timeZone: string, hours: BusinessConfig["bookableHours"]): boolean {
+  return withinBookableHours(start, timeZone, hours) && withinBookableHours(new Date(end.getTime() - 1), timeZone, hours);
+}
+
+function withinBookableHours(value: Date, timeZone: string, hours: BusinessConfig["bookableHours"]): boolean {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(value);
+  const read = (type: Intl.DateTimeFormatPartTypes): string => parts.find((part) => part.type === type)?.value ?? "";
+  const weekday = read("weekday");
+  if (weekday === "Sun" && !hours.weekends) return false;
+  if (weekday === "Sat" && !hours.weekends && !hours.saturday) return false;
+  const minute = Number(read("hour")) * 60 + Number(read("minute"));
+  const toMinute = (time: string): number => {
+    const [hour = "0", minuteValue = "0"] = time.split(":");
+    return Number(hour) * 60 + Number(minuteValue);
+  };
+  const end = weekday === "Sat" && !hours.weekends && hours.saturdayEnd ? hours.saturdayEnd : hours.weekdayEnd;
+  return minute >= toMinute(hours.weekdayStart) && minute < toMinute(end);
 }

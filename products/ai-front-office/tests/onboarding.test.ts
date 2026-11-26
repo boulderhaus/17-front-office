@@ -149,7 +149,7 @@ describe("three taps to a live line", () => {
     // Defaults come from the mobile number: Florida, Eastern time, the automatic greeting, owner confirms jobs.
     const account = (await store.getOwnerAccountByEmail("owner@example.test"))!;
     const config = await store.getConfig(account.tenantId);
-    expect(config).toMatchObject({ serviceAreaTerms: ["FL"], timezone: "America/New_York", greeting: "Thanks for calling Gulf Air. How can I help?", bookingMode: "confirm", paused: true });
+    expect(config).toMatchObject({ serviceAreaTerms: ["FL"], timezone: "America/New_York", greeting: "Thanks for calling Gulf Air. How can I help?", bookingMode: "direct", paused: true });
     // No consent box checked: no text notifications, but the number is still saved for setup.
     expect(config.ownerNotificationRefs).toEqual([]);
     expect(await store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")).toBe("+19415550199");
