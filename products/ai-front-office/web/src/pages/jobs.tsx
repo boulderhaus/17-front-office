@@ -4,7 +4,7 @@ import { Clock, Phone } from "lucide-react"
 import { ToneBadge } from "@/components/app/bits"
 import { Button } from "@/components/ui/button"
 import { derive } from "@/lib/derive"
-import { compactDate } from "@/lib/format"
+import { callerLabel, compactDate } from "@/lib/format"
 import { jobColumns, jobTab, type JobCard, type JobColumn, type JobColumnId } from "@/lib/jobs"
 import { useMediaQuery, useMode } from "@/lib/mode"
 import { callOrigin } from "@/lib/nav"
@@ -110,7 +110,7 @@ function Card({ card, status }: { card: JobCard<ApiCall>; status: boolean }) {
       <div className="flex items-start justify-between gap-2 lg:flex-col-reverse lg:items-start lg:gap-1.5">
         <Link to={`${base}/calls/${encodeURIComponent(call.id)}`} state={{ origin: callOrigin({ base, pathname: location.pathname, search: location.search }) }}
           className="min-w-0 max-w-full truncate text-base font-semibold outline-none after:absolute after:inset-0 after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-brand-ink">
-          {call.fields.callerName ?? "Unknown caller"}
+          {callerLabel(call)}
         </Link>
         {badge}
       </div>

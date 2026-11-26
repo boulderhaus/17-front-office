@@ -29,12 +29,12 @@ const later = (...values: Array<string | null | undefined>) => values.filter((va
  * started, so something that turned urgent after the bell was opened still gets the dot and sorts as new.
  * The list stops at `limit`, but an open urgent call or call back is never pushed off by newer bookings.
  */
-export function buildAlerts(input: { calls: AlertCall[]; tasks: AlertTask[]; nowMs: number }, limit = 20): AlertItem[] {
+export function buildAlerts<C extends AlertCall>(input: { calls: C[]; tasks: AlertTask[]; nowMs: number; who?: (call: C) => string }, limit = 20): AlertItem[] {
   const tasks = new Map(input.tasks.map((task) => [task.callId, task]))
   const items: AlertItem[] = []
   for (const call of input.calls) {
     if (call.outcome === "ignored_spam" || call.outcome === "in_progress") continue
-    const who = call.fields.callerName?.trim() || "Unknown caller"
+    const who = input.who?.(call) ?? (call.fields.callerName?.trim() || "Unknown caller")
     const problem = call.fields.problemDescription?.trim()
     const task = tasks.get(call.id)
     const dueNow = task?.status === "snoozed" && Date.parse(task.dueAt) <= input.nowMs

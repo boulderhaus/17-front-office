@@ -304,7 +304,7 @@ function WeekList({ days, today, visits, tz, onDay }: { days: string[]; today: s
                   <span key={visit.call.id} className={cn("ph-no-capture flex min-w-0 items-center gap-2 rounded-md border-l-[3px] px-2 py-1.5 text-[15px]", BLOCK[visit.state])}>
                     <span aria-hidden className="text-[13px] font-bold">{MARK[visit.state]}</span>
                     <span className="tabular shrink-0 font-semibold">{timeOnly(visit.call.fields.requestedStart!, tz)}</span>
-                    <span className="truncate">{visit.call.fields.callerName ?? "Unknown caller"}</span>
+                    <span className="truncate">{callerLabel(visit.call)}</span>
                     <span className="sr-only">, {STATE_WORD[visit.state]}</span>
                   </span>
                 ))}

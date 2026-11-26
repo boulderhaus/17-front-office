@@ -4,7 +4,7 @@ import { Bell, CalendarCheck, PhoneMissed, PhoneIncoming, Settings2, TriangleAle
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { buildAlerts, unseenAlerts, type AlertKind } from "@/lib/alerts"
-import { compactDate } from "@/lib/format"
+import { callerLabel, compactDate } from "@/lib/format"
 import { useMode } from "@/lib/mode"
 import { JUMP } from "@/lib/nav"
 import { cn } from "@/lib/utils"
@@ -43,7 +43,7 @@ export function AlertsBell({ className }: { className?: string }) {
   const navigate = useNavigate()
   const shop = dashboard?.analytics?.tenantId ?? dashboard?.shop.businessName ?? "shop"
   const seen = useSyncExternalStore(subscribe, () => readSeen(shop), () => null)
-  const alerts = useMemo(() => (dashboard ? buildAlerts({ calls: dashboard.calls, tasks: dashboard.tasks, nowMs: Date.parse(dashboard.now) }) : []), [dashboard])
+  const alerts = useMemo(() => (dashboard ? buildAlerts({ calls: dashboard.calls, tasks: dashboard.tasks, nowMs: Date.parse(dashboard.now), who: callerLabel }) : []), [dashboard])
   const fresh = unseenAlerts(alerts, seen)
   const tz = dashboard?.shop.timezone ?? "America/New_York"
   const onOpenChange = (open: boolean) => {
