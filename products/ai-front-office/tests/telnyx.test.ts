@@ -325,6 +325,27 @@ describe("Telnyx provider boundary", () => {
     expect(connectionId).toBe("texml-app");
   });
 
+  it("treats Telnyx's empty connection as already paused, and reads it back as paused", async () => {
+    let connectionId = "";
+    const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/ai/assistants/assistant-test")) return jsonResponse({ data: { telephony_settings: { default_texml_app_id: "texml-app" } } });
+      if (url.includes("/phone_numbers?")) return jsonResponse({ data: [{ id: "number-test", phone_number: "+15555550199", connection_id: connectionId }] });
+      if (url.endsWith("/phone_numbers/number-test") && init?.method === "PATCH") {
+        // Telnyx stores a cleared connection as "".
+        connectionId = (JSON.parse(String(init.body)) as { connection_id: string | null }).connection_id ?? "";
+        return jsonResponse({ data: { id: "number-test", connection_id: connectionId } });
+      }
+      return jsonResponse({}, 404);
+    }) as unknown as typeof fetch;
+    const client = new TelnyxVoiceRoutingClient({ apiKey: "synthetic-key", phoneNumber: "+15555550199", assistantId: "assistant-test", fetcher });
+    await expect(client.setPaused(true)).resolves.toMatchObject({ changed: false });
+    await expect(client.setPaused(false)).resolves.toMatchObject({ changed: true });
+    expect(connectionId).toBe("texml-app");
+    await expect(client.setPaused(true)).resolves.toMatchObject({ changed: true });
+    expect(connectionId).toBe("");
+  });
+
   it("does not take over a Telnyx number assigned elsewhere", async () => {
     const fetcher = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);

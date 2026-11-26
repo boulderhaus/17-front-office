@@ -2000,9 +2000,15 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (subscription?.providerSubscriptionId && subscription.status !== "canceled") {
         return refuse(409, "plan", "Cancel your subscription in Billing first. You can delete your account once it has ended.");
       }
-      try { await pauseLiveRoute(account.tenantId); } catch { return refuse(502, "line", "We couldn't disconnect your Call Otto line. Nothing was deleted; please retry."); }
+      try { await pauseLiveRoute(account.tenantId); } catch (error) {
+        log({ level: "error", event: "account_delete_pause_failed", tenantId: account.tenantId, error: safeError(error) });
+        return refuse(502, "line", "We couldn't disconnect your Call Otto line. Nothing was deleted; please retry.");
+      }
       // Recordings before the line: a failed one leaves the number and assistant in place, so a retry starts clean.
-      try { await deletionService.deleteRecordings(account.tenantId); } catch { return refuse(502, "recording", "A call recording couldn't be deleted. Your line is paused and nothing else was removed; please retry."); }
+      try { await deletionService.deleteRecordings(account.tenantId); } catch (error) {
+        log({ level: "error", event: "account_delete_recordings_failed", tenantId: account.tenantId, error: safeError(error) });
+        return refuse(502, "recording", "A call recording couldn't be deleted. Your line is paused and nothing else was removed; please retry.");
+      }
       // Never throws; a release that fails is logged and the number is retried by hand. It runs before the store
       // delete because that removes the record of which number to give back.
       await releaseProvisionedLine(account.tenantId);
