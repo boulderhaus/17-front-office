@@ -246,10 +246,19 @@ export interface PriceQuote {
 
 /** One calendar month later, clamped to the month's last day (Jan 31 → Feb 28), as Stripe bills monthly. */
 export function addOneMonth(date: Date): Date {
+  return shiftMonths(date, 1);
+}
+
+/** One calendar month earlier, clamped the same way: the start of a monthly period that ends on this date. */
+export function oneMonthBefore(date: Date): Date {
+  return shiftMonths(date, -1);
+}
+
+function shiftMonths(date: Date, months: number): Date {
   const next = new Date(date.getTime());
   const day = next.getUTCDate();
   next.setUTCDate(1);
-  next.setUTCMonth(next.getUTCMonth() + 1);
+  next.setUTCMonth(next.getUTCMonth() + months);
   const last = new Date(Date.UTC(next.getUTCFullYear(), next.getUTCMonth() + 1, 0)).getUTCDate();
   next.setUTCDate(Math.min(day, last));
   return next;

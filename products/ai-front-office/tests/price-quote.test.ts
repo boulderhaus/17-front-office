@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { demoEnvironment } from "../src/config/environment.js";
-import { addOneMonth, DEFAULT_PLANS, monthlyCents, planCatalog, priceQuote, prorationEstimateCents } from "../src/domain/plans.js";
+import { addOneMonth, DEFAULT_PLANS, oneMonthBefore, monthlyCents, planCatalog, priceQuote, prorationEstimateCents } from "../src/domain/plans.js";
 
 const STRIPE_ENV = {
   STRIPE_SECRET_KEY: "sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", STRIPE_WEBHOOK_SECRET: "whsec_synthetic_abcdefghijklmnopqrstuvwxyz",
@@ -42,6 +42,8 @@ describe("priceQuote: one price for every summary", () => {
   it("renews one calendar month later, clamped to the month's end", () => {
     expect(addOneMonth(new Date("2027-01-31T12:00:00.000Z")).toISOString()).toBe("2027-02-28T12:00:00.000Z");
     expect(addOneMonth(new Date("2026-12-15T12:00:00.000Z")).toISOString()).toBe("2027-01-15T12:00:00.000Z");
+    expect(oneMonthBefore(new Date("2026-12-26T14:00:00.000Z")).toISOString()).toBe("2026-11-26T14:00:00.000Z");
+    expect(oneMonthBefore(new Date("2027-03-31T12:00:00.000Z")).toISOString()).toBe("2027-02-28T12:00:00.000Z");
   });
 
   it("says one person for Solo, never one truck", () => {
