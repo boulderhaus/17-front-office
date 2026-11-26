@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import pg from "pg";
-import { PLATFORM_TENANT_ID, type Store, type ToolClaim } from "../ports.js";
+import { PLATFORM_TENANT_ID, wordClipKey, type Store, type ToolClaim, type WordClip } from "../ports.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, CustomerRecord, OutboxNotification, OwnerAccount, OwnerWorkspaceInput, PilotSignup, ProviderRoute, SubscriptionRecord, ToolEvent, UsageSummary } from "../domain/models.js";
 import { CryptoBox } from "../security/crypto-box.js";
 import { SIGN_IN_LINK_OUTBOX_TENANT } from "../security/owner-auth.js";
@@ -333,6 +333,36 @@ export class PostgresStore implements Store {
     } finally {
       client.release();
     }
+  }
+
+  async saveWordClip(clip: WordClip): Promise<void> {
+    await this.#pool.query(
+      `INSERT INTO word_clips(tenant_id,term_key,term,mime_type,audio_ciphertext,heard,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (tenant_id,term_key) DO UPDATE SET term=EXCLUDED.term,mime_type=EXCLUDED.mime_type,
+         audio_ciphertext=EXCLUDED.audio_ciphertext,heard=EXCLUDED.heard,created_at=EXCLUDED.created_at`,
+      [clip.tenantId, wordClipKey(clip.term), clip.term, clip.mimeType, this.cryptoBox.encrypt(clip.audio.toString("base64")), clip.heard, clip.createdAt],
+    );
+  }
+
+  async getWordClip(tenantId: string, term: string): Promise<WordClip | null> {
+    const result = await this.#pool.query("SELECT term,mime_type,audio_ciphertext,heard,created_at FROM word_clips WHERE tenant_id=$1 AND term_key=$2", [tenantId, wordClipKey(term)]);
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      tenantId, term: String(row.term), mimeType: String(row.mime_type),
+      audio: Buffer.from(this.cryptoBox.decrypt(String(row.audio_ciphertext)) ?? "", "base64"),
+      heard: row.heard === null ? null : String(row.heard), createdAt: new Date(row.created_at).toISOString(),
+    };
+  }
+
+  async listWordClips(tenantId: string): Promise<Array<Omit<WordClip, "audio">>> {
+    const result = await this.#pool.query("SELECT term,mime_type,heard,created_at FROM word_clips WHERE tenant_id=$1 ORDER BY created_at", [tenantId]);
+    return result.rows.map((row) => ({ tenantId, term: String(row.term), mimeType: String(row.mime_type), heard: row.heard === null ? null : String(row.heard), createdAt: new Date(row.created_at).toISOString() }));
+  }
+
+  async deleteWordClip(tenantId: string, term: string): Promise<boolean> {
+    const result = await this.#pool.query("DELETE FROM word_clips WHERE tenant_id=$1 AND term_key=$2", [tenantId, wordClipKey(term)]);
+    return (result.rowCount ?? 0) > 0;
   }
 
   async markRetentionFailed(callId: string, at: string): Promise<void> {

@@ -24,6 +24,8 @@ import { SMS_CONSENT_END, SMS_CONSENT_JOIN, SMS_CONSENT_LEAD, SMS_CONSENT_PRIVAC
 import { forwardingOn } from "@/lib/line-status"
 import type { ApiSettings } from "@/lib/types"
 import { cn } from "@/lib/utils"
+import { NamesAndWords, withLine } from "@/components/app/say-it"
+import { wordKey } from "@/lib/words"
 import { useSettings } from "./settings"
 
 const ZONES: Array<[string, string]> = [["America/New_York", "Eastern"], ["America/Chicago", "Central"], ["America/Denver", "Mountain"], ["America/Phoenix", "Arizona"], ["America/Los_Angeles", "Pacific"], ["America/Anchorage", "Alaska"], ["Pacific/Honolulu", "Hawaii"]]
@@ -196,9 +198,27 @@ export function BusinessSection() {
       </SettingsCard>
       <ServicesPicker />
       <SettingsCard title="Names and words" description="Help Otto say your street names and brands right.">
-        <Field label="Say these words like this" hint="One per line, like “Myakka: my-AK-uh”."><Textarea rows={2} className={areaClass} {...bind("pronunciations")} /></Field>
+        <NamesAndWordsField />
       </SettingsCard>
     </>
+  )
+}
+
+/** Names and words (walk 11-26, SET-05): say each word; what we hear fills "sounds like", which stays editable. */
+function NamesAndWordsField() {
+  const { text, set, settings, markSaved, patchSettings } = useSettings()
+  const clips = settings.wordClips ?? []
+  return (
+    <NamesAndWords text={text("pronunciations")} onText={(value) => set("pronunciations", value)} clips={clips}
+      onSaid={(result) => {
+        const clip = { term: result.term, heard: result.heard, savedAt: result.savedAt }
+        const withClip = (current: ApiSettings) => ({ ...current, wordClips: [...(current.wordClips ?? []).filter((item) => wordKey(item.term) !== wordKey(result.term)), clip] })
+        if (result.pronunciations === null) { patchSettings(withClip); return }
+        // Saved on the server: the new line shows as saved, and any other unsaved edit in the list stays.
+        const local = text("pronunciations") === String(settings.values.pronunciations ?? "") ? result.pronunciations : withLine(text("pronunciations"), result.term, result.heard ?? "")
+        markSaved("pronunciations", result.pronunciations, local, withClip)
+      }}
+      onUnsaid={(term) => patchSettings((current) => ({ ...current, wordClips: (current.wordClips ?? []).filter((item) => wordKey(item.term) !== wordKey(term)) }))} />
   )
 }
 

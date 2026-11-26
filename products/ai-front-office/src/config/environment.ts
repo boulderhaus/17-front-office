@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { DEFAULT_TELNYX_VOICE } from "../voice/system-prompt.js";
+import { DEFAULT_TELNYX_STT_MODEL } from "../adapters/telnyx-transcribe.js";
 import { validVapidKeys } from "../adapters/web-push.js";
 import { parseBookingWindows } from "../domain/founder-booking.js";
 
@@ -49,6 +50,8 @@ const schema = z.object({
    * expressive_mode: it leaks <break> tags into transcripts.
    */
   TELNYX_VOICE: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).default(DEFAULT_TELNYX_VOICE)),
+  /** Speech-to-text model for Settings > Names and words "Say it" clips (Telnyx /v2/ai/audio/transcriptions). */
+  TELNYX_STT_MODEL: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).default(DEFAULT_TELNYX_STT_MODEL)),
   /**
    * Shared TeXML app (scripts/configure-voicemail-app.ts) that answers a lapsed shop's number with
    * a voicemail for 30 days instead of disconnecting it. Without it, a billing lapse disconnects.

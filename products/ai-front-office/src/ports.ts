@@ -22,6 +22,19 @@ import type {
  */
 export const PLATFORM_TENANT_ID = "platform";
 
+/** Settings > Names and words, "Say it": the owner's own recording of one word, kept per shop (walk 11-26, SET-05). */
+export interface WordClip {
+  tenantId: string;
+  /** The word as the owner typed it. */
+  term: string;
+  /** audio/webm, audio/mp4 or audio/ogg (what Chrome, iPhone Safari and Firefox record). */
+  mimeType: string;
+  audio: Buffer;
+  /** What speech-to-text heard, or null when it failed (the clip and its check stay). */
+  heard: string | null;
+  createdAt: string;
+}
+
 export interface Store {
   ping(): Promise<void>;
   withLock<T>(key: string, task: () => Promise<T>): Promise<T>;
@@ -143,6 +156,16 @@ export interface Store {
   releaseToolResult(providerCallId: string, idempotencyKey: string): Promise<void>;
   /** Drop tool budgets and results last touched before `before`. */
   purgeToolLedger(before: string): Promise<number>;
+  /** "Say it" clips, one per shop and word (matched without case). Deleted with the shop. */
+  saveWordClip(clip: WordClip): Promise<void>;
+  getWordClip(tenantId: string, term: string): Promise<WordClip | null>;
+  listWordClips(tenantId: string): Promise<Array<Omit<WordClip, "audio">>>;
+  deleteWordClip(tenantId: string, term: string): Promise<boolean>;
+}
+
+/** How a word is matched to its clip: no case, single spaces. */
+export function wordClipKey(term: string): string {
+  return term.trim().replace(/\s+/g, " ").toLowerCase().slice(0, 120);
 }
 
 export type ToolClaim = { status: "claimed" } | { status: "pending" } | { status: "done"; result: unknown };
