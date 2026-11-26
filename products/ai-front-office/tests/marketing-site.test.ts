@@ -243,6 +243,18 @@ describe("homepage math, compare and FAQ", () => {
   });
 });
 
+describe("homepage on the narrowest phones (320px)", () => {
+  it("keeps the headline to two lines and hangs wrapped check lines under their text", () => {
+    const narrow = /@media\(max-width:359px\)\{\.plan-price b\{font-size:34px\}(.*)\}\n/.exec(css)![1]!;
+    expect(narrow).toContain(".hero h1{font-size:52px}");
+    // The three math steps stack as rows, the trades go to one column, the add-on label never wraps beside its switch.
+    expect(narrow).toContain(".math-steps{grid-template-columns:1fr;gap:10px}");
+    expect(narrow).toContain(".addon{grid-template-columns:1fr;justify-items:start}");
+    expect(css).toContain("@media(max-width:359px){.trade-grid{grid-template-columns:1fr}}");
+    expect(css).toContain(".trust li{position:relative;padding-left:21px;text-wrap:balance}.trust li:before{content:'✓';position:absolute;left:0}");
+  });
+});
+
 describe("homepage links", () => {
   it("has no way into the demo account (SITE-18)", () => {
     for (const page of [withOffer, noOffer, renderMarketing(config)]) {
