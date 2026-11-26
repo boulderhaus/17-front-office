@@ -1,5 +1,5 @@
 import type { CallRecord, CallSummaryInput } from "../domain/models.js";
-import { MIN_BILLABLE_CALL_SECONDS, usageClass } from "../domain/usage.js";
+import { lastClosedBillingPeriod, MIN_BILLABLE_CALL_SECONDS, usageClass } from "../domain/usage.js";
 import type { Clock, Store } from "../ports.js";
 import { CALL_TIME_LIMIT_SECONDS } from "../voice/system-prompt.js";
 import { BLIND_CLOSURE_FLAG, type CallService } from "./call-service.js";
@@ -171,6 +171,8 @@ export interface BackfillChange {
     problem: boolean;
     durationSeconds: number | null;
     counted: boolean;
+    /** The call falls in a billing period that already closed: its extra-call invoice will not change. */
+    closedPeriod: boolean;
     outcome?: string;
     callbackTask?: string;
   };
@@ -198,6 +200,8 @@ export async function backfillBlindClosures(input: {
   for (const tenantId of (await input.store.listTenantIds()).sort()) {
     const calls = (await input.store.listCallsStartedBetween(tenantId, from, new Date(now.getTime() + 60_000).toISOString(), 5_000))
       .filter((call) => call.qualityFlags.includes(BLIND_CLOSURE_FLAG));
+    const subscription = calls.length > 0 ? await input.store.getSubscription(tenantId) : null;
+    const closed = lastClosedBillingPeriod(now, subscription?.currentPeriodEnd);
     for (const call of calls) {
       const row = { call: call.id.slice(-6), tenant: tenantId.slice(-6) };
       try {
@@ -216,14 +220,17 @@ export async function backfillBlindClosures(input: {
           durationSeconds,
           // Counts against the plan once repaired: answered, not spam, 15 seconds or longer.
           counted: call.billingDisposition !== "spam_excluded" && (durationSeconds ?? 0) >= MIN_BILLABLE_CALL_SECONDS,
+          closedPeriod: closed !== null && Date.parse(call.startedAt) < Date.parse(closed[1]),
         };
         if (input.dryRun) {
           report.push({ ...row, status: "would_repair", changes });
           continue;
         }
         summary.recordingUrl = await recordingLink(input.store, input.recordings, input.publicBaseUrl, call);
+        // The caller declined recording: the audio goes. A failed delete is reported, never swallowed.
+        let deleteError: string | null = null;
         if ((summary.consentState === "declined" || call.consentState === "declined") && input.recordings) {
-          await input.recordings.deleteForCall(call.providerCallId).catch(() => undefined);
+          await input.recordings.deleteForCall(call.providerCallId).catch((error) => { deleteError = `declined recording not deleted: ${redactError(error)}`; });
           summary.recordingUrl = null;
         }
         const repaired = await input.service.finalizeFromProviderHistory(summary, { mode: "repair" });
@@ -241,7 +248,7 @@ export async function backfillBlindClosures(input: {
           counted: usageClass(repaired) === "billable",
           outcome: repaired.outcome,
           callbackTask: task?.status ?? "none",
-        } });
+        }, ...(deleteError ? { error: deleteError } : {}) });
       } catch (error) {
         report.push({ ...row, status: "failed", error: redactError(error) });
       }

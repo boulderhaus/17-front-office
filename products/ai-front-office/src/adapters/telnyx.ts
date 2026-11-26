@@ -678,8 +678,10 @@ export function toTelnyxHistoryCallSummary(input: {
 }): CallSummaryInput {
   const stamps = input.history.messages.map((message) => message.timestamp).filter((value): value is string => Boolean(value)).map((value) => Date.parse(value));
   const lastMessage = stamps.length > 0 ? new Date(Math.max(...stamps)).toISOString() : input.history.lastMessageAt;
-  const endedAt = input.endedAt ?? lastMessage ?? input.receivedAt.toISOString();
-  const span = Math.round((Date.parse(endedAt) - Date.parse(input.startedAt)) / 1_000);
+  const providerEnd = input.endedAt ?? lastMessage ?? null;
+  const endedAt = providerEnd ?? input.receivedAt.toISOString();
+  // With no time from the provider, the length is unknown: the time we recovered the call is not when it ended.
+  const span = providerEnd ? Math.round((Date.parse(providerEnd) - Date.parse(input.startedAt)) / 1_000) : Number.NaN;
   const durationSeconds = input.durationSeconds ?? (Number.isFinite(span) && span >= 0 ? span : null);
   const envelope = conversationEndedSchema.parse({
     data: {

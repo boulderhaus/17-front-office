@@ -1,4 +1,4 @@
-import { CALL_PATH_LIVE_WINDOW_MS } from "../domain/call-path.js";
+import { CALL_PATH_LIVE_WINDOW_MS, reachableNumber } from "../domain/call-path.js";
 import type { CallRecord } from "../domain/models.js";
 
 /** The export's file name: the product's name and the day it was made. */
@@ -48,7 +48,7 @@ export function callsCsv(calls: CallRecord[], timeZone: string, now?: Date): str
     .map((call) => [
       date.format(new Date(call.startedAt)),
       call.fields.callerName,
-      phone(call.fields.callbackNumber ?? call.fromNumber),
+      phone(reachableNumber(call)),
       call.fields.address?.trim() || null,
       call.fields.problemDescription.trim() || null,
       outcome(call, now),

@@ -54,7 +54,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     for (const row of report) console.log(JSON.stringify(row));
     const count = (status: string) => report.filter((row) => row.status === status).length;
     console.log(JSON.stringify({ mode: dryRun ? "dry_run" : "applied", days, calls: report.length, repaired: count("repaired"), would_repair: count("would_repair"), no_history: count("no_history"), skipped: count("skipped"), failed: count("failed") }));
-    if (count("failed") > 0) process.exitCode = 1;
+    if (count("failed") > 0 || report.some((row) => row.error)) process.exitCode = 1;
   } finally {
     await runtime.close();
   }

@@ -45,7 +45,8 @@ export class LineHealthCheck {
           fetcher: this.options.fetcher, sleep: this.options.sleep,
         });
         result.checked += 1;
-        if (state.action === "already_set") continue;
+        // Only a missing callback loses calls; call cost in webhooks is a nice-to-have the repair script sets.
+        if (state.delivers) continue;
         result.missing += 1;
         // A paused line takes no calls, so it is a warning until it is turned back on.
         this.options.log({ level: lineOn ? "error" : "warn", event: "line_call_end_callback_missing", tenantId, lineOn, fix: "npm run configure:telnyx -- --apply" });

@@ -9,7 +9,8 @@ import type { BookingRecord, CallbackTask, CallRecord, OutboxNotification, ToolE
 export type CallPathStepKey = "greeting" | "service_check" | "problem" | "safety" | "caller" | "address" | "times" | "booking" | "wrap_up";
 export type CallPathExtraKey = "price_question" | "owner_request";
 /** waiting: reached, but the owner still has to act (a booking to OK). flagged: reached, needs attention. */
-export type CallPathState = "done" | "waiting" | "flagged" | "current" | "todo" | "skipped";
+/** partial: Otto got some of the step (a name but no number), so it is neither done nor untouched. */
+export type CallPathState = "done" | "waiting" | "flagged" | "partial" | "current" | "todo" | "skipped";
 
 export interface CallPathStep<K extends string = CallPathStepKey> {
   key: K;
@@ -101,14 +102,15 @@ export function buildCallPath(input: {
   // Not the outcome (a request for the owner changes it mid-call): the call's end, plus a short settle so the
   // page never freezes on a half-written finish.
   const sinceEnd = call.endedAt === null ? 0 : input.now.getTime() - Date.parse(call.endedAt);
-  // The provider said the call is over before its final payload arrived (call recovery): never show it as live.
+  // The provider said the call is over before its final payload arrived (call recovery): `ended` keeps it from
+  // looking live, while `live` keeps the page polling until the record (transcript, callback task) lands.
   const providerEnded = events.some((event) => event.tool === "call.end");
-  const live = withinWindow && !providerEnded && (call.endedAt === null || sinceEnd < CALL_PATH_SETTLE_MS || (booking?.status === "checking" && sinceEnd < CALL_PATH_BOOKING_SETTLE_MS));
+  const live = withinWindow && (call.endedAt === null || sinceEnd < CALL_PATH_SETTLE_MS || (booking?.status === "checking" && sinceEnd < CALL_PATH_BOOKING_SETTLE_MS));
   // What the call record holds counts too: the end-of-call payload fills in details whose tool write failed or
   // never ran mid-call, and a step the record proves is never shown as skipped. No time: nothing stamped it.
   const hasProblem = problemCaptured(call);
   const hasName = Boolean(call.fields.callerName?.trim());
-  const hasNumber = /^\+[1-9]\d{7,14}$/.test(call.fields.callbackNumber ?? call.fromNumber);
+  const hasNumber = reachableNumber(call) !== null;
   const hasAddress = Boolean(call.fields.address?.trim());
   const spam = call.billingDisposition === "spam_excluded" || call.outcome === "ignored_spam";
   const emergency = call.emergency?.emergency === true;
@@ -116,7 +118,7 @@ export function buildCallPath(input: {
   const taskHandled = input.callbackTask?.status === "completed";
   const liveAlert = ownerAlertStatus(input.notifications, LIVE_ALERT_KEYS);
   const summary = ownerAlertStatus(input.notifications, SUMMARY_ALERT_KEYS);
-  type Found = { state: "done" | "waiting" | "flagged" | "skipped"; at: string | null; note: string | null } | null;
+  type Found = { state: "done" | "waiting" | "flagged" | "partial" | "skipped"; at: string | null; note: string | null } | null;
   const found: Found[] = [];
 
   // 1. Greeting: the line answered.
@@ -161,7 +163,7 @@ export function buildCallPath(input: {
   found.push(caller ? { state: "done", at: caller.completedAt, note: null }
     : live ? null
       : named && numbered ? { state: "done", at: null, note: null }
-        : named || numbered ? { state: "skipped", at: null, note: named ? "Got the name, no callback number" : "Got the number, no name" } : null);
+        : named || numbered ? { state: "partial", at: null, note: named ? "Got the name, no callback number" : "Got the number, no name" } : null);
 
   // 6. Address, checked against the service area. The note follows the latest check (a corrected address).
   const coverage = (event: ToolEvent): boolean => event.tool === "coverage.check" && ok(event) && meta(event, "status") !== "incomplete";
@@ -217,7 +219,7 @@ export function buildCallPath(input: {
   const extras: Array<CallPathStep<CallPathExtraKey>> = [];
   if (price) extras.push({ key: "price_question", label: "Price question", state: "done", at: price.completedAt, note: meta(price, "approved") === true ? "Gave your approved price" : "No approved price, took a message" });
   if (ownerAsk) extras.push({ key: "owner_request", label: "Asked for you", state: liveAlert === "failed" ? "flagged" : "done", at: ownerAsk.completedAt, note: alertWords(liveAlert, "callback alert") });
-  return { steps, extras, live, ended, done: steps.filter((step) => step.state === "done" || step.state === "waiting" || step.state === "flagged").length, startedAt: call.startedAt };
+  return { steps, extras, live, ended, done: steps.filter((step) => step.state === "done" || step.state === "waiting" || step.state === "flagged" || step.state === "partial").length, startedAt: call.startedAt };
 }
 
 /**
@@ -267,4 +269,12 @@ function recapLead(call: CallRecord, booking: BookingRecord | null, taskHandled:
   if (call.outcome === "pending_confirmation") return taskHandled ? "Handled" : "Needs your OK";
   if (call.outcome === "failed") return "Call dropped";
   return "Done";
+}
+
+/**
+ * The number to reach the caller on: the callback number when it is a real number, else the number that called.
+ * An old record's callback number written in words ("same number") never hides the caller ID.
+ */
+export function reachableNumber(call: { fields: { callbackNumber: string | null }; fromNumber: string }): string | null {
+  return [call.fields.callbackNumber, call.fromNumber].find((value) => value && /^\+[1-9]\d{7,14}$/.test(value)) ?? null;
 }

@@ -33,6 +33,8 @@ export interface CallEndCallbackResult {
   assistantId: string;
   texmlAppId: string;
   action: "already_set" | "set" | "would_set";
+  /** The callback URL is set and posted, so calls finalize (call cost in webhooks may still be off). */
+  delivers: boolean;
 }
 
 /** The assistant has no TeXML app to configure, or Telnyx refused the change: never activate a line on it. */
@@ -83,8 +85,9 @@ export async function ensureCallEndCallback(input: {
   const texmlAppId = typeof telephony.default_texml_app_id === "string" && telephony.default_texml_app_id ? telephony.default_texml_app_id : null;
   if (!texmlAppId) throw new CallEndCallbackError("Telnyx assistant has no default TeXML application");
   const app = objectData(await request(`/texml_applications/${encodeURIComponent(texmlAppId)}`));
-  if (callEndCallbackDelivers(app, want) && app.call_cost_in_webhooks === true) return { assistantId: input.assistantId, texmlAppId, action: "already_set" };
-  if (!input.apply) return { assistantId: input.assistantId, texmlAppId, action: "would_set" };
+  const delivers = callEndCallbackDelivers(app, want);
+  if (delivers && app.call_cost_in_webhooks === true) return { assistantId: input.assistantId, texmlAppId, action: "already_set", delivers };
+  if (!input.apply) return { assistantId: input.assistantId, texmlAppId, action: "would_set", delivers };
   const updated = objectData(await request(`/texml_applications/${encodeURIComponent(texmlAppId)}`, {
     method: "PATCH",
     body: JSON.stringify({
@@ -99,7 +102,7 @@ export async function ensureCallEndCallback(input: {
   // Trust only what Telnyx says it stored; an update that doesn't echo the app is read back.
   const stored = updated.status_callback === undefined ? objectData(await request(`/texml_applications/${encodeURIComponent(texmlAppId)}`)) : updated;
   if (!callEndCallbackDelivers(stored, want)) throw new CallEndCallbackError("Telnyx did not persist the call-end callback");
-  return { assistantId: input.assistantId, texmlAppId, action: "set" };
+  return { assistantId: input.assistantId, texmlAppId, action: "set", delivers: true };
 }
 
 /** The part a call record depends on: the callback URL, posted. (Call cost in webhooks is wanted, not required.) */

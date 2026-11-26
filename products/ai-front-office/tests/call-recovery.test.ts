@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { TelnyxCallHistoryClient, TelnyxProviderCallHistory, TelnyxRecordingClient, toTelnyxHistoryCallSummary } from "../src/adapters/telnyx.js";
 import { backfillBlindClosures, CallRecovery, RECOVERY_CERTAIN_END_MS, recoveryRetryMs } from "../src/application/call-recovery.js";
-import { BLIND_CLOSURE_FLAG, PROVIDER_HISTORY_FLAG } from "../src/application/call-service.js";
+import { BLIND_CLOSURE_FLAG, PROVIDER_HISTORY_FLAG, REPAIRED_BLIND_FLAG } from "../src/application/call-service.js";
 import { buildCallPath } from "../src/domain/call-path.js";
 import { parseBackfillArgs } from "../scripts/backfill-call-history.js";
 import { acConversation, BASE, callbackMessages, CALLER, fakeTelnyx, liveShop, type LiveShop } from "./support/live-shop.js";
@@ -110,6 +110,38 @@ describe("a shop call whose end-of-call callback never arrives", () => {
     expect(await shop.recovery.runOnce()).toEqual({ recovered: 0, waiting: 0, failed: 0 });
   });
 
+  it("finishes the call on the next pass when a write fails part-way (the call is never left half-done)", async () => {
+    shop = await liveShop();
+    await unansweredEnd();
+    shop.clock.advance(120);
+    const save = shop.store.saveCallbackTask.bind(shop.store);
+    shop.store.saveCallbackTask = async () => { throw new Error("database blip"); };
+    expect(await shop.recovery.runOnce()).toEqual({ recovered: 0, waiting: 0, failed: 1 });
+    const half = (await shop.store.getCallByProviderId(CALL))!;
+    expect(half.endedAt).toBeNull();
+    expect(half.qualityFlags).not.toContain(PROVIDER_HISTORY_FLAG);
+
+    shop.store.saveCallbackTask = save;
+    shop.clock.advance(120);
+    expect(await shop.recovery.runOnce()).toEqual({ recovered: 1, waiting: 0, failed: 0 });
+    const call = (await shop.store.getCallByProviderId(CALL))!;
+    expect(call.endedAt).not.toBeNull();
+    expect(call.qualityFlags).toContain(PROVIDER_HISTORY_FLAG);
+    expect(await shop.store.getCallbackTaskForCall(call.id)).toMatchObject({ status: "open" });
+    expect(await summaries(call.id)).toHaveLength(1);
+    expect(await usage()).toBe(1);
+  });
+
+  it("keeps the proof that recovery ran when the real callback lands afterwards", async () => {
+    shop = await liveShop();
+    const { history } = await unansweredEnd();
+    shop.clock.advance(120);
+    await shop.recovery.runOnce();
+    shop.clock.advance(60);
+    expect((await shop.callEnded(CALL, callbackMessages(history), 31)).status).toBe(200);
+    expect((await shop.store.getCallByProviderId(CALL))!.qualityFlags).toContain(PROVIDER_HISTORY_FLAG);
+  });
+
   it("does nothing when the callback arrived on time", async () => {
     shop = await liveShop();
     const { history } = await unansweredEnd();
@@ -175,8 +207,10 @@ describe("a shop call whose end-of-call callback never arrives", () => {
     // Telnyx has no conversation yet.
     expect(await shop.recovery.runOnce()).toEqual({ recovered: 0, waiting: 1, failed: 0 });
     const ended = await path();
-    expect(ended.live).toBe(false);
-    expect(ended.steps.every((step) => step.state !== "current" && step.state !== "todo")).toBe(true);
+    // Never looks live, yet the page keeps polling so the transcript and callback task show up when they land.
+    expect(ended.ended).toBe(true);
+    expect(ended.live).toBe(true);
+    expect(ended.steps.every((step) => step.state !== "current")).toBe(true);
     // Asked again later, the checkpoint is not written twice.
     shop.clock.advance(60);
     await shop.recovery.runOnce();
@@ -322,13 +356,13 @@ describe("a call that was already closed blind", () => {
     // Dry run: says what would change, with id suffixes only, and changes nothing.
     const before = shop.telnyx.requests.length;
     const dry = await backfill(true);
-    expect(dry).toEqual([{ call: call.id.slice(-6), tenant: shop.tenantId.slice(-6), status: "would_repair", changes: { transcript: true, callerName: true, address: true, problem: true, durationSeconds: 30, counted: true } }]);
+    expect(dry).toEqual([{ call: call.id.slice(-6), tenant: shop.tenantId.slice(-6), status: "would_repair", changes: { transcript: true, callerName: true, address: true, problem: true, durationSeconds: 30, counted: true, closedPeriod: false } }]);
     expect(JSON.stringify(dry)).not.toMatch(/Dana|Main Street|\+1555|AC stopped/);
     expect(await shop.store.getCallByProviderId(CALL)).toEqual(call);
     expect(shop.telnyx.requests.slice(before).map((request) => request.method)).toEqual(["GET", "GET"]);
 
     const report = await backfill(false);
-    expect(report).toEqual([{ call: call.id.slice(-6), tenant: shop.tenantId.slice(-6), status: "repaired", changes: { transcript: true, callerName: true, address: true, problem: true, durationSeconds: 30, counted: true, outcome: "pending_confirmation", callbackTask: "open" } }]);
+    expect(report).toEqual([{ call: call.id.slice(-6), tenant: shop.tenantId.slice(-6), status: "repaired", changes: { transcript: true, callerName: true, address: true, problem: true, durationSeconds: 30, counted: true, closedPeriod: false, outcome: "pending_confirmation", callbackTask: "open" } }]);
     const repaired = (await shop.store.getCallByProviderId(CALL))!;
     expect(repaired).toMatchObject({ outcome: "pending_confirmation", billingDisposition: "billable", durationSeconds: 30, endedAt: history[history.length - 1]!.sent_at });
     expect(repaired.qualityFlags).toContain(PROVIDER_HISTORY_FLAG);
@@ -382,6 +416,52 @@ describe("a call that was already closed blind", () => {
     expect((await shop.store.listNotifications(call.id)).map((item) => item.idempotencyKey).sort()).toEqual(notifications);
     expect((await shop.dashboard()).usage.countedCalls).toBe(1);
   });
+
+  it("says when a repaired call falls in a billing period that already closed", async () => {
+    const { history } = await blindClosed();
+    const subscription = (await shop.store.getSubscription(shop.tenantId))!;
+    await shop.store.saveSubscription({ ...subscription, currentPeriodEnd: shop.clock.iso(60 * 60) });
+    shop.telnyx.keepConversation(CALL, history, history[history.length - 1]!.sent_at!);
+    shop.clock.advance(3 * 60 * 60);
+    expect((await backfill(true))[0]).toMatchObject({ status: "would_repair", changes: { closedPeriod: true } });
+  });
+
+  it("never alerts the owner twice when a real callback lands after the backfill repaired the call", async () => {
+    const { history, call, notifications } = await blindClosed({ config: { customerSmsEnabled: true } });
+    shop.telnyx.keepConversation(CALL, history, history[history.length - 1]!.sent_at!);
+    await backfill(false);
+    expect((await shop.store.getCallByProviderId(CALL))!.qualityFlags).toEqual(expect.arrayContaining([PROVIDER_HISTORY_FLAG, REPAIRED_BLIND_FLAG]));
+    expect((await shop.callEnded(CALL, callbackMessages(history), 31)).status).toBe(200);
+    const after = (await shop.store.getCallByProviderId(CALL))!;
+    expect(after.qualityFlags).toEqual(expect.arrayContaining([PROVIDER_HISTORY_FLAG, REPAIRED_BLIND_FLAG]));
+    expect((await shop.store.listNotifications(call.id)).map((item) => item.idempotencyKey).sort()).toEqual(notifications);
+    expect((await shop.dashboard()).usage.countedCalls).toBe(1);
+  });
+
+  it("still tells the owner once about an emergency a late callback uncovers, but a backfill stays silent", async () => {
+    const gas = (messages: ReturnType<typeof acConversation>) => messages.map((message, index) => index === 1 ? { ...message, text: "I smell gas in the kitchen." } : message);
+    const first = await blindClosed();
+    let history0 = first.history;
+    const { call, notifications } = first;
+    expect((await shop.callEnded(CALL, callbackMessages(gas(history0)), 31)).status).toBe(200);
+    expect((await shop.store.getCallByProviderId(CALL))!.emergency?.emergency).toBe(true);
+    const added = (await shop.store.listNotifications(call.id)).map((item) => item.idempotencyKey).filter((key) => !notifications.includes(key));
+    expect(added.length).toBeGreaterThan(0);
+    expect(added.every((key) => key.startsWith(`repair-emergency:${call.id}`))).toBe(true);
+    // A duplicate delivery adds nothing.
+    expect((await shop.callEnded(CALL, callbackMessages(gas(history0)), 31)).status).toBe(200);
+    expect((await shop.store.listNotifications(call.id)).length).toBe(notifications.length + added.length);
+    await shop.close();
+
+    // The same emergency found days later by the backfill: the record is fixed, nobody is alerted.
+    history0 = (await blindClosed()).history;
+    const quiet = (await shop.store.getCallByProviderId(CALL))!;
+    const before = (await shop.store.listNotifications(quiet.id)).map((item) => item.idempotencyKey).sort();
+    shop.telnyx.keepConversation(CALL, gas(history0), history0[history0.length - 1]!.sent_at!);
+    expect((await backfill(false))[0]).toMatchObject({ status: "repaired" });
+    expect((await shop.store.getCallByProviderId(CALL))!.emergency?.emergency).toBe(true);
+    expect((await shop.store.listNotifications(quiet.id)).map((item) => item.idempotencyKey).sort()).toEqual(before);
+  });
 });
 
 describe("backfill script arguments", () => {
@@ -414,6 +494,9 @@ describe("Telnyx call history client", () => {
     const summary = toTelnyxHistoryCallSummary({ history: found, tenantId: "shop_x", providerCallId: CALL, startedAt, receivedAt: new Date("2026-11-26T15:00:00.000Z"), recordingUrl: null });
     expect(summary).toMatchObject({ providerCallId: CALL, tenantId: "shop_x", durationSeconds: 30, endedAt: "2026-11-26T13:49:30.000Z", fromNumber: CALLER, consentState: "unknown" });
     expect(summary.fields).toMatchObject({ callerName: "Dana Miller", callbackNumber: null, address: "100 Main Street, Sarasota FL" });
+    // No time from Telnyx at all: the length is unknown, never the time we happened to recover the call.
+    const unstamped = { ...found, lastMessageAt: null, messages: found.messages.map(({ timestamp: _drop, ...message }) => message) };
+    expect(toTelnyxHistoryCallSummary({ history: unstamped, tenantId: "shop_x", providerCallId: CALL, startedAt, receivedAt: new Date("2026-11-26T14:25:00.000Z"), recordingUrl: null }).durationSeconds).toBeNull();
     // Telnyx's own call status wins when it still has it.
     expect(toTelnyxHistoryCallSummary({ history: found, tenantId: "shop_x", providerCallId: CALL, startedAt, endedAt: "2026-11-26T13:49:41.000Z", durationSeconds: 41, receivedAt: new Date(), recordingUrl: null })).toMatchObject({ durationSeconds: 41, endedAt: "2026-11-26T13:49:41.000Z" });
   });

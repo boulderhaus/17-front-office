@@ -179,7 +179,7 @@ export interface ApiCallDetail {
   path?: ApiCallPath | null
 }
 
-export type ApiCallPathState = "done" | "waiting" | "flagged" | "current" | "todo" | "skipped"
+export type ApiCallPathState = "done" | "waiting" | "flagged" | "partial" | "current" | "todo" | "skipped"
 
 export interface ApiCallPathStep {
   key: string

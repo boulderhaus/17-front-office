@@ -48,7 +48,7 @@ describe("end-of-call callback on an assistant's TeXML app", () => {
   it("sets the callback, POST and call cost, keeps the app's own name and voice URL, and then leaves it alone", async () => {
     const telnyx = fakeTelnyx({ "assistant-shop": {} });
     const first = await ensureCallEndCallback({ apiKey: "k", assistantId: "assistant-shop", publicBaseUrl: "https://front-office.example", apply: true, fetcher: telnyx.fetcher, sleep: noSleep });
-    expect(first).toEqual({ assistantId: "assistant-shop", texmlAppId: "texml-assistant-shop", action: "set" });
+    expect(first).toEqual({ assistantId: "assistant-shop", texmlAppId: "texml-assistant-shop", action: "set", delivers: true });
     const patch = telnyx.requests.find((request) => request.method === "PATCH")!;
     expect(patch.path).toBe("/v2/texml_applications/texml-assistant-shop");
     expect(patch.body).toEqual({ friendly_name: "ai-assistant-shop", voice_url: "https://api.telnyx.com/v2/texml/ai_assistant", status_callback: WANT, status_callback_method: "post", call_cost_in_webhooks: true });
@@ -147,8 +147,10 @@ describe("line health check", () => {
   it("is quiet when every line is set, and reports a shop it could not read without stopping", async () => {
     const store = await twoShops();
     const set = { status_callback: WANT, call_cost_in_webhooks: true };
+    // A callback that delivers but without call cost (a hand patch) still finalizes calls: no alarm.
+    const noCost = { status_callback: WANT, call_cost_in_webhooks: false };
     const logs: Array<Record<string, unknown>> = [];
-    const healthy = new LineHealthCheck(store, { apiKey: "k", publicBaseUrl: "https://front-office.example", log: (entry) => { logs.push(entry); }, fetcher: fakeTelnyx({ "assistant-demo": set, "assistant-live": set, "assistant-paused": set }).fetcher, sleep: noSleep });
+    const healthy = new LineHealthCheck(store, { apiKey: "k", publicBaseUrl: "https://front-office.example", log: (entry) => { logs.push(entry); }, fetcher: fakeTelnyx({ "assistant-demo": set, "assistant-live": noCost, "assistant-paused": set }).fetcher, sleep: noSleep });
     expect(await healthy.runOnce()).toEqual({ checked: 3, missing: 0, failed: 0 });
     expect(logs).toEqual([]);
 

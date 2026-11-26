@@ -32,6 +32,11 @@ const SPAM_REFUSED = "spam_refused";
 export const BLIND_CLOSURE_FLAG = "call_ended_without_final_provider_payload";
 /** The end-of-call callback never arrived, so the record was built from the provider's own conversation history. */
 export const PROVIDER_HISTORY_FLAG = "finalized_from_provider_history";
+/**
+ * Kept on a call that was closed blind and later repaired: the owner already got the dropped-call alert and the
+ * caller the disconnect text, so a callback that lands after the repair still only repairs the record.
+ */
+export const REPAIRED_BLIND_FLAG = "closed_blind_then_repaired";
 
 type BookSlotResult = { status: "confirmed" | "pending" | "conflict" | "unknown"; message: string };
 
@@ -636,7 +641,8 @@ export class CallService {
       const current = await this.store.getCallByProviderId(input.providerCallId);
       if (!current || current.tenantId !== input.tenantId) return null;
       const needsIt = options.mode === "recover" ? current.endedAt === null : current.qualityFlags.includes(BLIND_CLOSURE_FLAG);
-      return needsIt ? this.finalizeClaimed(input, PROVIDER_HISTORY_FLAG) : null;
+      // A backfill repairs days-old records: it never alerts anyone, not even about an emergency it uncovers.
+      return needsIt ? this.finalizeClaimed(input, PROVIDER_HISTORY_FLAG, options.mode === "recover") : null;
     });
     // A repair tells the owner nothing new; the next finalized call checks usage.
     if (call && options.mode === "recover") await this.#usageAlerts.check(call.tenantId);
@@ -656,15 +662,25 @@ export class CallService {
     });
   }
 
-  private async finalizeClaimed(input: CallSummaryInput, provenance: string | null = null): Promise<CallRecord> {
+  private async finalizeClaimed(input: CallSummaryInput, provenance: string | null = null, alertNewEmergency = true): Promise<CallRecord> {
     if (await this.store.isProviderCallDeleted(input.providerCallId)) throw new Error("Provider call was deleted and cannot be recreated");
     const existing = await this.store.getCallByProviderId(input.providerCallId);
     if (existing && existing.tenantId !== input.tenantId) throw new Error("Provider call belongs to a different tenant");
     const config = await this.store.getConfig(input.tenantId);
     // Already closed blind: the owner was alerted and the caller texted then. This pass only repairs the record.
-    const repair = existing?.qualityFlags.includes(BLIND_CLOSURE_FLAG) === true;
-    const provenanceFlags = provenance ? [provenance] : [];
+    const repair = existing?.qualityFlags.some((flag) => flag === BLIND_CLOSURE_FLAG || flag === REPAIRED_BLIND_FLAG) === true;
+    // Where the record came from survives a later pass: a late real callback keeps the proof recovery ran.
+    const provenanceFlags = [...new Set([
+      ...(provenance ? [provenance] : []),
+      ...(existing?.qualityFlags.includes(PROVIDER_HISTORY_FLAG) ? [PROVIDER_HISTORY_FLAG] : []),
+      ...(repair ? [REPAIRED_BLIND_FLAG] : []),
+    ])];
     let call = existing ?? await this.createCall(input.tenantId, input.providerCallId, input.fromNumber, input.startedAt, false);
+    // Until the callback task and owner alerts are queued, the stored call keeps its old end and flags: a pass that
+    // fails part-way leaves the call unfinished, so recovery (or a backfill) runs it again. Every step is idempotent.
+    const priorEndedAt = call.endedAt;
+    const priorFlags = call.qualityFlags;
+    const saveUnfinished = (record: CallRecord): Promise<void> => this.store.saveCall({ ...record, endedAt: priorEndedAt, qualityFlags: priorFlags });
     // A callback number the model wrote its own way ("941-555-0110", "same number") must never replace the number
     // that called: keep it only when it is a real number, in the one form every screen and text can use.
     const fields = mergeCollectedFields(call.fields, { ...input.fields, callbackNumber: normalizeCustomerNumber(input.fields.callbackNumber) });
@@ -700,7 +716,7 @@ export class CallService {
       await this.store.saveCall(call);
       return call;
     }
-    await this.store.saveCall(call);
+    await saveUnfinished(call);
     const customerPhone = call.fields.callbackNumber ?? call.fromNumber;
     if (isAllowedCustomerNumber(customerPhone)) {
       await this.store.upsertCustomer({
@@ -779,7 +795,7 @@ export class CallService {
         : "pending_confirmation";
     // Where the record came from is kept on the call only: it is not a gap the owner has to resolve.
     call = { ...call, outcome, qualityFlags: [...qualityFlags, ...provenanceFlags], updatedAt: this.clock.now().toISOString() };
-    await this.store.saveCall(call);
+    await saveUnfinished(call);
     if (outcome !== "booked") {
       await this.ensureCallbackTask(
         call,
@@ -791,6 +807,11 @@ export class CallService {
       await this.completeCallbackTask(call.id, "verified_booking");
     }
     if (!repair) await this.enqueueOwnerNotifications(call, booking?.requestedStart ?? call.fields.requestedStart, config);
+    // The blind closure only sent "call dropped". An emergency the transcript now shows still reaches the owner once.
+    else if (alertNewEmergency && emergency.emergency && existing?.emergency?.emergency !== true) {
+      await this.enqueueOwnerNotifications(call, booking?.requestedStart ?? call.fields.requestedStart, config, "repair-emergency");
+    }
+    await this.store.saveCall(call);
     return call;
   }
 

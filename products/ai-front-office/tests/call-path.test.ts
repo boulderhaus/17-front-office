@@ -190,6 +190,14 @@ describe("Otto's path through a call", () => {
     expect(await states()).toMatchObject({ greeting: "done", service_check: "skipped", problem: "skipped", wrap_up: "skipped" });
   });
 
+  it("marks a step Otto only partly got as partly done, never as untouched (walk 3, CALL-06)", async () => {
+    await service.finalize({ webhookEventId: `end:${id}`, tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", startedAt: "2026-01-15T14:00:00.000Z", endedAt: clock.now().toISOString(), durationSeconds: 40, fields: { ...fields, callerName: null }, transcript: "Caller: AC blowing warm air at 100 Main St.", recordingUrl: null, consentState: "disclosed" });
+    clock.advance(21);
+    const current = await path();
+    expect(current.steps.find((step) => step.key === "caller")).toMatchObject({ state: "partial", note: "Got the number, no name" });
+    expect(current.steps.find((step) => step.key === "times")?.state).toBe("skipped");
+  });
+
   it("flags a call that dropped without its final report", async () => {
     await service.saveIntake({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", fields: { problemDescription: fields.problemDescription } });
     clock.advance(40 * 60);

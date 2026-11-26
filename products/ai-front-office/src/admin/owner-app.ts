@@ -270,8 +270,8 @@ export function renderCallPath(callId: string, path: CallPath): string {
     const seconds = Math.max(0, Math.round((Date.parse(at) - Date.parse(path.startedAt)) / 1000));
     return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
   };
-  const mark: Record<CallPathStep["state"], string> = { done: ownerIcon("check"), waiting: ownerIcon("clock"), flagged: ownerIcon("alert"), current: "<i></i>", todo: "", skipped: "" };
-  const words: Record<CallPathStep["state"], string> = { done: "done", waiting: "waiting on you", flagged: "needs attention", current: "happening now", todo: "not yet", skipped: "skipped" };
+  const mark: Record<CallPathStep["state"], string> = { done: ownerIcon("check"), waiting: ownerIcon("clock"), flagged: ownerIcon("alert"), partial: ownerIcon("minus"), current: "<i></i>", todo: "", skipped: "" };
+  const words: Record<CallPathStep["state"], string> = { done: "done", waiting: "waiting on you", flagged: "needs attention", partial: "partly done", current: "happening now", todo: "not yet", skipped: "skipped" };
   const item = (step: CallPathStep<string>, index: number | null): string =>
     `<li class="${step.state}"><span class="fo-path-mark" aria-hidden="true">${mark[step.state] || (index === null ? "" : String(index + 1))}</span><span class="fo-path-text"><strong>${e(step.label)}</strong>${step.note ? `<small>${e(step.note)}</small>` : ""}</span><span class="fo-path-time">${step.at && (step.state === "done" || step.state === "waiting" || step.state === "flagged") ? `<time datetime="${e(step.at)}">${clock(step.at)}</time>` : `<span class="fo-sr">${words[step.state]}</span>`}</span></li>`;
   const live = path.live ? ` data-live-path="/app/calls/${encodeURIComponent(callId)}/path"` : "";
@@ -457,6 +457,7 @@ export function ownerIcon(name: string): string {
     settings: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
     phone: '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/>',
     check: '<path d="M20 6L9 17l-5-5"/>',
+    minus: '<path d="M5 12h14"/>',
     back: '<path d="M15 18l-6-6 6-6"/>',
     map: '<path d="M12 21s-7-6.3-7-11a7 7 0 0 1 14 0c0 4.7-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/>',
     clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
@@ -564,6 +565,7 @@ button{font:inherit;cursor:pointer}svg{width:20px;height:20px;flex:none}
 .fo-path li.done .fo-path-mark{background:var(--green);border-color:var(--green);color:#fff}
 .fo-path li.flagged .fo-path-mark{background:var(--red);border-color:var(--red);color:#fff}
 .fo-path li.waiting .fo-path-mark{background:var(--amber);border-color:var(--amber);color:#fff}
+.fo-path li.partial .fo-path-mark{border-color:var(--amber);color:var(--amber)}
 .fo-path li.current{background:#f1f4e0}.fo-path li.current .fo-path-mark{border-color:var(--ink)}
 .fo-path:not(.live) li.current{background:none}.fo-path:not(.live) li.current .fo-path-mark i{animation:none;background:var(--muted)}
 .fo-path li.skipped .fo-path-text,.fo-path li.todo .fo-path-text{color:var(--muted)}.fo-path li.skipped strong{font-weight:600}

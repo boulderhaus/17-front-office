@@ -49,4 +49,13 @@ describe("the calls spreadsheet after a real shop call", () => {
     expect(callsCsv([{ ...call, endedAt: shop.clock.iso() }], "America/New_York", shop.clock.now())).toMatch(/"Call ended"\r\n$/);
     expect(callsCsvFileName(new Date("2026-11-26T23:00:00Z"))).toBe("call-otto-calls-2026-11-26.csv");
   });
+
+  it("never lets a callback number written in words hide the number that called", async () => {
+    shop = await liveShop();
+    await shop.init(CALL);
+    const call = (await shop.store.getCallByProviderId(CALL))!;
+    const old = { ...call, fields: { ...call.fields, callbackNumber: "same number" }, endedAt: shop.clock.iso() };
+    expect(callsCsv([old], "America/New_York", shop.clock.now())).toContain('"(555) 555-0110"');
+    expect(callsCsv([old], "America/New_York", shop.clock.now())).not.toContain("same number");
+  });
 });

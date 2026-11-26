@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react"
-import { Check, Clock, TriangleAlert } from "lucide-react"
+import { Check, Clock, Minus, TriangleAlert } from "lucide-react"
 import { api, ApiError } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import type { ApiCall, ApiCallPath, ApiCallPathStep } from "@/lib/types"
@@ -14,6 +14,7 @@ const STATE_WORDS: Record<ApiCallPathStep["state"], string> = {
   done: "done",
   waiting: "waiting on you",
   flagged: "needs attention",
+  partial: "partly done",
   current: "happening now",
   todo: "not yet",
   skipped: "skipped",
@@ -24,12 +25,13 @@ function Mark({ step, index, live }: { step: ApiCallPathStep; index: number | nu
   if (step.state === "done") return <span className={cn(base, "border-emerald-700 bg-emerald-700 text-white")}><Check className="size-3.5" strokeWidth={3} /></span>
   if (step.state === "waiting") return <span className={cn(base, "border-amber-600 bg-amber-600 text-white")}><Clock className="size-3.5" strokeWidth={2.5} /></span>
   if (step.state === "flagged") return <span className={cn(base, "border-red-600 bg-red-600 text-white")}><TriangleAlert className="size-3.5" strokeWidth={2.5} /></span>
+  if (step.state === "partial") return <span className={cn(base, "border-amber-600 bg-card text-amber-700")}><Minus className="size-3.5" strokeWidth={3} /></span>
   if (step.state === "current") return <span className={cn(base, "border-foreground bg-card")}><i className={cn("size-2 rounded-full", live ? "animate-pulse bg-red-600" : "bg-muted-foreground")} /></span>
   return <span className={cn(base, "border-border bg-card text-muted-foreground")}>{index === null ? "" : index + 1}</span>
 }
 
 function Row({ step, index, path }: { step: ApiCallPathStep; index: number | null; path: ApiCallPath }) {
-  const reached = step.state === "done" || step.state === "waiting" || step.state === "flagged"
+  const reached = step.state === "done" || step.state === "waiting" || step.state === "flagged" || step.state === "partial"
   return (
     <li className={cn("grid min-h-10 grid-cols-[28px_1fr_auto] items-center gap-2.5 rounded-lg px-1.5 py-1", step.state === "current" && path.live && !path.ended && "bg-lime-50")}>
       <Mark step={step} index={index} live={path.live && !path.ended} />
