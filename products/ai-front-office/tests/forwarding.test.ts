@@ -382,16 +382,28 @@ describe("the pause warning in Settings", () => {
 });
 
 describe("timing a ring-first test", () => {
-  it("under about 6 seconds never rang (every call still forwarded); about 8 or more rang first", async () => {
+  it("under about 8 seconds never rang (every call still forwarded); about 8 or more rang first", async () => {
     const { ringFirstVerdict, rangSeconds, RING_FIRST_AT_ONCE_MS, NOT_FORWARDING_AFTER_MS } = await import("../src/domain/forwarding.js");
+    expect(RING_FIRST_AT_ONCE_MS).toBe(8_000);
     expect(ringFirstVerdict(1_500)).toBe("at_once");
     expect(ringFirstVerdict(3_900)).toBe("at_once");
+    // A slow forward-all (two phone legs plus Otto starting up) is still "never rang".
+    expect(ringFirstVerdict(7_000)).toBe("at_once");
     expect(ringFirstVerdict(RING_FIRST_AT_ONCE_MS - 1)).toBe("at_once");
     expect(ringFirstVerdict(RING_FIRST_AT_ONCE_MS)).toBe("rang");
-    expect(ringFirstVerdict(8_000)).toBe("rang");
+    expect(ringFirstVerdict(12_000)).toBe("rang");
     expect(ringFirstVerdict(Number.NaN)).toBe("at_once");
-    expect(rangSeconds(12_400)).toBe(12);
+    // Call setup (about 2 s) is left out of "it rang about N seconds".
+    expect(rangSeconds(12_400)).toBe(10);
     expect(rangSeconds(200)).toBe(1);
     expect(NOT_FORWARDING_AFTER_MS).toBe(45_000);
+  });
+
+  it("every call picked: a quick arrival is right; 12 seconds or more means the phone rang first", async () => {
+    const { everyCallVerdict, EVERY_CALL_RANG_MS } = await import("../src/domain/forwarding.js");
+    expect(everyCallVerdict(2_000)).toBe("at_once");
+    expect(everyCallVerdict(9_000)).toBe("at_once");
+    expect(everyCallVerdict(EVERY_CALL_RANG_MS)).toBe("rang");
+    expect(everyCallVerdict(30_000)).toBe("rang");
   });
 });

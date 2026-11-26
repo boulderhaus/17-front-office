@@ -52,6 +52,10 @@ export function lineStatus(data: LineStatusInput): LineStatus {
   if (data.shop.paused) return { tone: "paused", label: "Answering paused", detail: "Call Otto isn’t answering. Turn it back on in How calls are answered.", to: "/app/settings/answering" }
   const line = data.line
   if (!line?.number) return { tone: "pending", label: "Setting up your line", detail: "We turn it on as soon as it’s approved and let you know.", to: "/app/start" }
+  // Calls reach Otto, but not the way the owner picked: our test found every call forwarded, or the phone ringing first.
+  const status = checkStatus(line)
+  if (line.confirmedAt && status === "forwards_all") return { tone: "pending", label: "Dial your new code", detail: "Every call goes to Otto until you do.", to: forward }
+  if (line.confirmedAt && status === "rings_first") return { tone: "pending", label: "Dial your new code", detail: "Your phone still rings first.", to: forward }
   if (!forwardingOn(line)) return { tone: "pending", label: "Not getting calls yet", detail: "Finish forwarding.", to: forward }
   if (line.business.update) return { tone: "pending", label: "Dial your new code", detail: "Your change is on once you dial it.", to: forward }
   if (line.business.everyCallOn) return { tone: "on", label: "Answering every call", detail: "Your phone won’t ring for these.", to: "/app/settings/answering" }

@@ -60,7 +60,7 @@ import { renderFounderBooking, renderFounderCalendars } from "../admin/founder.j
 import { ensureReviewAccount, isLinkPreview, REVIEW_NO_LINE, ReviewAccountError, reviewAccountTokenValid } from "../application/review-account.js";
 import { renderReviewAccount } from "../admin/review-account.js";
 import { dialsBackToOtto } from "../application/forwarding-loop.js";
-import { carrierFamily, forwardingChoice, forwardingOffInstruction, forwardsBackToOtto, parseTestedFor, rangSeconds, ringFirstVerdict, type CarrierFamily, type CarrierInfo, forwardingPlan, type ForwardingMode, type TestedFor } from "../domain/forwarding.js";
+import { carrierFamily, forwardingChoice, forwardingOffInstruction, forwardsBackToOtto, parseTestedFor, everyCallVerdict, rangSeconds, ringFirstVerdict, SETUP_CALL_STALE_MS, type CarrierFamily, type CarrierInfo, forwardingPlan, type ForwardingMode, type TestedFor } from "../domain/forwarding.js";
 import { FORWARDING_CHECK_WINDOW_MS, forwardingCheckStatus, forwardingUpdate, type ForwardingCheckRecord, type ForwardingState } from "./owner-api-model.js";
 import {
   clearGrace,
@@ -1609,8 +1609,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           idempotencyKey: `forwarding-help:${account.tenantId}:${now.slice(0, 13)}`,
           providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
         });
-        // A repeat in the same hour is the same email (idempotency key): it was already sent for this shop.
-        await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "help_team_at", queuedForTeam || await dependencies.store.getIntegrationSecret(account.tenantId, "forwarding", "help_team_at") ? now : "");
+        // A repeat in the same hour is the same email (idempotency key): it was already queued for this shop this
+        // hour. An older request (another hour) never counts for this one.
+        const earlier = await dependencies.store.getIntegrationSecret(account.tenantId, "forwarding", "help_team_at");
+        const sameEmail = Boolean(earlier) && earlier!.slice(0, 13) === now.slice(0, 13);
+        await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "help_team_at", queuedForTeam || sameEmail ? now : "");
       }
       log({ level: "warn", event: "forwarding_help_requested", tenantId: account.tenantId, emailed: Boolean(dependencies.env.SUPPORT_EMAIL), calling: Boolean(calling) });
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
@@ -1823,6 +1826,17 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   async function newHandoffLink(tenantId: string, ttlMs?: number): Promise<string> {
     const id = shortHandoffId(randomBytes(8));
     await dependencies.store.saveIntegrationSecret(PLATFORM_TENANT_ID, HANDOFF_PROVIDER, id, shortHandoffRecord(tenantId, dependencies.clock.now(), ttlMs));
+    // Each shop's links are listed, and the expired ones deleted whenever a new one is made, so QR refreshes never
+    // pile up. A link still open on the phone keeps working until it expires.
+    let ids: string[] = [];
+    try { ids = JSON.parse(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "handoff_ids") ?? "[]") as string[]; } catch { ids = []; }
+    const live: string[] = [];
+    for (const old of Array.isArray(ids) ? ids : []) {
+      if (typeof old !== "string" || !isShortHandoffId(old)) continue;
+      if (readShortHandoff(await dependencies.store.getIntegrationSecret(PLATFORM_TENANT_ID, HANDOFF_PROVIDER, old), dependencies.clock.now())) live.push(old);
+      else await dependencies.store.deleteIntegrationSecret(PLATFORM_TENANT_ID, HANDOFF_PROVIDER, old);
+    }
+    await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "handoff_ids", JSON.stringify([...live, id]));
     return `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}${SHORT_HANDOFF_PREFIX}${id}`;
   }
 
@@ -1834,7 +1848,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const handoff = short !== null
       ? (isShortHandoffId(short) ? readShortHandoff(await dependencies.store.getIntegrationSecret(PLATFORM_TENANT_ID, HANDOFF_PROVIDER, short), dependencies.clock.now()) : null)
       : readDialHandoffToken(dependencies.env.SESSION_SIGNING_KEY!, decodeURIComponent(url.pathname.slice("/dial/".length)), dependencies.clock.now());
-    if (!handoff) return sendHtml(response, 410, renderErrorPage({ status: 410, title: "This code link expired", message: "Reload the page on your computer, then scan the new QR.", back: { href: "/login", label: "Sign in instead" } }));
+    if (!handoff) return sendHtml(response, 410, renderErrorPage({ status: 410, title: "This code link expired", message: "Open the setup page on your computer for a new one.", back: { href: "/login", label: "Sign in instead" } }));
     const [config, state, lineNumber] = await Promise.all([
       dependencies.store.getConfig(handoff.tenantId),
       readForwarding(handoff.tenantId),
@@ -2807,7 +2821,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const check = parse<ForwardingCheckRecord>(checkJson);
     return {
       businessNumber, carrier: parse<CarrierInfo>(carrierJson), confirmedAt, testedFor: parseTestedFor(testedForJson),
-      check: check ? { startedAt: check.startedAt, method: check.method, answeredAt: check.answeredAt ?? null, endedAt: check.endedAt ?? null, hangupCause: check.hangupCause ?? null, screenedAt: check.screenedAt ?? null, amdResult: check.amdResult ?? null, code: check.code ?? null, choice: check.choice ?? null, autoFailed: check.autoFailed === true, forwardedAfterMs: typeof check.forwardedAfterMs === "number" ? check.forwardedAfterMs : null, atOnce: check.atOnce === true } : null,
+      check: check ? { startedAt: check.startedAt, method: check.method, answeredAt: check.answeredAt ?? null, endedAt: check.endedAt ?? null, hangupCause: check.hangupCause ?? null, screenedAt: check.screenedAt ?? null, amdResult: check.amdResult ?? null, code: check.code ?? null, choice: check.choice ?? null, autoFailed: check.autoFailed === true, forwardedAfterMs: typeof check.forwardedAfterMs === "number" ? check.forwardedAfterMs : null, atOnce: check.atOnce === true, rangFirst: check.rangFirst === true } : null,
       helpRequestedAt,
       helpCall: ((call) => call?.to && call.startedAt ? { to: call.to, startedAt: call.startedAt, endedAt: call.endedAt ?? null } : null)(readSetupCall(setupCallJson)),
       founderEmail,
@@ -3216,7 +3230,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
    * call record, so Otto never talks to Otto. A pass while a test is open records what the owner was set up for when
    * they started it; how long it took never decides which code is on.
    */
-  async function noteForwardedCall(tenantId: string, callerPhone: string, callControlId: string): Promise<"check" | "customer"> {
+  async function noteForwardedCall(tenantId: string, callerPhone: string, callControlId: string, occurredAt?: string | null): Promise<"check" | "customer"> {
     const now = dependencies.clock.now();
     const [checkJson, businessNumber] = await Promise.all([
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "check"),
@@ -3235,27 +3249,32 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     // landing during the test proves forwarding works, never which choice is on.
     if (open && check && (fromCheck || check.method === "manual")) {
       const choice = check.choice ?? forwardingChoice((await dependencies.store.getConfig(tenantId)).operationMode);
-      // Our own call is timed from when we placed it. Ring first that got here with no ring: every call is still
-      // forwarded (an old every-call code, or the phone rejecting the call). Recorded as every call, so the card
-      // shows the one clear-it code, and Otto keeps off this number until a ring-first test passes.
-      const afterMs = now.getTime() - Date.parse(check.startedAt);
+      // Our own call is timed from when we placed it to when Telnyx says it reached Otto (the event's own time: a
+      // retried or slow webhook never stretches it). Ring first that got here with no ring: every call is still
+      // forwarded, recorded as every call, so the card shows the one clear-it code and Otto keeps off this number
+      // until a ring-first test passes. Every call that rang first: the every-call code isn't on yet.
+      const eventMs = occurredAt ? Date.parse(occurredAt) : Number.NaN;
+      const afterMs = eventMs - Date.parse(check.startedAt);
       // While the setup helper is on the line with that phone it's busy, and busy forwards at once: not timed then.
       const helper = readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"));
-      const phoneBusy = Boolean(helper?.to && helper.to === businessNumber && !helper.endedAt);
-      const timed = fromCheck && check.method === "auto" && !phoneBusy;
+      const phoneBusy = Boolean(helper?.to && helper.to === businessNumber && !helper.endedAt && helper.startedAt && now.getTime() - Date.parse(helper.startedAt) < SETUP_CALL_STALE_MS);
+      const timed = fromCheck && check.method === "auto" && !phoneBusy && Number.isFinite(afterMs) && afterMs >= 0;
       const atOnce = timed && choice === "ring-first" && ringFirstVerdict(afterMs) === "at_once";
-      if (timed) {
-        await dependencies.store.withLock(`forwarding-check:${tenantId}`, async () => {
-          let latest: ForwardingCheckRecord | null = null;
-          try { latest = JSON.parse(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "check") ?? "null") as ForwardingCheckRecord | null; } catch { latest = null; }
-          if (latest?.startedAt !== check!.startedAt) return;
-          await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check", JSON.stringify({ ...latest, forwardedAfterMs: afterMs, ...(atOnce ? { atOnce: true } : {}) }));
-        });
-      }
-      await saveTestedFor(tenantId, atOnce
-        ? { mode: "every-call", code: null, at: now.toISOString() }
-        : { mode: choice, code: check.code ?? null, at: now.toISOString(), rangSeconds: timed && choice === "ring-first" ? rangSeconds(afterMs) : null });
-      if (timed) log({ level: "info", event: atOnce ? "forwarding_check_forwards_all" : "forwarding_check_timed", tenantId, afterMs, choice });
+      const rangFirst = timed && choice === "every-call" && everyCallVerdict(afterMs) === "rang";
+      // Ring first is proven only by our own timed call: a test from another phone, or one we couldn't time, says
+      // calls reach Otto but not that the phone rang first, so it never records ring first.
+      const proves = choice === "every-call" ? !rangFirst : timed && !atOnce;
+      // Under the test's lock, and only for the test that's still the newest: an older test landing late never
+      // rewrites what a newer one recorded.
+      await dependencies.store.withLock(`forwarding-check:${tenantId}`, async () => {
+        let latest: ForwardingCheckRecord | null = null;
+        try { latest = JSON.parse(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "check") ?? "null") as ForwardingCheckRecord | null; } catch { latest = null; }
+        if (latest?.startedAt !== check!.startedAt) return;
+        if (timed) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check", JSON.stringify({ ...latest, forwardedAfterMs: afterMs, ...(atOnce ? { atOnce: true } : {}), ...(rangFirst ? { rangFirst: true } : {}) }));
+        if (atOnce) await saveTestedFor(tenantId, { mode: "every-call", code: null, at: now.toISOString() });
+        else if (proves) await saveTestedFor(tenantId, { mode: choice, code: check!.code ?? null, at: now.toISOString(), rangSeconds: choice === "ring-first" ? rangSeconds(afterMs) : null, ...(timed ? { timed: true } : {}) });
+      });
+      if (timed) log({ level: "info", event: atOnce ? "forwarding_check_forwards_all" : rangFirst ? "forwarding_check_rang_first" : "forwarding_check_timed", tenantId, afterMs, choice });
     }
     if (!fromCheck) return "customer";
     await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check_inbound_call", callControlId);
@@ -3615,7 +3634,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       await requireOperational(tenantId);
       const config = await dependencies.store.getConfig(tenantId);
       const callerPhone = initialization.data.payload.telnyx_end_user_target ?? "unknown";
-      if (await noteForwardedCall(tenantId, callerPhone, initialization.data.payload.call_control_id) === "check") {
+      if (await noteForwardedCall(tenantId, callerPhone, initialization.data.payload.call_control_id, initialization.data.occurred_at ?? null) === "check") {
         // Our own forwarding check reached the shop: confirm it and end the call without a call record.
         return sendJson(response, 200, {
           dynamic_variables: { tenant_id: config.tenantId, business_name: config.businessName, call_direction: "inbound", opening_greeting: "Forwarding check complete. Goodbye.", caller_phone: callerPhone, call_access: "forwarding_check", owner_transfer_targets: [] },

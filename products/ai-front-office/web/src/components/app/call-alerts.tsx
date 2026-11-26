@@ -112,11 +112,11 @@ export function CallAlertsCard({ className }: { className?: string }) {
           <span className="text-[14px] text-muted-foreground">{device === "phone" ? "Your phone buzzes the moment Call Otto takes a call. Tap the alert to see who called." : "An alert pops up the moment Call Otto takes a call. Click it to see who called."}</span>
         </div>
       </div>
-      {state === "checking" && <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Checking this phone…</p>}
+      {state === "checking" && <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Checking this {device}…</p>}
       {state === "off" && (
         <>
           {/* The browser asks right after the tap; say so first, so its box isn't a surprise. */}
-          <p className="text-[14px]">Your browser will ask to show notifications. {device === "phone" ? "Tap" : "Click"} <strong className="font-semibold">Allow</strong>.</p>
+          <p className="text-[14px]">Your browser will ask. {device === "phone" ? "Tap" : "Click"} <strong className="font-semibold">Allow</strong>.</p>
           <Button type="button" size="tap" variant="outline" className="h-12 w-full bg-card text-base" disabled={busy} onClick={() => void turnOn()}>{busy ? <Loader2 className="animate-spin" /> : <BellRing />}Turn on call alerts on this {device}</Button>
         </>
       )}

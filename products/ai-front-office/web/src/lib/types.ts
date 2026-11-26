@@ -84,12 +84,12 @@ export interface ApiDashboard {
       /** How long "Ring my phone first" rings for this carrier (GSM timer, Verizon ~30 s), or null when unknown. */
       ringFirstSeconds?: number | null
       /** The last test that proved today's choice: when, and for ring first how long the phone rang first. */
-      lastTest?: { mode: "every-call" | "ring-first"; at: string; rangSeconds: number | null } | null
+      lastTest?: { mode: "every-call" | "ring-first"; at: string; rangSeconds: number | null; timed?: boolean } | null
     }
     confirmedAt: string | null
     check: {
       /** forwards_all: ring first was picked, but our call reached Otto with no ring (every call still forwarded). */
-      status: "idle" | "calling" | "passed" | "phone_answers" | "you_answered" | "voicemail" | "declined" | "not_reached" | "forwards_all"
+      status: "idle" | "calling" | "passed" | "phone_answers" | "you_answered" | "voicemail" | "declined" | "not_reached" | "forwards_all" | "rings_first"
       method: "auto" | "manual" | null
       startedAt: string | null
       answeredAfterSec: number | null

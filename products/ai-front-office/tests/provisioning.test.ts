@@ -647,13 +647,14 @@ describe("owner one-tap go-live", () => {
           const line = await made.line();
           expect(line.check).toMatchObject({ status: "forwards_all", forwardedAfterSec: 2 });
           expect(line.business).toMatchObject({ update: { clearFirst: "##002#" }, lastTest: null, mayForwardAll: true });
-          // Then they clear it, redial the ring-first code and test again: the phone rings 12 s first.
+          // Then they clear it, redial the ring-first code and test again: Otto answers 12 s after our call went out,
+          // about 10 s of ringing once call setup is left out.
           made.clock.at = new Date(made.clock.at.getTime() + 60_000);
           await made.api("/api/app/line/check");
           await made.arrives(12, "rang");
           const after = await made.line();
           expect(after.check.status).toBe("passed");
-          expect(after.business).toMatchObject({ update: null, lastTest: { mode: "ring-first", rangSeconds: 12 }, mayForwardAll: false });
+          expect(after.business).toMatchObject({ update: null, lastTest: { mode: "ring-first", rangSeconds: 10, timed: true }, mayForwardAll: false });
         });
 
         it("nothing reaches Otto 45 seconds after our call went out: not forwarding", async () => {
@@ -674,6 +675,27 @@ describe("owner one-tap go-live", () => {
           const line = (await made.dashboard()).line as unknown as { check: { status: string }; business: { lastTest: { mode: string; rangSeconds: number | null } | null } };
           expect(line.check.status).toBe("passed");
           expect(line.business.lastTest).toMatchObject({ mode: "every-call", rangSeconds: null });
+        });
+
+        it("every call picked, but our call rang the phone first: not passed, the every-call code isn't on yet", async () => {
+          const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } } });
+          await made.api("/api/app/line/business-number", { number: "9415550177" });
+          await made.api("/api/app/line/check");
+          made.clock.at = new Date(made.clock.at.getTime() + 14_000);
+          const init = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id: "always-slow", occurred_at: made.clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: "+15555550199", call_control_id: "v3:always-slow", assistant_id: "assistant-1" } } });
+          await fetch(`${made.baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, made.privateKey, made.clock.now()), body: init });
+          const line = (await made.dashboard()).line as unknown as { check: { status: string }; business: { lastTest: unknown } };
+          expect(line.check.status).toBe("rings_first");
+          expect(line.business.lastTest).toBeNull();
+        });
+
+        it("times from Telnyx's own event time: a webhook handled late never turns a quick forward-all into ring first", async () => {
+          const made = await ringFirstTest();
+          const sent = made.clock.now().getTime();
+          made.clock.at = new Date(sent + 15_000);
+          const init = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id: "late", occurred_at: new Date(sent + 2_000).toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: "+15555550199", call_control_id: "v3:late", assistant_id: "assistant-1" } } });
+          await fetch(`${made.baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, made.privateKey, made.clock.now()), body: init });
+          expect((await made.line()).check.status).toBe("forwards_all");
         });
       });
 
@@ -1065,7 +1087,8 @@ describe("owner one-tap go-live", () => {
           expect(await made.setupCall()).not.toHaveProperty("endedAt");
           expect(made.founderEmails()).toHaveLength(0);
           expect((await line(made)).check.status).toBe("passed");
-          expect(await testedFor(made)).toMatchObject({ mode: "ring-first" });
+          // A busy phone forwards at once, so this test can't show the phone rang first: ring first isn't recorded.
+          expect(await testedFor(made)).toBeNull();
         });
 
         it("a call from the business number itself is a real call: never ends the helper, never proves forwarding", async () => {
@@ -1082,7 +1105,8 @@ describe("owner one-tap go-live", () => {
           later(made, 10);
           expect(await made.arrives("check-shows-business", "+19415550199")).toBe("forwarding_check");
           expect((await line(made)).confirmedAt).toBeTruthy();
-          expect(await testedFor(made)).toMatchObject({ mode: "ring-first" });
+          // The helper is still on that phone (busy), so the test isn't timed and ring first isn't recorded.
+          expect(await testedFor(made)).toBeNull();
         });
       });
     });

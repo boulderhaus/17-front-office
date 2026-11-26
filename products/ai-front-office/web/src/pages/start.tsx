@@ -89,8 +89,10 @@ export function StartPage() {
   // Changing how calls are answered after setup (from Settings, or a "finish forwarding" link): the same card inside
   // the normal app, never the signup steps and "You're set" again.
   if (dashboard.onboarding.completed && step === "forward") {
+    // From Settings it's a change; from Calls or the status line it's finishing (or fixing) forwarding.
+    const fromSettings = params.get("from") === "settings"
     return (
-      <AppShell title="Change how calls are answered" back={{ to: "/app/settings/answering", label: "Settings" }}>
+      <AppShell title={fromSettings ? "Change how calls are answered" : "Forward your calls"} back={fromSettings ? { to: "/app/settings/answering", label: "Settings" } : { to: "/app", label: "Calls" }}>
         <div className="grid max-w-xl gap-4"><ForwardingCard dashboard={dashboard} inApp /></div>
       </AppShell>
     )

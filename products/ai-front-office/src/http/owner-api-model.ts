@@ -70,7 +70,7 @@ export interface ApiDashboard {
       /** How long "Ring my phone first" would ring for this carrier (GSM timer, Verizon ~30 s), or null when unknown. */
       ringFirstSeconds: number | null;
       /** The last test that proved today's choice: when, and for ring first how long the phone rang first. */
-      lastTest: { mode: ForwardingChoice; at: string; rangSeconds: number | null } | null;
+      lastTest: { mode: ForwardingChoice; at: string; rangSeconds: number | null; timed: boolean } | null;
     };
     /** When a call last proved forwarding works. */
     confirmedAt: string | null;
@@ -285,8 +285,9 @@ export function apiDashboard(input: {
  * chance. you_answered: a person picked it up (most likely the owner). voicemail: a voicemail answered it.
  * declined: it was declined but nothing forwarded it. not_reached: it rang out and never reached us.
  * forwards_all: ring first was picked, but our call reached Otto with no ring: every call is still forwarded.
+ * rings_first: every call was picked, but our call rang the phone first: the every-call code isn't on yet.
  */
-export type ForwardingCheckStatus = "idle" | "calling" | "passed" | "phone_answers" | "you_answered" | "voicemail" | "declined" | "not_reached" | "forwards_all";
+export type ForwardingCheckStatus = "idle" | "calling" | "passed" | "phone_answers" | "you_answered" | "voicemail" | "declined" | "not_reached" | "forwards_all" | "rings_first";
 
 /** The stored check, as the check endpoint and the check call's webhooks write it. */
 export interface ForwardingCheckRecord {
@@ -310,13 +311,15 @@ export interface ForwardingCheckRecord {
   forwardedAfterMs?: number | null;
   /** Ring first was picked and that was too fast to have rung: every call is still forwarded. */
   atOnce?: boolean | null;
+  /** Every call was picked and our call rang the phone first: the every-call code isn't on. */
+  rangFirst?: boolean | null;
 }
 
 export interface ForwardingState {
   businessNumber: string | null;
   carrier: CarrierInfo | null;
   confirmedAt: string | null;
-  check: { startedAt: string; method: "auto" | "manual"; answeredAt?: string | null; endedAt?: string | null; hangupCause?: string | null; screenedAt?: string | null; amdResult?: string | null; code?: string | null; choice?: ForwardingChoice | null; autoFailed?: boolean | null; forwardedAfterMs?: number | null; atOnce?: boolean | null } | null;
+  check: { startedAt: string; method: "auto" | "manual"; answeredAt?: string | null; endedAt?: string | null; hangupCause?: string | null; screenedAt?: string | null; amdResult?: string | null; code?: string | null; choice?: ForwardingChoice | null; autoFailed?: boolean | null; forwardedAfterMs?: number | null; atOnce?: boolean | null; rangFirst?: boolean | null } | null;
   helpRequestedAt: string | null;
   helpCall?: { to: string; startedAt: string; endedAt: string | null } | null;
   /** What the owner was set up for when a test last passed (see TestedFor). */
@@ -349,6 +352,8 @@ export function forwardingCheckStatus(check: ForwardingState["check"], confirmed
   if (!check) return "idle";
   // Ring first, and our call reached Otto with no ring: forwarding works, but not the way they picked.
   if (check.atOnce) return "forwards_all";
+  // Every call, and our call rang the phone first: calls reach Otto, but not the way they picked.
+  if (check.rangFirst) return "rings_first";
   if (confirmedAt && confirmedAt >= check.startedAt) return "passed";
   // The phone's own screener answered: say so right away, while our short explanation plays and we hang up.
   if (check.method === "auto" && check.screenedAt) return "phone_answers";
@@ -393,7 +398,7 @@ function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "oper
       codeApplied: Boolean(confirmedAt && plan && testedFor) && !update,
       mayForwardAll: mayForwardAll({ mode, testedFor }),
       ringFirstSeconds: state?.carrier ? ringFirstSeconds(state.carrier.family, config.answerAfterRings) : null,
-      lastTest: confirmedAt && plan && testedFor && !update && testedFor.at ? { mode: testedFor.mode, at: testedFor.at, rangSeconds: testedFor.mode === "ring-first" ? testedFor.rangSeconds ?? null : null } : null,
+      lastTest: confirmedAt && plan && testedFor && !update && testedFor.at ? { mode: testedFor.mode, at: testedFor.at, rangSeconds: testedFor.mode === "ring-first" ? testedFor.rangSeconds ?? null : null, timed: testedFor.timed === true } : null,
     },
     confirmedAt,
     check: { status, method: check?.method ?? null, startedAt: check?.startedAt ?? null, answeredAfterSec, callerId: checkCallerId, autoFailed: check?.autoFailed === true, choice: check?.choice ?? null, code: check?.code ?? null, forwardedAfterSec: typeof check?.forwardedAfterMs === "number" ? Math.max(0, Math.round(check.forwardedAfterMs / 1_000)) : null },

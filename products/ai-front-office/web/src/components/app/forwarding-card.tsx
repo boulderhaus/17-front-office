@@ -45,6 +45,8 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
   // Codes copied (or dialed) on this visit: that step shows done. A clear code dialed moves on to the shop's code.
   const [copied, setCopied] = useState<string | null>(null)
   const [cleared, setCleared] = useState<string | null>(null)
+  // A choice picked on this visit: step 1 shows done (so does a code copied or a test run).
+  const [picked, setPicked] = useState(false)
   const codeRef = useRef<HTMLDivElement>(null)
   const testRef = useRef<HTMLButtonElement>(null)
   const checking = line.check.status === "calling"
@@ -82,6 +84,7 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
   const choice: Choice = picking ?? saved
   // Picking a choice saves the tenant's mode; the server brings back "ring first" as it was (after hours stays).
   const setMode = async (next: Choice) => {
+    setPicked(true)
     if (next === saved) return true
     setPicking(next)
     const ok = await post("mode", "/api/app/line/mode", { mode: next === "always" ? "always" : "overflow" })
@@ -106,20 +109,20 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
   const clearing = forwardsAll && Boolean(plan?.off) && cleared !== plan?.off
   const dialCode = clearing ? plan!.off! : plan?.on ?? null
   const dialLink = clearing ? plan!.offDialLink : plan?.dialLink ?? null
-  const dialed = Boolean(dialCode) && copied === dialCode
+  // A copy on a computer isn't a dial (the code still has to go into the phone), so it never checks off step 2.
+  const dialed = Boolean(dialCode) && copied === dialCode && platform !== "desktop"
 
   // Back on this page after dialing in the Phone app: the next step is the test, so bring it into view.
   useEffect(() => {
     if (!dialed) return
     const back = () => {
-      if (document.visibilityState !== "visible") return
-      if (clearing) { setCleared(dialCode); return }
+      if (document.visibilityState !== "visible" || clearing) return
       testRef.current?.scrollIntoView({ block: "center" })
       testRef.current?.focus({ preventScroll: true })
     }
     document.addEventListener("visibilitychange", back)
     return () => document.removeEventListener("visibilitychange", back)
-  }, [dialed, clearing, dialCode])
+  }, [dialed, clearing])
 
   // "Set it up with me" was tapped in the last day (older requests are done with).
   const helpAsked = Boolean(line.helpRequestedAt) && Date.parse(dashboard.now) - Date.parse(line.helpRequestedAt!) < 24 * 60 * 60_000
@@ -140,8 +143,9 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
   const cancelTest = () => void post("check", "/api/app/line/check/cancel")
   const testLabel = status === "idle" ? "Test it" : "Test again"
   const fixOffer = plan ? showFix(status, plan) : false
-  const changeButton = (label: string) => <button type="button" aria-label="Change your business number" className="inline-flex min-h-11 min-w-11 items-center font-semibold whitespace-nowrap text-brand-ink underline underline-offset-4 focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-brand-ink focus-visible:outline-none" onClick={() => setEditing(true)}>{label}</button>
-  const change = changeButton("Change")
+  const changeButton = (label: string, inline = false) => <button type="button" aria-label="Change your business number" className={cn(inline && "-my-2.5 align-middle", "inline-flex min-h-11 min-w-11 items-center font-semibold whitespace-nowrap text-brand-ink underline underline-offset-4 focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-brand-ink focus-visible:outline-none")} onClick={() => setEditing(true)}>{label}</button>
+  // In a title line: still a 44px target, without making the line taller.
+  const change = changeButton("Change", true)
   // Office line leaving every call (or still forwarding every call): "forward all calls" goes off in the same website.
   const officeLeaving = Boolean((business.update?.leavingEveryCall || forwardsAll) && plan && !plan.on && plan.family === "office")
   const what = plan && officeLeaving && line.number
@@ -205,7 +209,7 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
 
             {showSteps && plan && (
               <ol className="grid gap-0">
-                <Step n={1} done title="How should calls work?">
+                <Step n={1} done={picked || Boolean(copied) || status !== "idle" || Boolean(line.confirmedAt)} title="How should calls work?">
                   <ModeChoice choice={choice} busy={busy === "mode"} locked={checking} family={family} ringFirstSeconds={business.ringFirstSeconds ?? null} onPick={(next) => { if (busy !== "mode") void setMode(next) }} />
                   {ringFirst && !isAndroid && family !== "office" && <IphoneSettings />}
                 </Step>
@@ -215,13 +219,15 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
                     <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">
                       <strong className="font-semibold">Your phone never rang.</strong> Otto answered {line.check.forwardedAfterSec != null ? `in ${Math.max(1, line.check.forwardedAfterSec)} seconds` : "right away"}, so every call is still being forwarded.{" "}
                       {plan.off ? (clearing ? "Dial this code to clear it." : "Now dial your code again.") : "Turn off forward all calls in your phone company’s website."}
+                      {!isAndroid && family !== "office" ? <span className="mt-1.5 block">Declined the test, or your iPhone silences unknown callers? Fix that and test again instead.</span> : null}
                     </p>
                   )}
                   {dialCode
                     ? <DialCode key={dialCode} code={dialCode} dialLink={dialLink} family={family} codeRef={codeRef} copied={copied === dialCode} onCopied={() => setCopied(dialCode)} />
                     : <p className="text-sm">{what}</p>}
-                  {clearing && dialed && (
-                    <Button type="button" size="tap" variant="outline" className={cn(fullButton, outlineButton)} onClick={() => setCleared(dialCode)}>Next: your code</Button>
+                  {/* Always there while clearing: the code may be dialed from the QR page, typed by hand, or after a reload. */}
+                  {clearing && (
+                    <Button type="button" size="tap" variant="outline" className={cn(fullButton, outlineButton)} onClick={() => setCleared(dialCode)}>I dialed it. Next: your code</Button>
                   )}
                 </Step>
 
@@ -231,7 +237,7 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
                       <p className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-950" role="status">
                         <Loader2 className="mt-0.5 size-4 shrink-0 motion-safe:animate-spin" />
                         {line.check.method === "auto"
-                          ? <span><strong>Calling {formatPhone(business.number!)}{callerId ? <> from <span className="whitespace-nowrap">{callerId}</span></> : null}.</strong> {plan.forwardsAll ? "Your phone shouldn’t ring." : "Your phone will ring. Don’t answer it."}</span>
+                          ? <span><strong>Calling {formatPhone(business.number!)}{callerId ? <> from <span className="whitespace-nowrap">{callerId}</span></> : null}.</strong> {plan.forwardsAll ? "Your phone shouldn’t ring." : "Your phone will ring. Don’t answer or decline it."}</span>
                           // Our call couldn't be placed: say so first, then the one thing to do instead.
                           : <span>{line.check.autoFailed ? <strong>We couldn’t call you. </strong> : null}Call {formatPhone(business.number!)} from another phone.{plan.forwardsAll ? " Your phone shouldn’t ring." : " Let it ring. Don’t answer it."}</span>}
                       </p>
@@ -245,8 +251,8 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
                           {busy === "mode" ? <Loader2 className="motion-safe:animate-spin" /> : null}Switch to Otto answers every call
                         </Button>
                       )}
-                      <p className="text-[15px] font-semibold">{plan.forwardsAll ? `${tapWord} ${testLabel}. Your phone won’t ring.` : `${tapWord} ${testLabel}. Your phone will ring. Don’t answer it.`}</p>
-                      <Button ref={testRef} size="tap" variant={fixOffer || clearing ? "outline" : "brand"} className={cn(fullButton, (fixOffer || clearing) && outlineButton)} disabled={busy === "check" || clearing} onClick={startTest}>
+                      <p className="text-[15px] font-semibold">{clearing ? "After both codes, test again." : plan.forwardsAll ? `${tapWord} ${testLabel}. Your phone won’t ring.` : `${tapWord} ${testLabel}. Your phone will ring. Don’t answer or decline it.`}</p>
+                      <Button ref={testRef} size="tap" variant={fixOffer || clearing ? "outline" : "brand"} className={cn(fullButton, (fixOffer || clearing) && outlineButton)} disabled={busy === "check"} onClick={startTest}>
                         {busy === "check" ? <><Loader2 className="motion-safe:animate-spin" />Starting…</> : testLabel}
                       </Button>
                       {callerId && <span className="text-center text-[13px] text-muted-foreground">Our test call comes from <span className="tabular whitespace-nowrap">{callerId}</span></span>}
@@ -259,8 +265,9 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
             {current && (
               <div className="grid gap-3 text-sm">
                 <p className="text-[15px]">{proofLine(business, dashboard.shop.timezone)}</p>
-                <span className="-mt-2">{changeButton("Change number")}</span>
+                {inApp && <p className="-mb-1 text-[15px] font-semibold">How calls work</p>}
                 {inApp && <ModeChoice choice={choice} busy={busy === "mode"} locked={checking} family={family} ringFirstSeconds={business.ringFirstSeconds ?? null} onPick={(next) => { if (busy !== "mode") void setMode(next) }} />}
+                <span className={inApp ? undefined : "-mt-2"}>{changeButton("Change number")}</span>
                 {plan?.off && (
                   <details className="group">
                     <summary className="cursor-pointer font-semibold underline underline-offset-4">How to turn forwarding off</summary>
@@ -309,7 +316,7 @@ function Step({ n, title, done = false, last = false, children }: { n: number; t
   return (
     <li className={cn("grid gap-3 border-t pt-4", !last && "pb-4")}>
       {/* The number sits with the title; what's under it gets the card's full width (the code never wraps on a phone). */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-start gap-3">
         <span aria-hidden className={cn("grid size-7 shrink-0 place-items-center rounded-full text-sm font-bold", done ? "bg-emerald-600 text-white" : "border-2 border-brand-ink text-brand-ink")}>
           {done ? <Check className="size-4" strokeWidth={3} /> : n}
         </span>
@@ -331,7 +338,8 @@ function proofLine(business: ApiDashboard["line"]["business"], timeZone: string)
   const number = formatPhone(business.number!)
   if (!test) return `Calls to ${number} reach Otto.`
   const when = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone }).format(new Date(test.at))
-  if (test.mode === "every-call") return `Tested ${when}: Otto answered every call to ${number}. Your phone won’t ring for these.`
+  // "Won't ring" only when our own timed call showed it; a test from another phone only shows calls reach Otto.
+  if (test.mode === "every-call") return test.timed ? `Tested ${when}: Otto answered every call to ${number}. Your phone won’t ring for these.` : `Tested ${when}: calls to ${number} reach Otto.`
   return test.rangSeconds
     ? `Tested ${when}: your phone rang about ${test.rangSeconds} seconds, then Otto answered.`
     : `Tested ${when}: calls you miss on ${number} go to Otto.`
@@ -438,7 +446,8 @@ function DialCode({ code, dialLink, family, codeRef, copied, onCopied }: { code:
           <a href={href} onClick={onCopied}>{copied ? <Check /> : <PhoneForwarded />}{copied ? "Opened in Phone" : "Tap to dial"}</a>
         </Button>
       ) : (
-        <Button type="button" size="tap" variant={copied ? "outline" : "brand"} className={cn(fullButton, copied && outlineButton)} onClick={copy} aria-live="polite">
+        // On a computer the QR below is the main way; copying is a side option.
+        <Button type="button" size="tap" variant={copied || platform === "desktop" ? "outline" : "brand"} className={cn(fullButton, (copied || platform === "desktop") && outlineButton)} onClick={copy} aria-live="polite">
           {copied ? <><Check />Copied</> : <><Copy />Copy code</>}
         </Button>
       )}
@@ -517,7 +526,9 @@ function CheckResult({ status, plan }: { status: Status; plan: ForwardingPlan })
     // Most often they just switched to every call after the phone picked up a ring-first test: not a new failure.
     return <p role="status" className="rounded-md border border-brand-ink/15 bg-accent px-3 py-2.5 text-sm text-accent-foreground"><strong className="font-semibold">Now dial the new code above,</strong> then test again.</p>
   }
-  const lines: string[] = plan.forwardsAll
+  const lines: string[] = status === "rings_first"
+    ? ["Your phone rang first, so the every-call code isn’t on yet.", plan.on ? "Dial the code above, then test again." : "Turn on forward all calls with your phone company, then test again."]
+    : plan.forwardsAll
     ? ["That test didn’t reach Otto.", plan.on ? "Dial the code above, then test again." : "Check forwarding is on with your phone company, then test again."]
     : status === "phone_answers"
       ? ["Your phone picked up the test itself.", settingsFix()]

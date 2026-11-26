@@ -102,9 +102,26 @@ describe("owner app fixes (walk 70039f169)", () => {
     // A changed token is refused, and so is one past its 15 minutes.
     const forged = await fetch(`${baseUrl}${path.slice(0, -2)}xx`);
     expect(forged.status).toBe(410);
-    expect(await forged.text()).toContain("Reload the page on your computer, then scan the new QR.");
+    expect(await forged.text()).toContain("Open the setup page on your computer for a new one.");
     at = new Date(now.getTime() + 16 * 60_000);
     expect((await fetch(`${baseUrl}${path}`)).status).toBe(410);
+  });
+
+  it("expired QR links are deleted when a new one is made, so refreshes never pile up", async () => {
+    const { account, post } = await signUp("qr-sweep@synthetic.example", "(941) 555-0148");
+    await store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", "+13125550148");
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "business_number", "+19415550181");
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "T-Mobile USA", lineType: "mobile", family: "gsm", chosen: false }));
+    const idOf = async () => new URL(((await (await post("/api/app/line/handoff")).json()) as { url: string }).url).pathname.slice(3);
+    const first = await idOf();
+    const second = await idOf();
+    expect(await store.getIntegrationSecret("platform", "dial-handoff", first)).toBeTruthy();
+    at = new Date(now.getTime() + 16 * 60_000);
+    const third = await idOf();
+    expect(await store.getIntegrationSecret("platform", "dial-handoff", first)).toBeNull();
+    expect(await store.getIntegrationSecret("platform", "dial-handoff", second)).toBeNull();
+    expect(await store.getIntegrationSecret("platform", "dial-handoff", third)).toBeTruthy();
+    expect(JSON.parse((await store.getIntegrationSecret(account.tenantId, "forwarding", "handoff_ids"))!)).toEqual([third]);
   });
 
   it("Email me these steps sends the owner's own email a day-long link to the same page", async () => {
