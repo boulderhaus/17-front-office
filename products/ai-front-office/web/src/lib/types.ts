@@ -224,6 +224,10 @@ export interface ApiCallPath {
 
 export type SettingsValues = Record<string, string | boolean>
 
+export interface TradeOption { key: string; label: string; services: string[] }
+export interface EmergencyOption { key: string; label: string; trades: string[]; words: string[] }
+export interface SettingsCatalog { trades: TradeOption[]; emergencies: EmergencyOption[]; alwaysOnWords: string[]; alwaysOnLine: string }
+
 export interface ApiSettings {
   /** Automated emergency calls to the owner's mobile: offered, and on only with the owner's recorded consent. */
   /** held: the urgent number may send every call to Otto, so urgent calls to it are skipped (push and email still go). */
@@ -232,6 +236,10 @@ export interface ApiSettings {
   texts?: { live: boolean; on: boolean; mobile: string | null }
   csrf: string
   values: SettingsValues
+  /** Tick boxes for "What you fix" and "What counts as an emergency"; the stored values stay plain word lists. */
+  catalog?: SettingsCatalog
+  /** The shop's own area from the mobile's area code, offered when "Where you work" is only a state. */
+  areaSuggestion?: string | null
   status: string
   /** No password on the account (Google, Microsoft or email link): deleting needs a sign-in from the last 10 minutes. */
   signIn?: { hasPassword: boolean; recent: boolean }

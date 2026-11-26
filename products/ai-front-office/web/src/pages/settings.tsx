@@ -31,13 +31,13 @@ const MODE_WORDS: Record<string, string> = { always: "Otto answers every call", 
 
 export const SECTIONS: SectionDef[] = [
   { ...settingsPage("business"), form: true, description: "Name, greeting, where you work and what you fix.", summary: ({ text }) => text("businessName"), render: () => <BusinessSection /> },
-  { ...settingsPage("answering"), form: true, description: "Which calls Call Otto picks up, and emergencies.", summary: ({ text }) => (text("serviceState") === "paused" ? "Paused" : MODE_WORDS[text("operationMode")] ?? "On"), render: () => <AnsweringSection /> },
-  { ...settingsPage("answers"), form: true, description: "The only prices and facts Call Otto may tell callers.", summary: ({ text }) => { const count = [text("priceSnippets"), text("approvedKnowledge")].join("\n").split("\n").filter((line) => line.trim()).length; return count ? `${count} saved` : "None yet" }, render: () => <AnswersSection /> },
+  { ...settingsPage("answering"), form: true, description: "Which calls Otto answers, and what counts as an emergency.", summary: ({ text }) => (text("serviceState") === "paused" ? "Paused" : MODE_WORDS[text("operationMode")] ?? "On"), render: () => <AnsweringSection /> },
+  { ...settingsPage("answers"), form: true, description: "What Otto tells callers. It never quotes anything else.", summary: ({ text }) => { const count = [text("priceSnippets"), text("approvedKnowledge")].join("\n").split("\n").filter((line) => line.trim()).length; return count ? `${count} saved` : "None yet" }, render: () => <AnswersSection /> },
   { ...settingsPage("alerts"), form: true, description: "How we let you know about new calls.", summary: ({ settings }) => (settings.integrations.ownerPhoneConfigured ? "Mobile saved" : "No mobile yet"), render: () => <AlertsSection /> },
   { ...settingsPage("calendar"), form: true, description: "Google Calendar, appointment hours and booking.", summary: ({ settings }) => (settings.integrations.googleConnected ? "Connected" : settings.integrations.googleAvailable ? "Not connected" : "Not available yet"), render: () => <CalendarSection /> },
   { ...settingsPage("plan"), form: false, description: "Your plan, your card, invoices, cancel.", summary: ({ settings }) => settings.plan.label, render: () => <PlanSection /> },
   { ...settingsPage("team"), form: false, description: "People who work your calls with you.", summary: () => "Invite people", render: () => <TeamSection /> },
-  { ...settingsPage("data"), form: true, description: "Downloads, how long calls are kept, sign out, delete.", summary: ({ text }) => `${text("dataRetentionDays")} days`, render: () => <DataSection /> },
+  { ...settingsPage("data"), form: false, description: "Download your calls, sign out, delete.", summary: () => "Every call kept", render: () => <DataSection /> },
 ]
 // Old links and the status pill used these ids.
 const ALIASES: Record<string, string> = { shop: "business", area: "business", appointments: "calendar", emergencies: "answering" }
@@ -259,15 +259,16 @@ function SectionPage({ section }: { section: SectionDef }) {
           </div>
         )}
       </header>
-      {section.render()}
+      <div className="grid divide-y">{section.render()}</div>
     </>
   )
-  if (!section.form) return <div className="grid max-w-3xl gap-4">{body}</div>
+  if (!section.form) return <div className="grid max-w-3xl gap-2">{body}</div>
   return (
-    <form className="grid max-w-3xl gap-4" onSubmit={(event) => { event.preventDefault(); void save() }}>
+    <form className="grid max-w-3xl gap-2" onSubmit={(event) => { event.preventDefault(); void save() }}>
       {body}
       {dirty && (
-        <div className="sticky bottom-0 z-10 -mx-4 flex items-center gap-3 border-t bg-card px-4 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] lg:hidden">
+        // Flush with the bottom of the screen: it takes the page's bottom padding, so no empty band shows under it.
+        <div className="sticky bottom-0 z-10 -mx-4 -mb-[calc(2.5rem+env(safe-area-inset-bottom))] flex items-center gap-3 border-t bg-card px-4 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] lg:hidden">
           <Button type="button" variant="outline" size="tap" className="flex-1" onClick={discard}>Discard</Button>
           {saveButton("flex-[2]")}
         </div>
