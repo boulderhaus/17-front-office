@@ -132,15 +132,20 @@ export class StripeBillingClient {
     body.set("subscription_details[proration_date]", String(options.prorationDate));
     const preview = await this.post("invoices/create_preview", body);
     if (!preview.ok) throw new Error(`Stripe invoice preview failed with HTTP ${preview.status}${preview.payload.error?.message ? `: ${preview.payload.error.message}` : ""}`);
-    const payload = preview.payload as { lines?: { data?: Array<{ amount?: number; proration?: boolean; parent?: { subscription_item_details?: { proration?: boolean } } }> }; starting_balance?: number };
+    type Line = { amount?: number; proration?: boolean; parent?: { type?: string; subscription_item_details?: { proration?: boolean }; invoice_item_details?: unknown } };
+    const payload = preview.payload as { lines?: { data?: Line[] }; starting_balance?: number };
+    const lines = payload.lines?.data ?? [];
+    const amount = (line: Line) => (typeof line.amount === "number" ? line.amount : 0);
     // Stripe's advice: the prorations being previewed are the lines marked proration.
-    const changeCents = (payload.lines?.data ?? [])
-      .filter((line) => line.parent?.subscription_item_details?.proration === true || line.proration === true)
-      .reduce((sum, line) => sum + (typeof line.amount === "number" ? line.amount : 0), 0);
-    // A credit already on the account (negative balance) is used before the card.
+    const isProration = (line: Line) => line.parent?.subscription_item_details?.proration === true || line.proration === true;
+    const changeCents = lines.filter(isProration).reduce((sum, line) => sum + amount(line), 0);
+    // always_invoice also sweeps any pending invoice items onto the same invoice, so they are charged now too.
+    const pendingCents = lines.filter((line) => !isProration(line) && (line.parent?.type === "invoice_item_details" || line.parent?.invoice_item_details !== undefined))
+      .reduce((sum, line) => sum + amount(line), 0);
+    // The account balance applies to that invoice: a credit (negative) is used before the card, a debit (positive) is added.
     const balance = typeof payload.starting_balance === "number" ? payload.starting_balance : 0;
-    const chargeCents = changeCents > 0 ? Math.max(0, changeCents + Math.min(0, balance)) : 0;
-    return { changeCents, chargeCents, creditCents: changeCents < 0 ? -changeCents : 0, noChange: false };
+    const total = changeCents + pendingCents + balance;
+    return { changeCents, chargeCents: Math.max(0, total), creditCents: changeCents < 0 ? -changeCents : 0, noChange: false };
   }
 
   /**
@@ -170,18 +175,23 @@ export class StripeBillingClient {
    * What the owner last paid and what the next bill is, for the top line of Plan and billing. Read only.
    * The next bill comes from Stripe's preview of the subscription's next invoice, so a credit is already applied.
    */
-  async billingSummary(subscriptionId: string): Promise<{ lastPaid: { amountCents: number; paidAt: string } | null; next: { amountCents: number; at: string | null } | null }> {
-    const [paid, upcoming] = await Promise.all([
+  async billingSummary(subscriptionId: string): Promise<{ lastPaid: { amountCents: number; paidAt: string } | null; next: { amountCents: number; at: string | null } | null; endsAt: string | null }> {
+    const [paid, upcoming, subscription] = await Promise.all([
       this.get(`invoices?subscription=${encodeURIComponent(subscriptionId)}&status=paid&limit=10`).catch(() => null) as Promise<{ data?: Array<{ amount_paid?: number; created?: number; status_transitions?: { paid_at?: number | null } }> } | null>,
       this.post("invoices/create_preview", new URLSearchParams({ subscription: subscriptionId })).catch(() => null),
+      this.get(`subscriptions/${encodeURIComponent(subscriptionId)}`).catch(() => null) as Promise<{ cancel_at_period_end?: boolean; cancel_at?: number | null; current_period_end?: number; items?: { data?: Array<{ current_period_end?: number }> } } | null>,
     ]);
+    // Set to cancel: there is no next bill, only an end date.
+    const endSeconds = subscription?.cancel_at ?? (subscription?.cancel_at_period_end ? (subscription.items?.data?.[0]?.current_period_end ?? subscription.current_period_end ?? null) : null);
+    const endsAt = typeof endSeconds === "number" ? new Date(endSeconds * 1_000).toISOString() : null;
     const last = (paid?.data ?? []).filter((invoice) => (invoice.amount_paid ?? 0) > 0)
       .map((invoice) => ({ amountCents: invoice.amount_paid ?? 0, at: invoice.status_transitions?.paid_at ?? invoice.created ?? 0 }))
       .sort((left, right) => right.at - left.at)[0];
     const next = upcoming?.ok ? upcoming.payload as { amount_due?: number; next_payment_attempt?: number | null; period_end?: number } : null;
     return {
       lastPaid: last && last.at > 0 ? { amountCents: last.amountCents, paidAt: new Date(last.at * 1_000).toISOString() } : null,
-      next: next && typeof next.amount_due === "number" ? { amountCents: next.amount_due, at: typeof next.next_payment_attempt === "number" ? new Date(next.next_payment_attempt * 1_000).toISOString() : null } : null,
+      next: !endsAt && next && typeof next.amount_due === "number" ? { amountCents: next.amount_due, at: typeof next.next_payment_attempt === "number" ? new Date(next.next_payment_attempt * 1_000).toISOString() : null } : null,
+      endsAt,
     };
   }
 

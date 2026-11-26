@@ -1,6 +1,6 @@
 import type { ReactNode } from "react"
 import { Switch } from "@/components/ui/switch"
-import { money } from "@/lib/format"
+import { money, perCall } from "@/lib/format"
 import type { ApiPlan, PlanId } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -67,7 +67,7 @@ export function UnlimitedAddOn({ plan, checked, onCheckedChange, id, disabled }:
         </span>
         <span className="tabular text-[16px] font-semibold whitespace-nowrap">+{money(plan.unlimited.addOnCents)}/mo</span>
       </label>
-      <span id={`${id}-hint`} className="text-[14px] text-balance text-muted-foreground">No extra-call charges, up to {plan.unlimited.fairUseCalls.toLocaleString("en-US")} calls a month.</span>
+      <span id={`${id}-hint`} className="text-[14px] text-balance text-muted-foreground">No extra-call charges up to {plan.unlimited.fairUseCalls.toLocaleString("en-US")} calls a month. Past that, {perCall(plan.overageCentsPerCall)} each.</span>
     </div>
   )
 }
@@ -87,7 +87,7 @@ export function PriceSummary({ label, big, struck, line, children, live = true, 
             <strong className="tabular text-[32px] leading-none font-semibold tracking-tight">{big}</strong>
             {struck && <s className="tabular text-[18px] font-medium text-muted-foreground decoration-2">{struck}</s>}
           </span>
-          <span className="text-[15px] font-medium text-brand-ink">{line}</span>
+          <span className="text-[15px] font-medium text-pretty text-brand-ink">{line}</span>
         </div>
         {children}
       </div>

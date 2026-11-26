@@ -168,7 +168,7 @@ export interface BillingQuote {
 }
 
 /** The top line of Plan and billing (GET /api/app/billing/summary). */
-export interface BillingSummary { lastPaid: { amountCents: number; paidAt: string } | null; next: { amountCents: number; at: string } | null; monthlyCents: number }
+export interface BillingSummary { lastPaid: { amountCents: number; paidAt: string } | null; next: { amountCents: number; at: string } | null; endsAt: string | null; monthlyCents: number }
 
 export interface Guarantee {
   state: "none" | "watching" | "eligible" | "pending" | "refunded" | "closed"

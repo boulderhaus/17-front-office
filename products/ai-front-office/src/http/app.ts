@@ -2363,16 +2363,17 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   }
 
   /** The top line of Plan and billing: what was last paid and what the next bill is, from Stripe. Read only. */
-  async function billingSummary(account: OwnerAccount): Promise<{ lastPaid: { amountCents: number; paidAt: string } | null; next: { amountCents: number; at: string } | null; monthlyCents: number }> {
+  async function billingSummary(account: OwnerAccount): Promise<{ lastPaid: { amountCents: number; paidAt: string } | null; next: { amountCents: number; at: string } | null; endsAt: string | null; monthlyCents: number }> {
     const [subscription, config] = await Promise.all([dependencies.store.getSubscription(account.tenantId), dependencies.store.getConfig(account.tenantId)]);
     const monthly = monthlyCents(currentPlan(known, config.planId), config.unlimitedCalls === true);
-    if (!stripeClient || !liveSubscription(subscription) || isCompStatus(subscription.status)) return { lastPaid: null, next: null, monthlyCents: monthly };
+    if (!stripeClient || !liveSubscription(subscription) || isCompStatus(subscription.status)) return { lastPaid: null, next: null, endsAt: null, monthlyCents: monthly };
     const read = await stripeClient.billingSummary(subscription.providerSubscriptionId).catch((error) => {
       log({ level: "warn", event: "billing_summary_failed", tenantId: account.tenantId, error: safeError(error) });
-      return { lastPaid: null, next: null };
+      return { lastPaid: null, next: null, endsAt: null };
     });
-    const at = read.next?.at ?? subscription.currentPeriodEnd;
-    return { lastPaid: read.lastPaid, next: at ? { amountCents: read.next?.amountCents ?? monthly, at } : null, monthlyCents: monthly };
+    // Only Stripe's own preview names a next bill; never invent one (a cancelling plan has none).
+    const at = read.next ? read.next.at ?? subscription.currentPeriodEnd : null;
+    return { lastPaid: read.lastPaid, next: read.next && at ? { amountCents: read.next.amountCents, at } : null, endsAt: read.endsAt, monthlyCents: monthly };
   }
 
   /** Keep the shop's plan and price in step with what Stripe says it is paying for (e.g. a switch in the billing portal). */
@@ -4138,7 +4139,6 @@ export function createStripeClient(env: Environment, fetcher: typeof fetch): Str
   }, fetcher);
 }
 
-/** The shop's config on a plan: label lives in the catalog; price, included calls and overage are saved with the shop. */
 /** A plan change priced for the owner before anything is charged. */
 interface BillingQuote {
   plan: PlanId; unlimited: boolean; monthlyCents: number; renewsAt: string | null; live: boolean; noChange: boolean;
@@ -4157,6 +4157,7 @@ function parseConfirm(value: unknown): ConfirmedQuote | null {
   return whole(prorationDate) && whole(todayCents) && whole(creditCents) && typeof estimated === "boolean" ? { prorationDate, todayCents, creditCents, estimated } : null;
 }
 
+/** The shop's config on a plan: label lives in the catalog; price, included calls and overage are saved with the shop. */
 function onPlan(config: BusinessConfig, plan: Plan, unlimited = config.unlimitedCalls === true): BusinessConfig {
   return { ...config, planId: plan.id, flatMonthlyPriceCents: plan.priceCents, includedCalls: plan.includedCalls, overageCentsPerCall: plan.overageCentsPerCall, unlimitedCalls: unlimited && Boolean(plan.unlimited) };
 }

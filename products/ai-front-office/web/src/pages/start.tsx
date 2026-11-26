@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { cents, PlanCards, PriceSummary, shortDay, UnlimitedAddOn } from "@/components/app/plan-picker"
 import { api } from "@/lib/api"
-import { formatPhone, LEAD_GUARANTEE, money } from "@/lib/format"
+import { formatPhone, LEAD_GUARANTEE, money, perCall } from "@/lib/format"
 import { useMode } from "@/lib/mode"
 import { forwardingOn } from "@/lib/line-status"
 import type { Activation, ApiDashboard, PlanId } from "@/lib/types"
@@ -144,7 +144,9 @@ function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDa
   const withUnlimited = Boolean(unlimited && plan?.unlimited)
   // One quote for the summary and the button: the same numbers Stripe's page shows.
   const quote = plan ? (withUnlimited && plan.unlimited ? plan.unlimited.quote : plan.quote) : null
-  const offer = quote?.strikeCents ? (quote.todayCents * 2 === quote.strikeCents || quote.todayCents * 2 + 1 === quote.strikeCents ? "First month half off" : "First month off") : null
+  // The same words as offerWords in src/domain/plans.ts: "half off" or "40% off", never a vague "off".
+  const percent = quote?.strikeCents ? Math.round(100 - (quote.todayCents * 100) / quote.strikeCents) : 0
+  const offer = percent > 0 ? (percent === 50 ? "First month half off" : `First month ${percent}% off`) : null
   return (
     <>
       <Heading title={<span className="marker">Add a card to turn on your line</span>}>Your Call Otto line turns on the moment you’re back here. No extra button.</Heading>
@@ -154,6 +156,7 @@ function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDa
         <span aria-hidden className="absolute inset-x-0 top-0 h-1.5 bg-brand-yellow" />
         <CardContent className="grid gap-4 pt-2">
           {plans.length > 0 && <PlanCards plans={plans} picked={picked} onPick={setPicked} />}
+          {plan && !withUnlimited && <p className="-mt-1 pl-1 text-[14px] text-muted-foreground">Extra calls {perCall(plan.overageCentsPerCall)} each.</p>}
           {plan?.unlimited && <UnlimitedAddOn id="card-unlimited" plan={plan} checked={unlimited} onCheckedChange={setUnlimited} />}
           <ul className="grid gap-1.5 text-[15px]">
             <li className="flex gap-2"><CheckCircle2 className="mt-0.5 size-4.5 shrink-0 text-emerald-700" />Keep your number</li>
@@ -175,7 +178,7 @@ function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDa
             <input type="hidden" name="from" value="start" />
             {plan && <input type="hidden" name="plan" value={plan.id} />}
             <input type="hidden" name="unlimited" value={withUnlimited ? "yes" : "no"} />
-            <Button size="tap" variant="brand" className="h-14 w-full text-base md:w-60 lg:h-12">{quote.todayCents > 0 ? `Pay ${cents(quote.todayCents)}` : "Add card"}<ArrowRight /></Button>
+            <Button size="tap" variant="brand" className="h-14 w-full text-base md:w-52 lg:h-12">{quote.todayCents > 0 ? `Pay ${cents(quote.todayCents)}` : "Add card"}<ArrowRight /></Button>
           </form>
         </PriceSummary>
       ) : dashboard.checkoutConfigured ? (

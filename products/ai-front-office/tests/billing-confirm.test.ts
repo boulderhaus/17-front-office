@@ -22,6 +22,7 @@ function fakeStripe() {
   let items: Array<{ id: string; price: { id: string } }> = [{ id: "si_plan", price: { id: "price_solo_synthetic" } }];
   let previewRefused = false;
   let creditBalance = 0;
+  let cancelling = false;
   const prorate = (body: URLSearchParams, prefix: string, at: number): { cents: number; next: typeof items } => {
     let next = items.map((item) => ({ ...item }));
     let delta = 0;
@@ -39,7 +40,7 @@ function fakeStripe() {
     const request: Recorded = { method: init?.method ?? "GET", url: String(input), body: new URLSearchParams(init?.body instanceof URLSearchParams ? init.body.toString() : typeof init?.body === "string" ? init.body : "") };
     requests.push(request);
     const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
-    if (request.method === "GET" && request.url.endsWith("/v1/subscriptions/sub_synthetic")) return json({ id: "sub_synthetic", status: "active", customer: "cus_synthetic", items: { data: items } });
+    if (request.method === "GET" && request.url.endsWith("/v1/subscriptions/sub_synthetic")) return json({ id: "sub_synthetic", status: "active", customer: "cus_synthetic", cancel_at_period_end: cancelling, current_period_end: PERIOD_END, items: { data: items } });
     if (request.method === "POST" && request.url.endsWith("/v1/invoices/create_preview")) {
       if (previewRefused) return json({ error: { message: "synthetic refusal" } }, 400);
       if (!request.body.has("subscription_details[proration_date]")) return json({ amount_due: 4_999 + creditBalance, next_payment_attempt: PERIOD_END, lines: { data: [] } });
@@ -62,6 +63,7 @@ function fakeStripe() {
     requests, invoiced, fetcher,
     writes: () => requests.filter((request) => request.method === "POST" && request.url.endsWith("/v1/subscriptions/sub_synthetic")),
     refusePreview: (value: boolean) => { previewRefused = value; },
+    cancelAtPeriodEnd: (value: boolean) => { cancelling = value; },
   };
 }
 
@@ -195,7 +197,19 @@ describe("plan and Unlimited changes: a tap never charges", () => {
   it("says what was paid and what comes next, from Stripe", async () => {
     const shop = await paidOwner();
     const summary = await (await fetch(`${baseUrl}/api/app/billing/summary`, { headers: { cookie: shop.cookie } })).json();
-    expect(summary).toEqual({ lastPaid: { amountCents: 2_499, paidAt: "2026-11-26T14:00:00.000Z" }, next: { amountCents: 4_999, at: "2026-12-26T14:00:00.000Z" }, monthlyCents: 4_999 });
+    expect(summary).toEqual({ lastPaid: { amountCents: 2_499, paidAt: "2026-11-26T14:00:00.000Z" }, next: { amountCents: 4_999, at: "2026-12-26T14:00:00.000Z" }, endsAt: null, monthlyCents: 4_999 });
+    expect(stripe.writes()).toHaveLength(0);
+  });
+
+  it("never invents a next bill: a cancelling plan shows when it ends, and a refused preview shows none", async () => {
+    const shop = await paidOwner();
+    stripe.cancelAtPeriodEnd(true);
+    const ending = await (await fetch(`${baseUrl}/api/app/billing/summary`, { headers: { cookie: shop.cookie } })).json();
+    expect(ending).toMatchObject({ next: null, endsAt: "2026-12-26T14:00:00.000Z" });
+    stripe.cancelAtPeriodEnd(false);
+    stripe.refusePreview(true);
+    const refused = await (await fetch(`${baseUrl}/api/app/billing/summary`, { headers: { cookie: shop.cookie } })).json();
+    expect(refused).toMatchObject({ next: null, endsAt: null });
     expect(stripe.writes()).toHaveLength(0);
   });
 
@@ -216,5 +230,19 @@ describe("StripeBillingClient.previewChange", () => {
     const client = new StripeBillingClient("sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", { base: "price_solo", unlimited: { solo: "price_unl_solo" } }, fetcher);
     expect(await client.previewChange("sub_x", "solo", { unlimited: true, prorationDate: 1_800_000_000 })).toEqual({ changeCents: 4_000, chargeCents: 3_000, creditCents: 0, noChange: false });
     expect(await client.previewChange("sub_x", "solo", { unlimited: false, prorationDate: 1_800_000_000 })).toEqual({ changeCents: 0, chargeCents: 0, creditCents: 0, noChange: true });
+  });
+
+  it("adds a debit on the account and pending invoice items, which always_invoice charges on the same invoice", async () => {
+    const fetcher = (async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/subscriptions/sub_x")) return new Response(JSON.stringify({ id: "sub_x", items: { data: [{ id: "si_plan", price: { id: "price_solo" } }] } }));
+      return new Response(JSON.stringify({ starting_balance: 100, lines: { data: [
+        { amount: 1_000, proration: true },
+        { amount: 250, parent: { type: "invoice_item_details", invoice_item_details: { invoice_item: "ii_synthetic" } } },
+        { amount: 4_999, parent: { subscription_item_details: { proration: false } } },
+      ] } }));
+    }) as typeof fetch;
+    const client = new StripeBillingClient("sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", { base: "price_solo", unlimited: { solo: "price_unl_solo" } }, fetcher);
+    expect(await client.previewChange("sub_x", "solo", { unlimited: true, prorationDate: 1_800_000_000 })).toEqual({ changeCents: 1_000, chargeCents: 1_350, creditCents: 0, noChange: false });
   });
 });

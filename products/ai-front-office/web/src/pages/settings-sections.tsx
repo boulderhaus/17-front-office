@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Link, useLocation, useSearchParams } from "react-router-dom"
 import { CheckCircle2, ChevronRight, Download, Loader2, LogOut } from "lucide-react"
 import { toast } from "sonner"
@@ -392,6 +392,7 @@ function Price({ cents, size = "lg" }: { cents: number; size?: "lg" | "md" }) {
 function paidLine(summary: BillingSummary | null, tz: string): string | null {
   if (!summary) return null
   const paid = summary.lastPaid ? `You paid ${cents(summary.lastPaid.amountCents)} on ${shortDay(summary.lastPaid.paidAt, tz)}.` : null
+  if (summary.endsAt) return [paid, `Your plan ends ${shortDay(summary.endsAt, tz)}.`].filter(Boolean).join(" ")
   if (!summary.next) return paid
   const day = shortDay(summary.next.at, tz)
   const next = summary.next.amountCents === summary.monthlyCents
@@ -432,6 +433,8 @@ export function PlanSection() {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [summary, setSummary] = useState<BillingSummary | null>(null)
+  // Bumped on every new pick or cancel, so a slow price reply for an old pick never overwrites the new one.
+  const quoteGeneration = useRef(0)
   // Back from Stripe's billing page, or it couldn't open: say so here, in one line.
   const [params] = useSearchParams()
   const billing = params.get("billing")
@@ -450,24 +453,28 @@ export function PlanSection() {
   useEffect(() => {
     if (!plan.paid || comp) return
     let alive = true
-    api<BillingSummary>("/api/app/billing/summary").then((value) => { if (alive) setSummary(value) }).catch(() => undefined)
+    api<BillingSummary>("/api/app/billing/summary")
+      .then((value) => { if (alive) setSummary(value) })
+      // Couldn't read it: show no top line rather than a placeholder that never ends.
+      .catch(() => { if (alive) setSummary({ lastPaid: null, next: null, endsAt: null, monthlyCents: 0 }) })
     return () => { alive = false }
   }, [plan.paid, comp, plan.id, plan.unlimited])
   // The live total: Stripe's own price for the change on screen, refreshed on every pick.
   useEffect(() => {
+    const generation = ++quoteGeneration.current
     setQuote(null)
     setQuoteError(null)
     if (!changed || !target) return
     let alive = true
     const timer = window.setTimeout(() => {
       api<BillingQuote>("/api/app/billing/preview", { method: "POST", body: { plan: proposal.plan, unlimited: proposalUnlimited } })
-        .then((value) => { if (alive) setQuote(value) })
-        .catch((error) => { if (alive) setQuoteError(error instanceof Error ? error.message : "We couldn’t get the price. Try again.") })
+        .then((value) => { if (alive && generation === quoteGeneration.current) setQuote(value) })
+        .catch((error) => { if (alive && generation === quoteGeneration.current) setQuoteError(error instanceof Error ? error.message : "We couldn’t get the price. Try again.") })
     }, 150)
     return () => { alive = false; window.clearTimeout(timer) }
   }, [changed, target, proposal.plan, proposalUnlimited])
 
-  const revert = () => { setProposal({ plan: plan.id, unlimited: plan.unlimited }); setConfirmOpen(false) }
+  const revert = () => { quoteGeneration.current++; setProposal({ plan: plan.id, unlimited: plan.unlimited }); setConfirmOpen(false) }
   const flipUnlimited = (on: boolean) => {
     setProposal((current) => ({ ...current, unlimited: on }))
     // A paying shop confirms the exact amount first; before paying, the pick is just remembered (below).
@@ -486,7 +493,10 @@ export function PlanSection() {
       if (error instanceof ApiError && error.status === 409) {
         // The price moved (or went stale): show the new one in the same dialog. Nothing was charged.
         setQuote(null)
-        api<BillingQuote>("/api/app/billing/preview", { method: "POST", body: { plan: target.id, unlimited: proposalUnlimited } }).then(setQuote).catch(() => undefined)
+        const generation = ++quoteGeneration.current
+        api<BillingQuote>("/api/app/billing/preview", { method: "POST", body: { plan: target.id, unlimited: proposalUnlimited } })
+          .then((value) => { if (generation === quoteGeneration.current) setQuote(value) })
+          .catch(() => undefined)
       } else {
         revert()
       }
@@ -504,7 +514,7 @@ export function PlanSection() {
   const topLine = plan.paid && !comp ? paidLine(summary, tz) : null
   const words = quote && target ? confirmWords({ quote, from: { label: plan.label, unlimited: plan.unlimited }, to: target, tz }) : null
   const newMonthly = target ? monthlyOf(target, proposalUnlimited) : monthly
-  const todayLine = !changed ? "No change" : !plan.paid ? "Charged when you add your card" : quoteError ? quoteError : !quote ? "Checking the price…"
+  const todayLine = !plan.paid ? "Charged when you add your card" : quoteError ? quoteError : !quote ? "Checking the price…"
     : quote.todayCents > 0 ? `${quote.estimated ? "About " : ""}${cents(quote.todayCents)} charged today`
     : quote.creditCents > 0 ? `${quote.estimated ? "About " : ""}${cents(quote.creditCents)} off your next bill` : "Nothing charged today"
   return (
@@ -514,7 +524,7 @@ export function PlanSection() {
         {plan.paid && !comp && (
           topLine
             ? <p className="text-[16px] font-semibold text-brand-ink text-balance">{topLine}</p>
-            : <span aria-hidden className="h-6 w-4/5 animate-pulse rounded bg-muted motion-reduce:animate-none" />
+            : !summary && <span aria-hidden className="h-6 w-4/5 animate-pulse rounded bg-muted motion-reduce:animate-none" />
         )}
         <div className="grid gap-2">
           <span className="text-[15px] font-semibold text-muted-foreground">Your plan: {plan.label}{plan.unlimited ? " with Unlimited calls" : ""}</span>
@@ -536,16 +546,14 @@ export function PlanSection() {
         <SettingsCard title="Change plan" description={plan.paid ? "Your team shares the plan’s calls. You see the price before anything is charged." : "Your team shares the plan’s calls. We’ll use this plan when you add your card."}>
           <PlanCards columns plans={plan.plans} picked={proposal.plan} currentId={plan.id} disabled={busy} onPick={(id) => setProposal((current) => ({ ...current, plan: id }))} />
           {shownUnlimitedPlan?.unlimited && <UnlimitedAddOn id="settings-unlimited" plan={shownUnlimitedPlan} checked={proposalUnlimited} disabled={busy} onCheckedChange={flipUnlimited} />}
-          <PriceSummary pinned={changed} label={changed ? "New price" : "Your price"} big={<>{cents(newMonthly)}<span className="text-[15px] font-medium text-muted-foreground"> a month</span></>} line={todayLine}>
-            {changed && (
-              <span className="grid gap-2 sm:flex sm:items-center">
-                <Button size="tap" variant="brand" className={actionClass} disabled={busy || (plan.paid && !quote)} onClick={() => (plan.paid ? setConfirmOpen(true) : void apply())}>
-                  {target && target.id !== plan.id ? `Switch to ${target.label}` : proposalUnlimited ? "Add Unlimited calls" : "Turn off Unlimited calls"}
-                </Button>
-                <Button size="tap" variant="ghost" className="sm:w-auto" disabled={busy} onClick={revert}>Keep my plan</Button>
-              </span>
-            )}
-          </PriceSummary>
+          {changed && <PriceSummary label="New price" big={<>{cents(newMonthly)}<span className="text-[15px] font-medium text-muted-foreground"> a month</span></>} line={todayLine}>
+            <span className="grid gap-2 sm:flex sm:items-center">
+              <Button size="tap" variant="brand" className={actionClass} disabled={busy || (plan.paid && !quote)} onClick={() => (plan.paid ? setConfirmOpen(true) : void apply())}>
+                {target && target.id !== plan.id ? `Switch to ${target.label}` : proposalUnlimited ? "Add Unlimited calls" : "Turn off Unlimited calls"}
+              </Button>
+              <Button size="tap" variant="ghost" className="sm:w-auto" disabled={busy} onClick={revert}>Keep my plan</Button>
+            </span>
+          </PriceSummary>}
         </SettingsCard>
       )}
 
@@ -553,7 +561,7 @@ export function PlanSection() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{words?.title ?? "Checking the price…"}</AlertDialogTitle>
-            <AlertDialogDescription className="text-[16px] text-brand-ink">
+            <AlertDialogDescription className="text-[16px] text-pretty text-brand-ink">
               {words?.body ?? (quoteError ?? "One moment. Nothing is charged until you confirm.")}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -573,6 +581,9 @@ export function PlanSection() {
             <input type="hidden" name="csrf" value={csrf} />
             {/* Paying from here continues setup, where the line turns on the moment the owner is back. */}
             {!plan.paid && <input type="hidden" name="from" value="start" />}
+            {/* The plan and add-on picked above, so Stripe opens on exactly that price. */}
+            {!plan.paid && <input type="hidden" name="plan" value={proposal.plan} />}
+            {!plan.paid && <input type="hidden" name="unlimited" value={proposalUnlimited ? "yes" : "no"} />}
             <Button size="tap" variant={plan.paid ? "outline" : "brand"} className={actionClass}>{plan.paid ? "Manage billing or cancel" : "Start your plan"}</Button>
           </form>
         </SettingsCard>
