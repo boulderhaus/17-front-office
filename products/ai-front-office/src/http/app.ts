@@ -566,7 +566,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     emailLink: signIn.loginOptions(request).emailLink === true,
     verified: verifiedSignupEmail(identity),
     chargeNote: stripeClient ? planCharge(plans[0]!) : null,
-    plans: stripeClient ? plans.map((plan) => ({ ...plan, chargeNote: planCharge(plan), unlimitedChargeNote: plan.unlimited ? planCharge(plan, undefined, true) : null })) : [],
+    plans: stripeClient ? plans.map((plan) => ({ ...plan, chargeNote: planCharge(plan), unlimitedChargeNote: plan.unlimited ? planCharge(plan, undefined, true) : null, quote: priceQuote({ plan, unlimited: false, now: dependencies.clock.now(), trialDays }), unlimitedQuote: plan.unlimited ? priceQuote({ plan, unlimited: true, now: dependencies.clock.now(), trialDays }) : null })) : [],
   });
   /** The owner this browser is signed in as, if any (a live session for an account that still matches it). */
   const signedInOwner = async (request: IncomingMessage): Promise<OwnerAccount | null> => {

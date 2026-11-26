@@ -36,9 +36,25 @@ describe("Privacy and Terms: a document layout that changes no words (LEGAL-01)"
     termsWithOffer: { heading: "Service terms", words: 915, sha256: "725151d33edee36bd887a87e7c81147fa10a8bee2cd2e0237d41794e96798a6c" },
   } as const;
 
-  it("keeps every word of both pages exactly as it was", () => {
+  /**
+   * The only two sentences changed since (walk 11-26, SITE-10 and SET-20), each mapped back to its old wording so
+   * the fingerprint still proves nothing else moved.
+   */
+  const EDITS: Array<[now: string, before: string]> = [
+    ["A plan’s monthly answered calls are shared by everyone on the team; adding teammates does not add calls.", "Team members are free on every plan; the price is per shop line."],
+    ["Call records are kept until the shop deletes them or closes its account, and a shop can ask us to delete them at any time.", `Call records are retained for ${config.dataRetentionDays} days unless legal or customer obligations require a different period.`],
+  ];
+
+  it("says calls are shared by the team and records are kept until the shop deletes them, never the old lines", () => {
+    expect(pages.terms).toContain(EDITS[0]![0]);
+    expect(pages.terms).not.toMatch(/free on every plan/);
+    expect(pages.privacy).toContain(EDITS[1]![0]);
+    expect(pages.privacy).not.toMatch(/retained for \d+ days/);
+  });
+
+  it("keeps every other word of both pages exactly as it was", () => {
     for (const name of ["privacy", "terms", "termsWithOffer"] as const) {
-      const body = text(inside(pages[name], "main"));
+      const body = EDITS.reduce((current, [now, before]) => current.replace(now, before), text(inside(pages[name], "main")));
       expect(text(inside(pages[name], "h1")), name).toBe(BEFORE[name].heading);
       expect(body.split(" ").length, name).toBe(BEFORE[name].words);
       expect(sha256(body), name).toBe(BEFORE[name].sha256);
