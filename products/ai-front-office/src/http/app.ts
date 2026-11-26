@@ -163,6 +163,13 @@ const dateTime = z.string().datetime({ offset: true });
 const baseToolSchema = z.object({
   provider_call_id: z.string().min(1),
 });
+/** The call record's value when the caller's number isn't known. */
+const UNKNOWN_CALLER = "unknown";
+/**
+ * The provider fills this in, not the model. A missing, non-text or unresolved value must never fail a tool
+ * (triage is the safety check): it reads as unknown, and the tool uses the number the call started with.
+ */
+const providerFromNumber = z.string().trim().min(3).max(40).refine((value) => !value.includes("{{")).catch(UNKNOWN_CALLER);
 const availabilitySchema = baseToolSchema.extend({
   window_start: dateTime,
   window_end: dateTime,
@@ -171,7 +178,7 @@ const serviceAreaSchema = baseToolSchema.extend({
   address: z.string().min(3).max(500),
 });
 const triageSchema = baseToolSchema.extend({
-  from_number: z.string().min(3).max(40),
+  from_number: providerFromNumber,
   caller_name: z.string().max(120).optional(),
   problem_description: z.string().min(1).max(2_000),
   llm_score: z.number().min(0).max(1).optional(),
@@ -188,14 +195,14 @@ const bookingSchema = baseToolSchema.extend({
   diagnostic_fee_accepted: z.boolean(),
 });
 const handoffSchema = baseToolSchema.extend({
-  from_number: z.string().min(3).max(40),
+  from_number: providerFromNumber,
   reason: z.enum(["explicit_request", "emergency"]),
   caller_quote: z.string().min(1).max(500),
   caller_name: z.string().max(120).optional(),
   problem_description: z.string().max(2_000).optional(),
 });
 const intakeSchema = baseToolSchema.extend({
-  from_number: z.string().min(3).max(40),
+  from_number: providerFromNumber,
   caller_name: z.string().max(120).optional(),
   company_name: z.string().max(120).optional(),
   callback_number: z.string().max(40).optional(),
@@ -555,7 +562,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       log({ level: "warn", event: "tool_call_limited", requestId, tool, reason: error.reason });
     } else {
       const status = error instanceof HttpError ? error.status : error instanceof z.ZodError ? 400 : error instanceof ToolWriteInProgressError ? 409 : 500;
-      log({ level: status >= 500 ? "error" : "warn", event: "tool_request_failed", requestId, tool, status, error: safeError(error) });
+      log({ level: status >= 500 ? "error" : "warn", event: "tool_request_failed", requestId, tool, status, error: safeError(error), ...(error instanceof z.ZodError ? { fields: invalidFields(error) } : {}) });
       if (status >= 500) telemetry.captureException(error, { route: `tool:${tool}`, method: "POST", status, requestId });
     }
     if (response.headersSent) {
@@ -1054,17 +1061,23 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (pathname === "/tools/book") return handleBooking(tool);
     if (pathname === "/tools/request-human") return handleHandoff(tool);
     if (pathname === "/tools/mark-spam") {
-      const input = baseToolSchema.extend({ from_number: z.string().min(3).max(40), category: z.enum(SPAM_CATEGORIES), caller_quote: z.string().min(1).max(500) }).parse(toolPayload(tool));
+      const input = baseToolSchema.extend({ from_number: providerFromNumber, category: z.enum(SPAM_CATEGORIES), caller_quote: z.string().min(1).max(500) }).parse(toolPayload(tool));
       requireToolCallId(tool, input.provider_call_id);
       const tenantId = await tenantForCall(input.provider_call_id);
       await requireOperational(tenantId);
-      return service.markSpam({ tenantId, providerCallId: input.provider_call_id, fromNumber: input.from_number, category: input.category, callerQuote: input.caller_quote });
+      return service.markSpam({ tenantId, providerCallId: input.provider_call_id, fromNumber: await callerNumber(input.provider_call_id, input.from_number), category: input.category, callerQuote: input.caller_quote });
     }
     throw new HttpError(404, "Not found");
   }
 
   function toolPayload(tool: ToolRequest): unknown {
-    return unwrapToolPayload(parseJson<unknown>(tool.rawBody));
+    return withoutNullFields(unwrapToolPayload(parseJson<unknown>(tool.rawBody)));
+  }
+
+  /** The caller's number for a tool: the provider's value when usable, otherwise the number the call started with. */
+  async function callerNumber(providerCallId: string, provided: string): Promise<string> {
+    if (provided !== UNKNOWN_CALLER) return provided;
+    return (await dependencies.store.getCallByProviderId(providerCallId))?.fromNumber ?? UNKNOWN_CALLER;
   }
 
   /** The signed payload must name the call the budget was charged to. */
@@ -3465,7 +3478,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const result = await service.saveIntake({
       tenantId,
       providerCallId: input.provider_call_id,
-      fromNumber: input.from_number,
+      fromNumber: await callerNumber(input.provider_call_id, input.from_number),
       fields: {
         problemDescription: input.problem_description,
         ...(input.caller_name === undefined ? {} : { callerName: input.caller_name }),
@@ -3522,7 +3535,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const result = await service.triageCall({
       tenantId,
       providerCallId: input.provider_call_id,
-      fromNumber: input.from_number,
+      fromNumber: await callerNumber(input.provider_call_id, input.from_number),
       problemDescription: input.problem_description,
       ...(input.caller_name === undefined ? {} : { callerName: input.caller_name }),
       ...(input.llm_score === undefined ? {} : { llmScore: input.llm_score }),
@@ -3570,7 +3583,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const result = await service.queueHumanHandoff({
       tenantId,
       providerCallId: input.provider_call_id,
-      fromNumber: input.from_number,
+      fromNumber: await callerNumber(input.provider_call_id, input.from_number),
       ...(input.caller_name === undefined ? {} : { callerName: input.caller_name }),
       ...(input.problem_description === undefined ? {} : { problemDescription: input.problem_description }),
       reason: input.reason,
@@ -3984,6 +3997,17 @@ const OWNER_SETUP_STUCK = "We couldn’t finish setting up your line. We’ve be
 
 function toolForPath(pathname: string): VoiceToolName | null {
   return pathname.startsWith("/tools/") ? TOOL_ROUTES[pathname.slice(7)] ?? null : null;
+}
+
+/** The model writes null for a field it has nothing for. That means "not given", so the field is dropped (a required one still fails). */
+function withoutNullFields(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== null));
+}
+
+/** Which fields failed and how (names and types only, never what the caller said), so a rejected tool call can be fixed from the log. */
+function invalidFields(error: z.ZodError): string {
+  return error.issues.slice(0, 8).map((issue) => `${issue.path.join(".") || "(body)"}:${issue.code}`).join(",");
 }
 
 function unwrapToolPayload(value: unknown): unknown {
