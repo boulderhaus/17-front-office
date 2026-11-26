@@ -1,6 +1,7 @@
 import { useRef, type ReactNode } from "react"
 import { Link, useSearchParams } from "react-router-dom"
 import { ChevronLeft, ChevronRight, Settings2, X } from "lucide-react"
+import { Button } from "@/components/ui/button"
 import { CallLink } from "@/components/app/bits"
 import { CallPanel } from "./today"
 import { derive } from "@/lib/derive"
@@ -88,6 +89,13 @@ export function CalendarPage() {
   return (
     <div className={cn("grid grid-cols-1 gap-6", selected && "lg:grid-cols-[minmax(0,1fr)_400px] lg:items-start xl:grid-cols-[minmax(0,1fr)_440px]")}>
       <section className="grid min-w-0 content-start gap-3">
+        {/* Not connected yet: the way to connect sits at the top, where people look first. */}
+        {!member && !preview && !dashboard.googleConnected && dashboard.googleAvailable && (
+          <div className="grid gap-3 rounded-xl border bg-card px-4 py-3 sm:flex sm:items-center sm:justify-between">
+            <span className="grid"><strong className="text-base font-semibold">Put jobs on your Google Calendar</strong><span className="text-sm text-muted-foreground">Otto checks when you’re busy and adds the jobs you confirm.</span></span>
+            <Button size="tap" variant="brand" className="w-full sm:w-auto" asChild><a href="/app/integrations/google/start">Connect Google Calendar</a></Button>
+          </div>
+        )}
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2.5">
           <div className="flex items-center gap-1.5">
             <button type="button" aria-label="Previous" onClick={() => step(-1)} className="grid size-11 shrink-0 place-items-center rounded-lg border bg-card hover:bg-muted"><ChevronLeft className="size-5" /></button>
