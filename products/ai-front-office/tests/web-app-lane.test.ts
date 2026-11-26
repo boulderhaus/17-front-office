@@ -4,7 +4,7 @@ import { smsDraft, smsHref } from "../web/src/lib/sms-draft.js";
 import { installHelp } from "../web/src/lib/install.js";
 import { opensAtTop } from "../web/src/lib/scroll.js";
 import { usageTile } from "../web/src/lib/usage-tile.js";
-import { jobColumns, jobTab } from "../web/src/lib/jobs.js";
+import { agoLabel, BOARD_CAP, cappedCards, jobColumns, jobTab, PHONE_CAP } from "../web/src/lib/jobs.js";
 
 const NOW = Date.parse("2026-11-26T15:00:00.000Z");
 const at = (minutesAgo: number) => new Date(NOW - minutesAgo * 60_000).toISOString();
@@ -117,7 +117,7 @@ describe("the Jobs board (APP-08)", () => {
   it("has four columns in the order a job moves, each card with when and one next step", () => {
     const columns = build([c("a", 1), c("b", 2, at(-60)), c("s", 3), c("k", 4, at(-120), "booked"), c("d", 5)], { actionable: [task("a", "high"), task("b")], snoozed: [task("s")], handled: [task("d")] });
     expect(columns.map((column) => [column.title, column.cards.length])).toEqual([["Needs reply", 2], ["Waiting", 1], ["Booked", 1], ["Done", 1]]);
-    expect(columns[0]!.cards.map((card) => [card.label, card.when, card.action])).toEqual([["Urgent", "Now", "call"], ["Confirm time", "Now", "call"]]);
+    expect(columns[0]!.cards.map((card) => [card.label, card.when, card.action])).toEqual([["Urgent", "1m ago", "call"], ["Confirm time", "2m ago", "call"]]);
     expect(columns[2]!.cards[0]!.action).toBeNull();
   });
   it("puts every job in exactly one column: far-off visits in Booked, past visits in Done, open follow-ups first", () => {
@@ -126,6 +126,34 @@ describe("the Jobs board (APP-08)", () => {
     ], { actionable: [task("both")], handled: [task("old", "normal", 300), task("new", "normal", 1)] });
     const ids = columns.map((column) => column.cards.map((card) => card.call.id));
     expect(ids).toEqual([["both"], [], ["far"], ["new", "old", "past"]]);
+  });
+  it("puts urgent first, then the newest call, so a busy Needs reply column reads top-down", () => {
+    const columns = build([c("old", 300), c("new", 3), c("mid", 40), c("hot", 500)], { actionable: [task("old"), task("hot", "high"), task("mid"), task("new")] });
+    expect(columns[0]!.cards.map((card) => [card.call.id, card.when])).toEqual([["hot", "8h ago"], ["new", "3m ago"], ["mid", "40m ago"], ["old", "5h ago"]]);
+  });
+  it("tells each card apart by how long ago they called, and keeps a later due time when one is set", () => {
+    const columns = jobColumns({ callsById: new Map([["a", c("a", 10)], ["b", c("b", 90)]]), actionable: [task("a"), task("b")], snoozed: [], handled: [], nowMs: NOW,
+      due: (one) => (one.callId === "b" ? "Due today 5:00 PM" : "Due now"), date: () => "Nov 27" });
+    expect(columns[0]!.cards.map((card) => [card.whenLabel, card.when])).toEqual([["Called", "10m ago"], ["Call back", "Today 5:00 PM"]]);
+  });
+  it("orders Waiting by the soonest back", () => {
+    const later = { ...task("late"), dueAt: at(-600) }, sooner = { ...task("soon"), dueAt: at(-60) };
+    const columns = build([c("late", 5), c("soon", 50)], { snoozed: [later, sooner] });
+    expect(columns[1]!.cards.map((card) => card.call.id)).toEqual(["soon", "late"]);
+  });
+  it("counts every card but shows the first few until Show all", () => {
+    const calls = Array.from({ length: 30 }, (_, index) => c(`n${index}`, index + 1));
+    const columns = build(calls, { actionable: calls.map((one) => task(one.id)) });
+    expect(columns[0]!.cards).toHaveLength(30);
+    expect(cappedCards(columns[0]!.cards, PHONE_CAP, false)).toMatchObject({ hidden: 25 });
+    expect(cappedCards(columns[0]!.cards, PHONE_CAP, false).shown.map((card) => card.call.id)).toEqual(["n0", "n1", "n2", "n3", "n4"]);
+    expect(cappedCards(columns[0]!.cards, PHONE_CAP, true)).toMatchObject({ hidden: 0 });
+    expect(cappedCards(columns[0]!.cards, BOARD_CAP, false).hidden).toBe(5);
+    expect(cappedCards(columns[0]!.cards.slice(0, 3), PHONE_CAP, false)).toMatchObject({ hidden: 0 });
+  });
+  it("says how long ago in the fewest words", () => {
+    expect([0, 0.5, 12, 59, 60, 23 * 60, 30 * 60, 72 * 60].map((minutes) => agoLabel(at(minutes), NOW))).toEqual(["Just now", "Just now", "12m ago", "59m ago", "1h ago", "23h ago", "Yesterday", "3d ago"]);
+    expect(agoLabel(at(-5), NOW)).toBe("Just now");
   });
   it("says plainly when a column is empty, and maps old tab links", () => {
     const columns = build([], {});
