@@ -41,6 +41,8 @@ const schema = z.object({
   TELNYX_MESSAGING_PROFILE_ID: z.string().uuid().optional(),
   TELNYX_ASSISTANT_ID: z.string().min(1).optional(),
   TELNYX_TEMPLATE_ASSISTANT_ID: z.string().min(1).optional(),
+  /** The "Call me now" setup helper's assistant, made by scripts/configure-telnyx.ts --apply (optional: else the saved id). */
+  TELNYX_SETUP_ASSISTANT_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).max(200).optional()),
   TELNYX_CAMPAIGN_ID: z.string().min(1).optional(),
   /** Call Control connection used for the owner's one-tap forwarding check call. Without it, owners test by calling themselves. */
   TELNYX_CHECK_CONNECTION_ID: z.string().min(1).optional(),
@@ -142,8 +144,8 @@ const schema = z.object({
   /** Display name on owner emails: "Call Otto <hello@callotto.co>". No angle brackets or quotes, so it cannot break the header. */
   RESEND_FROM_NAME: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(60).regex(/^[^<>"\r\n]+$/, "RESEND_FROM_NAME must be plain text").default("Call Otto")),
   /**
-   * Brock's follow-up when the AI setup helper can't finish: sent as "Brock from Call Otto" from this address
-   * (default brock@ + the domain of RESEND_FROM_EMAIL), replies to FOUNDER_REPLY_TO (default SUPPORT_EMAIL).
+   * Our team's follow-up when the AI setup helper can't finish: sent as "Call Otto team" from this address
+   * (default team@ + the domain of RESEND_FROM_EMAIL), replies to FOUNDER_REPLY_TO (default SUPPORT_EMAIL).
    */
   FOUNDER_FROM_EMAIL: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
   FOUNDER_REPLY_TO: z.preprocess((value) => value === "" ? undefined : value, z.string().email().optional()),
@@ -203,15 +205,15 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
   return parsed;
 }
 
-/** Who Brock's follow-up emails come from and where replies go. Null when email isn't set up. */
+/** Who our team's follow-up emails come from and where replies go. Null when email isn't set up. */
 export function founderEmailSender(env: Environment): { from: string; replyTo: string | null } | null {
   const domain = env.RESEND_FROM_EMAIL?.split("@")[1];
-  const address = env.FOUNDER_FROM_EMAIL ?? (domain ? `brock@${domain}` : null);
+  const address = env.FOUNDER_FROM_EMAIL ?? (domain ? `team@${domain}` : null);
   if (!address) return null;
   return { from: `${FOUNDER_FROM_NAME} <${address}>`, replyTo: env.FOUNDER_REPLY_TO ?? env.SUPPORT_EMAIL ?? null };
 }
 
-export const FOUNDER_FROM_NAME = "Brock from Call Otto";
+export const FOUNDER_FROM_NAME = "Call Otto team";
 
 function hasProviderTestConfiguration(env: Environment): boolean {
   return Boolean(

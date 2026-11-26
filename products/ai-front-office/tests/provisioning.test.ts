@@ -771,11 +771,18 @@ describe("owner one-tap go-live", () => {
       expect((created?.body as { name: string }).name).toBe("Call Otto · Setup helper");
       expect((created?.body as Record<string, unknown>).dynamic_variables_webhook_url).toBeUndefined();
       const start = telnyx.calls.find((call) => call.url.endsWith("/actions/ai_assistant_start"));
-      const startBody = start?.body as { assistant: { id: string; instructions: string }; greeting: string };
+      const startBody = start?.body as { assistant: { id: string; instructions: string; dynamic_variables: Record<string, string>; tools: Array<{ type: string; webhook?: { name: string; url: string } }> }; greeting: string };
       expect(startBody.greeting).toContain("setup helper");
-      expect(startBody.assistant.instructions).toContain("**004*19415550123**10#");
-      expect(startBody.assistant.instructions).toContain("Screen Unknown Callers to Never");
+      // The facts are the call's variables, never guessed: the template only names them.
+      expect(startBody.assistant.instructions).toContain("{{setup_steps}}");
       expect(startBody.assistant.instructions).toContain("Never invent a code");
+      const vars = startBody.assistant.dynamic_variables;
+      expect(vars).toMatchObject({ shop_name: "Gulf Air", picked_mode: "Otto answers every call", device: "an iPhone", carrier_family: "AT&T or T-Mobile family", business_number_last4: "0177", otto_number_digits: "9 4 1 5 5 5 0 1 2 3", last_test: "not_run: No test yet." });
+      expect(vars.setup_steps).toContain("**004*19415550123**10#");
+      expect(vars.setup_steps).toContain("Screen Unknown Callers to Never");
+      expect(vars.setup_steps).toContain("on this iPhone they use the Call Forwarding switch");
+      expect(startBody.assistant.tools.map((tool) => tool.webhook?.name ?? tool.type)).toEqual(["start_forwarding_test", "get_test_result", "email_steps", "get_open_times", "book_time", "hangup"]);
+      expect(startBody.assistant.tools[0]!.webhook!.url).toMatch(/\/setup-help\/tools\/start_forwarding_test$/);
 
       // Missed, it forwards into the shop's own line: Otto ends it at once, and that proves forwarding works.
       const looped = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id: "evt-loop", occurred_at: clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: "+15555550199", call_control_id: "v3:looped", assistant_id: "assistant-1" } } });
@@ -1053,11 +1060,12 @@ describe("owner one-tap go-live", () => {
           return { ...made, arrives, setupCall, hangups, founderEmails };
         }
 
-        it("back from our own number in seconds: still only a missed helper call (a Decline forwards as fast as forward-all). Ended, Brock emails, nothing recorded", async () => {
+        it("back from our own number in seconds: still only a missed helper call (a Decline forwards as fast as forward-all). Ended, our team emails, nothing recorded", async () => {
           const made = await ringing();
           later(made, 3);
           expect(await made.arrives("help-loop", "+15555550199")).toBe("forwarding_check");
-          expect(await made.setupCall()).toMatchObject({ hangupCause: "no_answer" });
+          // Ring first is picked, so it was missed or declined, not "your phone sends every call to Otto".
+          expect(await made.setupCall()).toMatchObject({ hangupCause: "no_answer", outcome: "missed" });
           expect(made.hangups()).toBe(1);
           expect(await made.store.listCalls(made.account.tenantId, 10)).toHaveLength(0);
           expect(made.founderEmails()).toHaveLength(1);
@@ -1075,6 +1083,23 @@ describe("owner one-tap go-live", () => {
           expect(await testedFor(made)).toBeNull();
           expect((await line(made)).business).toMatchObject({ mayForwardAll: false });
           expect(made.founderEmails()).toHaveLength(1);
+        });
+
+        it("every call on and our call comes back to Otto: ended as looped (the screen says their phone sends every call to Otto), no email", async () => {
+          const made = await ringing();
+          // Every call got picked after the call went out: what's on decides what the screen says.
+          await made.store.saveConfig({ ...await made.store.getConfig(made.account.tenantId), operationMode: "always" });
+          later(made, 3);
+          expect(await made.arrives("help-looped", "+15555550199")).toBe("forwarding_check");
+          expect(await made.setupCall()).toMatchObject({ outcome: "looped" });
+          expect(made.hangups()).toBe(1);
+          expect(made.founderEmails()).toHaveLength(0);
+          expect(((await line(made)) as unknown as { helpCall: { outcome: string } }).helpCall.outcome).toBe("looped");
+          // Answered late (the forwarded leg): the helper never starts on Otto's own line.
+          const state = (helpDials(made).at(-1)!.body as { client_state: string }).client_state;
+          const answered = JSON.stringify({ data: { record_type: "event", event_type: "call.answered", id: "evt-looped-answer", occurred_at: made.clock.now().toISOString(), payload: { call_control_id: "v3:check-call", client_state: state } } });
+          await fetch(`${made.baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(answered, made.privateKey, made.clock.now()), body: answered });
+          expect(made.telnyx.calls.some((call) => call.url.endsWith("/actions/ai_assistant_start"))).toBe(false);
         });
 
         it("a test the owner starts while talking to the helper reaches Otto (busy phone): that's the test, the helper stays up", async () => {

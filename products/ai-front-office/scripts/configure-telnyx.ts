@@ -4,6 +4,8 @@ import { withTimeout } from "../src/application/retry.js";
 import { loadEnvironment } from "../src/config/environment.js";
 import type { Store } from "../src/ports.js";
 import { buildTelnyxAssistantUpdate } from "../src/voice/system-prompt.js";
+import { buildSetupAssistant, inheritedModel } from "../src/adapters/telnyx-setup-call.js";
+import { PLATFORM_TENANT_ID } from "../src/ports.js";
 
 export interface AssistantPush {
   tenantId: string;
@@ -56,6 +58,34 @@ export async function syncCallEndCallbacks(input: { pushes: AssistantPush[]; api
   return outcomes;
 }
 
+export interface SetupHelperPlan {
+  /** The existing setup helper to update, or null to create one. */
+  assistantId: string | null;
+  body: Record<string, unknown>;
+}
+
+/**
+ * The "Call me now" setup helper: one assistant for every shop, with Otto's voice, speech settings and model (copied
+ * from Otto's assistant, never named here) and its tools. TELNYX_SETUP_ASSISTANT_ID wins, then the id the app saved.
+ */
+export async function planSetupHelper(input: { store: Store; setupAssistantId?: string | undefined; ottoAssistant: Record<string, unknown>; publicBaseUrl: string; voice?: string | undefined }): Promise<SetupHelperPlan> {
+  const assistantId = input.setupAssistantId ?? await input.store.getIntegrationSecret(PLATFORM_TENANT_ID, "telnyx", "setup_assistant_id");
+  return { assistantId, body: buildSetupAssistant({ publicBaseUrl: input.publicBaseUrl, voice: input.voice, inherited: inheritedModel(input.ottoAssistant) }) };
+}
+
+/** Create or update the setup helper; a new one's id is saved where the app reads it. */
+export async function applySetupHelper(input: { plan: SetupHelperPlan; store: Store; request: <T>(path: string, init?: RequestInit) => Promise<T> }): Promise<{ assistantId: string; action: "updated" | "created" }> {
+  if (input.plan.assistantId) {
+    await input.request(`/ai/assistants/${encodeURIComponent(input.plan.assistantId)}`, { method: "POST", body: JSON.stringify(input.plan.body) });
+    return { assistantId: input.plan.assistantId, action: "updated" };
+  }
+  const created = await input.request<{ data?: { id?: unknown }; id?: unknown }>("/ai/assistants", { method: "POST", headers: { "idempotency-key": "call-otto-setup-helper-v2" }, body: JSON.stringify(input.plan.body) });
+  const id = typeof created.data?.id === "string" ? created.data.id : typeof created.id === "string" ? created.id : null;
+  if (!id) throw new Error("Telnyx did not return a setup assistant id");
+  await input.store.saveIntegrationSecret(PLATFORM_TENANT_ID, "telnyx", "setup_assistant_id", id);
+  return { assistantId: id, action: "created" };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const apply = process.argv.includes("--apply");
   const env = loadEnvironment(process.env);
@@ -71,6 +101,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         demoUpdate: pushes.find((push) => push.assistantId === env.TELNYX_ASSISTANT_ID)?.update ?? null,
         // Read-only: which assistants' TeXML apps still lack the end-of-call callback ("would_set").
         callEndCallbacks: env.TELNYX_API_KEY ? await syncCallEndCallbacks({ pushes, apiKey: env.TELNYX_API_KEY, publicBaseUrl: env.PUBLIC_BASE_URL, apply: false }) : "TELNYX_API_KEY not set",
+        // The "Call me now" setup helper (model copied from Otto's assistant on --apply).
+        setupHelper: await planSetupHelper({ store: runtime.store, setupAssistantId: env.TELNYX_SETUP_ASSISTANT_ID, ottoAssistant: {}, publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE }).then((plan) => ({ action: plan.assistantId ? "would_update" : "would_create", assistantId: plan.assistantId, tools: (plan.body.tools as Array<{ type: string; webhook?: { name: string } }>).map((tool) => tool.webhook?.name ?? tool.type), telephony_settings: plan.body.telephony_settings })),
       }, null, 2));
     } else {
       if (!env.TELNYX_API_KEY || !env.TELNYX_ASSISTANT_ID || !env.TELNYX_MESSAGING_PROFILE_ID) {
@@ -97,6 +129,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       for (const outcome of callEndCallbacks) {
         if (outcome.action === "failed") failed.push({ tenantId: outcome.tenantId, assistantId: outcome.assistantId, error: `call-end callback: ${outcome.error ?? "failed"}` });
       }
+      // The setup helper: same voice, speech settings and model as Otto. A failure is reported, never hides the rest.
+      let setupHelper: { assistantId: string; action: string } | { action: "failed"; error: string };
+      try {
+        const plan = await planSetupHelper({ store: runtime.store, setupAssistantId: env.TELNYX_SETUP_ASSISTANT_ID, ottoAssistant: (current.data && typeof current.data === "object" ? current.data : current) as Record<string, unknown>, publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE });
+        setupHelper = await applySetupHelper({ plan, store: runtime.store, request: (path, init) => telnyxRequest(apiKey, path, init) });
+      } catch (error) {
+        setupHelper = { action: "failed", error: error instanceof Error ? error.message : String(error) };
+        failed.push({ tenantId: PLATFORM_TENANT_ID, assistantId: "setup-helper", error: setupHelper.error });
+      }
       await telnyxRequest(apiKey, `/messaging_profiles/${encodeURIComponent(env.TELNYX_MESSAGING_PROFILE_ID)}`, {
         method: "PATCH",
         body: JSON.stringify({
@@ -111,6 +152,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         failed,
         callEndCallbacks: callEndCallbacks.map(({ tenantId, assistantId, action }) => ({ tenantId, assistantId, action })),
         texmlAppId,
+        setupHelper,
         messagingProfileId: env.TELNYX_MESSAGING_PROFILE_ID,
         webhookUrl: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx`,
       }));

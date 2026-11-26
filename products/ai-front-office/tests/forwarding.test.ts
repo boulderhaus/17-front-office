@@ -244,7 +244,10 @@ describe("the AI setup helper's script", () => {
     expect(text).toContain("Suggest every call unless they want their phone to ring.");
     expect(text).toContain("Picked on their screen now: Otto answers every call.");
     // Both codes, so whichever they pick, the helper can read it.
-    expect(text).toContain("For Otto answers every call, the code is **21*19415550123#");
+    // Every call on an AT&T or T-Mobile iPhone is the Call Forwarding switch (forwardingSteps), code only as fallback.
+    expect(text).toContain("For Otto answers every call, on this iPhone they use the Call Forwarding switch, no code. They can do it while on this call: open Settings, then Apps, then Phone.");
+    expect(text).toContain("Tap Forward To and enter Otto's number, 9 4 1 5 5 5 0 1 2 3.");
+    expect(text).toContain("If they don't see Call Forwarding, the code is **21*19415550123#");
     expect(text).toContain("For Ring my phone first, the code is **004*19415550123**15#");
     // The one iPhone prerequisite for ring first; nothing to change for every call.
     expect(text).toContain("On iPhone they first turn off Live Voicemail in Settings, then Apps, then Phone");
@@ -257,11 +260,13 @@ describe("the AI setup helper's script", () => {
     expect(text).toContain("To turn forwarding off later, they dial ##002#");
     expect(text).toContain("With every call, they do that before they ever pause Call Otto");
     expect(text.match(/##002#/g)).toHaveLength(1);
-    expect(text).toContain("tap Call me now (or Test again)");
+    expect(text).toContain("tap Test it (or Test again)");
+    expect(text).not.toContain("tap Call me now (or");
     expect(text).not.toContain("first ring");
     expect(text).toContain("their phone doesn't ring for those. Calls they make and texts work like before.");
-    // The founder-email promise stays.
-    expect(text).toContain("Brock, our founder, will email them a link to book a 10-minute call");
+    // Not solved: a time with our team, never a person's name.
+    expect(text).toContain("offer a quick 10-minute call with our team (get_open_times, then book_time)");
+    expect(text).not.toMatch(/Brock|founder/);
   });
   it("Android has nothing extra for ring first", () => {
     const text = setupInstructions({ ...base, device: "android" });
@@ -273,7 +278,10 @@ describe("the AI setup helper's script", () => {
     const text = setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device: "iphone", phoneAnswersTest: true });
     expect(text).toContain("Their last test: their phone picked up our test call by itself.");
     expect(text).toContain("Picked on their screen now: Ring my phone first.");
-    expect(text).toContain("switch to Otto answers every call (tap it on the screen, then dial the new code, **21*19415550123#");
+    // On this iPhone every call is the switch, so there's no new code to dial.
+    expect(text).toContain("switch to Otto answers every call (tap it on the screen), or keep ring first");
+    // Android still dials the every-call code.
+    expect(setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device: "android", phoneAnswersTest: true })).toContain("switch to Otto answers every call (tap it on the screen, then dial the new code, **21*19415550123#");
     expect(text).toContain("Screen Unknown Callers set to Never");
     expect(text).toContain("Right now their phone rings first.");
   });

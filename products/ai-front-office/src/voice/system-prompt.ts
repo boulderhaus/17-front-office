@@ -373,6 +373,17 @@ export function buildTelnyxAssistantUpdate(config: BusinessConfig, publicBaseUrl
       noise_suppression: "aicoustics",
       recording_settings: { enabled: audioRecordingEnabled(config), channels: "dual", format: "mp3", stop_on_conversation_end: true },
     },
+    ...ottoSpeechSettings(),
+    promote_to_main: true,
+  };
+}
+
+/**
+ * Otto's speech-to-text and turn-taking, as every Call Otto voice uses them (shop assistants and the setup helper),
+ * so a change here reaches both.
+ */
+export function ottoSpeechSettings(): { transcription: Record<string, unknown>; interruption_settings: Record<string, unknown> } {
+  return {
     transcription: {
       model: "deepgram/flux",
       language: "en",
@@ -394,6 +405,5 @@ export function buildTelnyxAssistantUpdate(config: BusinessConfig, publicBaseUrl
         transcription_endpointing_plan: { on_punctuation_seconds: 0.1, on_no_punctuation_seconds: 0.1, on_number_seconds: 0.1 },
       },
     },
-    promote_to_main: true,
   };
 }

@@ -108,7 +108,9 @@ export interface ApiDashboard {
     /** Where to write when "Set it up with me" reached no one (the company email). */
     helpEmail?: string
     /** The AI setup helper's last call: endedAt is null while it's still up. */
-    helpCall: { to: string; startedAt: string; endedAt: string | null } | null
+    helpCall: { to: string; startedAt: string; answeredAt?: string | null; endedAt: string | null; outcome?: "done" | "missed" | "voicemail" | "looped" | "failed" | null; booked?: boolean } | null
+    /** "Didn't ring? Book a time": the signed booking page, when booking is set up. */
+    helpBookUrl?: string | null
     /** Brock's follow-up email in the last 24 hours, and whether it has a booking link. */
     founderEmail?: { sentAt: string; link: boolean } | null
   }

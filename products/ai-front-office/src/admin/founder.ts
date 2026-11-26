@@ -24,23 +24,22 @@ export type FounderBookingView =
   | { state: "expired" }
   | { state: "reply"; reason: "no_calendar" | "unavailable" | "nothing_open" };
 
-/** /book-setup: pick a 10-minute call with Brock, shown in the owner's own time zone. */
+/** /book-setup: pick a 10-minute call with our team, shown in the owner's own time zone. */
 export function renderFounderBooking(view: FounderBookingView): string {
   if (view.state === "expired") {
-    return page("Link expired", "Setup call", "This link has expired.", `<p class="authnote">Reply to Brock’s email and he’ll find a time with you.</p>`, `<p>Booking links work for 7 days.</p>`);
+    return page("Link expired", "Setup call", "This link has expired.", `<p class="authnote">Reply to our team’s email and we’ll find a time with you.</p>`, `<p>Booking links work for 7 days.</p>`);
   }
   if (view.state === "reply") {
-    // Brock is named once: "his email" after a line that already says whose open times.
     const why = view.reason === "nothing_open"
-      ? "Brock’s open times are full this week. Reply to his email"
-      : view.reason === "unavailable" ? "We couldn’t load Brock’s open times just now. Reply to his email" : "Online booking isn’t open yet. Reply to Brock’s email";
-    return page("Book a setup call", "Setup call", "Reply with a good time.", "", `<p>${why} with a good time and he’ll call you.</p>`);
+      ? "Our team’s open times are full this week. Reply to our email"
+      : view.reason === "unavailable" ? "We couldn’t load our team’s open times just now. Reply to our email" : "Online booking isn’t open yet. Reply to our team’s email";
+    return page("Book a setup call", "Setup call", "Reply with a good time.", "", `<p>${why} with a good time and we’ll call you.</p>`);
   }
   if (view.state === "booked") {
     const when = slotFullLabel(view.slot.start, view.timeZone);
-    const call = view.callNumber ? `Brock will call you at <span class="nowrap">${escapeHtml(view.callNumber)}</span>.` : "Brock will call you.";
+    const call = view.callNumber ? `Our team will call you at <span class="nowrap">${escapeHtml(view.callNumber)}</span>.` : "Our team will call you.";
     const sent = view.justBooked ? `<p>We emailed you a calendar invite.</p>` : "";
-    return page("You’re set", "Setup call", "You’re set.", `<div class="publicform"><p class="done">${escapeHtml(when)}</p><p>${call} It takes about 10 minutes.</p>${sent}</div><p class="authnote">Need a different time? Reply to Brock’s email.</p>`);
+    return page("You’re set", "Setup call", "You’re set.", `<div class="publicform"><p class="done">${escapeHtml(when)}</p><p>${call} It takes about 10 minutes.</p>${sent}</div><p class="authnote">Need a different time? Reply to our email.</p>`);
   }
   const days = new Map<string, FounderSlot[]>();
   for (const slot of view.slots) {
@@ -53,9 +52,9 @@ export function renderFounderBooking(view: FounderBookingView): string {
   return page(
     "Book a setup call",
     "Setup call",
-    "Book a 10-minute call with Brock.",
+    "Book a 10-minute call with our team.",
     `${view.taken ? `<div class="formerror" role="alert" tabindex="-1" autofocus><p>That time just got taken. Pick another.</p></div>` : ""}${zone ? `<p class="zone">Times are in your time zone (${escapeHtml(zone)}).</p>` : ""}<form class="publicform" method="post" action="/book-setup"><input type="hidden" name="t" value="${escapeHtml(view.token)}">${groups}</form>`,
-    `<p>Brock, our founder, will call and turn on call forwarding for ${escapeHtml(view.businessName)}.</p>`,
+    `<p>Our team will call and turn on call forwarding for ${escapeHtml(view.businessName)}.</p>`,
   );
 }
 

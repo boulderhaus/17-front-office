@@ -215,7 +215,7 @@ export function slotFullLabel(iso: string, timeZone: string): string {
 
 // ---- Words ----
 
-export type FounderFollowupReason = "call_unavailable" | "helper_failed" | "no_answer" | "not_confirmed" | "limit";
+export type FounderFollowupReason = "call_unavailable" | "helper_failed" | "no_answer" | "not_confirmed" | "limit" | "asked_for_team";
 
 /** "Mike" from "Mike Rivera"; nothing for the signup placeholder or a blank name. */
 export function ownerFirstName(displayName: string | null | undefined): string | null {
@@ -229,23 +229,24 @@ function greeting(firstName: string | null): string {
   return firstName ? `Hi ${firstName},` : "Hi there,";
 }
 
-const SIGNATURE = "Brock\nFounder, Call Otto";
+const SIGNATURE = "The Call Otto team";
 
 function whatHappened(reason: FounderFollowupReason, businessName: string): string {
   switch (reason) {
     case "call_unavailable": return `You asked for help turning on call forwarding for ${businessName}, and our setup helper couldn't call you.`;
     case "helper_failed": return "Our setup helper couldn't start on your call just now.";
     case "no_answer": return `Our setup helper called you about call forwarding for ${businessName} and didn't reach you.`;
-    case "not_confirmed": return `I don't see call forwarding working for ${businessName} yet.`;
+    case "not_confirmed": return `We don't see call forwarding working for ${businessName} yet.`;
     case "limit": return `Otto has called you a few times today about call forwarding for ${businessName}.`;
+    case "asked_for_team": return `On your call with our setup helper, you asked for a time with our team about call forwarding for ${businessName}.`;
   }
 }
 
-/** Brock's note to the owner. With no founder calendar connected, it asks for a reply instead of sending a link. */
+/** Our team's note to the owner. With no founder calendar connected, it asks for a reply instead of sending a link. */
 export function founderFollowupEmail(input: { firstName: string | null; businessName: string; reason: FounderFollowupReason; link: string | null }): { subject: string; text: string } {
   const ask = input.link
-    ? `I'll walk you through it myself. Pick a time for a quick 10-minute call:\n\n${input.link}`
-    : "I'll walk you through it myself. Just reply with a good time for a quick 10-minute call.";
+    ? `We'll walk you through it. Pick a time for a quick 10-minute call:\n\n${input.link}`
+    : "We'll walk you through it. Just reply with a good time for a quick 10-minute call.";
   return {
     subject: "Quick call to finish your Call Otto setup",
     text: `${greeting(input.firstName)}\n\n${whatHappened(input.reason, input.businessName)}\n\n${ask}\n\n${SIGNATURE}`,
@@ -253,7 +254,7 @@ export function founderFollowupEmail(input: { firstName: string | null; business
 }
 
 export function founderConfirmationEmail(input: { firstName: string | null; businessName: string; when: string; callNumber: string | null }): { subject: string; text: string } {
-  const call = input.callNumber ? `I'll call you at ${input.callNumber}` : "Reply with the best number to reach you and I'll call you";
+  const call = input.callNumber ? `We'll call you at ${input.callNumber}` : "Reply with the best number to reach you and we'll call you";
   return {
     subject: `You're set: ${input.when}`,
     text: `${greeting(input.firstName)}\n\nYou're set for ${input.when}. ${call}, and we'll get call forwarding on for ${input.businessName}. It takes about 10 minutes.\n\nNeed a different time? Just reply.\n\n${SIGNATURE}`,

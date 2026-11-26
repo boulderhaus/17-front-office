@@ -96,8 +96,10 @@ export interface ApiDashboard {
     helpTeam: boolean;
     /** Where an owner writes when "Set it up with me" reached no one: the company email published in the footer. */
     helpEmail: string;
-    /** Otto's AI setup helper's last call to the owner: where, when, and when it ended (null while it's still up). */
-    helpCall: { to: string; startedAt: string; endedAt: string | null } | null;
+    /** Otto's AI setup helper's last call to the owner: where, when, picked up, ended (null while it's still up), how. */
+    helpCall: { to: string; startedAt: string; answeredAt: string | null; endedAt: string | null; outcome: "done" | "missed" | "voicemail" | "looped" | "failed" | null; booked: boolean } | null;
+    /** "Book a time": the signed /book-setup link for this shop, when booking is set up. */
+    helpBookUrl: string | null;
     /** Brock's follow-up email in the last 24 hours, and whether it has a booking link (no calendar connected: it asks for a reply). */
     founderEmail: { sentAt: string; link: boolean } | null;
   };
@@ -226,11 +228,12 @@ export function apiDashboard(input: {
   smsConsent?: boolean | undefined;
   textsLive?: boolean | undefined;
   helpTeam?: boolean | undefined;
+  helpBookUrl?: string | null | undefined;
 }): ApiDashboard {
   const c = input.config;
   const lineNumber = input.lineNumber ?? null;
   return {
-    line: { ...lineModel(lineNumber, c, input.forwarding, input.now, input.account.role === "member" ? null : input.ownerMobile ?? null, input.checkCallerId ?? null), helpTeam: input.helpTeam === true, helpEmail: COMPANY.email },
+    line: { ...lineModel(lineNumber, c, input.forwarding, input.now, input.account.role === "member" ? null : input.ownerMobile ?? null, input.checkCallerId ?? null), helpTeam: input.helpTeam === true, helpEmail: COMPANY.email, helpBookUrl: input.account.role === "member" ? null : input.helpBookUrl ?? null },
     csrf: input.csrf,
     now: input.now,
     preview: input.preview,
@@ -325,7 +328,7 @@ export interface ForwardingState {
   confirmedAt: string | null;
   check: { startedAt: string; method: "auto" | "manual"; answeredAt?: string | null; endedAt?: string | null; hangupCause?: string | null; screenedAt?: string | null; amdResult?: string | null; code?: string | null; choice?: ForwardingChoice | null; autoFailed?: boolean | null; forwardedAfterMs?: number | null; atOnce?: boolean | null; rangFirst?: boolean | null } | null;
   helpRequestedAt: string | null;
-  helpCall?: { to: string; startedAt: string; endedAt: string | null } | null;
+  helpCall?: { to: string; startedAt: string; answeredAt: string | null; endedAt: string | null; outcome: "done" | "missed" | "voicemail" | "looped" | "failed" | null; booked: boolean } | null;
   /** What the owner was set up for when a test last passed (see TestedFor). */
   testedFor?: TestedFor | null;
   founderEmail?: { sentAt: string; link: boolean } | null;
@@ -378,7 +381,7 @@ export function forwardingCheckStatus(check: ForwardingState["check"], confirmed
   return "not_reached";
 }
 
-function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "operationMode" | "answerAfterRings">, state: ForwardingState | undefined, now: string, ownerMobile: string | null, checkCallerId: string | null): Omit<ApiDashboard["line"], "helpTeam" | "helpEmail"> {
+function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "operationMode" | "answerAfterRings">, state: ForwardingState | undefined, now: string, ownerMobile: string | null, checkCallerId: string | null): Omit<ApiDashboard["line"], "helpTeam" | "helpEmail" | "helpBookUrl"> {
   const mode = config.operationMode;
   const check = state?.check ?? null;
   const confirmedAt = state?.confirmedAt ?? null;
