@@ -54,8 +54,8 @@ describe("call-minute guards in the assistant", () => {
     expect(update.dynamic_variables.caller_reputation).toBe("unknown");
   });
 
-  it("checks in once on silence, then says goodbye and hangs up", () => {
-    expect(prompt).toContain('If the caller goes silent, ask once, "Are you still there?"');
+  it("re-asks once on silence, checks in once, then says goodbye and hangs up", () => {
+    expect(prompt).toContain('If the caller goes silent after your question, repeat it once in a few words. If still silent, ask once, "Are you still there?"');
     expect(prompt).toContain('say "I\'ll let you go. Goodbye.", and invoke the built-in hangup tool in the same turn');
   });
 
@@ -63,14 +63,14 @@ describe("call-minute guards in the assistant", () => {
     expect(prompt).toContain("Any tool may return wrap_up=true once the call has run about five minutes");
     expect(prompt).toContain('say exactly "I\'ve got everything I need; the owner will call you back."');
     expect(prompt).toContain("Finish intake in about two minutes. No small talk. Ask exactly one question at a time");
-    expect(prompt).toContain("the problem, the caller's name, the callback number, the service address, and how urgent it is");
+    expect(prompt).toContain("the problem, the caller's name, the callback number, and the service address.");
     expect(prompt).toContain("Confirm the details once, in the final recap.");
     expect(prompt).not.toContain("small, natural groups");
   });
 
   it("sets Telnyx's six-minute cap and silence timers and exposes the spam tool", () => {
     const update = buildTelnyxAssistantUpdate(config, "https://front-office.example") as { telephony_settings: Record<string, unknown> };
-    expect(update.telephony_settings).toMatchObject({ time_limit_secs: 420, user_idle_reply_secs: 4, user_idle_timeout_secs: 10 });
+    expect(update.telephony_settings).toMatchObject({ time_limit_secs: 420, user_idle_reply_secs: 3, user_idle_timeout_secs: 10 });
     const tool = buildTelnyxTools(config, "https://front-office.example")
       .find((entry) => (entry.webhook as { name?: string } | undefined)?.name === "mark_spam_call") as {
         webhook: { url: string; body_parameters: { required: string[]; properties: { category: { enum: string[] } } }; preset_body_fields: Record<string, unknown> };

@@ -132,8 +132,8 @@ describe("system prompt budget", () => {
       "Never invent times: only offer times a tool returned.",
       "If a tool result has ok=false, say its say line once, follow its instruction, and do not call that tool again.",
       // Booking and price refusal
-      "The booking mode is confirm",
-      "never claim it is booked",
+      "The booking mode is direct",
+      "Don't promise a callback while you can book.",
       "Call book_slot only after the caller explicitly confirms one offered slot.",
       'Say "confirmed" only when book_slot returns status=confirmed',
       "Never pretend a booking succeeded.",
@@ -147,7 +147,10 @@ describe("system prompt budget", () => {
       "Never dial a number the caller gives you",
       // Ending
       'Never say "goodbye" without immediately invoking',
-      'If the caller goes silent, ask once, "Are you still there?"',
+      'If the caller goes silent after your question, repeat it once in a few words. If still silent, ask once, "Are you still there?"',
+      // Hearing and urgency (walk 3)
+      "Missed or half heard an answer? Say so and ask that one thing again, once. Never guess.",
+      "Never ask how urgent or serious it is; judge it yourself.",
       "Any tool may return wrap_up=true once the call has run about five minutes",
       'say exactly "I\'ve got everything I need; the owner will call you back."',
     ];
