@@ -61,6 +61,9 @@ export function CalendarPage() {
   // The demo opens on the week, so its visits show on a phone too (its day can be empty).
   const view: View = (["day", "week", "month"] as View[]).find((item) => item === params.get("view")) ?? (phone && !preview ? "day" : "week")
   const anchor = /^\d{4}-\d{2}-\d{2}$/.test(params.get("date") ?? "") ? params.get("date")! : today
+  // Days off (Settings › Hours and calendar): shaded quietly; Otto books nothing on them.
+  const daysOff = dashboard.shop.daysOff ?? []
+  const isOff = (day: string) => daysOff.some((entry) => entry.start <= day && day <= entry.end)
   const selected = params.get("call") ? d.callsById.get(params.get("call")!) ?? null : null
   const visits: Visit[] = dashboard.calls
     .filter((call) => call.fields.requestedStart && call.outcome !== "ignored_spam")
@@ -125,9 +128,9 @@ export function CalendarPage() {
           }}
         >
           {view === "month"
-            ? <MonthGrid anchor={anchor} today={today} visits={visits} wide={wide} onDay={(day) => go({ view: "day", date: day })} selectedId={selected?.id ?? null} />
-            : view === "week" && phone ? <WeekList days={Array.from({ length: 7 }, (_, index) => addDays(weekStart, index))} today={today} visits={visits} tz={d.tz} onDay={(day) => go({ view: "day", date: day })} />
-            : <TimeGrid days={view === "day" ? [anchor] : Array.from({ length: 7 }, (_, index) => addDays(weekStart, index))} today={today} visits={visits} tz={d.tz} nowMs={d.nowMs} detailed={view === "day" || wide} selectedId={selected?.id ?? null} onDay={(day) => go({ view: "day", date: day })} />}
+            ? <MonthGrid anchor={anchor} today={today} visits={visits} isOff={isOff} wide={wide} onDay={(day) => go({ view: "day", date: day })} selectedId={selected?.id ?? null} />
+            : view === "week" && phone ? <WeekList days={Array.from({ length: 7 }, (_, index) => addDays(weekStart, index))} today={today} visits={visits} isOff={isOff} tz={d.tz} onDay={(day) => go({ view: "day", date: day })} />
+            : <TimeGrid days={view === "day" ? [anchor] : Array.from({ length: 7 }, (_, index) => addDays(weekStart, index))} today={today} visits={visits} isOff={isOff} tz={d.tz} nowMs={d.nowMs} detailed={view === "day" || wide} selectedId={selected?.id ?? null} onDay={(day) => go({ view: "day", date: day })} />}
         </div>
 
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-muted-foreground">
@@ -160,7 +163,7 @@ const HOUR = 52
 const THREE_LINES = 68
 
 /** Day and Week: a time grid like Google Calendar, today's column tinted, a line at the current time. */
-function TimeGrid({ days, today, visits, tz, nowMs, detailed, selectedId, onDay }: { days: string[]; today: string; visits: Visit[]; tz: string; nowMs: number; detailed: boolean; selectedId: string | null; onDay: (day: string) => void }) {
+function TimeGrid({ days, today, visits, isOff, tz, nowMs, detailed, selectedId, onDay }: { days: string[]; today: string; visits: Visit[]; isOff: (day: string) => boolean; tz: string; nowMs: number; detailed: boolean; selectedId: string | null; onDay: (day: string) => void }) {
   const shown = visits.filter((visit) => days.includes(visit.day))
   const first = Math.min(7, ...shown.map((visit) => Math.floor(visit.minutes / 60)))
   const last = Math.max(19, ...shown.map((visit) => Math.ceil(visit.minutes / 60) + 1))
@@ -189,15 +192,17 @@ function TimeGrid({ days, today, visits, tz, nowMs, detailed, selectedId, onDay 
           <button key={day} type="button" onClick={() => onDay(day)} disabled={single} className={cn("grid justify-items-center gap-0.5 border-l py-2 disabled:cursor-default", day === today && "bg-brand-yellow/15")}>
             <span className={cn("text-[12px] font-semibold uppercase", day === today ? "text-brand-ink" : "text-muted-foreground")}>{fmt(day, { weekday: single ? "long" : "short" })}</span>
             <DayNumber day={day} today={day === today} />
+            {isOff(day) && <span className="text-[11px] font-semibold text-muted-foreground uppercase">Off</span>}
           </button>
         ))}
       </div>
-      {single && !shown.length && <p className="border-b px-4 py-3 text-[15px] text-muted-foreground">Nothing booked or requested {days[0] === today ? "today" : "this day"}.</p>}
+      {single && isOff(days[0]!) && <p className="border-b bg-muted/60 px-4 py-3 text-[15px] text-muted-foreground"><strong className="font-semibold text-foreground">Day off.</strong> Otto books nothing {days[0] === today ? "today" : "this day"}.</p>}
+      {single && !isOff(days[0]!) && !shown.length && <p className="border-b px-4 py-3 text-[15px] text-muted-foreground">Nothing booked or requested {days[0] === today ? "today" : "this day"}.</p>}
       {/* pt-3: room for the first hour's label above its line. */}
       <div className="relative grid pt-3" style={cols}>
         <div>{hours.map((hour) => <div key={hour} style={{ height: HOUR }} className="relative"><span className="tabular absolute -top-2.5 right-2 text-[12px] font-medium text-muted-foreground">{`${hour % 12 || 12}${hour < 12 ? "a" : "p"}`}</span></div>)}</div>
         {days.map((day) => (
-          <div key={day} className={cn("relative border-l", day === today && "bg-brand-yellow/10")}>
+          <div key={day} className={cn("relative border-l", day === today && "bg-brand-yellow/10", isOff(day) && "bg-muted/60")}>
             {hours.map((hour) => <div key={hour} style={{ height: HOUR }} className="border-t border-border/70" />)}
             {day === today && nowMinutes >= first * 60 && nowMinutes <= last * 60 && (
               <span aria-hidden className="absolute inset-x-0 z-10 h-0.5 bg-red-600" style={{ top: ((nowMinutes - first * 60) / 60) * HOUR }}><i className="absolute -top-1 -left-1 size-2.5 rounded-full bg-red-600" /></span>
@@ -239,7 +244,7 @@ function TimeGrid({ days, today, visits, tz, nowMs, detailed, selectedId, onDay 
 }
 
 /** Month: every day of the month, today circled; tap a day to open it. */
-function MonthGrid({ anchor, today, visits, wide, onDay, selectedId }: { anchor: string; today: string; visits: Visit[]; wide: boolean; onDay: (day: string) => void; selectedId: string | null }) {
+function MonthGrid({ anchor, today, visits, isOff, wide, onDay, selectedId }: { anchor: string; today: string; visits: Visit[]; isOff: (day: string) => boolean; wide: boolean; onDay: (day: string) => void; selectedId: string | null }) {
   const monthStart = `${anchor.slice(0, 7)}-01`
   const gridStart = startOfWeek(monthStart)
   const month = anchor.slice(0, 7)
@@ -249,12 +254,14 @@ function MonthGrid({ anchor, today, visits, wide, onDay, selectedId }: { anchor:
   const cell = (day: string): ReactNode => {
     const items = visits.filter((visit) => visit.day === day)
     const outside = day.slice(0, 7) !== month
+    const off = isOff(day)
     return (
-      <div key={day} className={cn("relative grid min-h-20 content-start gap-1 border-t border-l p-1 first:border-l-0 lg:min-h-28 lg:p-1.5 [&:nth-child(7n+1)]:border-l-0", outside && "bg-muted/40", day === today && "bg-brand-yellow/10")}>
+      <div key={day} className={cn("relative grid min-h-20 content-start gap-1 border-t border-l p-1 first:border-l-0 lg:min-h-28 lg:p-1.5 [&:nth-child(7n+1)]:border-l-0", outside && "bg-muted/40", day === today && "bg-brand-yellow/10", off && "bg-muted/60")}>
         {/* Phone and tablet: the whole day is the tap target, not just its 28px number. */}
-        <button type="button" onClick={() => onDay(day)} className={cn("justify-self-center lg:justify-self-start", !wide && "after:absolute after:inset-0")} aria-label={fmt(day, { weekday: "long", month: "long", day: "numeric" })}>
+        <button type="button" onClick={() => onDay(day)} className={cn("justify-self-center lg:justify-self-start", !wide && "after:absolute after:inset-0")} aria-label={`${fmt(day, { weekday: "long", month: "long", day: "numeric" })}${off ? ", day off" : ""}`}>
           <DayNumber day={day} today={day === today} className={cn(outside && "text-muted-foreground", "size-7 text-sm")} />
         </button>
+        {off && <span aria-hidden className="text-center text-[11px] font-semibold text-muted-foreground uppercase lg:w-7">Off</span>}
         {wide ? items.slice(0, 3).map((visit) => (
           <CallLink key={visit.call.id} callId={visit.call.id} aria-current={selectedId === visit.call.id}
             aria-label={`${visit.call.fields.callerName ?? "Caller"}, ${STATE_WORD[visit.state]}`}
@@ -285,14 +292,14 @@ function MonthGrid({ anchor, today, visits, wide, onDay, selectedId }: { anchor:
  * A phone's week: seven columns of 40px cut every name to "Mo…", so it is a list instead. One row per day, today
  * marked, each visit its time, name and state; a day with nothing says so. Tap a day to open it.
  */
-function WeekList({ days, today, visits, tz, onDay }: { days: string[]; today: string; visits: Visit[]; tz: string; onDay: (day: string) => void }) {
+function WeekList({ days, today, visits, isOff, tz, onDay }: { days: string[]; today: string; visits: Visit[]; isOff: (day: string) => boolean; tz: string; onDay: (day: string) => void }) {
   return (
     <ol className="divide-y overflow-hidden rounded-xl border bg-card">
       {days.map((day) => {
         const items = visits.filter((visit) => visit.day === day)
         const now = day === today
         return (
-          <li key={day} className={cn(now && "bg-brand-yellow/10")}>
+          <li key={day} className={cn(now && "bg-brand-yellow/10", isOff(day) && "bg-muted/60")}>
             <button type="button" onClick={() => onDay(day)} aria-label={`Open ${fmt(day, { weekday: "long", month: "long", day: "numeric" })}`}
               className="flex min-h-14 w-full items-start gap-3 px-3 py-2.5 text-left hover:bg-muted/50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand-ink">
               <span className="grid w-11 shrink-0 justify-items-center pt-0.5">
@@ -300,7 +307,7 @@ function WeekList({ days, today, visits, tz, onDay }: { days: string[]; today: s
                 <DayNumber day={day} today={now} />
               </span>
               <span className="grid min-w-0 flex-1 content-center gap-1.5 self-center">
-                {items.length === 0 ? <span className="text-[15px] text-muted-foreground">Nothing booked</span> : items.map((visit) => (
+                {items.length === 0 ? <span className="text-[15px] text-muted-foreground">{isOff(day) ? "Day off" : "Nothing booked"}</span> : items.map((visit) => (
                   <span key={visit.call.id} className={cn("ph-no-capture flex min-w-0 items-center gap-2 rounded-md border-l-[3px] px-2 py-1.5 text-[15px]", BLOCK[visit.state])}>
                     <span aria-hidden className="text-[13px] font-bold">{MARK[visit.state]}</span>
                     <span className="tabular shrink-0 font-semibold">{timeOnly(visit.call.fields.requestedStart!, tz)}</span>

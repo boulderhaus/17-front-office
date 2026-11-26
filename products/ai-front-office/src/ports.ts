@@ -167,6 +167,8 @@ export interface CalendarPort {
     bookableHours: BusinessConfig["bookableHours"];
     minimumLeadTimeMinutes: number;
     now: string;
+    /** The shop's days off: no slot may touch one (whole days in `timezone`). */
+    daysOff?: BusinessConfig["daysOff"];
   }, options?: CallOptions): Promise<AvailabilitySlot[]>;
   isFree(input: { tenantId: string; slot: AvailabilitySlot }, options?: CallOptions): Promise<boolean>;
   /** Inserts with an id derived only from attempt.idempotencyKey; a repeat of the same key never makes a second event. */

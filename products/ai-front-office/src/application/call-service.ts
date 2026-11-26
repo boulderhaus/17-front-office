@@ -11,6 +11,7 @@ import type {
   OutboxNotification,
 } from "../domain/models.js";
 import { evaluateServiceArea, isInServiceArea, slotWithinBookableHours } from "../domain/config.js";
+import { slotTouchesDayOff } from "../domain/days-off.js";
 import { triageEmergency } from "../domain/triage.js";
 import { audioRecordingEnabled, WRAP_UP_AFTER_SECONDS } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
@@ -328,7 +329,8 @@ export class CallService {
           bookableHours: config.bookableHours,
           minimumLeadTimeMinutes: config.minimumLeadTimeMinutes,
           now: this.clock.now().toISOString(),
-        }, { signal }),
+          daysOff: config.daysOff,
+        }, { signal }).then((found) => found.filter((slot) => !slotTouchesDayOff(new Date(slot.start), new Date(slot.end), config.timezone, config.daysOff))),
         // Both tries plus the backoff (2 x 1.7 s + 0.1 s) end before the 4 s tool deadline, so a slow calendar
         // still gets the take-a-message answer below instead of the deadline's wrap-up result.
         { attempts: 2, baseDelayMs: 50, maxDelayMs: 100, timeoutMs: AVAILABILITY_TRY_TIMEOUT_MS, shouldRetry: () => !signal?.aborted },
@@ -477,7 +479,9 @@ export class CallService {
     const noticeFloor = this.clock.now().getTime() + (config.minimumLeadTimeMinutes - OFFER_GRACE_MINUTES) * 60_000;
     // Team shops offer each teammate's own hours, so any enabled teammate's hours count.
     const hoursToCheck = [config.bookableHours, ...(config.schedulingCalendars ?? []).filter((member) => member.enabled).map((member) => member.hours)];
-    if (!hoursToCheck.some((hours) => slotWithinBookableHours(new Date(slotStart), slotEnd, config.timezone, hours)) || slotStart < noticeFloor) {
+    // A day off is closed for everyone, like a time outside the hours.
+    if (!hoursToCheck.some((hours) => slotWithinBookableHours(new Date(slotStart), slotEnd, config.timezone, hours)) || slotStart < noticeFloor
+      || slotTouchesDayOff(new Date(slotStart), slotEnd, config.timezone, config.daysOff)) {
       return { status: "pending", message: "That time is outside the shop's hours or notice. Do not promise it; offer a returned slot or take a message." };
     }
     const availabilityEvents = (await this.store.listToolEvents(call.id))
@@ -753,11 +757,16 @@ export class CallService {
     const latestOffered = call.fields.requestedStart
       ? await this.wasLatestOffered(call.id, call.fields.requestedStart)
       : false;
+    const requestedMs = Date.parse(call.fields.requestedStart ?? "");
+    const onDayOff = Number.isFinite(requestedMs)
+      && slotTouchesDayOff(new Date(requestedMs), new Date(requestedMs + config.defaultServiceDurationMinutes * 60_000), config.timezone, config.daysOff);
     const canAttemptDirectBooking = config.bookingMode === "direct"
       && !emergency.emergency
       && !call.fields.humanRequested
       && Boolean(call.fields.requestedStart)
       && Date.parse(call.fields.requestedStart ?? "") >= this.clock.now().getTime()
+      // Set as a day off after the offer (mid-call): the owner confirms instead.
+      && !onDayOff
       && latestOffered
       && call.fields.explicitSlotConfirmation
       && (!config.requireDiagnosticFeeAcceptance || (config.priceSnippets.length > 0 && call.fields.diagnosticFeeAccepted))
@@ -784,6 +793,7 @@ export class CallService {
         config.bookingMode === "confirm" ? "Owner confirmation mode is active"
           // A repair never writes to the calendar: the owner confirms the time the caller asked for.
           : repair && canAttemptDirectBooking ? "Recovered after the call; confirm the time with the caller"
+            : onDayOff ? "That day is set as a day off; confirm a time with the caller"
             : "Booking requirements were incomplete");
     }
 

@@ -128,6 +128,8 @@ export interface ApiDashboard {
     rulesSaved: boolean
     greeting: string
     hours: string
+    /** Upcoming days off, "YYYY-MM-DD" in the shop's time zone, both ends included. Older servers leave it out. */
+    daysOff?: Array<{ start: string; end: string }>
     flatMonthlyPriceCents: number
     includedCalls: number
     overageCentsPerCall: number

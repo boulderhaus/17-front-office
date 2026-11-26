@@ -188,6 +188,8 @@ export interface BusinessConfig {
     /** Saturday closes earlier than weekdays (e.g. "12:00" for Saturday mornings). */
     saturdayEnd?: string | undefined;
   };
+  /** Whole days (in `timezone`) when Otto offers and books no visits: holidays, a trade show, a week away. */
+  daysOff?: Array<{ start: string; end: string }>;
   minimumLeadTimeMinutes: number;
   priceSnippets: Array<{ label: string; text: string }>;
   approvedKnowledge: Array<{ topic: string; text: string }>;

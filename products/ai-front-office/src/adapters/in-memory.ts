@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { slotTouchesDayOff } from "../domain/days-off.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { CalendarPort, CallOptions, CreateEventOptions, NotificationPort, Store, ToolClaim } from "../ports.js";
 import type {
@@ -571,6 +572,7 @@ export class InMemoryCalendar implements CalendarPort {
     bookableHours: BusinessConfig["bookableHours"];
     minimumLeadTimeMinutes: number;
     now: string;
+    daysOff?: BusinessConfig["daysOff"];
   }, options?: CallOptions): Promise<AvailabilitySlot[]> {
     options?.signal?.throwIfAborted();
     if (this.failAvailability) throw new Error("Calendar unavailable");
@@ -580,6 +582,7 @@ export class InMemoryCalendar implements CalendarPort {
     if (end.toISOString() > input.windowEnd) return [];
     const slot = { start: start.toISOString(), end: end.toISOString() };
     const available = isWithinBookableHours(slot.start, input.timezone, input.bookableHours)
+      && !slotTouchesDayOff(start, end, input.timezone, input.daysOff)
       && await this.isFree({ tenantId: "demo", slot });
     return available ? [slot] : [];
   }
