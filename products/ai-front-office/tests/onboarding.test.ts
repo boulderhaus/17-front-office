@@ -146,10 +146,10 @@ describe("three taps to a live line", () => {
     expect(checkout.get("cancel_url")).toBe("https://front-office.example/app/start?checkout=cancelled");
     expect(checkout.get("custom_text[submit][message]")).toBe("Today: $24.99 (limited-time half off). Then $49.99/month. Cancel anytime.");
 
-    // Defaults come from the mobile number: Florida, Eastern time, the automatic greeting, owner confirms jobs.
+    // Defaults come from the mobile number: the 941 area (Sarasota and its neighbors), Eastern time, the automatic greeting, owner confirms jobs.
     const account = (await store.getOwnerAccountByEmail("owner@example.test"))!;
     const config = await store.getConfig(account.tenantId);
-    expect(config).toMatchObject({ serviceAreaTerms: ["FL"], timezone: "America/New_York", greeting: "Thanks for calling Gulf Air. How can I help?", bookingMode: "direct", paused: true });
+    expect(config).toMatchObject({ serviceAreaTerms: ["Sarasota FL", "Bradenton FL", "Venice FL", "North Port FL"], timezone: "America/New_York", greeting: "Thanks for calling Gulf Air. How can I help?", bookingMode: "direct", paused: true });
     // No consent box checked: no text notifications, but the number is still saved for setup.
     expect(config.ownerNotificationRefs).toEqual([]);
     expect(await store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary")).toBe("+19415550199");

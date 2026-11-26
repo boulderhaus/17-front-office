@@ -456,16 +456,15 @@ export function apiSettings(config: BusinessConfig): Record<string, string | boo
     usageAlertPercent: String(config.usageAlertPercent),
     emergencyKeywords: config.emergencyKeywords.join(", "),
     emergencyThreshold: String(config.emergencyThreshold),
-    maxCallsPerCallerPerDay: String(config.maxCallsPerCallerPerDay),
     pronunciations: config.pronunciations.map((item) => `${item.term}: ${item.spokenAs}`).join("\n"),
-    dataRetentionDays: String(config.dataRetentionDays),
     supportEmail: config.supportEmail ?? "",
     flatMonthlyPrice: String(Math.round(config.flatMonthlyPriceCents / 100)),
   };
 }
 
+// Not here on purpose: repeat-caller limits and call retention are fixed by Call Otto, not owner settings.
 const SETTINGS_FIELDS = new Set([
-  "serviceState", "operationMode", "answerAfterRings", "weekends", "weekdayStart", "weekdayEnd", "holidayDates", "businessName", "timezone", "greeting", "recordingNotice", "serviceAreaTerms", "serviceCategories", "bookableWeekdayStart", "bookableWeekdayEnd", "defaultServiceDurationMinutes", "minimumLeadTimeMinutes", "bookableWeekends", "bookingMode", "requireDiagnosticFeeAcceptance", "priceSnippets", "approvedKnowledge", "ownerPhone", "ownerDailySmsEnabled", "ownerDailySmsHour", "ownerRealtimeSmsEnabled", "ownerWeeklyEmailEnabled", "usageAlertPercent", "emergencyKeywords", "emergencyThreshold", "maxCallsPerCallerPerDay", "pronunciations", "dataRetentionDays", "supportEmail", "flatMonthlyPrice",
+  "serviceState", "operationMode", "answerAfterRings", "weekends", "weekdayStart", "weekdayEnd", "holidayDates", "businessName", "timezone", "greeting", "recordingNotice", "serviceAreaTerms", "serviceCategories", "bookableWeekdayStart", "bookableWeekdayEnd", "defaultServiceDurationMinutes", "minimumLeadTimeMinutes", "bookableWeekends", "bookingMode", "requireDiagnosticFeeAcceptance", "priceSnippets", "approvedKnowledge", "ownerPhone", "ownerDailySmsEnabled", "ownerDailySmsHour", "ownerRealtimeSmsEnabled", "ownerWeeklyEmailEnabled", "usageAlertPercent", "emergencyKeywords", "emergencyThreshold", "pronunciations", "supportEmail", "flatMonthlyPrice",
 ]);
 
 /**

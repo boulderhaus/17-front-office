@@ -4,7 +4,7 @@ import { BellRing, CalendarDays, CreditCard, Database, MessageSquareQuote, Phone
 export const SETTINGS_PAGES = [
   { id: "business", title: "Business details", icon: Store },
   { id: "answering", title: "How calls are answered", icon: PhoneIncoming },
-  { id: "answers", title: "Prices and answers", icon: MessageSquareQuote },
+  { id: "answers", title: "Your prices and answers", icon: MessageSquareQuote },
   { id: "alerts", title: "Alerts", icon: BellRing },
   { id: "calendar", title: "Hours and Google Calendar", icon: CalendarDays },
   { id: "plan", title: "Plan and billing", icon: CreditCard },

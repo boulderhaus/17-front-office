@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Link, useLocation, useSearchParams } from "react-router-dom"
-import { CheckCircle2, ChevronRight, Download, Loader2, LogOut } from "lucide-react"
+import { Check, CheckCircle2, ChevronDown, ChevronRight, Download, Loader2, LogOut, Plus, X } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { CallAlertsCard } from "@/components/app/call-alerts"
@@ -17,6 +19,7 @@ import type { ApiPlan, BillingQuote, BillingSummary, PlanId } from "@/lib/types"
 import { ringChoicesWith, VERIZON_RING_LINE } from "@/lib/dial"
 import { pauseHint } from "@/lib/pause-hint"
 import { recordingHint } from "@/lib/recording-hint"
+import { emergencyChoicesFor, joinEmergencies, joinServices, otherServicesProblem, splitEmergencies, splitServices, type Picks } from "@/lib/settings-picks"
 import { SMS_CONSENT_END, SMS_CONSENT_JOIN, SMS_CONSENT_LEAD, SMS_CONSENT_PRIVACY, SMS_CONSENT_TERMS } from "@/lib/sms-consent"
 import { forwardingOn } from "@/lib/line-status"
 import type { ApiSettings } from "@/lib/types"
@@ -24,8 +27,8 @@ import { cn } from "@/lib/utils"
 import { useSettings } from "./settings"
 
 const ZONES: Array<[string, string]> = [["America/New_York", "Eastern"], ["America/Chicago", "Central"], ["America/Denver", "Mountain"], ["America/Phoenix", "Arizona"], ["America/Los_Angeles", "Pacific"], ["America/Anchorage", "Alaska"], ["Pacific/Honolulu", "Hawaii"]]
-/** Fields read easily (DESIGN): 17px, weight 500, dark ink on white, 48px tall, a solid ink focus edge. */
-const selectClass = "h-12 w-full rounded-lg border border-input bg-card px-3 text-[17px] font-medium text-foreground outline-none focus-visible:border-brand-ink focus-visible:ring-[3px] focus-visible:ring-brand-ink/20"
+/** Fields read easily (DESIGN): 17px, weight 500, dark ink on white, 48px tall, a solid ink focus edge. The arrow sits inside (see NativeSelect). */
+const selectClass = "h-12 w-full min-w-0 appearance-none truncate rounded-lg border border-input bg-card pr-10 pl-3 text-[17px] font-medium text-foreground outline-none focus-visible:border-brand-ink focus-visible:ring-[3px] focus-visible:ring-brand-ink/20"
 const fieldClass = "h-12 bg-card"
 const areaClass = "bg-card"
 /** Card actions: full width on a phone; on a computer every button in a card is the same width, left-aligned. */
@@ -35,44 +38,119 @@ const EASY_ALERT_PERCENTS = [75, 90]
 const OTHER_ALERT_PERCENTS = [50, 55, 60, 65, 70, 80, 85, 95]
 const unique = (list: number[]) => list.filter((value, index, all) => all.indexOf(value) === index).sort((left, right) => left - right)
 
-/** One topic, one card. */
-export function SettingsCard({ title, description, children, danger, id }: { title: string; description?: ReactNode; children: ReactNode; danger?: boolean; id?: string }) {
+/**
+ * One topic: a heading, one grey line, then plain rows. Topics sit one under another on dividers (the page draws
+ * them), never as boxes inside boxes.
+ */
+export function SettingsCard({ title, description, children, danger, id, action }: { title: string; description?: ReactNode; children?: ReactNode; danger?: boolean; id?: string; action?: ReactNode }) {
   return (
-    <section id={id} className={cn("grid scroll-mt-24 gap-4 rounded-xl border bg-card p-4 md:p-5", danger && "border-red-200")}>
-      <header className="grid gap-1">
-        <h3 className={cn("text-[17px] font-semibold", danger && "text-red-700")}>{title}</h3>
-        {description && <p className="text-[15px] text-muted-foreground">{description}</p>}
+    <section id={id} className="grid scroll-mt-24 content-start gap-4 py-6 first:pt-2 lg:first:pt-6">
+      <header className="flex items-start justify-between gap-4">
+        <div className="grid gap-1">
+          <h3 className={cn("text-[17px] font-semibold text-balance", danger && "text-red-700")}>{title}</h3>
+          {description && <p className="text-[15px] text-muted-foreground text-pretty">{description}</p>}
+        </div>
+        {action}
       </header>
       {children}
     </section>
   )
 }
 
-function Field({ label, hint, children, className }: { label: string; hint?: string; children: ReactNode; className?: string }) {
+function Field({ label, hint, children, className, error }: { label: string; hint?: ReactNode; children: ReactNode; className?: string; error?: string | null }) {
   return (
-    <label className={cn("grid gap-1.5", className)}>
+    <label className={cn("grid min-w-0 gap-1.5", className)}>
       <span className="text-[15px] font-medium">{label}</span>
       {children}
-      {hint && <span className="text-sm text-muted-foreground">{hint}</span>}
+      {error ? <span role="alert" className="text-sm font-medium text-red-700">{error}</span> : hint && <span className="text-sm text-muted-foreground text-pretty">{hint}</span>}
     </label>
   )
 }
 
-/** A switch on the right, its label and one line of help on the left. Rows sit on dividers, not in boxes. */
-function ToggleRow({ id, label, hint, checked, onChange, disabled }: { id: string; label: string; hint?: ReactNode; checked: boolean; onChange: (value: boolean) => void; disabled?: boolean }) {
+/** A native select (the phone's own picker) with its arrow inside the box, at the usual padding. */
+function NativeSelect({ className, children, ...props }: React.ComponentProps<"select">) {
   return (
-    <div className="flex items-start justify-between gap-4 border-t pt-4 first:border-t-0 first:pt-0">
-      <Label htmlFor={id} className="grid gap-0.5 font-normal">
-        <span className="text-[15px] font-medium">{label}</span>
-        {hint && <span className="text-sm text-muted-foreground">{hint}</span>}
+    <span className="relative block min-w-0">
+      <select className={cn(selectClass, className)} {...props}>{children}</select>
+      <ChevronDown aria-hidden className="pointer-events-none absolute top-1/2 right-3.5 size-5 -translate-y-1/2 text-muted-foreground" />
+    </span>
+  )
+}
+
+/** "Saved" for a control that saves on its own: shows for two seconds after each save, beside the control. */
+function useSavedMark(): [ReactNode, () => void] {
+  const [shown, setShown] = useState(0)
+  const timer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(timer.current), [])
+  const flash = () => {
+    setShown(Date.now())
+    window.clearTimeout(timer.current)
+    timer.current = window.setTimeout(() => setShown(0), 2200)
+  }
+  const mark = <span role="status" aria-live="polite" className={cn("inline-flex items-center gap-1 text-sm font-semibold text-emerald-800 transition-opacity duration-200", shown ? "opacity-100" : "opacity-0")}>{shown ? <><Check className="size-4" />Saved</> : null}</span>
+  return [mark, flash]
+}
+
+/** A switch on the right, its label and one line of help on the left. */
+function ToggleRow({ id, label, hint, checked, onChange, disabled, saved }: { id: string; label: string; hint?: ReactNode; checked: boolean; onChange: (value: boolean) => void; disabled?: boolean; saved?: ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <Label htmlFor={id} className="grid min-w-0 gap-0.5 leading-normal font-normal">
+        <span className="text-[15px] font-medium text-balance">{label}</span>
+        {hint && <span className="text-sm text-muted-foreground text-pretty">{hint}</span>}
       </Label>
-      <Switch id={id} checked={checked} disabled={disabled} onCheckedChange={onChange} className="mt-0.5 shrink-0" />
+      <span className="flex shrink-0 flex-col items-end gap-1">
+        <Switch id={id} checked={checked} disabled={disabled} onCheckedChange={onChange} className="mt-0.5" />
+        {saved}
+      </span>
     </div>
   )
 }
 
 function Pair({ children }: { children: ReactNode }) {
   return <div className="grid gap-4 sm:grid-cols-2">{children}</div>
+}
+
+/** Tick boxes in a grid, each a full 44px row to tap. */
+function TickGrid({ legend, options, picked, onChange, children }: { legend: string; options: Array<{ key: string; label: string }>; picked: string[]; onChange: (picked: string[]) => void; children?: ReactNode }) {
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1.5 text-[15px] font-medium">{legend}</legend>
+      <div className="grid gap-x-4 sm:grid-cols-2">
+        {options.map((option) => (
+          <label key={option.key} className="flex min-h-11 cursor-pointer items-center gap-3 text-[15px]">
+            <Checkbox className="size-5 bg-card" checked={picked.includes(option.key)} onCheckedChange={(on) => onChange(on === true ? [...picked, option.key] : picked.filter((key) => key !== option.key))} />
+            <span>{option.label}</span>
+          </label>
+        ))}
+        {children}
+      </div>
+    </fieldset>
+  )
+}
+
+/**
+ * Boxes plus "Other" over one stored comma list. The Other text is kept as typed while the owner types (the stored
+ * list drops a trailing comma), and reset whenever the stored list changes from outside (save, discard).
+ */
+function usePicks(value: string, split: (value: string) => Picks, join: (picks: Picks) => string, onChange: (value: string) => void) {
+  const parsed = split(value)
+  const [otherText, setOtherText] = useState(parsed.other)
+  const [otherOpen, setOtherOpen] = useState(parsed.other !== "")
+  useEffect(() => {
+    const now = split(value)
+    const typed = otherText.split(",").map((item) => item.trim()).filter(Boolean).join(", ")
+    if (typed !== now.other) setOtherText(now.other)
+    if (now.other !== "") setOtherOpen(true)
+  }, [value]) // eslint-disable-line react-hooks/exhaustive-deps
+  return {
+    picked: parsed.picked,
+    otherText,
+    otherOpen,
+    setPicked: (picked: string[]) => onChange(join({ ...parsed, picked, other: otherText })),
+    setOther: (text: string) => { setOtherText(text); onChange(join({ ...parsed, other: text })) },
+    setOtherOpen: (open: boolean) => { setOtherOpen(open); if (!open) { setOtherText(""); onChange(join({ ...parsed, other: "" })) } },
+  }
 }
 
 /* ---------------------------------------------------------------- Business details */
@@ -84,6 +162,8 @@ export function BusinessSection() {
   const savedName = String(settings.values.businessName ?? "").trim()
   const newName = text("businessName").trim()
   const staleGreeting = savedName.length > 1 && newName.length > 1 && newName !== savedName && text("greeting").includes(savedName)
+  // Only one whole state ("FL") so far: offer the owner's own area, from their mobile's area code.
+  const suggestion = settings.areaSuggestion && /^\s*[A-Za-z]{2}\s*$/.test(text("serviceAreaTerms")) ? settings.areaSuggestion : null
   return (
     <>
       <SettingsCard title="Your business">
@@ -95,56 +175,102 @@ export function BusinessSection() {
           </p>
         )}
         <Pair>
-          <Field label="Time zone"><select className={selectClass} {...bind("timezone")}>{zones.map(([zone, label]) => <option key={zone} value={zone}>{label}</option>)}</select></Field>
-          <Field label="Email callers can write to"><Input type="email" className={fieldClass} placeholder="office@yourshop.com" {...bind("supportEmail")} /></Field>
+          <Field label="Time zone"><NativeSelect {...bind("timezone")}>{zones.map(([zone, label]) => <option key={zone} value={zone}>{label}</option>)}</NativeSelect></Field>
+          <Field label="Email callers can write to"><Input type="email" className={fieldClass} placeholder="office@yourshop.com" spellCheck={false} autoCapitalize="none" {...bind("supportEmail")} /></Field>
         </Pair>
+        <Field label="What Otto says when it picks up"><Textarea required rows={2} className={areaClass} {...bind("greeting")} /></Field>
       </SettingsCard>
-      <SettingsCard title="Greeting">
-        <Field label="What Call Otto says when it picks up"><Textarea required rows={2} className={areaClass} {...bind("greeting")} /></Field>
-        <ToggleRow id="recordingNotice" label="Recording notice when a call is put through to you" checked={flag("recordingNotice")} onChange={(value) => set("recordingNotice", value)}
+      <SettingsCard title="Recording notice">
+        <ToggleRow id="recordingNotice" label="Play a recording notice when a call is put through to you" checked={flag("recordingNotice")} onChange={(value) => set("recordingNotice", value)}
           hint={recordingHint(flag("recordingNotice"), text("serviceAreaTerms"))} />
       </SettingsCard>
-      <SettingsCard title="Where you work" description="Call Otto checks each caller’s address against this list.">
+      <SettingsCard title="Where you work" description="Otto checks each caller’s address against this list.">
         <Field label="Cities and ZIP codes" hint="A city with its state, like “Sarasota FL”, or a 5-digit ZIP."><Textarea rows={2} placeholder="Sarasota FL, 34236" className={areaClass} {...bind("serviceAreaTerms")} /></Field>
+        {suggestion && (
+          <div role="status" className="grid gap-2 rounded-lg bg-accent px-3 py-2.5 text-[15px] text-accent-foreground sm:flex sm:items-center sm:justify-between sm:gap-4">
+            <span>Your area, from your phone number: <strong className="font-semibold">{suggestion}</strong></span>
+            <Button type="button" size="tap" variant="outline" className="bg-card" onClick={() => set("serviceAreaTerms", suggestion)}>Use these</Button>
+          </div>
+        )}
       </SettingsCard>
-      <SettingsCard title="What you fix">
-        <Field label="Services you offer" hint="Separate with commas."><Textarea rows={2} className={areaClass} {...bind("serviceCategories")} /></Field>
-      </SettingsCard>
-      <SettingsCard title="Names and words" description="Help Call Otto say your street names and brands right.">
+      <ServicesPicker />
+      <SettingsCard title="Names and words" description="Help Otto say your street names and brands right.">
         <Field label="Say these words like this" hint="One per line, like “Myakka: my-AK-uh”."><Textarea rows={2} className={areaClass} {...bind("pronunciations")} /></Field>
       </SettingsCard>
     </>
   )
 }
 
+/** "What you fix": the trades on the website as tick boxes, plus Other with a short text box. */
+function ServicesPicker() {
+  const { text, set, settings } = useSettings()
+  const trades = settings.catalog?.trades ?? []
+  const picks = usePicks(text("serviceCategories"), (value) => splitServices(value, trades), (value) => joinServices(value, trades), (value) => set("serviceCategories", value))
+  const problem = picks.otherOpen ? otherServicesProblem(picks.otherText) : null
+  const nothing = picks.picked.length === 0 && !picks.otherText.trim()
+  return (
+    <SettingsCard title="What you fix" description="Otto takes calls for these and offers times for them.">
+      <TickGrid legend="Pick all that apply" options={trades} picked={picks.picked} onChange={picks.setPicked}>
+        <label className="flex min-h-11 cursor-pointer items-center gap-3 text-[15px]">
+          <Checkbox className="size-5 bg-card" checked={picks.otherOpen} onCheckedChange={(on) => picks.setOtherOpen(on === true)} />
+          <span>Other</span>
+        </label>
+      </TickGrid>
+      {picks.otherOpen && (
+        <Field label="Other services" hint="Separate with commas, like “Pool repair, Septic”." error={problem}>
+          <Input className={fieldClass} value={picks.otherText} onChange={(event) => picks.setOther(event.target.value)} aria-invalid={problem ? true : undefined} placeholder="Pool repair" />
+        </Field>
+      )}
+      {nothing && <p role="alert" className="text-sm font-medium text-red-700">Pick at least one, so Otto knows which calls are yours.</p>}
+    </SettingsCard>
+  )
+}
+
 /* ---------------------------------------------------------------- How calls are answered */
 
+// The same names as setup.
+const MODES: Array<[string, string, string]> = [
+  ["always", "Otto answers every call", "Your phone won’t ring for these."],
+  ["overflow", "Ring my phone first", "Otto takes the calls you miss."],
+]
+// How sure Otto must be about anything not ticked. Saved values in between show as the nearest choice.
+const URGENCY: Array<[number, string, string]> = [
+  [0.5, "Anything that might be urgent", "More alerts. Some turn out to be routine."],
+  [0.7, "Likely emergencies", "Otto’s best judgment. Most shops pick this."],
+  [0.9, "Only sure emergencies", "Fewest alerts."],
+]
+const urgencyChoice = (value: number) => (value < 0.6 ? 0.5 : value <= 0.8 ? 0.7 : 0.9)
+
 export function AnsweringSection() {
-  const { text, set, bind, settings } = useSettings()
+  const { text, set, settings } = useSettings()
   const { dashboard } = useMode()
   // Said when they pick Paused, and only when every call may go to Otto (the saved choice or the last passed test).
   const business = dashboard?.line.business
-  const hint = pauseHint({ active: settings.status === "active", paused: text("serviceState") === "paused", mayForwardAll: Boolean(business?.mayForwardAll), off: business?.plan?.off })
+  const paused = text("serviceState") === "paused"
+  const hint = pauseHint({ active: settings.status === "active", paused, mayForwardAll: Boolean(business?.mayForwardAll), off: business?.plan?.off })
   // Two ways calls work. A shop saved as "after hours" works like ring first today (forwarding sends Otto only the
   // calls nobody picks up, at any hour), so it shows as Ring my phone first.
   const everyCall = text("operationMode") === "always"
   const mode = everyCall ? "always" : "overflow"
-  const forwarding = dashboard?.line.number ? (forwardingOn(dashboard.line) ? (dashboard.line.business.update ? "Dial your new code" : "Forwarding works") : "Not on yet") : null
+  const forwarding = dashboard?.line.number ? (forwardingOn(dashboard.line) ? (dashboard.line.business.update ? "Dial your new code" : "Works") : "Not on yet") : null
   return (
     <>
-      <SettingsCard title="Which calls">
-        <Field label="Call Otto is" hint={hint}>
-          <select className={selectClass} {...bind("serviceState")}><option value="active">On, answering calls</option><option value="paused">Paused</option></select>
-        </Field>
-        <Pair>
-          <Field label="Calls to your business number" hint={everyCall ? "Your phone won’t ring for this number." : "Your phone rings first. Otto takes the calls you miss."}>
-            <select className={selectClass} name="operationMode" value={mode} onChange={(event) => set("operationMode", event.target.value === "overflow" && text("operationMode") === "after_hours" ? "after_hours" : event.target.value)}>
-              <option value="always">Otto answers every call</option><option value="overflow">Ring my phone first</option>
-            </select>
-          </Field>
-          {/* Ring time only matters when the phone rings first. */}
-          {!everyCall && <RingFirstField rings={Number(text("answerAfterRings"))} onChange={(value) => set("answerAfterRings", value)} family={dashboard?.line.business.carrier?.family ?? null} confirmed={Boolean(dashboard?.line.confirmedAt)} />}
-        </Pair>
+      <SettingsCard title="Answering">
+        <ToggleRow id="serviceState" label="Otto answers calls" checked={settings.status === "active" && !paused} disabled={settings.status !== "active"} onChange={(on) => set("serviceState", on ? "active" : "paused")}
+          hint={hint ?? (paused ? "Paused. Otto isn’t taking calls." : "Turn off to pause Otto.")} />
+        <div className="border-t pt-4"><fieldset className="grid gap-2">
+          <legend className="mb-1.5 text-[15px] font-medium">When customers call</legend>
+          <RadioGroup value={mode} onValueChange={(value) => set("operationMode", value === "overflow" && text("operationMode") === "after_hours" ? "after_hours" : value)} className="gap-1">
+            {MODES.map(([value, label, line]) => (
+              <label key={value} className="flex min-h-11 cursor-pointer items-start gap-3 py-1.5">
+                <RadioGroupItem value={value} className="mt-0.5 size-5 bg-card" />
+                <span className="grid gap-0.5"><span className="text-[15px] font-medium">{label}</span><span className="text-sm text-muted-foreground">{line}</span></span>
+              </label>
+            ))}
+          </RadioGroup>
+        </fieldset></div>
+        {/* Ring time only matters when the phone rings first. */}
+        {!everyCall && <div className="sm:max-w-80"><RingFirstField rings={Number(text("answerAfterRings"))} onChange={(value) => set("answerAfterRings", value)} family={dashboard?.line.business.carrier?.family ?? null} confirmed={Boolean(dashboard?.line.confirmedAt)} /></div>}
         {dashboard?.line.business.update && (
           <p className="rounded-md border border-brand-ink/15 bg-accent px-3 py-2.5 text-sm text-accent-foreground" role="status">
             Dial your new code once to apply this. <Link className="inline-flex min-h-11 items-center font-semibold underline underline-offset-4" to="/app/start?step=forward&from=settings">Show me the code</Link>
@@ -152,25 +278,55 @@ export function AnsweringSection() {
         )}
         {forwarding && (
           <Link to="/app/start?step=forward&from=settings" className="group flex min-h-12 items-center justify-between gap-3 border-t pt-3 text-[15px]">
-            <span className="grid"><strong className="font-semibold group-hover:underline">Your forwarding code</strong><span className="text-sm text-muted-foreground">{forwarding}. See the code, test it, or turn it off.</span></span>
+            <span className="grid"><strong className="font-semibold group-hover:underline">Call forwarding</strong><span className="text-sm text-muted-foreground">{forwarding}. See, test or turn off the code.</span></span>
             <ChevronRight className="size-5 shrink-0 text-muted-foreground" />
           </Link>
         )}
       </SettingsCard>
-      <SettingsCard title="Emergencies" description="Urgent calls go to the top of Calls.">
-        <Field label="Extra emergency words" hint="Separate with commas, like “no heat, water leak”."><Textarea rows={2} className={areaClass} {...bind("emergencyKeywords")} /></Field>
-        <Field label="How quick to call it urgent">
-          <select className={selectClass} value={String(([0.5, 0.6, 0.7, 0.8, 0.9].find((value) => Math.abs(value - Number(text("emergencyThreshold"))) < 0.001)) ?? text("emergencyThreshold"))} onChange={(event) => set("emergencyThreshold", event.target.value)}>
-            {([[0.5, "Most cautious: flag anything that might be urgent"], [0.6, "Cautious"], [0.7, "Balanced"], [0.8, "Strict"], [0.9, "Strictest: only clear emergencies"]] as Array<[number, string]>).map(([value, label]) => <option key={value} value={String(value)}>{label}</option>)}
-          </select>
-        </Field>
-      </SettingsCard>
-      <SettingsCard title="Repeat callers" description="Stops one number from using up your calls.">
-        <Field label="Most calls from one number in a day">
-          <select className={selectClass} {...bind("maxCallsPerCallerPerDay")}>{unique([1, 2, 3, 5, 8, 10, 20, Number(text("maxCallsPerCallerPerDay"))]).map((value) => <option key={value} value={value}>{value}</option>)}</select>
-        </Field>
-      </SettingsCard>
+      <EmergenciesSection />
     </>
+  )
+}
+
+function EmergenciesSection() {
+  const { text, set, settings } = useSettings()
+  const catalog = settings.catalog
+  const choices = catalog?.emergencies ?? []
+  const alwaysOn = catalog?.alwaysOnWords ?? []
+  const picks = usePicks(text("emergencyKeywords"), (value) => splitEmergencies(value, choices, alwaysOn), (value) => joinEmergencies(value, choices), (value) => set("emergencyKeywords", value))
+  const trades = splitServices(text("serviceCategories"), catalog?.trades ?? []).picked
+  const shown = emergencyChoicesFor(choices, trades, picks.picked)
+  const level = urgencyChoice(Number(text("emergencyThreshold")))
+  return (
+    <SettingsCard title="Emergencies" description="Otto puts these calls at the top of Calls and alerts you right away.">
+      <TickGrid legend="What counts as an emergency" options={shown} picked={picks.picked} onChange={picks.setPicked}>
+        <label className="flex min-h-11 cursor-pointer items-center gap-3 text-[15px]">
+          <Checkbox className="size-5 bg-card" checked={picks.otherOpen} onCheckedChange={(on) => picks.setOtherOpen(on === true)} />
+          <span>Other</span>
+        </label>
+      </TickGrid>
+      {picks.otherOpen && (
+        <Field label="Other emergency words" hint="Words a caller would say, like “basement flooding”. Separate with commas.">
+          <Input className={fieldClass} value={picks.otherText} onChange={(event) => picks.setOther(event.target.value)} placeholder="basement flooding" />
+        </Field>
+      )}
+      {catalog?.alwaysOnLine && <p className="text-sm text-muted-foreground">{catalog.alwaysOnLine} Otto also flags burst pipes, flooding, sewage and no heat or AC.</p>}
+      <div className="border-t pt-4"><fieldset className="grid gap-2">
+        <legend className="mb-1.5 text-[15px] font-medium">For everything else, flag</legend>
+        <RadioGroup value={String(level)} onValueChange={(value) => set("emergencyThreshold", value)} className="gap-1">
+          {URGENCY.map(([value, label, line]) => (
+            <label key={value} className="flex min-h-11 cursor-pointer items-start gap-3 py-1.5">
+              <RadioGroupItem value={String(value)} className="mt-0.5 size-5 bg-card" />
+              <span className="grid gap-0.5"><span className="text-[15px] font-medium">{label}</span><span className="text-sm text-muted-foreground">{line}</span></span>
+            </label>
+          ))}
+        </RadioGroup>
+      </fieldset></div>
+      <Link className="group flex min-h-12 items-center justify-between gap-3 border-t pt-3 text-[15px]" to="/app/settings/alerts">
+        <span className="grid"><strong className="font-semibold group-hover:underline">Want a phone call too?</strong><span className="text-sm text-muted-foreground">Turn on emergency calls in Alerts.</span></span>
+        <ChevronRight className="size-5 shrink-0 text-muted-foreground" />
+      </Link>
+    </SettingsCard>
   )
 }
 
@@ -188,25 +344,57 @@ function RingFirstField({ rings, onChange, family, confirmed }: { rings: number;
   return (
     <Field label="Ring time" hint={hint}>
       {verizon ? (
-        <select className={cn(selectClass, "disabled:cursor-not-allowed disabled:opacity-70")} disabled value="verizon" onChange={() => undefined}><option value="verizon">About 30 seconds (Verizon)</option></select>
+        <NativeSelect className="disabled:cursor-not-allowed disabled:opacity-70" disabled value="verizon" onChange={() => undefined}><option value="verizon">About 30 seconds (Verizon)</option></NativeSelect>
       ) : (
-        <select className={selectClass} name="answerAfterRings" value={String(choices.find((choice) => choice.rings === rings)?.rings ?? 2)} onChange={(event) => onChange(event.target.value)}>
+        <NativeSelect name="answerAfterRings" value={String(choices.find((choice) => choice.rings === rings)?.rings ?? 2)} onChange={(event) => onChange(event.target.value)}>
           {choices.map((choice) => <option key={choice.rings} value={String(choice.rings)}>{choice.label}</option>)}
-        </select>
+        </NativeSelect>
       )}
     </Field>
   )
 }
 
-/* ---------------------------------------------------------------- Prices and answers */
+/* ---------------------------------------------------------------- Your prices and answers */
+
+/** Lines of "Name: words" as rows of two boxes, with Add and Remove. Empty rows are kept while editing. */
+function PairList({ name, columns, placeholders, addLabel }: { name: string; columns: [string, string]; placeholders: [string, string]; addLabel: string }) {
+  const { text, set } = useSettings()
+  const parse = (value: string): Array<[string, string]> => value.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => {
+    const [first = "", ...rest] = line.split(":")
+    return [first.trim(), rest.join(":").trim()]
+  })
+  const stored = text(name)
+  const [rows, setRows] = useState<Array<[string, string]>>(() => { const list = parse(stored); return list.length ? list : [["", ""]] })
+  const serialize = (list: Array<[string, string]>) => list.filter(([left, right]) => left.trim() || right.trim()).map(([left, right]) => `${left.trim()}: ${right.trim()}`).join("\n")
+  // Saved or discarded from outside: show what's stored.
+  useEffect(() => { if (serialize(rows) !== stored) { const list = parse(stored); setRows(list.length ? list : [["", ""]]) } }, [stored]) // eslint-disable-line react-hooks/exhaustive-deps
+  const update = (next: Array<[string, string]>) => { setRows(next); set(name, serialize(next)) }
+  return (
+    <div className="grid gap-3">
+      <div className="hidden grid-cols-[minmax(0,2fr)_minmax(0,3fr)_2.75rem] gap-3 text-[15px] font-medium sm:grid">
+        <span>{columns[0]}</span><span>{columns[1]}</span><span />
+      </div>
+      {rows.map(([left, right], index) => (
+        <div key={index} className="grid grid-cols-[minmax(0,1fr)_2.75rem] gap-x-3 gap-y-2 border-b pb-3 last:border-b-0 sm:grid-cols-[minmax(0,2fr)_minmax(0,3fr)_2.75rem] sm:border-b-0 sm:pb-0">
+          {Boolean(left.trim()) !== Boolean(right.trim()) && <p role="alert" className="col-span-2 row-start-3 text-sm text-amber-900 sm:col-span-3 sm:row-start-2">Fill in both boxes, or remove this row.</p>}
+          <Input aria-label={columns[0]} className={cn(fieldClass, "col-start-1 row-start-1")} placeholder={index === 0 ? placeholders[0] : undefined} value={left} onChange={(event) => update(rows.map((row, at) => (at === index ? [event.target.value.replace(/:/g, ""), row[1]] : row)))} />
+          <Input aria-label={columns[1]} className={cn(fieldClass, "col-span-2 col-start-1 row-start-2 sm:col-span-1 sm:col-start-2 sm:row-start-1")} placeholder={index === 0 ? placeholders[1] : undefined} value={right} onChange={(event) => update(rows.map((row, at) => (at === index ? [row[0], event.target.value] : row)))} />
+          <Button type="button" variant="ghost" size="icon" aria-label={`Remove ${left || "this row"}`} className="col-start-2 row-start-1 size-11 text-muted-foreground sm:col-start-3" onClick={() => update(rows.length > 1 ? rows.filter((_, at) => at !== index) : [["", ""]])}><X className="size-5" /></Button>
+        </div>
+      ))}
+      <Button type="button" variant="outline" size="tap" className={actionClass} onClick={() => setRows([...rows, ["", ""]])}><Plus />{addLabel}</Button>
+    </div>
+  )
+}
 
 export function AnswersSection() {
-  const { bind } = useSettings()
   return (
     <>
-      <SettingsCard title="What Otto may say" description="Call Otto only says what’s written here. Leave a box empty and it takes a message instead.">
-        <Field label="Prices" hint="One per line: a name, a colon, then the exact words."><Textarea rows={3} placeholder="Service call: Our service call is $89." className={areaClass} {...bind("priceSnippets")} /></Field>
-        <Field label="Answers" hint="One per line, the same way."><Textarea rows={3} placeholder="Brands: We service all major brands." className={areaClass} {...bind("approvedKnowledge")} /></Field>
+      <SettingsCard title="Your prices" description="What you charge your customers. Otto says these word for word.">
+        <PairList name="priceSnippets" columns={["Service", "Price"]} placeholders={["Service call", "$89"]} addLabel="Add a price" />
+      </SettingsCard>
+      <SettingsCard title="Your answers" description="Questions callers ask, and what Otto should say. Anything not here, Otto takes a message.">
+        <PairList name="approvedKnowledge" columns={["Question", "Answer"]} placeholders={["Brands", "We service all major brands."]} addLabel="Add an answer" />
       </SettingsCard>
     </>
   )
@@ -224,6 +412,8 @@ export function AlertsSection() {
   useEffect(() => { if (settings.texts) setTexts(settings.texts) }, [settings.texts])
   const [textsBusy, setTextsBusy] = useState(false)
   const [textsError, setTextsError] = useState<string | null>(null)
+  const [textsSaved, flashTextsSaved] = useSavedMark()
+  const [urgentSaved, flashUrgentSaved] = useSavedMark()
   const mobile = texts.mobile ?? i.ownerPhoneMasked ?? null
   const [editingMobile, setEditingMobile] = useState(!mobile)
   useEffect(() => { setEditingMobile(!i.ownerPhoneMasked) }, [i.ownerPhoneMasked])
@@ -253,7 +443,8 @@ export function AlertsSection() {
       }))
       if (on && typed) { set("ownerPhone", ""); setEditingMobile(false) }
       await reloadDashboard()
-      toast.success(on ? (result.texts.live ? "Text alerts are on." : "Saved. Texts start once approved.") : "Text alerts are off.")
+      flashTextsSaved()
+      toast.success(on ? (result.texts.live ? "Text alerts are on." : "Saved. Texts start as soon as texting turns on.") : "Text alerts are off.")
     } catch (error) {
       setTexts(before)
       setTextsError(error instanceof Error ? error.message : "That didn’t change. Please try again.")
@@ -261,9 +452,9 @@ export function AlertsSection() {
       setTextsBusy(false)
     }
   }
-  // The text switches work only once texts can send and the owner said yes; until then they read off, with why.
-  const textsReady = texts.live && texts.on
-  const switchHint = (on: string) => (!texts.live ? "Texts start once approved." : !texts.on ? "Check the box above first." : on)
+  // The text switches work once the owner ticked the box; before texting turns on, their picks wait.
+  const switchHint = (on: string) => (!texts.on ? "Tick the box above first." : on)
+  const urgent = settings.urgentCalls
   return (
     <>
       <CallAlertsCard className="p-4 md:p-5" />
@@ -273,39 +464,42 @@ export function AlertsSection() {
             <div className="grid gap-0.5">
               <span className="text-[15px] font-medium">Mobile number</span>
               <strong className="tabular text-[17px] font-semibold">{mobile}</strong>
-              <span className="text-sm text-muted-foreground">Emergency calls (if on) and text alerts come here.</span>
+              <span className="text-sm text-muted-foreground">Emergency calls and texts come here.</span>
             </div>
             <Button type="button" size="tap" variant="outline" onClick={() => { setEditingMobile(true); requestAnimationFrame(() => document.getElementById("owner-phone")?.focus()) }}>Change</Button>
           </div>
         ) : (
-          <Field label="Mobile number" hint="Emergency calls (if on) and text alerts come here.">
-            <Input id="owner-phone" type="tel" inputMode="tel" autoComplete="tel" className={fieldClass} placeholder="(941) 555-0100" {...bind("ownerPhone")} />
+          <Field label="Mobile number" hint="Emergency calls and texts come here.">
+            <Input id="owner-phone" type="tel" inputMode="tel" autoComplete="tel" className={fieldClass} placeholder="(555) 555-0100" {...bind("ownerPhone")} />
           </Field>
         )}
         {mobile && editingMobile && <button type="button" className="-mt-2 inline-flex min-h-11 w-fit items-center text-sm font-semibold underline underline-offset-4" onClick={() => { set("ownerPhone", ""); setEditingMobile(false) }}>Keep {mobile}</button>}
-        {settings.urgentCalls?.available && (
-          <ToggleRow id="urgentCalls" label="Call me about emergencies" checked={settings.urgentCalls.on} disabled={urgentBusy}
-            hint={settings.urgentCalls.disclosure}
-            onChange={(on) => void toggleUrgentCalls(on)} />
-        )}
-        {/* The urgent number is the business number and may send every call to Otto: Otto skips those calls. */}
-        {settings.urgentCalls?.available && settings.urgentCalls.on && settings.urgentCalls.held && (
-          <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">Emergency calls paused: this number may send every call to Otto. You still get a push and an email.</p>
-        )}
       </SettingsCard>
-      <SettingsCard id="texts" title="Texts">
+      {urgent?.available && (
+        <SettingsCard title="Emergency calls">
+          <ToggleRow id="urgentCalls" label="Call me about emergencies" checked={urgent.on} disabled={urgentBusy} saved={urgentSaved}
+            hint={<>
+              {urgent.disclosure}
+              {/* The mobile is the business number and may send every call to Otto: Otto can't ring it, so it says why. */}
+              {urgent.on && urgent.held && <span className="mt-1 block font-medium text-amber-900">On, but waiting: Otto can’t ring this number while it sends every call to Otto. You still get an alert and an email.</span>}
+            </>}
+            onChange={(on) => void toggleUrgentCalls(on).then((ok) => { if (ok) flashUrgentSaved() })} />
+        </SettingsCard>
+      )}
+      <SettingsCard id="texts" title="Texts" action={textsSaved}>
         {/* The consent box: its words are carrier-reviewed and never change (see lib/sms-consent). */}
         <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-3">
-          <input id="sms-consent" type="checkbox" checked={texts.on} disabled={textsBusy} aria-describedby={textsError ? "sms-consent-error" : undefined} onChange={(event) => void toggleTexts(event.target.checked)} className="mt-1 size-5 cursor-pointer accent-brand-ink disabled:cursor-wait" />
-          <label htmlFor="sms-consent" className="block cursor-pointer text-[15px] leading-relaxed">{SMS_CONSENT_LEAD}<a className="font-semibold underline underline-offset-4" href={SMS_CONSENT_TERMS.href}>{SMS_CONSENT_TERMS.label}</a>{SMS_CONSENT_JOIN}<a className="font-semibold underline underline-offset-4" href={SMS_CONSENT_PRIVACY.href}>{SMS_CONSENT_PRIVACY.label}</a>{SMS_CONSENT_END}</label>
+          <input id="sms-consent" type="checkbox" checked={texts.on} disabled={textsBusy} aria-describedby={textsError ? "sms-consent-error" : undefined} onChange={(event) => void toggleTexts(event.target.checked)} className="mt-0.5 size-5 cursor-pointer accent-brand-ink disabled:cursor-wait" />
+          <label htmlFor="sms-consent" className="block cursor-pointer text-sm leading-normal text-muted-foreground"><span className="font-medium text-foreground">{SMS_CONSENT_LEAD.split(".")[0]}.</span>{SMS_CONSENT_LEAD.slice(SMS_CONSENT_LEAD.indexOf(".") + 1)}<a className="font-semibold text-foreground underline underline-offset-4" href={SMS_CONSENT_TERMS.href}>{SMS_CONSENT_TERMS.label}</a>{SMS_CONSENT_JOIN}<a className="font-semibold text-foreground underline underline-offset-4" href={SMS_CONSENT_PRIVACY.href}>{SMS_CONSENT_PRIVACY.label}</a>{SMS_CONSENT_END}</label>
         </div>
         {textsBusy && <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status"><Loader2 className="size-4 motion-safe:animate-spin" />Saving…</p>}
         {textsError && <p id="sms-consent-error" role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">{textsError}</p>}
-        <ToggleRow id="ownerRealtimeSmsEnabled" label="A text for every new lead" hint={switchHint("Sent the moment the call ends. Included in every plan.")} checked={textsReady && flag("ownerRealtimeSmsEnabled")} disabled={!textsReady} onChange={(value) => set("ownerRealtimeSmsEnabled", value)} />
-        <ToggleRow id="ownerDailySmsEnabled" label="Morning recap" hint={switchHint("Follow-ups and appointments, once a day.")} checked={textsReady && flag("ownerDailySmsEnabled")} disabled={!textsReady} onChange={(value) => set("ownerDailySmsEnabled", value)} />
-        {textsReady && flag("ownerDailySmsEnabled") && (
+        {!texts.live && texts.on && <p className="rounded-md bg-accent px-3 py-2.5 text-sm text-accent-foreground">Texting turns on soon. Your picks below are saved and start then.</p>}
+        <ToggleRow id="ownerRealtimeSmsEnabled" label="A text for every new lead" hint={switchHint("Sent the moment the call ends.")} checked={texts.on && flag("ownerRealtimeSmsEnabled")} disabled={!texts.on} onChange={(value) => set("ownerRealtimeSmsEnabled", value)} />
+        <ToggleRow id="ownerDailySmsEnabled" label="Morning recap" hint={switchHint("Follow-ups and appointments, once a day.")} checked={texts.on && flag("ownerDailySmsEnabled")} disabled={!texts.on} onChange={(value) => set("ownerDailySmsEnabled", value)} />
+        {texts.on && flag("ownerDailySmsEnabled") && (
           <Field label="Recap time" className="sm:max-w-60">
-            <select className={selectClass} {...bind("ownerDailySmsHour")}>{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{new Intl.DateTimeFormat("en-US", { hour: "numeric", timeZone: "UTC" }).format(new Date(Date.UTC(2026, 0, 1, hour)))}</option>)}</select>
+            <NativeSelect {...bind("ownerDailySmsHour")}>{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{new Intl.DateTimeFormat("en-US", { hour: "numeric", timeZone: "UTC" }).format(new Date(Date.UTC(2026, 0, 1, hour)))}</option>)}</NativeSelect>
           </Field>
         )}
         {/* Shown only once email can actually be sent: never a switch that says "not available". */}
@@ -313,12 +507,12 @@ export function AlertsSection() {
       </SettingsCard>
       <SettingsCard title="Running low on calls" description={settings.plan.unlimited && settings.plan.unlimitedOffer ? `One alert when you reach this share of your ${settings.plan.unlimitedOffer.fairUseCalls.toLocaleString("en-US")} fair-use calls, and one if you use them all.` : `One alert when you reach this share of your ${settings.plan.includedCalls} calls, and one if you use them all.`}>
         <Field label="Alert me" className="sm:max-w-60">
-          <select className={selectClass} {...bind("usageAlertPercent")}>
+          <NativeSelect {...bind("usageAlertPercent")}>
             {EASY_ALERT_PERCENTS.map((percent) => <option key={percent} value={percent}>At {percent}% used</option>)}
             <optgroup label="Other">
               {unique([...OTHER_ALERT_PERCENTS, Number(text("usageAlertPercent"))]).filter((percent) => percent >= 50 && percent <= 95 && !EASY_ALERT_PERCENTS.includes(percent)).map((percent) => <option key={percent} value={percent}>At {percent}% used</option>)}
             </optgroup>
-          </select>
+          </NativeSelect>
         </Field>
       </SettingsCard>
     </>
@@ -326,6 +520,16 @@ export function AlertsSection() {
 }
 
 /* ---------------------------------------------------------------- Calendar */
+
+/** Half-hour times, 5 AM to 11 PM, plus a saved time off the grid. */
+function timeChoices(current: string): Array<[string, string]> {
+  const values = Array.from({ length: 37 }, (_, index) => { const minutes = 300 + index * 30; return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}` })
+  if (/^\d{2}:\d{2}$/.test(current) && !values.includes(current)) values.push(current)
+  return values.sort().map((value) => {
+    const [hours, minutes] = value.split(":").map(Number) as [number, number]
+    return [value, new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", timeZone: "UTC" }).format(new Date(Date.UTC(2026, 0, 1, hours, minutes)))]
+  })
+}
 
 export function CalendarSection() {
   const { text, flag, set, bind, settings } = useSettings()
@@ -337,38 +541,42 @@ export function CalendarSection() {
     <>
       <SettingsCard title="Google Calendar">
         {i.googleConnected ? (
-          <>
-            <p className="flex items-center gap-2 text-[15px] font-semibold text-emerald-800"><CheckCircle2 className="size-5 shrink-0" />Connected. Call Otto checks when you’re busy, and confirmed jobs go on your calendar.</p>
-            <Button size="tap" variant="outline" className={actionClass} asChild><a href="/app/integrations/google/start">Reconnect</a></Button>
-          </>
+          <div className="grid gap-1">
+            <p className="flex items-center gap-2 text-[17px] font-semibold text-emerald-800"><CheckCircle2 className="size-5 shrink-0" />Connected</p>
+            <p className="text-[15px] text-muted-foreground">Otto checks when you’re busy, and confirmed jobs go on your calendar.</p>
+            <p className="flex flex-wrap items-center gap-x-5 text-sm">
+              <a className="inline-flex min-h-11 items-center font-semibold underline underline-offset-4" href="/app/integrations/google/start">Reconnect</a>
+              <a className="inline-flex min-h-11 items-center text-muted-foreground underline underline-offset-4" href="/privacy#google-calendar">How Otto uses your calendar</a>
+            </p>
+          </div>
         ) : i.googleAvailable ? (
           <>
-            <p className="text-[15px]">Connect the calendar your jobs live on. Call Otto checks when you’re busy, and confirmed jobs land on it.</p>
+            <p className="text-[15px]">Connect the calendar your jobs live on. Otto checks when you’re busy, and confirmed jobs land on it.</p>
             <Button size="tap" variant="brand" className={actionClass} asChild><a href="/app/integrations/google/start">Connect Google Calendar</a></Button>
+            <a className="inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground underline underline-offset-4" href="/privacy#google-calendar">How Otto uses your calendar</a>
           </>
         ) : (
-          <p className="text-[15px]">Not available yet. Until it is, Call Otto takes the time the caller asks for and you confirm it. Those jobs show as <strong className="font-semibold">Confirm time</strong> in Calls.</p>
+          <p className="text-[15px]">Not available yet. Until it is, Otto takes the time the caller asks for and you confirm it. Those jobs show as <strong className="font-semibold">Confirm time</strong> in Calls.</p>
         )}
-        {i.googleConnected || i.googleAvailable ? <a className="text-sm text-muted-foreground underline underline-offset-4" href="/privacy#google-calendar">How Call Otto uses Google Calendar data</a> : null}
       </SettingsCard>
       <SettingsCard title="Appointment hours" description="Times callers can ask for.">
         <Pair>
-          <Field label="First appointment"><Input type="time" className={fieldClass} {...bind("bookableWeekdayStart")} /></Field>
-          <Field label="Last one ends by"><Input type="time" className={fieldClass} {...bind("bookableWeekdayEnd")} /></Field>
+          <Field label="First appointment"><NativeSelect name="bookableWeekdayStart" value={text("bookableWeekdayStart")} onChange={(event) => set("bookableWeekdayStart", event.target.value)}>{timeChoices(text("bookableWeekdayStart")).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</NativeSelect></Field>
+          <Field label="Last one ends by"><NativeSelect name="bookableWeekdayEnd" value={text("bookableWeekdayEnd")} onChange={(event) => set("bookableWeekdayEnd", event.target.value)}>{timeChoices(text("bookableWeekdayEnd")).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</NativeSelect></Field>
         </Pair>
-        <ToggleRow id="bookableWeekends" label="Weekend appointments" checked={flag("bookableWeekends")} onChange={(value) => set("bookableWeekends", value)} />
+        <ToggleRow id="bookableWeekends" label="Weekend appointments" hint={flag("bookableWeekends") ? "Saturdays and Sundays, same hours." : "Weekdays only."} checked={flag("bookableWeekends")} onChange={(value) => set("bookableWeekends", value)} />
       </SettingsCard>
       <SettingsCard title="Booking">
         <Pair>
           <Field label="Typical job length">
-            <select className={selectClass} {...bind("defaultServiceDurationMinutes")}>{unique([30, 45, 60, 90, 120, 180, 240, Number(text("defaultServiceDurationMinutes"))]).map((value) => <option key={value} value={value}>{value < 60 ? `${value} min` : `${value / 60} hr${value === 60 ? "" : "s"}`}</option>)}</select>
+            <NativeSelect {...bind("defaultServiceDurationMinutes")}>{unique([30, 45, 60, 90, 120, 180, 240, Number(text("defaultServiceDurationMinutes"))]).map((value) => <option key={value} value={value}>{value < 60 ? `${value} min` : `${value / 60} hr${value === 60 ? "" : "s"}`}</option>)}</NativeSelect>
           </Field>
-          <Field label="Notice you need"><select className={selectClass} {...bind("minimumLeadTimeMinutes")}>{notice.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>
+          <Field label="Notice you need" hint="From the call to the job start. Count your drive time in this."><NativeSelect {...bind("minimumLeadTimeMinutes")}>{notice.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</NativeSelect></Field>
         </Pair>
         {i.directBookingAvailable ? (
-          <Field label="When a caller picks a time"><select className={selectClass} {...bind("bookingMode")}><option value="confirm">Take the details; I’ll confirm</option><option value="direct">Book it on my calendar</option></select></Field>
-        ) : <p className="text-sm text-muted-foreground">Call Otto takes the time the caller wants. You confirm it.</p>}
-        <ToggleRow id="requireDiagnosticFeeAcceptance" label="Caller must agree to your service-call fee" hint="Uses the service-call price in Prices and answers." checked={flag("requireDiagnosticFeeAcceptance")} onChange={(value) => set("requireDiagnosticFeeAcceptance", value)} />
+          <Field label="When a caller picks a time"><NativeSelect {...bind("bookingMode")}><option value="confirm">Take the details; I’ll confirm</option><option value="direct">Book it on my calendar</option></NativeSelect></Field>
+        ) : <p className="text-sm text-muted-foreground">Otto takes the time the caller wants. You confirm it.</p>}
+        <ToggleRow id="requireDiagnosticFeeAcceptance" label="Get a yes to your service-call fee" hint="Otto tells the caller your fee (from Your prices) and books only if they say yes." checked={flag("requireDiagnosticFeeAcceptance")} onChange={(value) => set("requireDiagnosticFeeAcceptance", value)} />
       </SettingsCard>
       <SettingsCard title="Teammates’ calendars" description="Each teammate connects their own calendar and sets their own hours on the Team page.">
         <Button size="tap" variant="outline" className={actionClass} asChild><a href="/app/team">Open the Team page</a></Button>
@@ -642,7 +850,7 @@ const DELETE_PROBLEMS: Record<string, string> = {
 const SIGN_IN_TO_DELETE = `/login?next=${encodeURIComponent("/app/settings/data?delete=open")}`
 
 export function DataSection() {
-  const { settings, text, bind } = useSettings()
+  const { settings } = useSettings()
   const [params] = useSearchParams()
   const deleteParam = params.get("delete")
   const deleteBack = deleteParam === "open" || deleteParam === "signin" || (deleteParam && Object.prototype.hasOwnProperty.call(DELETE_PROBLEMS, deleteParam)) ? deleteParam : null
@@ -665,14 +873,9 @@ export function DataSection() {
   }, [deleteBack, badPassword, badConfirm, askPassword])
   return (
     <>
-      <SettingsCard title="Download your data" description="Files save straight to this phone or computer. Nothing is emailed.">
+      <SettingsCard title="Download your data" description="We keep every call until you delete it. Files save straight to this phone or computer.">
         <DownloadRow title="Calls spreadsheet (.csv)" text="Every call: date, caller, callback number, address, problem and outcome. Opens in Excel or Google Sheets." href={`/api/app/shops/${encodeURIComponent(settings.shopId)}/calls.csv`} />
         <DownloadRow title="Everything (.json)" text="Settings, calls, transcripts, follow-ups and appointments in one file, for moving to another system. Recordings aren’t included." href="/app/account/export" />
-      </SettingsCard>
-      <SettingsCard title="Keep call records for" description="Older calls, transcripts and recordings are deleted for good. Jobs on your calendar stay.">
-        <Field label="Keep for" className="sm:max-w-60">
-          <select className={selectClass} {...bind("dataRetentionDays")}>{unique([30, 60, 90, 180, 365, Number(text("dataRetentionDays"))]).map((days) => <option key={days} value={days}>{days} days</option>)}</select>
-        </Field>
       </SettingsCard>
       <SettingsCard title="Sign out">
         <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-center sm:gap-6">
