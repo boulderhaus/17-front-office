@@ -31,16 +31,16 @@ describe("the line's status in the menu and on Calls", () => {
     expect(status).toMatchObject({ tone: "on", label: "Answering calls you miss" });
   });
 
-  it("a changed choice whose new code isn't dialed yet: Dial your new code", () => {
+  it("a changed choice whose new code (or iPhone switch) isn't done yet: Finish your change", () => {
     const status = lineStatus(withLine({ confirmedAt: "2026-11-25T10:00:00Z", check: { status: "passed" }, business: { everyCallOn: false, update: { clearFirst: null, leavingEveryCall: false }, plan: { on: "*72" } } }));
-    expect(status).toMatchObject({ tone: "pending", label: "Dial your new code", to: "/app/start?step=forward" });
+    expect(status).toMatchObject({ tone: "pending", label: "Finish your change", to: "/app/start?step=forward" });
   });
 
-  it("calls reach Otto but not the way the owner picked: Dial your new code, never Not getting calls yet", () => {
+  it("calls reach Otto but not the way the owner picked: never Not getting calls yet", () => {
     const forwardsAll = lineStatus(withLine({ mode: "overflow", confirmedAt: "2026-11-25T10:00:00Z", check: { status: "forwards_all", choice: "ring-first", code: "*71" }, business: { everyCallOn: false, update: null, plan: { on: "*71" } } }));
     expect(forwardsAll).toMatchObject({ tone: "pending", label: "Dial your new code", detail: "Every call goes to Otto until you do.", to: "/app/start?step=forward" });
     const ringsFirst = lineStatus(withLine({ mode: "always", confirmedAt: "2026-11-25T10:00:00Z", check: { status: "rings_first", choice: "every-call", code: "*72 941 555 0100" } }));
-    expect(ringsFirst).toMatchObject({ tone: "pending", label: "Dial your new code", detail: "Your phone still rings first." });
+    expect(ringsFirst).toMatchObject({ tone: "pending", label: "Finish your change", detail: "Your phone still rings first." });
   });
 
   it("billing, pause, setup and the demo keep their own words", () => {

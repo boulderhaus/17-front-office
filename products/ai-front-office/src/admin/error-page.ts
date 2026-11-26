@@ -1,3 +1,4 @@
+import { NO_SWITCH_LINK, OLDER_IPHONE_LINE, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS } from "../domain/forwarding-steps.js";
 import { escapeHtml as e } from "./render.js";
 
 /**
@@ -23,8 +24,10 @@ a:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
  * number, big, with the one way this phone can dial it (Android: a link that opens the dialer filled in; iPhone:
  * press and hold to copy, then paste in Phone). One code per screen, never two that could be dialed as one string:
  * when our test found every call still forwarded, the clear code comes first and "Next" opens the shop's code.
+ * `settings` (every call, or clearing it, on a GSM-family iPhone): the iPhone's Call Forwarding switch instead, with
+ * the code flow unchanged behind "Don't see Call Forwarding?" (forwardingSteps decides).
  */
-export function renderDialHandoff(input: { businessNumber: string; code: string | null; what: string; dialLink: string | null; device: "iphone" | "android" | "other"; family?: string | null; clearFirst?: { code: string; dialLink: string | null } | null; nextHref?: string | null }): string {
+export function renderDialHandoff(input: { businessNumber: string; code: string | null; what: string; dialLink: string | null; device: "iphone" | "android" | "other"; family?: string | null; clearFirst?: { code: string; dialLink: string | null } | null; nextHref?: string | null; settings?: { ottoNumber: string; digits: string } | null }): string {
   const clearing = Boolean(input.clearFirst);
   const code = clearing ? input.clearFirst!.code : input.code;
   const link = clearing ? input.clearFirst!.dialLink : input.dialLink;
@@ -33,8 +36,14 @@ export function renderDialHandoff(input: { businessNumber: string; code: string 
   const how = input.device === "android" && link ? `<a class="back" href="${e(link)}">Tap to dial</a><p class="next">Then tap Call.</p>`
     : input.device === "iphone" ? `<ol><li>Press and hold the code, tap Copy.</li><li>Open Phone, tap Keypad.</li><li>Press and hold the number line, tap Paste, then Call.</li></ol>`
       : `<p class="next">Dial it in your Phone app’s keypad and tap Call.</p>`;
-  const body = !code ? `<p>${e(input.what)}</p>`
-    : `${clearing ? `<p class="next">Every call is still being forwarded. Dial this first to clear it.</p>` : ""}<div class="code">${e(code)}</div>${how}<p class="muted">${e(after)}</p>${clearing && input.nextHref ? `<a class="back alt" href="${e(input.nextHref)}">Next: your code</a>` : ""}`;
+  const next = clearing && input.nextHref ? `<a class="back alt" href="${e(input.nextHref)}">Next: your code</a>` : "";
+  const codeFlow = !code ? `<p>${e(input.what)}</p>`
+    : `${clearing ? `<p class="next">Every call is still being forwarded. Dial this first to clear it.</p>` : ""}<div class="code">${e(code)}</div>${how}<p class="muted">${e(after)}</p>${next}`;
+  const settings = input.settings && code ? input.settings : null;
+  const body = !settings ? codeFlow
+    : clearing
+      ? `<p class="next">Every call is still being forwarded. Turn that off first.</p><p>${e(SETTINGS_OFF_LINE)}</p>${next}<details><summary>${e(NO_SWITCH_LINK)}</summary><div class="alt-flow">${codeFlow.replace(next, "")}</div></details>`
+      : `<div class="num">${e(settings.ottoNumber)}</div><button type="button" class="back" data-copy="${e(settings.digits)}" hidden>Copy number</button><p class="muted" data-copy-hint>Press and hold the number, tap Copy.</p><ol>${SETTINGS_ON_STEPS.map((step) => `<li>${e(step)}</li>`).join("")}</ol><p class="muted">${e(OLDER_IPHONE_LINE)}</p><details><summary>${e(NO_SWITCH_LINK)}</summary><div class="alt-flow">${codeFlow}</div></details><script src="/assets/copy-number.js" defer></script>`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><meta name="referrer" content="no-referrer"><meta name="format-detection" content="telephone=no"><title>Your forwarding code · Call Otto</title><style>
 :root{--ink:#0b2545;--paper:#faf8f1;--muted:#5d6676;--yellow:#e9f447;--border:#e6e1d3}
 *{box-sizing:border-box}body{margin:0;min-height:100dvh;background:var(--paper);color:var(--ink);font:400 17px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -42,11 +51,16 @@ header{display:flex;align-items:center;min-height:56px;padding:0 16px;border-bot
 .brand{font-weight:650;font-size:18px}.brand em{font-family:Georgia,serif;font-style:italic;font-weight:500}
 main{max-width:34rem;margin:0 auto;padding:28px 16px 48px;display:grid;gap:14px}
 h1{margin:0;font-size:24px;line-height:1.25;text-wrap:balance}
-.code{padding:14px 8px;border:2px solid var(--ink);border-radius:12px;background:var(--yellow);text-align:center;font:700 clamp(20px,6.4vw,28px)/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;user-select:all;-webkit-user-select:all;overflow-wrap:anywhere}
+.code,.num{padding:14px 8px;border:2px solid var(--ink);border-radius:12px;background:var(--yellow);text-align:center;font:700 clamp(20px,6.4vw,28px)/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;user-select:all;-webkit-user-select:all;overflow-wrap:anywhere}
 p{margin:0}.next{font-weight:600}.muted{color:var(--muted);font-size:15px}
 ol{margin:0;padding-left:1.3em;display:grid;gap:6px;font-weight:600}
 .back{display:flex;align-items:center;justify-content:center;min-height:52px;border-radius:10px;background:var(--ink);color:#fff;font-weight:650;text-decoration:none}
 .back.alt{background:#fff;color:var(--ink);border:2px solid var(--ink)}
+button.back{width:100%;border:0;font:inherit;font-weight:650;cursor:pointer}button.back[hidden]{display:none}
+.num{font-family:inherit;white-space:nowrap}
+details summary{display:flex;align-items:center;min-height:44px;cursor:pointer;font-weight:600;text-decoration:underline;text-underline-offset:4px}
+details .alt-flow{display:grid;gap:14px;padding-top:6px}
+summary:focus-visible,button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
 a:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
-</style></head><body><header><span class="brand">Call&nbsp;<em>Otto</em></span></header><main><h1>${clearing ? "Clear the old forwarding on" : "Dial this on"} ${e(input.businessNumber)}</h1>${body}<p class="muted">This link stops working soon. Get a new one on your computer.</p></main></body></html>`;
+</style></head><body><header><span class="brand">Call&nbsp;<em>Otto</em></span></header><main><h1>${clearing ? "Clear the old forwarding on" : settings ? "Forward calls on" : "Dial this on"} ${e(input.businessNumber)}</h1>${body}<p class="muted">This link stops working soon. Get a new one on your computer.</p></main></body></html>`;
 }

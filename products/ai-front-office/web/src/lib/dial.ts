@@ -10,6 +10,9 @@
  */
 export type DialPlatform = "iphone" | "android" | "phone" | "desktop"
 
+// Settings switch or code: one decision, shared with the phone page and the emailed steps (src/domain/forwarding-steps.ts).
+export { forwardingSteps, forwardToDigits, NO_SWITCH_LINK, NO_SWITCH_LINK_DESKTOP, OLDER_IPHONE_LINE, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, type ForwardingSteps } from "../../../src/domain/forwarding-steps.js"
+
 export function dialPlatform(userAgent: string): DialPlatform {
   if (/iPhone|iPad|iPod/i.test(userAgent)) return "iphone"
   if (/Android/i.test(userAgent)) return /Firefox|FxiOS|Focus/i.test(userAgent) ? "phone" : "android"
