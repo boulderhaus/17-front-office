@@ -42,7 +42,7 @@ describe("Privacy and Terms: a document layout that changes no words (LEGAL-01)"
    */
   const EDITS: Array<[now: string, before: string]> = [
     ["A plan’s monthly answered calls are shared by everyone on the team; adding teammates does not add calls.", "Team members are free on every plan; the price is per shop line."],
-    ["Call records are kept until the shop deletes them or closes its account, and a shop can ask us to delete them at any time.", `Call records are retained for ${config.dataRetentionDays} days unless legal or customer obligations require a different period.`],
+    [`Call records are kept until the shop deletes them or closes its account, and a shop can ask us to delete them at any time. When a subscription is cancelled, its call records are deleted ${config.dataRetentionDays} days after it ends.`, `Call records are retained for ${config.dataRetentionDays} days unless legal or customer obligations require a different period.`],
   ];
 
   it("says calls are shared by the team and records are kept until the shop deletes them, never the old lines", () => {

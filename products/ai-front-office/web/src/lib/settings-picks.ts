@@ -8,7 +8,8 @@ const items = (value: string): string[] => value.split(",").map((item) => item.t
 const has = (list: string[], word: string): boolean => list.some((item) => item.toLowerCase() === word.toLowerCase())
 const unique = (list: string[]): string[] => list.filter((item, index) => list.findIndex((other) => other.toLowerCase() === item.toLowerCase()) === index)
 
-export interface Picks { picked: string[]; other: string; hidden: string[] }
+/** `kept`: for a trade ticked from its first service alone, the services the shop really has (saved as they are). */
+export interface Picks { picked: string[]; other: string; hidden: string[]; kept?: Record<string, string[]> }
 
 /**
  * "What you fix": a trade is ticked when all its services are in the list (trades share some, like "Repairs").
@@ -23,14 +24,19 @@ export function splitServices(value: string, trades: Array<{ key: string; servic
     return Boolean(first) && has(list, first!) && !trades.some((other) => other.key !== trade.key && has(other.services, first!))
   }
   const picked = trades.filter((trade) => ownFirst(trade) || trade.services.every((service) => has(list, service))).map((trade) => trade.key)
+  // Ticked from part of its list: saving keeps only the services the shop had, never adds the rest of the trade's.
+  const kept: Record<string, string[]> = {}
+  for (const trade of trades) {
+    if (picked.includes(trade.key) && !trade.services.every((service) => has(list, service))) kept[trade.key] = trade.services.filter((service) => has(list, service))
+  }
   const covered = trades.filter((trade) => picked.includes(trade.key)).flatMap((trade) => trade.services)
   const hidden = list.filter((item) => item.toLowerCase() === "other")
   const other = list.filter((item) => !has(covered, item) && !has(hidden, item))
-  return { picked, other: other.join(", "), hidden }
+  return { picked, other: other.join(", "), hidden, ...(Object.keys(kept).length > 0 ? { kept } : {}) }
 }
 
 export function joinServices(picks: Picks, trades: Array<{ key: string; services: string[] }>): string {
-  const services = trades.filter((trade) => picks.picked.includes(trade.key)).flatMap((trade) => trade.services)
+  const services = trades.filter((trade) => picks.picked.includes(trade.key)).flatMap((trade) => picks.kept?.[trade.key] ?? trade.services)
   return unique([...services, ...items(picks.other), ...picks.hidden]).join(", ")
 }
 

@@ -107,6 +107,18 @@ describe("What you fix", () => {
     expect(splitServices("Repairs", trades).picked).toEqual([]);
   });
 
+  it("never adds a trade's other services when a shop ticked from its first service saves", () => {
+    const trades = TRADES.filter((trade) => trade.key !== "other");
+    const picks = splitServices("Electrical repair", trades);
+    expect(picks.picked).toEqual(["electrical"]);
+    const saved = joinServices({ ...picks, other: "Generators" }, trades);
+    expect(saved).toBe("Electrical repair, Generators");
+    expect(saved).not.toContain("EV chargers");
+    // Unticked and ticked again, the box means the whole trade.
+    const off = joinServices({ ...splitServices(saved, trades), picked: [] }, trades);
+    expect(joinServices({ ...splitServices(off, trades), picked: ["electrical"] }, trades)).toContain("EV chargers");
+  });
+
   it("names the trades the way the website does", async () => {
     const { tradeShortLabel } = await import("../src/domain/trades.js");
     expect(TRADES.filter((trade) => trade.key !== "other").map(tradeShortLabel)).toEqual(["Heating & air", "Plumbing", "Electrical", "Roofing", "Contractors", "Water damage", "Garage doors", "Handyman", "Landscaping", "Pest control", "Locksmith", "Appliances"]);
