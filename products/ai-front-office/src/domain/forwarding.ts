@@ -93,13 +93,54 @@ export function forwardingChoice(mode: ForwardingMode): ForwardingChoice {
 /**
  * What the owner was set up for when a test last passed: their choice and the code on screen then. Also written,
  * as every call, when the owner leaves every call before any test proved it (they may have dialed forward-all).
- * The owner's choice is the source of truth; we never work out which code is on from how long a call took (a
- * Decline forwards as fast as forward-all, and a 15 s timer can't be told from a 25 s one).
+ * A ring-first test is also timed (ringFirstVerdict): a call that reached Otto with no ring means every call is
+ * still forwarded. The owner is told never to answer or decline the test, so a fast arrival is never a Decline.
  */
 export interface TestedFor {
   mode: ForwardingChoice;
   code: string | null;
   at: string;
+  /** Ring first, tested by our own call: about how long the owner's phone rang before Otto answered. */
+  rangSeconds?: number | null;
+  /** Proven by our own timed call (every call: it reached Otto with no ring). A test from another phone isn't. */
+  timed?: boolean;
+}
+
+/**
+ * Ring-first test, timed by our own check call: from the moment Telnyx accepted our call to the moment the forwarded
+ * call reached Otto (Telnyx's own event timestamp, so a slow or retried webhook never stretches it).
+ * Forward-all (or a phone that turns the call away at once) gets there in about 2-4 s with no ring. The shortest
+ * ring-first choice is 10 s of ringing on top of call setup, so a ring-first that works takes about 12 s.
+ * Under this many ms the phone never rang: every call is still being forwarded.
+ */
+export const RING_FIRST_AT_ONCE_MS = 8_000;
+/** About how long call setup takes before the owner's phone starts ringing; left out of "it rang about N seconds". */
+export const CALL_SETUP_MS = 2_000;
+/**
+ * Every call picked, but our call took this long to reach Otto: the phone rang first (the ring-first code, or no
+ * every-call code dialed yet). Above forward-all's slowest arrival, at the shortest ring-first timer.
+ */
+export const EVERY_CALL_RANG_MS = 12_000;
+/** Nothing reached Otto this long after our test call went out (Verizon's ~30 s ring included): it isn't forwarding. */
+export const NOT_FORWARDING_AFTER_MS = 45_000;
+/** A setup-helper call this old with no recorded end is over (a lost hangup webhook never blocks timing for good). */
+export const SETUP_CALL_STALE_MS = 15 * 60_000;
+
+export type RingFirstVerdict = "at_once" | "rang";
+
+/** What a ring-first test's timing proves: forwarded at once (forward-all still on) or rang first. */
+export function ringFirstVerdict(afterMs: number): RingFirstVerdict {
+  return Number.isFinite(afterMs) && afterMs >= RING_FIRST_AT_ONCE_MS ? "rang" : "at_once";
+}
+
+/** What an every-call test's timing proves: reached Otto at once, or the phone rang first (every call isn't on). */
+export function everyCallVerdict(afterMs: number): RingFirstVerdict {
+  return Number.isFinite(afterMs) && afterMs >= EVERY_CALL_RANG_MS ? "rang" : "at_once";
+}
+
+/** About how long the phone rang, in whole seconds, for "it rang about N seconds" (call setup left out). */
+export function rangSeconds(afterMs: number): number {
+  return Math.max(1, Math.round((afterMs - CALL_SETUP_MS) / 1_000));
 }
 
 export function parseTestedFor(value: string | null | undefined): TestedFor | null {
@@ -107,7 +148,7 @@ export function parseTestedFor(value: string | null | undefined): TestedFor | nu
   try {
     const parsed = JSON.parse(value) as Partial<TestedFor> | null;
     if (!parsed || (parsed.mode !== "every-call" && parsed.mode !== "ring-first")) return null;
-    return { mode: parsed.mode, code: typeof parsed.code === "string" ? parsed.code : null, at: typeof parsed.at === "string" ? parsed.at : "" };
+    return { mode: parsed.mode, code: typeof parsed.code === "string" ? parsed.code : null, at: typeof parsed.at === "string" ? parsed.at : "", rangSeconds: typeof parsed.rangSeconds === "number" && Number.isFinite(parsed.rangSeconds) ? parsed.rangSeconds : null, ...(parsed.timed === true ? { timed: true } : {}) };
   } catch {
     return null;
   }

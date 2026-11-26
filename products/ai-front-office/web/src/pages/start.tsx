@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom"
 import { ArrowLeft, ArrowRight, CalendarClock, Check, CheckCircle2, Clock3, Loader2, MessageSquareText, Phone, PhoneCall } from "lucide-react"
 import { BrandMark } from "@/components/app/bits"
+import { AppShell } from "@/components/app/shell"
 import { CallAlertsCard } from "@/components/app/call-alerts"
 import { ForwardingCard } from "@/components/app/forwarding-card"
 import { Button } from "@/components/ui/button"
@@ -64,9 +65,11 @@ export function StartPage() {
     // Run once per visit, as soon as the dashboard is loaded.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dashboard])
-  useEffect(() => { document.title = "Set up · Call Otto" }, [])
   // Each step opens at its heading, never at the old step's scroll position (under the sticky header).
   const stepParam = params.get("step")
+  const inApp = Boolean(dashboard?.onboarding.completed) && stepParam === "forward"
+  // The in-app version (below) is titled by the app shell.
+  useEffect(() => { if (!inApp) document.title = "Set up · Call Otto" }, [inApp])
   useEffect(() => { window.scrollTo(0, 0) }, [stepParam])
   // Pin the step once paid, so a background refresh (e.g. forwarding just confirmed) never jumps the screen.
   useEffect(() => {
@@ -83,6 +86,17 @@ export function StartPage() {
   const confirming = Boolean(sessionId) && (activation === null || activation === "running")
   const go = (next: Step) => setParams({ step: next })
   const current = STEPS.find((item) => item.id === step)!
+  // Changing how calls are answered after setup (from Settings, or a "finish forwarding" link): the same card inside
+  // the normal app, never the signup steps and "You're set" again.
+  if (dashboard.onboarding.completed && step === "forward") {
+    // From Settings it's a change; from Calls or the status line it's finishing (or fixing) forwarding.
+    const fromSettings = params.get("from") === "settings"
+    return (
+      <AppShell title={fromSettings ? "Change how calls are answered" : "Forward your calls"} back={fromSettings ? { to: "/app/settings/answering", label: "Settings" } : { to: "/app", label: "Calls" }}>
+        <div className="grid max-w-xl gap-4"><ForwardingCard dashboard={dashboard} inApp /></div>
+      </AppShell>
+    )
+  }
   // A standard back arrow, top-left, on every step after paying: All set goes back to forwarding, and
   // forwarding (the card is already paid) goes back to Calls, where "Continue setup" brings the owner back.
   const back: Step | "calls" | null = step === "done" ? "forward" : step === "forward" ? "calls" : null
@@ -229,14 +243,21 @@ function ActivationNote({ activation, dashboard, retry }: { activation: Activati
 }
 
 function ForwardStep({ dashboard, next }: { dashboard: ApiDashboard; next: () => void }) {
+  // The test just passed for today's choice: straight to "You're set" (green check, full bar), no extra tap.
+  const proven = dashboard.line.check.status === "passed" && Boolean(dashboard.line.confirmedAt) && !dashboard.line.business.update
+  const was = useRef(proven)
+  useEffect(() => {
+    if (proven && !was.current) next()
+    was.current = proven
+  }, [proven, next])
   return (
     <>
       <Heading oneLine title="Send your calls to Call Otto" />
       <ForwardingCard
         dashboard={dashboard}
         footer={({ confirmed }) => (confirmed || (!dashboard.line.number && dashboard.line.business.number) ? (
-          <div className="grid gap-2 border-t pt-4 md:flex md:items-center">
-            <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} onClick={next}>Finish setup<ArrowRight /></Button>
+          <div className="grid gap-2 border-t pt-4">
+            <Button size="tap" variant="brand" className="h-14 w-full text-base lg:h-12" onClick={next}>Finish setup<ArrowRight /></Button>
           </div>
         ) : null)}
       />
@@ -279,7 +300,7 @@ function DoneStep({ dashboard, activation, toForward }: { dashboard: ApiDashboar
         <div className="grid justify-items-start gap-4">
           <span className="grid size-14 place-items-center rounded-full bg-amber-500 text-white shadow-[0_0_0_6px_rgba(245,158,11,.15)]"><PhoneCall className="size-7" strokeWidth={2.5} /></span>
           <Heading title="One step left">{dashboard.line.confirmedAt ? "Your last test didn’t reach Otto. Test again to finish." : "Your line is on, but calls aren’t reaching it yet. Turn on forwarding and test it."}</Heading>
-          <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")} onClick={toForward}>Turn on forwarding<ArrowRight /></Button>
+          <Button size="tap" variant="brand" className="h-14 w-full text-base lg:h-12" onClick={toForward}>Turn on forwarding<ArrowRight /></Button>
         </div>
       ) : (
         <div className="grid justify-items-start gap-4">
@@ -302,7 +323,7 @@ function DoneStep({ dashboard, activation, toForward }: { dashboard: ApiDashboar
       </Card>
       <CallAlertsCard />
       {/* With forwarding off, "Turn on forwarding" above is the one main button; this one steps back. */}
-      <Button size="tap" variant={notForwarding ? "outline" : "brand"} className={cn(tapWidth, "h-14 text-base lg:h-12", notForwarding && "border-2 border-brand-ink bg-card text-brand-ink")} disabled={busy} onClick={() => void finish()}>{busy ? <Loader2 className="animate-spin" /> : null}See my calls<ArrowRight /></Button>
+      <Button size="tap" variant={notForwarding ? "outline" : "brand"} className={cn("h-14 w-full text-base lg:h-12", notForwarding && "border-2 border-brand-ink bg-card text-brand-ink")} disabled={busy} onClick={() => void finish()}>{busy ? <Loader2 className="animate-spin" /> : null}See my calls<ArrowRight /></Button>
       <p className="text-sm text-muted-foreground">Change your greeting, service area or hours anytime in <Link className="py-3 font-semibold underline underline-offset-4" to="/app/settings">Settings</Link>.</p>
     </>
   )

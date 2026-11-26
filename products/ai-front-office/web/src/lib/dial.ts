@@ -1,9 +1,9 @@
 /**
  * How the owner dials a forwarding code on this device. Pure functions (no DOM), so tests can import them.
  *
- * - iPhone (any browser): never the code in a tel: link. iOS 27 blocks forwarding codes in links with a scary
- *   "Call Forwarding Link Blocked" alert, so the owner copies the code, we try to open the Phone keypad with a bare
- *   tel: (no number) once it's copied, and they paste it (or type it) there.
+ * - iPhone (any browser): never a tel: link at all. iOS 27 blocks forwarding codes in links ("Call Forwarding Link
+ *   Blocked"), and a bare tel: shows an empty Call sheet whose Call does nothing (the Nov 26 walk). The button copies
+ *   the code and one line says exactly where to paste it.
  * - Android Chrome / Samsung Internet: a tel: link opens the dialer with the code filled in (# must be %23).
  * - Firefox on Android blocks tel: links with * or #: copy instead.
  * - A computer can't dial: show the code and a QR code that opens this page on their phone.
@@ -66,41 +66,37 @@ export function ringChoicesWith(current: number): Array<{ rings: number; seconds
   return [...RING_CHOICES, { rings: current, seconds, label }].sort((left, right) => left.rings - right.rings)
 }
 
-/** How long the page may stay in front after we ask iOS to open Phone before we say how to open it by hand. */
-export const OPEN_PHONE_WAIT_MS = 1_200
-
 /**
- * iPhone "Copy code & open Phone", all from the one tap: copy the code, and once it's copied open the Phone app's
- * keypad with a bare `tel:` (never the code itself: iOS blocks forwarding codes in links). If the copy fails (or
- * there's no clipboard), the page stays put and `onCopied(false)` says to type the code: opening Phone then would
- * leave them with nothing to paste and our message hidden behind it. If the page is still showing after
- * OPEN_PHONE_WAIT_MS (no visibilitychange to hidden), Phone didn't open: `onStayed` shows the one-line instruction.
- *
- * NEEDS A REAL-IPHONE CHECK: a bare tel: opened the dialer from an app (Apple forums thread 749906), but nobody has
- * confirmed it from Safari, nor that Safari still follows it once the copy has resolved (after the tap's own turn).
- * If Safari shows an error or ignores it, drop the tel: step and keep copy + the line.
+ * Copy a code from a tap: the Clipboard API first, then the old hidden-textarea copy (`fallback`) for browsers that
+ * refuse it. Never navigates anywhere. True when it was copied.
  */
-export function copyAndOpenPhone(code: string, env: {
-  clipboard: { writeText: (text: string) => Promise<void> } | undefined
-  location: { href: string }
-  document: { readonly visibilityState: string; addEventListener: (type: "visibilitychange", listener: () => void) => void; removeEventListener: (type: "visibilitychange", listener: () => void) => void }
-  setTimeout: (run: () => void, ms: number) => unknown
-  onCopied: (copied: boolean) => void
-  onStayed: () => void
-}): Promise<void> {
-  if (!env.clipboard) {
-    env.onCopied(false)
-    return Promise.resolve()
+export async function copyText(text: string, env: { clipboard: { writeText: (text: string) => Promise<void> } | undefined; fallback: (text: string) => boolean }): Promise<boolean> {
+  if (env.clipboard) {
+    try {
+      await env.clipboard.writeText(text)
+      return true
+    } catch {
+      // Denied or not allowed here: try the old way below.
+    }
   }
-  return env.clipboard.writeText(code).then(() => {
-    env.onCopied(true)
-    let left = false
-    const hidden = () => { if (env.document.visibilityState === "hidden") left = true }
-    env.document.addEventListener("visibilitychange", hidden)
-    env.location.href = "tel:"
-    env.setTimeout(() => {
-      env.document.removeEventListener("visibilitychange", hidden)
-      if (!left && env.document.visibilityState === "visible") env.onStayed()
-    }, OPEN_PHONE_WAIT_MS)
-  }, () => env.onCopied(false))
+  try {
+    return env.fallback(text)
+  } catch {
+    return false
+  }
+}
+
+/** Where to put a copied code, on this device, in one line. */
+export function pasteLine(platform: DialPlatform): string {
+  if (platform === "iphone") return "Open Phone, tap Keypad, press and hold the number line, tap Paste, then Call."
+  if (platform === "desktop") return "On your phone: open Phone, tap Keypad, type the code, then Call."
+  return "Open your Phone app’s keypad, paste the code, then Call."
+}
+
+/** What the phone shows once the code goes through, said right before they dial so it never looks like an error. */
+export function afterDialLine(family: string | null | undefined, platform: DialPlatform): string {
+  if (family === "verizon") return "You’ll hear a tone. Hang up and come back."
+  if (platform === "iphone") return "Your carrier shows a gray box that says Succeeded. Tap Dismiss and come back."
+  if (platform === "desktop") return "Your phone then shows a box that says it worked. Tap Dismiss or OK."
+  return "Your phone shows a message that it worked. Close it and come back."
 }

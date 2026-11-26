@@ -9,7 +9,7 @@ import { createDemoConfig } from "../src/domain/config.js";
 import { carrierFamily, forwardingChoice, forwardingOffInstruction, forwardingPlan, forwardsBackToOtto, isForwardAllCode, mayForwardAll, parseTestedFor, RING_CHOICES, ringChoicesWith, ringSeconds, type TestedFor } from "../src/domain/forwarding.js";
 import { forwardingCheckStatus, forwardingUpdate } from "../src/http/owner-api-model.js";
 import { NotificationHeldError } from "../src/ports.js";
-import { codeChunks, copyAndOpenPhone, dialHref, dialPlatform, OPEN_PHONE_WAIT_MS, RING_CHOICES as WEB_RING_CHOICES, ringChoicesWith as webRingChoicesWith, ringSeconds as webRingSeconds, spokenCode, VERIZON_RING_LINE } from "../web/src/lib/dial.js";
+import { afterDialLine, codeChunks, copyText, dialHref, dialPlatform, pasteLine, RING_CHOICES as WEB_RING_CHOICES, ringChoicesWith as webRingChoicesWith, ringSeconds as webRingSeconds, spokenCode, VERIZON_RING_LINE } from "../web/src/lib/dial.js";
 import { pauseHint } from "../web/src/lib/pause-hint.js";
 import { loginReturningHere } from "../web/src/lib/login-next.js";
 import { safeNext } from "../src/http/owner-sign-in.js";
@@ -109,7 +109,7 @@ describe("what the owner was set up for when a test last passed", () => {
     expect(forwardingChoice("always")).toBe("every-call");
     expect(forwardingChoice("overflow")).toBe("ring-first");
     expect(forwardingChoice("after_hours")).toBe("ring-first");
-    expect(parseTestedFor(JSON.stringify(tested("every-call", all.on)))).toEqual(tested("every-call", all.on));
+    expect(parseTestedFor(JSON.stringify(tested("every-call", all.on)))).toEqual({ ...tested("every-call", all.on), rangSeconds: null });
     expect(parseTestedFor(JSON.stringify({ mode: "office", code: null }))).toBeNull();
     expect(parseTestedFor("not json")).toBeNull();
     expect(parseTestedFor(null)).toBeNull();
@@ -334,70 +334,30 @@ describe("dialing a code on this device", () => {
   });
 });
 
-describe("iPhone: Copy code & open Phone", () => {
-  function fakeIphone(options: { clipboard?: boolean; leaves?: boolean; failCopy?: boolean } = {}) {
-    const events: string[] = [];
-    let visibility: "visible" | "hidden" = "visible";
-    const listeners = new Set<() => void>();
-    let timer: (() => void) | null = null;
-    let waited = 0;
-    const location = { href: "https://app.callotto.example/app/start?step=forward" };
-    const env = {
-      clipboard: options.clipboard === false ? undefined : { writeText: async (text: string) => { events.push(`copy:${text}`); if (options.failCopy) throw new Error("denied"); } },
-      location,
-      document: {
-        get visibilityState() { return visibility; },
-        addEventListener: (_type: string, listener: () => void) => { listeners.add(listener); },
-        removeEventListener: (_type: string, listener: () => void) => { listeners.delete(listener); },
-      },
-      setTimeout: (run: () => void, ms: number) => { timer = run; waited = ms; },
-      onCopied: (copied: boolean) => events.push(copied ? "copied" : "not-copied"),
-      onStayed: () => events.push("stayed"),
-    };
-    const leave = () => { visibility = "hidden"; for (const listener of listeners) listener(); };
-    return { env, events, location, leave, fire: () => timer?.(), waited: () => waited, listeners };
-  }
+describe("iPhone: copy the code, then paste it in Phone", () => {
   const code = "**21*19415550123#";
 
-  it("copies the code, then once it's copied opens Phone with a bare tel:, never the code itself", async () => {
-    const phone = fakeIphone();
-    await copyAndOpenPhone(code, phone.env);
-    expect(phone.location.href).toBe("tel:");
-    expect(phone.location.href).not.toContain("21");
-    expect(phone.events.slice(0, 2)).toEqual([`copy:${code}`, "copied"]);
-    expect(phone.waited()).toBe(OPEN_PHONE_WAIT_MS);
-    expect(OPEN_PHONE_WAIT_MS).toBe(1_200);
+  it("copies with the Clipboard API and never opens a tel: link (the empty Call sheet on the walk)", async () => {
+    const copied: string[] = [];
+    const ok = await copyText(code, { clipboard: { writeText: async (text) => { copied.push(text); } }, fallback: () => { throw new Error("not needed"); } });
+    expect(ok).toBe(true);
+    expect(copied).toEqual([code]);
   });
 
-  it("Phone opened (the page went to the background): no instruction line", async () => {
-    const phone = fakeIphone();
-    await copyAndOpenPhone(code, phone.env);
-    phone.leave();
-    phone.fire();
-    expect(phone.events).not.toContain("stayed");
-    expect(phone.listeners.size).toBe(0);
+  it("falls back to the old copy when the Clipboard API refuses, and says no when both fail", async () => {
+    const denied = { writeText: async () => { throw new Error("denied"); } };
+    expect(await copyText(code, { clipboard: denied, fallback: () => true })).toBe(true);
+    expect(await copyText(code, { clipboard: undefined, fallback: () => true })).toBe(true);
+    expect(await copyText(code, { clipboard: denied, fallback: () => false })).toBe(false);
+    expect(await copyText(code, { clipboard: undefined, fallback: () => { throw new Error("no DOM"); } })).toBe(false);
   });
 
-  it("still on the page after the wait: shows 'Paste it in Phone › Keypad and tap Call.'", async () => {
-    const phone = fakeIphone();
-    await copyAndOpenPhone(code, phone.env);
-    phone.fire();
-    expect(phone.events).toContain("stayed");
-  });
-
-  it("the copy failed: never leaves the page (nothing to paste, and the message would hide behind Phone), says to type it", async () => {
-    const phone = fakeIphone({ failCopy: true });
-    await copyAndOpenPhone(code, phone.env);
-    expect(phone.location.href).not.toBe("tel:");
-    expect(phone.events).toEqual([`copy:${code}`, "not-copied"]);
-    expect(phone.waited()).toBe(0);
-  });
-
-  it("no clipboard: never leaves the page, says to type it", async () => {
-    const phone = fakeIphone({ clipboard: false });
-    await copyAndOpenPhone(code, phone.env);
-    expect(phone.location.href).not.toBe("tel:");
-    expect(phone.events).toEqual(["not-copied"]);
+  it("says exactly where to paste on each device, and what the carrier shows before they dial", () => {
+    expect(pasteLine("iphone")).toBe("Open Phone, tap Keypad, press and hold the number line, tap Paste, then Call.");
+    expect(pasteLine("desktop")).toContain("On your phone");
+    expect(afterDialLine("gsm", "iphone")).toBe("Your carrier shows a gray box that says Succeeded. Tap Dismiss and come back.");
+    expect(afterDialLine("verizon", "iphone")).toBe("You’ll hear a tone. Hang up and come back.");
+    expect(afterDialLine("gsm", "android")).not.toContain("gray box");
   });
 });
 
@@ -418,5 +378,32 @@ describe("the pause warning in Settings", () => {
     expect(pauseHint({ active: true, paused: false, mayForwardAll: true, off: "##002#" })).toBeUndefined();
     expect(pauseHint({ active: true, paused: true, mayForwardAll: false, off: "##002#" })).toBeUndefined();
     expect(pauseHint({ active: false, paused: true, mayForwardAll: true, off: "##002#" })).toBe("Your line turns on after it’s approved. Until then it stays paused.");
+  });
+});
+
+describe("timing a ring-first test", () => {
+  it("under about 8 seconds never rang (every call still forwarded); about 8 or more rang first", async () => {
+    const { ringFirstVerdict, rangSeconds, RING_FIRST_AT_ONCE_MS, NOT_FORWARDING_AFTER_MS } = await import("../src/domain/forwarding.js");
+    expect(RING_FIRST_AT_ONCE_MS).toBe(8_000);
+    expect(ringFirstVerdict(1_500)).toBe("at_once");
+    expect(ringFirstVerdict(3_900)).toBe("at_once");
+    // A slow forward-all (two phone legs plus Otto starting up) is still "never rang".
+    expect(ringFirstVerdict(7_000)).toBe("at_once");
+    expect(ringFirstVerdict(RING_FIRST_AT_ONCE_MS - 1)).toBe("at_once");
+    expect(ringFirstVerdict(RING_FIRST_AT_ONCE_MS)).toBe("rang");
+    expect(ringFirstVerdict(12_000)).toBe("rang");
+    expect(ringFirstVerdict(Number.NaN)).toBe("at_once");
+    // Call setup (about 2 s) is left out of "it rang about N seconds".
+    expect(rangSeconds(12_400)).toBe(10);
+    expect(rangSeconds(200)).toBe(1);
+    expect(NOT_FORWARDING_AFTER_MS).toBe(45_000);
+  });
+
+  it("every call picked: a quick arrival is right; 12 seconds or more means the phone rang first", async () => {
+    const { everyCallVerdict, EVERY_CALL_RANG_MS } = await import("../src/domain/forwarding.js");
+    expect(everyCallVerdict(2_000)).toBe("at_once");
+    expect(everyCallVerdict(9_000)).toBe("at_once");
+    expect(everyCallVerdict(EVERY_CALL_RANG_MS)).toBe("rang");
+    expect(everyCallVerdict(30_000)).toBe("rang");
   });
 });

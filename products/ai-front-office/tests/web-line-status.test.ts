@@ -36,6 +36,13 @@ describe("the line's status in the menu and on Calls", () => {
     expect(status).toMatchObject({ tone: "pending", label: "Dial your new code", to: "/app/start?step=forward" });
   });
 
+  it("calls reach Otto but not the way the owner picked: Dial your new code, never Not getting calls yet", () => {
+    const forwardsAll = lineStatus(withLine({ mode: "overflow", confirmedAt: "2026-11-25T10:00:00Z", check: { status: "forwards_all", choice: "ring-first", code: "*71" }, business: { everyCallOn: false, update: null, plan: { on: "*71" } } }));
+    expect(forwardsAll).toMatchObject({ tone: "pending", label: "Dial your new code", detail: "Every call goes to Otto until you do.", to: "/app/start?step=forward" });
+    const ringsFirst = lineStatus(withLine({ mode: "always", confirmedAt: "2026-11-25T10:00:00Z", check: { status: "rings_first", choice: "every-call", code: "*72 941 555 0100" } }));
+    expect(ringsFirst).toMatchObject({ tone: "pending", label: "Dial your new code", detail: "Your phone still rings first." });
+  });
+
   it("billing, pause, setup and the demo keep their own words", () => {
     expect(lineStatus({ ...base, viewer: { status: "pending_activation" } }).label).toBe("Setting up your line");
     expect(lineStatus({ ...base, shop: { paused: true, pausedForBilling: true } }).label).toBe("Paused for billing");

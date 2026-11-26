@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { latestOnly } from "@/lib/latest"
 import { loginReturningHere } from "@/lib/login-next"
 
 export class ApiError extends Error {
@@ -35,18 +36,22 @@ export function useApi<T extends { csrf?: string }>(path: string | null) {
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(Boolean(path))
+  const order = useRef(latestOnly())
   const load = useCallback(async () => {
     if (!path) return
+    const ticket = order.current.next()
     setLoading(true)
     try {
       const next = await api<T>(path)
+      if (!order.current.isLatest(ticket)) return
       if (next.csrf) setCsrf(next.csrf)
       setData(next)
       setError(null)
     } catch (caught) {
+      if (!order.current.isLatest(ticket)) return
       setError(caught instanceof Error ? caught.message : "Could not load")
     } finally {
-      setLoading(false)
+      if (order.current.isLatest(ticket)) setLoading(false)
     }
   }, [path])
   useEffect(() => {

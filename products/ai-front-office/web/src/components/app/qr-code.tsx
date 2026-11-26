@@ -1,31 +1,24 @@
 import { useEffect, useState } from "react"
+import { qrPixels } from "@/lib/qr"
 
 /**
- * A QR code as an inline SVG (dark squares on white, with the standard 4-module quiet zone), so a computer can
- * hand this page to the owner's phone. The encoder loads only when a QR is shown (computers), never on phones.
+ * A QR code as an inline SVG: pure black on white with the standard 4-module quiet zone, drawn at least `size` CSS
+ * pixels and rounded so each module is whole pixels, so a phone camera reads it off a laptop screen at once.
+ * The encoder loads only when a QR is shown (computers), never on phones.
  */
-export function QrCode({ value, size = 168, label }: { value: string; size?: number; label: string }) {
-  const [path, setPath] = useState<{ d: string; count: number } | null>(null)
+export function QrCode({ value, size = 184, label }: { value: string; size?: number; label: string }) {
+  const [path, setPath] = useState<{ d: string; size: number } | null>(null)
   useEffect(() => {
     let live = true
-    void import("qrcode-generator").then(({ default: qrcode }) => {
-      const qr = qrcode(0, "M")
-      qr.addData(value)
-      qr.make()
-      const count = qr.getModuleCount()
-      let d = ""
-      for (let row = 0; row < count; row += 1) {
-        for (let col = 0; col < count; col += 1) if (qr.isDark(row, col)) d += `M${col + 4} ${row + 4}h1v1h-1z`
-      }
-      if (live) setPath({ d, count })
-    }).catch(() => undefined)
+    void import("@/lib/qr").then(({ qrPath }) => { if (live) setPath(qrPath(value)) }).catch(() => undefined)
     return () => { live = false }
   }, [value])
-  const box = (path?.count ?? 25) + 8
+  const box = path?.size ?? 33
+  const pixels = qrPixels(size, box)
   return (
-    <svg role="img" aria-label={label} width={size} height={size} viewBox={`0 0 ${box} ${box}`} shapeRendering="crispEdges" className="shrink-0 rounded-md border border-brand-ink/15 bg-white">
+    <svg role="img" aria-label={label} width={pixels} height={pixels} viewBox={`0 0 ${box} ${box}`} shapeRendering="crispEdges" className="shrink-0 bg-white">
       <rect width={box} height={box} fill="#ffffff" />
-      {path ? <path d={path.d} fill="#0b2545" /> : null}
+      {path ? <path d={path.d} fill="#000000" /> : null}
     </svg>
   )
 }

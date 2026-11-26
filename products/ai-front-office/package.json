@@ -30,6 +30,8 @@
   "devDependencies": {
     "@types/node": "26.6.6",
     "@types/pg": "8.23.1",
+    "jsqr": "1.4.0",
+    "qrcode-generator": "2.0.4",
     "tsx": "4.23.15",
     "typescript": "7.0.2",
     "vitest": "5.1.1"
