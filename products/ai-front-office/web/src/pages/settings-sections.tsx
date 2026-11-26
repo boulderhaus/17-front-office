@@ -616,15 +616,16 @@ function DaysOffCard() {
   const [first, setFirst] = useState("")
   const [last, setLast] = useState("")
   const end = last && last >= first ? last : first
-  const problem = !first ? null
-    : first < today ? "Pick today or a later day."
+  // A first-day problem shows under the first day; the rest under the last day.
+  const firstProblem = first && first < today ? "Pick today or a later day." : null
+  const problem = !first || firstProblem ? null
     : last && last < first ? "The last day is before the first."
     : spanDays(first, end) > MAX_DAYS_OFF_SPAN ? `Up to ${MAX_DAYS_OFF_SPAN} days in a row.`
     : list.some((entry) => entry.start === first && entry.end === end) ? "That’s already on your list."
     : list.length >= MAX_DAYS_OFF ? `You can keep up to ${MAX_DAYS_OFF}. Remove one first.`
     : null
   const add = () => {
-    if (!first || problem) return
+    if (!first || firstProblem || problem) return
     set("daysOff", joinDaysOff([...list, { start: first, end }].sort((left, right) => left.start.localeCompare(right.start))))
     setFirst("")
     setLast("")
@@ -648,10 +649,10 @@ function DaysOffCard() {
         </ul>
       ) : <p className="text-[15px] text-muted-foreground">No days off yet.</p>}
       <Pair>
-        <Field label="First day off"><Input type="date" className={cn(fieldClass, "appearance-none")} min={today} value={first} onChange={(event) => { setFirst(event.target.value); if (last && event.target.value > last) setLast("") }} /></Field>
+        <Field label="First day off" error={firstProblem}><Input type="date" className={cn(fieldClass, "appearance-none")} min={today} value={first} onChange={(event) => { setFirst(event.target.value); if (last && event.target.value > last) setLast("") }} /></Field>
         <Field label="Last day off" hint="Leave it empty for one day." error={problem}><Input type="date" className={cn(fieldClass, "appearance-none")} min={first || today} value={last} onChange={(event) => setLast(event.target.value)} /></Field>
       </Pair>
-      <Button type="button" variant="outline" size="tap" className={actionClass} disabled={!first || Boolean(problem)} onClick={add}><Plus />Add days off</Button>
+      <Button type="button" variant="outline" size="tap" className={actionClass} disabled={!first || Boolean(firstProblem || problem)} onClick={add}><Plus />Add days off</Button>
     </SettingsCard>
   )
 }
