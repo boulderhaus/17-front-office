@@ -1,6 +1,9 @@
 import { renderOwnerSignup } from "../src/admin/render.js";
 import { createHash, generateKeyPairSync, randomUUID, sign, type KeyObject } from "node:crypto";
 import { createServer, type Server } from "node:http";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
 import { demoEnvironment } from "../src/config/environment.js";
@@ -42,7 +45,7 @@ afterEach(async () => {
   server = null;
 });
 
-async function harness(env: Record<string, string> = {}): Promise<Harness> {
+async function harness(env: Record<string, string> = {}, ownerWebDir?: string): Promise<Harness> {
   const store = new InMemoryStore();
   await store.saveConfig(createDemoConfig());
   let nowMs = Date.parse("2026-03-02T15:00:00.000Z");
@@ -83,6 +86,7 @@ async function harness(env: Record<string, string> = {}): Promise<Harness> {
       ...env,
     }),
     store, calendar: new InMemoryCalendar(), clock: { now: () => new Date(nowMs) }, integrations: {}, logger: () => undefined,
+    ...(ownerWebDir ? { ownerWeb: { dir: ownerWebDir } } : {}),
   }));
   await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -465,6 +469,59 @@ describe("accounts without a password", () => {
     const deleted = await remove(fresh, freshCsrf);
     expect(deleted.status).toBe(303);
     expect(await h.store.getOwnerAccountByEmail("nopass@synthetic.example")).toBeNull();
+  });
+
+  it("lets an owner who forgot their password delete after a fresh Google or email-link sign-in, and says what went wrong next to the form", async () => {
+    // The React app is served, so a refused delete can go back to its delete card.
+    const webDir = await mkdtemp(join(tmpdir(), "afo-web-"));
+    await writeFile(join(webDir, "index.html"), '<!doctype html><div id="root"></div>');
+    const h = await harness({}, webDir);
+    await ownerAccount(h, "forgot@synthetic.example");
+    await requestLink(h, "forgot@synthetic.example");
+    const signedIn = cookieOf(await useLink(h, (await queuedLinks(h))[0]!.token), "afo_owner")!;
+    const csrfOf = async (cookie: string) => (await (await fetch(`${h.baseUrl}/api/app/settings`, { headers: { cookie } })).json() as { csrf: string }).csrf;
+    const csrf = await csrfOf(signedIn);
+    const remove = (cookie: string, token: string, fields: Record<string, string>, page = false) => fetch(`${h.baseUrl}/app/account/delete`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded", ...(page ? { accept: "text/html" } : {}) }, body: new URLSearchParams({ csrf: token, ...fields }) });
+
+    h.advance(11 * 60_000);
+    // Old sign-in: the password is needed, and a browser goes back to the form with the reason, not an error page.
+    expect((await remove(signedIn, csrf, { confirm: "DELETE" })).status).toBe(403);
+    // No password typed (the box was hidden while the sign-in was fresh): ask for it, don't call it wrong.
+    expect((await remove(signedIn, csrf, { confirm: "DELETE" }, true)).headers.get("location")).toBe("/app/settings/data?delete=signin");
+    const wrong = await remove(signedIn, csrf, { confirm: "DELETE", password: "not-my-password" }, true);
+    expect(wrong.status).toBe(303);
+    expect(wrong.headers.get("location")).toBe("/app/settings/data?delete=password");
+    expect((await remove(signedIn, csrf, { confirm: "delet", password: "long-password-for-tests" }, true)).headers.get("location")).toBe("/app/settings/data?delete=confirm");
+    expect(await h.store.getOwnerAccountByEmail("forgot@synthetic.example")).not.toBeNull();
+
+    // A fresh sign-in stands in for the forgotten password.
+    h.store.notifications.clear();
+    await requestLink(h, "forgot@synthetic.example");
+    const fresh = cookieOf(await useLink(h, (await queuedLinks(h))[0]!.token), "afo_owner")!;
+    expect((await (await fetch(`${h.baseUrl}/api/app/settings`, { headers: { cookie: fresh } })).json() as { signIn: unknown }).signIn).toEqual({ hasPassword: true, recent: true });
+    // A password typed anyway must still be right.
+    const freshCsrf = await csrfOf(fresh);
+    expect((await remove(fresh, freshCsrf, { confirm: "DELETE", password: "not-my-password" })).status).toBe(403);
+    const deleted = await remove(fresh, freshCsrf, { confirm: "DELETE" }, true);
+    expect(deleted.status).toBe(303);
+    expect(deleted.headers.get("location")).toBe("/?deleted=1");
+    expect(await h.store.getOwnerAccountByEmail("forgot@synthetic.example")).toBeNull();
+  });
+
+  it("stops password guessing on delete after 10 tries", async () => {
+    const h = await harness();
+    await ownerAccount(h, "guess@synthetic.example");
+    await requestLink(h, "guess@synthetic.example");
+    const cookie = cookieOf(await useLink(h, (await queuedLinks(h))[0]!.token), "afo_owner")!;
+    const csrf = /name="csrf" value="([^"]+)"/.exec(await (await fetch(`${h.baseUrl}/app/settings`, { headers: { cookie } })).text())![1]!;
+    h.advance(11 * 60_000);
+    const guess = (password: string) => fetch(`${h.baseUrl}/app/account/delete`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, confirm: "DELETE", password }) });
+    // No React app here: a browser gets the error page, never a redirect to a card that isn't there.
+    const page = await fetch(`${h.baseUrl}/app/account/delete`, { method: "POST", redirect: "manual", headers: { cookie, accept: "text/html", "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, confirm: "DELETE", password: "wrong-first" }) });
+    expect(page.status).toBe(403);
+    for (let attempt = 1; attempt < 10; attempt += 1) expect((await guess(`wrong-${attempt}`)).status).toBe(403);
+    expect((await guess("long-password-for-tests")).status).toBe(429);
+    expect(await h.store.getOwnerAccountByEmail("guess@synthetic.example")).not.toBeNull();
   });
 });
 

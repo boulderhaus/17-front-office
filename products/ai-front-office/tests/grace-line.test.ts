@@ -16,7 +16,7 @@ async function harness(options: { voicemail?: boolean } = { voicemail: true }) {
   let now = new Date("2026-11-21T18:00:00.000Z");
   const clock = { now: () => now };
   const api = { status: "active", tenant: null as string | null };
-  const telnyx = { connectionId: "texml_assistant" as string | null, released: [] as string[], patchGate: null as Promise<void> | null, onPatch: null as (() => void) | null };
+  const telnyx = { connectionId: "texml_assistant" as string | null, released: [] as string[], patchGate: null as Promise<void> | null, onPatch: null as (() => void) | null, recordings: [] as string[], recordingDeleteFails: false };
   const calls: Array<{ url: string; method: string }> = [];
   const fetcher = (async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
@@ -35,6 +35,13 @@ async function harness(options: { voicemail?: boolean } = { voicemail: true }) {
       return json({ data: { connection_id: telnyx.connectionId } });
     }
     if (url.endsWith("/v2/phone_numbers/num_synthetic") && method === "DELETE") { telnyx.released.push("number"); return json({}); }
+    if (url.includes("api.telnyx.com/v2/recordings?") && method === "GET") return json({ data: telnyx.recordings.map((id) => ({ id })) });
+    const recording = /api\.telnyx\.com\/v2\/recordings\/([^?/]+)$/.exec(url);
+    if (recording && method === "DELETE") {
+      if (telnyx.recordingDeleteFails) return json({ errors: [{ detail: "synthetic outage" }] }, 503);
+      telnyx.recordings = telnyx.recordings.filter((id) => id !== recording[1]);
+      return json({});
+    }
     throw new Error(`Unexpected outbound request in test: ${method} ${url}`);
   }) as typeof fetch;
 
@@ -316,6 +323,38 @@ describe("billing grace line", () => {
       expect(deleted.status).toBe(303);
       expect(h.telnyx.connectionId).toBeNull();
       expect(h.telnyx.released.sort()).toEqual(["assistant", "number"]);
+    } finally { await h.close(); }
+  });
+
+  it("keeps the line when a recording can't be deleted, so deleting again works", async () => {
+    const h = await harness();
+    try {
+      await h.setStatus("canceled");
+      const at = "2026-11-21T18:00:00.000Z";
+      await h.store.saveCall({
+        id: "33333333-3333-4333-8333-333333333333", tenantId: h.tenantId, providerCallId: "v3:recorded-call", fromNumber: CALLER, fromNumberVerified: true,
+        startedAt: at, endedAt: at, durationSeconds: 60,
+        fields: { callerName: null, companyName: null, callbackNumber: null, address: null, serviceCategory: null, serviceCategoryConfidence: 0, problemDescription: null, equipmentDetails: null, accessNotes: null, requestedStart: null, explicitSlotConfirmation: false, diagnosticFeeAccepted: false, humanRequested: false, confidence: 0 },
+        emergency: null, outcome: "message_taken", transcript: null, recordingUrl: "https://recordings.example.test/1.mp3", consentState: "disclosed",
+        billingDisposition: "billable", qualityFlags: [], createdAt: at, updatedAt: at,
+      } as never);
+      h.telnyx.recordings = ["rec_synthetic"];
+      h.telnyx.recordingDeleteFails = true;
+      const page = await (await fetch(`${h.baseUrl}/app/settings`, { headers: { cookie: h.cookie } })).text();
+      const csrf = /name="csrf" value="([^"]+)"/.exec(page)![1]!;
+      const remove = () => fetch(`${h.baseUrl}/app/account/delete`, {
+        method: "POST", redirect: "manual", headers: { cookie: h.cookie, "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ csrf, confirm: "DELETE", password: "synthetic-password-42" }),
+      });
+      expect((await remove()).status).toBe(502);
+      expect(h.telnyx.released).toEqual([]);
+      expect(await h.store.getOwnerAccountByEmail("grace@example.test")).not.toBeNull();
+
+      h.telnyx.recordingDeleteFails = false;
+      expect((await remove()).status).toBe(303);
+      expect(h.telnyx.recordings).toEqual([]);
+      expect(h.telnyx.released.sort()).toEqual(["assistant", "number"]);
+      expect(await h.store.getOwnerAccountByEmail("grace@example.test")).toBeNull();
     } finally { await h.close(); }
   });
 

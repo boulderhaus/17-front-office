@@ -484,7 +484,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   const signIn = createOwnerSignIn({ env: dependencies.env, store: dependencies.store, clock: dependencies.clock, fetcher: (input, init) => (dependencies.fetcher ?? globalThis.fetch)(input, init), limiter, log });
   /** A passwordless account re-confirms risky changes by having signed in within this long. */
   const RECENT_SIGN_IN_MS = 10 * 60_000;
-  const signedInRecently = (session: OwnerSession): boolean => dependencies.clock.now().getTime() - ownerSessionIssuedAt(session) <= RECENT_SIGN_IN_MS;
+  const signedInRecently = (session: OwnerSession): boolean => {
+    const age = dependencies.clock.now().getTime() - ownerSessionIssuedAt(session);
+    return age >= 0 && age <= RECENT_SIGN_IN_MS;
+  };
   const telemetry = dependencies.telemetry ?? noopTelemetry;
   /** Brock's Google calendars and his personal follow-up when the AI setup helper can't finish. */
   const founderCalendars = new FounderCalendars({ store: dependencies.store, env: dependencies.env, clock: dependencies.clock, fetcher: dependencies.fetcher, log });
@@ -1973,21 +1976,37 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (member) throw new HttpError(403, "Only the owner can delete the shop");
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
-      if (form.get("confirm")?.trim().toLowerCase() !== "delete") throw new HttpError(400, "Type DELETE to confirm");
-      // No password on the account (Google, Microsoft or email link): a sign-in in the last 10 minutes stands in for it.
+      // A browser goes back to the delete card with the problem next to the field; the JSON client (and the plain
+      // server-rendered settings, which has no such card) gets the status.
+      const backToCard = wantsPage(request) && Boolean(await loadOwnerWebIndex());
+      const refuse = (status: number, reason: string, message: string): void => {
+        if (backToCard) return redirect(response, `/app/settings/data?delete=${reason}`);
+        throw new HttpError(status, message);
+      };
+      if (form.get("confirm")?.trim().toLowerCase() !== "delete") return refuse(400, "confirm", "Type DELETE to confirm");
+      // Proof it's the owner: a sign-in in the last 10 minutes (Google, Microsoft, email link or password), or the
+      // account's password. An account with no password (Google, Microsoft or email link) has only the first.
+      const typed = form.get("password") ?? "";
       if (isPasswordless(account.passwordHash)) {
-        if (!signedInRecently(session)) throw new HttpError(403, "For your safety, sign in again, then delete within 10 minutes.");
-      } else if (!await verifyOwnerPassword(form.get("password") ?? "", account.passwordHash)) throw new HttpError(403, "Password is incorrect");
+        if (!signedInRecently(session)) return refuse(403, "signin", "For your safety, sign in again, then delete within 10 minutes.");
+      } else if (typed || !signedInRecently(session)) {
+        // The page showed no password box (fresh sign-in) but the 10 minutes ran out before the tap.
+        if (!typed) return refuse(403, "signin", "For your safety, enter your password or sign in again.");
+        if (!limiter.allow(`delete-password:${account.id}`, 10, 15 * 60_000)) return refuse(429, "slow", "Too many tries. Wait 15 minutes or sign in again.");
+        if (!await verifyOwnerPassword(typed, account.passwordHash)) return refuse(403, "password", "That password isn’t right");
+      }
       const subscription = await dependencies.store.getSubscription(account.tenantId);
       // Only once billing has fully ended: anything but a cancelled subscription may still charge.
       if (subscription?.providerSubscriptionId && subscription.status !== "canceled") {
-        throw new HttpError(409, "Cancel your subscription in Billing first. You can delete your account once it has ended.");
+        return refuse(409, "plan", "Cancel your subscription in Billing first. You can delete your account once it has ended.");
       }
-      await pauseLiveRoute(account.tenantId)
-        .catch(() => { throw new HttpError(502, "We couldn't disconnect your Call Otto line. Nothing was deleted; please retry."); });
+      try { await pauseLiveRoute(account.tenantId); } catch { return refuse(502, "line", "We couldn't disconnect your Call Otto line. Nothing was deleted; please retry."); }
+      // Recordings before the line: a failed one leaves the number and assistant in place, so a retry starts clean.
+      try { await deletionService.deleteRecordings(account.tenantId); } catch { return refuse(502, "recording", "A call recording couldn't be deleted. Your line is paused and nothing else was removed; please retry."); }
+      // Never throws; a release that fails is logged and the number is retried by hand. It runs before the store
+      // delete because that removes the record of which number to give back.
       await releaseProvisionedLine(account.tenantId);
-      await deletionService.deleteWorkspace(account.tenantId)
-        .catch(() => { throw new HttpError(502, "A call recording couldn't be deleted. Nothing else was removed; please retry."); });
+      await dependencies.store.deleteWorkspace(account.tenantId);
       log({ level: "warn", event: "owner_workspace_deleted", tenantId: account.tenantId });
       response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/?deleted=1");

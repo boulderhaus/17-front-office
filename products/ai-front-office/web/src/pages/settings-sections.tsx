@@ -537,12 +537,40 @@ function DownloadRow({ title, text, href }: { title: string; text: string; href:
   )
 }
 
+/** Back from a refused delete: what went wrong, said next to the form. */
+const DELETE_PROBLEMS: Record<string, string> = {
+  confirm: "Type DELETE in the first box.",
+  password: "That password isn’t right. Try again, or sign in again with Google or an email link instead.",
+  slow: "Too many tries. Wait 15 minutes, or sign in again with Google or an email link.",
+  plan: "Cancel your plan first. You can delete once it has ended.",
+  line: "We couldn’t disconnect your line, so nothing was deleted. Try again.",
+  recording: "A call recording couldn’t be deleted. Your line is paused and nothing else was removed. Try again.",
+}
+/** Re-sign-in lands back here with the delete form open. */
+const SIGN_IN_TO_DELETE = `/login?next=${encodeURIComponent("/app/settings/data?delete=open")}`
+
 export function DataSection() {
   const { settings, text, bind } = useSettings()
-  const [confirmDelete, setConfirmDelete] = useState(false)
-  // Signed up with Google, Microsoft or an email link: no password to type, a fresh sign-in instead.
+  const [params] = useSearchParams()
+  const deleteParam = params.get("delete")
+  const deleteBack = deleteParam === "open" || deleteParam === "signin" || (deleteParam && Object.prototype.hasOwnProperty.call(DELETE_PROBLEMS, deleteParam)) ? deleteParam : null
+  const [confirmDelete, setConfirmDelete] = useState(Boolean(deleteBack))
+  // Signed in within the last 10 minutes (any way): that proves it's the owner, no password needed.
+  // Otherwise a password account types its password; Google, Microsoft or email-link accounts sign in again.
   const hasPassword = settings.signIn?.hasPassword ?? true
-  const needsFreshSignIn = !hasPassword && !settings.signIn?.recent
+  const recent = settings.signIn?.recent ?? false
+  const needsFreshSignIn = !hasPassword && !recent
+  const askPassword = hasPassword && !recent
+  const problem = deleteBack === "signin"
+    ? (hasPassword ? "It’s been over 10 minutes since you signed in. Enter your password, or sign in again." : null)
+    : deleteBack && Object.prototype.hasOwnProperty.call(DELETE_PROBLEMS, deleteBack) ? DELETE_PROBLEMS[deleteBack]! : null
+  const badPassword = deleteBack === "password" || deleteBack === "signin"
+  const badConfirm = deleteBack === "confirm"
+  useEffect(() => {
+    if (!deleteBack) return
+    document.getElementById("delete-account")?.scrollIntoView({ block: "center" })
+    document.getElementById(badConfirm ? "delete-confirm" : badPassword && askPassword ? "delete-password" : "delete-problem")?.focus()
+  }, [deleteBack, badPassword, badConfirm, askPassword])
   return (
     <>
       <SettingsCard title="Download your data" description="Files save straight to this phone or computer. Nothing is emailed.">
@@ -565,21 +593,28 @@ export function DataSection() {
           <Button size="tap" variant="outline" className="w-full sm:w-52">Sign out everywhere</Button>
         </form>
       </SettingsCard>
-      <SettingsCard danger title="Delete your account" description="Cancel your plan first. This disconnects your line and deletes every call, transcript, recording, follow-up and setting. Jobs on your calendar stay there.">
+      <SettingsCard danger id="delete-account" title="Delete your account" description="Cancel your plan first. This disconnects your line and deletes every call, transcript, recording, follow-up and setting. Jobs on your calendar stay there.">
         {!confirmDelete ? (
           <Button size="tap" variant="outline" className={cn(actionClass, "border-red-200 text-red-700 hover:bg-red-50")} type="button" onClick={() => setConfirmDelete(true)}>Delete my account…</Button>
         ) : needsFreshSignIn ? (
           <div className="grid gap-3">
             <p className="text-[15px]">For your safety, sign in again first. Then you have 10 minutes to delete.</p>
-            <Button size="tap" variant="outline" className={actionClass} asChild><a href="/login?next=%2Fapp%2Fsettings%2Fdata">Sign in again</a></Button>
+            <Button size="tap" variant="outline" className={actionClass} asChild><a href={SIGN_IN_TO_DELETE}>Sign in again</a></Button>
           </div>
         ) : (
           <form method="post" action="/app/account/delete" className="grid gap-4">
             <input type="hidden" name="csrf" value={settings.csrf} />
+            <p className="text-[15px]">This deletes <strong>{settings.businessName || "this shop"}</strong> for good.</p>
+            {problem && <p role="alert" id="delete-problem" tabIndex={-1} className="rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-900">{problem}</p>}
             <Pair>
-              <Field label="Type DELETE"><Input name="confirm" autoComplete="off" required className={fieldClass} /></Field>
-              {hasPassword ? <Field label="Your password"><Input name="password" type="password" autoComplete="current-password" required className={fieldClass} /></Field> : null}
+              <Field label="Type DELETE"><Input id="delete-confirm" name="confirm" autoComplete="off" required defaultValue={problem && !badConfirm && askPassword ? "DELETE" : undefined} aria-invalid={badConfirm || undefined} aria-describedby={badConfirm ? "delete-problem" : undefined} className={fieldClass} /></Field>
+              {askPassword ? (
+                <Field label="Your password">
+                  <Input id="delete-password" name="password" type="password" autoComplete="current-password" required aria-invalid={deleteBack === "password" || undefined} aria-describedby={badPassword && problem ? "delete-problem" : undefined} className={fieldClass} />
+                </Field>
+              ) : null}
             </Pair>
+            {askPassword && <p className="text-sm text-muted-foreground">Forgot it? <a className="font-medium text-foreground underline underline-offset-4" href={SIGN_IN_TO_DELETE}>Sign in again with Google or an email link</a>, then delete here within 10 minutes.</p>}
             <Button size="tap" className={cn(actionClass, "bg-red-600 text-white hover:bg-red-700")}>Delete my account for good</Button>
           </form>
         )}
