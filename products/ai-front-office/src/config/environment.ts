@@ -95,6 +95,8 @@ const schema = z.object({
     z.string().url().refine((value) => value.startsWith("https://"), "FOUNDING_CHECKOUT_URL must use HTTPS").optional(),
   ),
   STRIPE_SECRET_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().min(20).optional()),
+  /** Lets the card change open inside Plan and billing (Stripe embedded Checkout). Unset: Stripe's own card page, which sends the owner back by itself. */
+  STRIPE_PUBLISHABLE_KEY: z.preprocess((value) => value === "" ? undefined : value, z.string().regex(/^pk_(live|test)_[A-Za-z0-9]{10,}$/).optional()),
   STRIPE_WEBHOOK_SECRET: z.preprocess((value) => value === "" ? undefined : value, z.string().min(20).optional()),
   STRIPE_PRICE_ID: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   /** Pro plan, old name. Used when STRIPE_PRICE_ID_PRO is unset. Pro is no longer sold; its prices stay recognized. */

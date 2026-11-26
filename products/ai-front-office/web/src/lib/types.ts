@@ -269,3 +269,12 @@ export interface ApiSettings {
     directBookingAvailable: boolean
   }
 }
+
+/** The card on file and past bills (GET /api/app/billing/details). cardChange: how "Change card" opens. */
+export interface BillingDetails {
+  card: { brand: string; last4: string; expMonth: number; expYear: number } | null
+  invoices: Array<{ id: string; at: string; amountCents: number; status: "paid" | "failed" | "due"; pdfUrl: string | null }>
+  cardChange: "embedded" | "hosted" | null
+}
+/** Where a card change opens (POST /api/app/billing/card). */
+export type CardChangeStart = { mode: "embedded"; clientSecret: string; publishableKey: string; uiMode: "embedded" | "embedded_page" } | { mode: "hosted"; url: string }

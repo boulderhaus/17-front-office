@@ -101,7 +101,7 @@ import {
   toTelnyxTexmlCallSummary,
   verifyTelnyxWebhook,
 } from "../adapters/telnyx.js";
-import { firstChargeFromEvent, StripeBillingClient, subscriptionFromStripeEvent, verifyStripeWebhook } from "../adapters/stripe.js";
+import { CARD_UPDATE_TAG, firstChargeFromEvent, StripeBillingClient, subscriptionFromStripeEvent, verifyStripeWebhook, type BillLine, type CardOnFile } from "../adapters/stripe.js";
 import { noopTelemetry, type Telemetry } from "../adapters/posthog.js";
 import { TelnyxTranscriber, type Transcriber } from "../adapters/telnyx-transcribe.js";
 import { cleanHeard, parseClipUpload, withPronunciation, WORD_CLIP_MAX_BYTES } from "../domain/word-clips.js";
@@ -755,11 +755,12 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   }
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    setSecurityHeaders(response);
+    const url = new URL(request.url ?? "/", "http://localhost");
+    // Stripe's embedded card form only ever runs inside the owner app, and only once a publishable key is set.
+    setSecurityHeaders(response, { stripeEmbed: Boolean(dependencies.env.STRIPE_PUBLISHABLE_KEY) && (url.pathname === "/app" || url.pathname.startsWith("/app/")) });
     const requestId = typeof request.headers["x-request-id"] === "string" ? request.headers["x-request-id"] : randomUUID();
     response.setHeader("x-request-id", requestId);
     const started = Date.now();
-    const url = new URL(request.url ?? "/", "http://localhost");
     const method = request.method ?? "GET";
     const route = routeKey(url.pathname);
     const ip = requestIp(request);
@@ -1793,6 +1794,40 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (!owner) throw new HttpError(403, "Only the owner can see billing");
       return sendJson(response, 200, await billingSummary(account));
     }
+    // Card, bills and cancel all live on Plan and billing: nothing here sends the owner to Stripe unless the
+    // embedded card form can't run, and then Stripe's own card page sends them back by itself.
+    if (method === "GET" && url.pathname === "/api/app/billing/details") {
+      if (!owner) throw new HttpError(403, "Only the owner can see billing");
+      return sendJson(response, 200, await billingDetails(account));
+    }
+    if (method === "POST" && url.pathname === "/api/app/billing/card") {
+      if (!owner) throw new HttpError(403, "Only the owner can change the card");
+      const body = await readApiJson(request, session, 1_000) as { hosted?: unknown };
+      if (!limiter.allow(`card-change:${account.tenantId}`, 20, 60 * 60_000)) throw new HttpError(429, "Please try again in a bit.");
+      return sendJson(response, 200, await startCardChange(account, body.hosted === true));
+    }
+    if (method === "POST" && url.pathname === "/api/app/billing/card/complete") {
+      if (!owner) throw new HttpError(403, "Only the owner can change the card");
+      const body = await readApiJson(request, session, 1_000) as { sessionId?: unknown };
+      const sessionId = typeof body.sessionId === "string" && /^cs_[A-Za-z0-9_]{6,200}$/.test(body.sessionId) ? body.sessionId : null;
+      if (!sessionId) throw new HttpError(400, "Missing card session");
+      await finishCardChange(account, sessionId);
+      return sendJson(response, 200, await billingDetails(account));
+    }
+    if (method === "POST" && url.pathname === "/api/app/billing/card/sync") {
+      if (!owner) throw new HttpError(403, "Only the owner can change the card");
+      await readApiJson(request, session, 1_000);
+      if (!limiter.allow(`card-change:${account.tenantId}`, 20, 60 * 60_000)) throw new HttpError(429, "Please try again in a bit.");
+      await syncHostedCard(account);
+      return sendJson(response, 200, await billingDetails(account));
+    }
+    if (method === "POST" && (url.pathname === "/api/app/billing/cancel" || url.pathname === "/api/app/billing/keep")) {
+      if (!owner) throw new HttpError(403, "Only the owner can cancel the plan");
+      await readApiJson(request, session, 1_000);
+      if (!limiter.allow(`plan-cancel:${account.tenantId}`, 20, 60 * 60_000)) throw new HttpError(429, "Please try again in a bit.");
+      await setCancel(account, url.pathname.endsWith("/cancel"));
+      return sendJson(response, 200, await billingSummary(account));
+    }
     if (method === "POST" && (url.pathname === "/api/app/billing/change" || url.pathname === "/api/app/billing/plan" || url.pathname === "/api/app/billing/unlimited")) {
       if (!owner) throw new HttpError(403, url.pathname.endsWith("/unlimited") ? "Only the owner can change Unlimited calls" : "Only the owner can change the plan");
       const body = await readApiJson(request, session, 2_000) as { plan?: unknown; unlimited?: unknown; on?: unknown; confirm?: unknown };
@@ -2664,6 +2699,105 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     // Only Stripe's own preview names a next bill; never invent one (a cancelling plan has none).
     const at = read.next ? read.next.at ?? subscription.currentPeriodEnd : null;
     return { lastPaid: read.lastPaid, next: read.next && at ? { amountCents: read.next.amountCents, at } : null, endsAt: read.endsAt, monthlyCents: monthly };
+  }
+
+  /** The Stripe subscription a card or cancel change applies to, or the one-line reason there is none. */
+  async function billedSubscription(account: OwnerAccount): Promise<{ client: StripeBillingClient; subscriptionId: string; customerId: string }> {
+    const subscription = await dependencies.store.getSubscription(account.tenantId);
+    if (isCompStatus(subscription?.status)) throw new HttpError(409, "This is a complimentary account. There’s no billing to manage.");
+    if (!stripeClient || !liveSubscription(subscription) || !subscription.providerCustomerId) throw new HttpError(409, "There’s no paid plan to manage yet.");
+    return { client: stripeClient, subscriptionId: subscription.providerSubscriptionId, customerId: subscription.providerCustomerId };
+  }
+
+  /** Card on file and past bills, for Plan and billing. Read only; a refused read shows nothing. */
+  async function billingDetails(account: OwnerAccount): Promise<{ card: CardOnFile | null; invoices: BillLine[]; cardChange: "embedded" | "hosted" | null }> {
+    const subscription = await dependencies.store.getSubscription(account.tenantId);
+    if (!stripeClient || isCompStatus(subscription?.status) || !liveSubscription(subscription) || !subscription.providerCustomerId) return { card: null, invoices: [], cardChange: null };
+    const read = await stripeClient.paymentDetails(subscription.providerCustomerId, subscription.providerSubscriptionId).catch((error) => {
+      log({ level: "warn", event: "billing_details_failed", tenantId: account.tenantId, error: safeError(error) });
+      return { card: null, invoices: [] };
+    });
+    return { ...read, cardChange: dependencies.env.STRIPE_PUBLISHABLE_KEY ? "embedded" : "hosted" };
+  }
+
+  /**
+   * Start a card change: Stripe's embedded form on our page when a publishable key is set and Stripe agrees,
+   * otherwise Stripe's own card page, which sends the owner back to Plan and billing by itself. Charges nothing.
+   */
+  async function startCardChange(account: OwnerAccount, hosted: boolean): Promise<{ mode: "embedded"; clientSecret: string; publishableKey: string; uiMode: "embedded" | "embedded_page" } | { mode: "hosted"; url: string }> {
+    const { client, customerId } = await billedSubscription(account);
+    const base = dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "");
+    const publishableKey = dependencies.env.STRIPE_PUBLISHABLE_KEY;
+    if (publishableKey && !hosted) {
+      const embedded = await client.createCardSetup({ customerId, tenantId: account.tenantId, returnUrl: `${base}/app/settings/plan?card=done&session_id={CHECKOUT_SESSION_ID}` }).catch((error) => {
+        log({ level: "warn", event: "card_setup_embedded_failed", tenantId: account.tenantId, error: safeError(error) });
+        return null;
+      });
+      if (embedded) return { mode: "embedded", clientSecret: embedded.clientSecret, publishableKey, uiMode: embedded.uiMode };
+    }
+    const url = await client.createCardUpdatePortal(customerId, `${base}/app/settings/plan`, `${base}/app/settings/plan?card=back`).catch((error) => {
+      log({ level: "warn", event: "card_update_page_failed", tenantId: account.tenantId, error: safeError(error) });
+      return null;
+    });
+    if (!url) throw new HttpError(502, "We couldn’t open the card form. Nothing changed. Try again in a minute.");
+    return { mode: "hosted", url };
+  }
+
+  /** The card a finished setup session saved becomes the one the subscription and the customer pay with. */
+  async function finishCardChange(account: OwnerAccount, sessionId: string): Promise<void> {
+    const { client, subscriptionId, customerId } = await billedSubscription(account);
+    const setup = await client.retrieveCardSetup(sessionId).catch((error) => {
+      log({ level: "warn", event: "card_setup_lookup_failed", tenantId: account.tenantId, error: safeError(error) });
+      throw new HttpError(502, "We couldn’t check the new card. Try again in a minute.");
+    });
+    if (!setup.isCardUpdate || setup.tenantId !== account.tenantId || (setup.customerId && setup.customerId !== customerId)) throw new HttpError(403, "That card form belongs to another account.");
+    if (!setup.paymentMethodId) throw new HttpError(409, "The new card isn’t saved yet. Finish the form, then try again.");
+    await dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
+      // A late or repeated completion (the webhook after the page, or an older form after a newer one) never puts back
+      // an older card: a card saved after this one already paying wins.
+      const current = await client.currentDefaultCards(customerId, subscriptionId).catch(() => null);
+      const paying = current?.subscription ?? null;
+      if (paying && paying.id !== setup.paymentMethodId && setup.paymentMethodCreated !== null && paying.created > setup.paymentMethodCreated) {
+        log({ level: "info", event: "card_change_superseded", tenantId: account.tenantId });
+        return;
+      }
+      const result = await client.setDefaultCard({ customerId, subscriptionId, paymentMethodId: setup.paymentMethodId! }).catch((error) => {
+        log({ level: "error", event: "card_default_update_failed", tenantId: account.tenantId, error: safeError(error) });
+        throw new HttpError(502, "Your new card is saved, but we couldn’t switch to it. Try again in a minute.");
+      });
+      if (!result.customerUpdated) log({ level: "warn", event: "card_customer_default_failed", tenantId: account.tenantId });
+    });
+  }
+
+  /**
+   * Back from Stripe's own card page: it saves the new card as the customer's default only, so the subscription (which
+   * may carry its own older default) is switched to it here. Only ever moves to a card saved later than the one paying.
+   */
+  async function syncHostedCard(account: OwnerAccount): Promise<void> {
+    const { client, subscriptionId, customerId } = await billedSubscription(account);
+    await dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
+      const current = await client.currentDefaultCards(customerId, subscriptionId);
+      const saved = current.customer;
+      if (!saved || saved.id === current.subscription?.id) return;
+      if (current.subscription && current.subscription.created > saved.created) return;
+      await client.setSubscriptionCard(subscriptionId, saved.id);
+      log({ level: "info", event: "card_hosted_synced", tenantId: account.tenantId });
+    }).catch((error) => {
+      if (error instanceof HttpError) throw error;
+      log({ level: "error", event: "card_hosted_sync_failed", tenantId: account.tenantId, error: safeError(error) });
+      throw new HttpError(502, "Your new card is saved, but we couldn’t switch to it. Try again in a minute.");
+    });
+  }
+
+  /** Cancel at the end of the paid period, or keep the plan. What happens when it ends is the webhook's job, as before. */
+  async function setCancel(account: OwnerAccount, cancel: boolean): Promise<void> {
+    const { client, subscriptionId } = await billedSubscription(account);
+    await dependencies.store.withLock(`billing:${account.tenantId}`, () => client.setCancelAtPeriodEnd(subscriptionId, cancel)).catch((error) => {
+      if (error instanceof HttpError) throw error;
+      log({ level: "error", event: cancel ? "plan_cancel_failed" : "plan_keep_failed", tenantId: account.tenantId, error: safeError(error) });
+      throw new HttpError(502, "We couldn’t reach our payment processor. Nothing changed. Try again in a minute.");
+    });
+    log({ level: "info", event: cancel ? "plan_cancel_scheduled" : "plan_cancel_undone", tenantId: account.tenantId });
   }
 
   /** Keep the shop's plan and price in step with what Stripe says it is paying for (e.g. a switch in the billing portal). */
@@ -3924,6 +4058,18 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           }
         }
       });
+    }
+    // A card saved on Plan and billing becomes the default here too, in case the owner closed the page first.
+    const cardSession = event.data.object as { id?: unknown; mode?: unknown; metadata?: Record<string, unknown> };
+    if (event.type === "checkout.session.completed" && cardSession.mode === "setup" && cardSession.metadata?.front_office === CARD_UPDATE_TAG && typeof cardSession.id === "string" && typeof cardSession.metadata?.tenant_id === "string") {
+      const owner = await dependencies.store.getOwnerAccountByTenant(cardSession.metadata.tenant_id);
+      if (owner && stripeClient) {
+        await finishCardChange(owner, cardSession.id).catch((error) => {
+          // Not a paid plan any more, or someone else's form: nothing to switch, and nothing for Stripe to retry.
+          if (error instanceof HttpError && (error.status === 403 || error.status === 409)) return;
+          throw new HttpError(502, "Card default update failed; Stripe will retry");
+        });
+      }
     }
     // The guarantee clock and overage clamping start at the first successful charge, taken from Stripe:
     // a paid invoice (paid_at), or a checkout completed with payment. Idempotent (keeps the earliest).
