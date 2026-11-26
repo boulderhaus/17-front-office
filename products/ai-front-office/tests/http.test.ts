@@ -183,6 +183,7 @@ describe("HTTP boundary", () => {
       expect((await store.getCallByProviderId(id))?.fromNumber, id).toBe("unknown");
     }
     expect(logs.some((entry) => entry.event === "tool_request_failed")).toBe(false);
+    expect(logs.filter((entry) => entry.event === "tool_input_repaired").map((entry) => entry.fromNumber)).toEqual(["missing", "number", "placeholder", "empty"]);
   });
 
   it("uses the number the call started with when the provider sends none on a later tool", async () => {
@@ -215,18 +216,46 @@ describe("HTTP boundary", () => {
     expect(await intake.json()).toMatchObject({ status: "saved" });
     expect((await store.getCallByProviderId("null-fields"))?.fields).toMatchObject({ callerName: "Sam", problemDescription: "Routine maintenance" });
     expect(logs.some((entry) => entry.event === "tool_request_failed")).toBe(false);
+    expect(logs.filter((entry) => entry.event === "tool_input_repaired")).toEqual([
+      expect.objectContaining({ tool: "triage_call", nullFields: 3 }),
+      expect.objectContaining({ tool: "save_intake", nullFields: 4 }),
+    ]);
+  });
+
+  it("drops an optional field the model got wrong instead of failing triage or the save", async () => {
+    const headers = { authorization: `Bearer ${toolToken}`, "content-type": "application/json" };
+    const triage = await fetch(`${baseUrl}/tools/triage`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ provider_call_id: "bad-optional", from_number: "+15555550110", caller_name: "N".repeat(200), llm_score: "0.9", llm_reason: "smell", problem_description: "The basement smells like gas" }),
+    });
+    expect(await triage.json()).toMatchObject({ severity: "life_safety", emergency: true });
+    const intake = await fetch(`${baseUrl}/tools/save-intake`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ provider_call_id: "bad-optional-intake", from_number: "+15555550110", caller_name: "Sam", confidence: "My number is 555-555-0142", human_requested: "yes", problem_description: "Routine maintenance" }),
+    });
+    expect(await intake.json()).toMatchObject({ status: "saved" });
+    expect((await store.getCallByProviderId("bad-optional-intake"))?.fields).toMatchObject({ callerName: "Sam", problemDescription: "Routine maintenance", humanRequested: false });
+    const repaired = logs.filter((entry) => entry.event === "tool_input_repaired");
+    expect(repaired).toEqual([
+      expect.objectContaining({ tool: "triage_call", dropped: "caller_name,llm_score" }),
+      expect.objectContaining({ tool: "save_intake", dropped: "human_requested,confidence" }),
+    ]);
+    expect(JSON.stringify(repaired)).not.toMatch(/0142|NNNN|yes/);
   });
 
   it("logs which field a rejected tool call failed on, never what was said", async () => {
     const response = await fetch(`${baseUrl}/tools/save-intake`, {
       method: "POST",
       headers: { authorization: `Bearer ${toolToken}`, "content-type": "application/json" },
-      body: JSON.stringify({ provider_call_id: "bad-fields", from_number: "+15555550110", problem_description: null, confidence: "My number is 555-555-0142" }),
+      body: JSON.stringify({ provider_call_id: "bad-fields", from_number: "+15555550110", problem_description: null, caller_name: "My number is 555-555-0142" }),
     });
     expect(await response.json()).toMatchObject({ ok: false, status: "unavailable" });
     const failed = logs.find((entry) => entry.event === "tool_request_failed");
-    expect(failed).toMatchObject({ tool: "save_intake", status: 400, fields: "problem_description:invalid_type,confidence:invalid_type" });
-    expect(JSON.stringify(failed)).not.toContain("0142");
+    expect(failed).toMatchObject({ tool: "save_intake", status: 400, fields: "problem_description:invalid_type" });
+    expect(JSON.stringify(logs)).not.toContain("0142");
+    expect(await store.getCallByProviderId("bad-fields")).toBeNull();
   });
 
   it("rejects audio complaints as handoff requests but accepts an explicit request for a person", async () => {
