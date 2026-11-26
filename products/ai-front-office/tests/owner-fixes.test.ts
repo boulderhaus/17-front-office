@@ -204,18 +204,31 @@ describe("owner app fixes (walk 70039f169)", () => {
 });
 
 describe("sign-up page start (walk 70039f169)", () => {
-  it("offers Google, Microsoft and an email link with equal weight, a full-size trade select, and server-side errors", async () => {
+  it("two choices, one 'or': providers, then Continue with email, which holds the email, the password and the link", async () => {
     const { renderOwnerSignup, providerButtons } = await import("../src/admin/render.js");
     const page = renderOwnerSignup("", {}, { providers: { google: true, microsoft: true }, emailLink: true });
-    expect(page).toContain('<form class="linkstart" method="post" action="/login/email">');
-    expect(page).toContain("Sign up with an email link");
-    expect(page.indexOf("Continue with Google")).toBeLessThan(page.indexOf("Sign up with an email link"));
+    // Walk 11-26 (SIGNUP-02): three stacked choices and two "or"s. Now one "or" between the providers and email.
+    expect(page.match(/class="ordivider"/g)).toHaveLength(1);
+    expect(page).not.toContain("or fill this in");
+    expect(page).not.toContain("linkstart");
+    expect(page.indexOf("Continue with Google")).toBeLessThan(page.indexOf("Continue with email"));
+    expect(page).toContain('<details class="emailpath"><summary class="emailbtn">');
+    // Inside: email, then password (revealed once the email looks complete), then the link as a small second choice.
+    const emailForm = page.slice(page.indexOf('<details class="emailpath">'), page.indexOf("</details>"));
+    expect(emailForm.indexOf('name="email"')).toBeLessThan(emailForm.indexOf('name="password"'));
+    expect(emailForm).toContain('<button class="linkbtn" formaction="/login/email" formnovalidate>Email me a sign-in link instead</button>');
+    expect(emailForm.indexOf("<button>Continue</button>")).toBeLessThan(emailForm.indexOf("Email me a sign-in link instead"));
+    expect(page).toContain(".authpage .emailpath form:has(input[type=email]:valid) .pwstep");
     expect(page).toContain(".idp .microsoft{border:1px solid #747775;color:#1f1f1f}");
-    expect(page).toContain('<span class="selectwrap"><select name="trade" id="signup-trade"');
-    expect(page).toContain('action="/signup" novalidate>');
-    expect(page).not.toContain("Callers never see it");
-    // Verified already (Google, Microsoft or the link): no second way in.
-    expect(renderOwnerSignup("", {}, { providers: { google: true }, emailLink: true, verified: { email: "a@b.example", provider: "email" } })).not.toContain("Sign up with an email link");
+    expect(page).toContain('action="/signup" novalidate');
+    // No shop questions before the account exists, and never a trade.
+    for (const name of ["businessName", "phone", "trade", "ownerSmsConsent"]) expect(page).not.toContain(`name="${name}"`);
+    // Without a provider, the email form shows at once (nothing to choose between).
+    const emailOnly = renderOwnerSignup("", {}, { emailLink: true });
+    expect(emailOnly).not.toContain("<details");
+    expect(emailOnly).not.toContain(`class="ordivider"`);
+    // Verified already (Google, Microsoft or the link): the shop screen, no second way in.
+    expect(renderOwnerSignup("", {}, { providers: { google: true }, emailLink: true, verified: { email: "a@b.example", provider: "email" } })).not.toContain("Email me a sign-in link");
     expect(providerButtons({ google: true, microsoft: true })).toContain("Continue with Microsoft");
   });
 });

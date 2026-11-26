@@ -18,7 +18,7 @@ Skills to load for UI work, all installed in `~/.claude/skills`:
   <!-- 2026-11-24: homepage copy too wordy; 2026-11-25: setup card too wordy -->
 - **Never make the owner change phone settings to get started.** Fit the product around the phone they already have. A settings change can only be an option the owner picks, such as "Ring my phone first" needing Live Voicemail off. Why: "we can't have the user do a bunch of things to set it up."
   <!-- 2026-11-25 -->
-- **Sign-in offers Google, Microsoft and an email link.** Password stays a fallback only. Why: email-and-password-only felt archaic.
+- **Sign-in and sign-up are two choices: Google (and Microsoft), or Continue with email.** Email opens the email box, then the password box, with "Email me a sign-in link instead" as a small second choice. One "or" at most. Sign-up asks for the account first, then the shop (name and mobile) once they're in; never the trade. Why: "two buttons Google or email", three "or"s looked wrong (walk 11-26).
   <!-- 2026-11-25 -->
 - **Fields must be easy to read.** Typed text is at least 16px (18px preferred), sans-serif, weight 500, dark ink on white, with a visible focus ring. Never a light, thin serif inside a field. Why: "why is it so hard to see my email in this box."
   <!-- 2026-11-25 -->

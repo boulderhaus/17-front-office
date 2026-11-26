@@ -1,6 +1,6 @@
 /**
- * The trades Call Otto starts a shop with. Picking one at signup seeds the shop's services and
- * the extra words that mark a call urgent; the owner changes either anytime in Settings.
+ * The trades Call Otto starts a shop with. Signup never asks: the shop name picks one (see tradeForShopName),
+ * which seeds the shop's services and the extra words that mark a call urgent; the owner changes either in Settings.
  * Life-safety rules (gas, carbon monoxide, fire) apply to every trade regardless of these words.
  */
 export interface Trade {
@@ -44,4 +44,45 @@ export const TRADES: readonly Trade[] = [
 export function findTrade(key: string | null | undefined): Trade | null {
   const wanted = key?.trim().toLowerCase();
   return wanted ? TRADES.find((trade) => trade.key === wanted) ?? null : null;
+}
+
+/**
+ * Words in a shop name that say its trade, matched as whole words (prefixes where a word grows: "Plumbing", "Plumbers").
+ * Strong words name the trade outright and always beat weak ones, wherever each sits in the name, so
+ * "Sun Air Plumbing" is plumbing and "Key West Electric" is electrical. Weak words only decide when no strong word is
+ * there ("Gulf Air"). Words common in place names (key, lock, tree, garden, yard) are left out: "Florida Keys Plumbing"
+ * must never start a plumber with locksmith urgent words. Within a tier, the first word in the name wins.
+ */
+const NAME_WORDS: ReadonlyArray<{ trade: string; strong: RegExp; weak?: RegExp }> = [
+  { trade: "hvac", strong: /\b(?:hvac|heating|a\/c|ac|cooling|air condition\w*|furnaces?|refrigeration|heat pumps?)\b/, weak: /\b(?:heat|air|climate|mechanical|comfort)\b/ },
+  { trade: "plumbing", strong: /\b(?:plumb\w*|drains?|rooter|sewers?|septic)\b/, weak: /\b(?:pipes?|water heaters?)\b/ },
+  { trade: "electrical", strong: /\b(?:electric\w*)\b/, weak: /\b(?:wiring|volts?)\b/ },
+  { trade: "roofing", strong: /\b(?:roof\w*)\b/, weak: /\b(?:gutters?)\b/ },
+  { trade: "restoration", strong: /\b(?:restoration|water damage|mold)\b/, weak: /\b(?:restore|dry ?out)\b/ },
+  { trade: "garage", strong: /\b(?:garage doors?|overhead doors?)\b/, weak: /\b(?:garage\w*)\b/ },
+  { trade: "construction", strong: /\b(?:construction|remodel\w*|renovat\w*|builders?)\b/, weak: /\b(?:contract\w*)\b/ },
+  { trade: "handyman", strong: /\b(?:handy\w*)\b/, weak: /\b(?:odd jobs?)\b/ },
+  { trade: "landscaping", strong: /\b(?:landscap\w*|lawns?|irrigation|mowing|tree (?:service|care|removal|trimming)|arborists?)\b/, weak: /\b(?:turf)\b/ },
+  { trade: "pest", strong: /\b(?:pests?|termites?|extermin\w*)\b/, weak: /\b(?:bugs?|wildlife)\b/ },
+  { trade: "locksmith", strong: /\b(?:locksmith\w*)\b/ },
+  { trade: "appliance", strong: /\b(?:appliances?)\b/ },
+];
+
+/**
+ * The trade a new shop starts with, from its name; "Another trade" (general home services) when the name doesn't
+ * say. Never blocks signup: the owner fixes services and urgent words in Settings.
+ */
+export function tradeForShopName(name: string | null | undefined): Trade {
+  const text = (name ?? "").toLowerCase().replace(/[’']/g, "").replace(/&/g, " ");
+  const first = (tier: "strong" | "weak") => {
+    let best: { trade: string; at: number } | null = null;
+    for (const word of NAME_WORDS) {
+      const pattern = word[tier];
+      const at = pattern ? text.search(pattern) : -1;
+      if (at >= 0 && (!best || at < best.at)) best = { trade: word.trade, at };
+    }
+    return best;
+  };
+  const best = first("strong") ?? first("weak");
+  return findTrade(best?.trade) ?? findTrade("other")!;
 }

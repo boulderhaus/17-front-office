@@ -9,6 +9,7 @@ import { describeHours, hoursFromChoice } from "../src/domain/hours.js";
 import { firstMonthCents, money, planCatalog } from "../src/domain/plans.js";
 import { createRequestHandler } from "../src/http/app.js";
 import { graceStartedAt } from "../src/application/grace-line.js";
+import { shopStepPage } from "./signup-steps.js";
 
 type Call = { url: string; method: string; body: string | null };
 
@@ -117,6 +118,18 @@ describe("three taps to a live line", () => {
   // Legacy Pro on the old STRIPE_PRICE_ID_PLUS name (recognized, never sold), Team and Fleet on their own.
   const PLANS = { STRIPE_PRICE_ID_PLUS: "price_plus_synthetic", STRIPE_PRICE_ID_TEAM: "price_team_synthetic", STRIPE_PRICE_ID_FLEET: "price_fleet_synthetic", STRIPE_FIRST_MONTH_COUPON_ID: "first_month_half_off" };
 
+  it("a double tap on the shop screen's last button lands both taps on the card page, with one workspace", async () => {
+    const { baseUrl, store } = await start({ env: PLANS });
+    const account = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ step: "account", email: "double@example.test", password: "synthetic-password-42" }) });
+    const cookie = account.headers.getSetCookie().find((value) => value.startsWith("afo_pending_identity="))!.split(";")[0]!;
+    const shop = () => fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", cookie }, body: new URLSearchParams({ businessName: "Gulf Air", phone: "(941) 555-0199", timezone: "America/New_York" }) });
+    const first = await shop();
+    const second = await shop();
+    expect(first.headers.get("location")).toMatch(/^https:\/\/checkout\.stripe\.com\//);
+    expect(second.headers.get("location")).toMatch(/^https:\/\/checkout\.stripe\.com\//);
+    expect([...store.ownerAccounts.values()].filter((owner) => owner.email === "double@example.test")).toHaveLength(1);
+  });
+
   it("goes from the signup form straight to Stripe: no trial, Solo, limited-time first month half off", async () => {
     const { baseUrl, store, providers } = await start({ env: PLANS });
     const { response } = await signUp(baseUrl);
@@ -150,7 +163,7 @@ describe("three taps to a live line", () => {
 
   it("shows Solo already picked and the bigger plans behind one compact line, and charges the one picked", async () => {
     const { baseUrl, store, providers } = await start({ env: PLANS });
-    const page = await (await fetch(`${baseUrl}/signup`)).text();
+    const page = await shopStepPage(baseUrl);
     expect(page).toMatch(/<input type="radio" name="plan" id="plan-solo" value="solo" checked>/);
     for (const id of ["team", "fleet"]) expect(page).toMatch(new RegExp(`<input type="radio" name="plan" id="plan-${id}" value="${id}" >`));
     // Pro is no longer sold.
@@ -207,7 +220,7 @@ describe("three taps to a live line", () => {
 
   it("switches the limited-time offer off everywhere with FIRST_MONTH_OFFER_ENABLED=false", async () => {
     const { baseUrl, providers } = await start({ env: { ...PLANS, FIRST_MONTH_OFFER_ENABLED: "false" } });
-    const [signup, home] = await Promise.all([fetch(`${baseUrl}/signup`).then((r) => r.text()), fetch(`${baseUrl}/`).then((r) => r.text())]);
+    const [signup, home] = await Promise.all([shopStepPage(baseUrl), fetch(`${baseUrl}/`).then((r) => r.text())]);
     for (const page of [signup, home]) expect(page).not.toMatch(/half off|limited time|First month \$/i);
     expect(signup).toContain("Today: $49.99. Then $49.99/month. Cancel anytime.");
     await signUp(baseUrl);
@@ -218,7 +231,7 @@ describe("three taps to a live line", () => {
 
   it("only sells plans that have a Stripe price, and never Pro", async () => {
     const { baseUrl } = await start({ env: { STRIPE_PRICE_ID_PRO: "price_pro_synthetic", STRIPE_PRICE_ID_TEAM: "price_team_synthetic" } });
-    const page = await (await fetch(`${baseUrl}/signup`)).text();
+    const page = await shopStepPage(baseUrl);
     expect(page).toContain('id="plan-team"');
     expect(page).not.toContain('id="plan-pro"');
     expect(page).not.toContain('id="plan-fleet"');
@@ -253,7 +266,7 @@ describe("three taps to a live line", () => {
     expect(checkout.has("discounts[0][coupon]")).toBe(false);
     expect(checkout.get("payment_method_collection")).toBe("always");
     expect(checkout.get("custom_text[submit][message]")).toBe("Today: $49.99. Then $49.99/month. Cancel anytime.");
-    const page = await (await fetch(`${baseUrl}/signup`)).text();
+    const page = await shopStepPage(baseUrl);
     expect(page).toContain("Today: $49.99. Then $49.99/month. Cancel anytime.");
     expect(page).not.toContain('id="plan-plus"');
   });

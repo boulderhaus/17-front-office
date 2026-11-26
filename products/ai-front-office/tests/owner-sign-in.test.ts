@@ -205,8 +205,8 @@ describe("Continue with Google", () => {
     expect(done.headers.getSetCookie().find((cookie) => cookie.startsWith("afo_pending_identity="))).toContain("Path=/signup");
 
     const page = await (await fetch(`${h.baseUrl}/signup`, { headers: { cookie: pending } })).text();
-    expect(page).toContain('value="new-owner@synthetic.example" readonly');
-    expect(page).toContain("Verified with Google.");
+    expect(page).toContain("Signing up as <b>new-owner@synthetic.example</b>. Verified with Google.");
+    expect(page).not.toContain('name="email"');
     expect(page).not.toContain('name="password"');
     expect(page).not.toContain("Continue with Google");
     // The text opt-in block is untouched.
@@ -222,6 +222,12 @@ describe("Continue with Google", () => {
     expect(account.passwordHash).toBe(PASSWORDLESS_HASH);
     expect(account.displayName).toBe("Sam Synthetic");
     expect((await h.store.getConfig(account.tenantId)).businessName).toBe("Synthetic Heating");
+    // A second tap or a resubmit with the same Google sign-up signs into that shop; never a second workspace.
+    const again = await fetch(`${h.baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { cookie: pending, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Heating" }) });
+    expect(again.status).toBe(303);
+    expect(again.headers.get("location")).toBe("/app/start");
+    expect(cookieOf(again, "afo_owner")).toBeTruthy();
+    expect([...h.store.ownerAccounts.values()].filter((item) => item.email === "new-owner@synthetic.example")).toHaveLength(1);
   });
 
   it("refuses an email Google hasn't verified", async () => {
@@ -329,8 +335,8 @@ describe("Continue with Microsoft", () => {
     const withIt = await harness(microsoftEnv);
     const login = await (await fetch(`${withIt.baseUrl}/login`)).text();
     expect(login.indexOf("Continue with Google")).toBeLessThan(login.indexOf("Continue with Microsoft"));
-    expect(login.indexOf("Continue with Microsoft")).toBeLessThan(login.indexOf("Email me a sign-in link"));
-    expect(login.indexOf("Email me a sign-in link")).toBeLessThan(login.indexOf("Use a password instead"));
+    expect(login.indexOf("Continue with Microsoft")).toBeLessThan(login.indexOf("Continue with email"));
+    expect(login.indexOf("Continue with email")).toBeLessThan(login.indexOf("Email me a sign-in link instead"));
     expect(await (await fetch(`${withIt.baseUrl}/signup`)).text()).toContain("Continue with Microsoft");
   });
 
@@ -416,8 +422,8 @@ describe("Email me a sign-in link", () => {
     expect(used.headers.get("location")).toBe("/signup");
     const pending = cookieOf(used, "afo_pending_identity")!;
     const page = await (await fetch(`${h.baseUrl}/signup`, { headers: { cookie: pending } })).text();
-    expect(page).toContain('value="fresh@synthetic.example" readonly');
-    expect(page).toContain("Verified by your email link.");
+    expect(page).toContain("Signing up as <b>fresh@synthetic.example</b>. Verified by your email link.");
+    expect(page).toContain('<a href="/signup?fresh=1">Use a different email</a>');
     // "Use a different email" drops it.
     const fresh = await fetch(`${h.baseUrl}/signup?fresh=1`, { redirect: "manual", headers: { cookie: pending } });
     expect(fresh.headers.get("set-cookie")).toContain("afo_pending_identity=;");
@@ -529,8 +535,8 @@ describe("sign-in page", () => {
   it("is readable and accessible: labelled fields, autocomplete, and an alert tied to the field", async () => {
     const h = await harness();
     const page = await (await fetch(`${h.baseUrl}/login`)).text();
-    expect(page).toContain('<label for="link-email">');
-    expect(page).toMatch(/id="link-email" name="email" type="email" autocomplete="username" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false"/);
+    expect(page).toContain('<label for="login-email">');
+    expect(page).toMatch(/id="login-email" name="email" type="email" autocomplete="username" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false"/);
     expect(page).toMatch(/id="password" name="password" type="password" autocomplete="current-password"/);
     expect(page).toContain('<a href="/forgot">Forgot your password?</a>');
     expect(page).toMatch(/\.publicform input,[^{]*\{[^}]*font:500 18px[^}]*ui-sans-serif/);
@@ -548,10 +554,10 @@ describe("sign-in page", () => {
     expect(wrong).toContain('role="alert" id="login-error"');
     // The summary links to the field that shows the error and has focus: the password, since the email was kept.
     expect(wrong).toContain('<a href="#password">Email or password is incorrect.</a>');
-    expect(wrong).toMatch(/id="password-email"[^>]*aria-invalid="true" aria-describedby="login-error"/);
-    expect(wrong).toContain('<details class="pwd" open>');
+    expect(wrong).toMatch(/id="login-email"[^>]*aria-invalid="true" aria-describedby="login-error"/);
+    expect(wrong).toContain('novalidate class="pwopen">');
     // The typed email stays, the password field takes focus, and the problem also sits right under it.
-    expect(wrong).toMatch(/id="password-email"[^>]*value="nobody@synthetic\.example"/);
+    expect(wrong).toMatch(/id="login-email"[^>]*value="nobody@synthetic\.example"/);
     expect(wrong).toMatch(/id="password" [^>]*aria-describedby="login-field-error" autofocus>/);
     expect(wrong).toContain('<span class="fielderror" id="login-field-error">Email or password is incorrect.</span>');
   });
@@ -561,11 +567,11 @@ describe("sign-in page", () => {
     const response = await fetch(`${h.baseUrl}/login`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@shop", password: "some-long-password" }) });
     expect(response.status).toBe(400);
     const page = await response.text();
-    expect(page).toContain('<a href="#password-email">Enter an email like you@yourshop.com.</a>');
-    expect(page).toMatch(/id="password-email" [^>]*value="owner@shop" required aria-invalid="true" aria-describedby="login-field-error" autofocus>/);
+    expect(page).toContain('<a href="#login-email">Enter an email like you@yourshop.com.</a>');
+    expect(page).toMatch(/id="login-email" [^>]*value="owner@shop" required aria-invalid="true" aria-describedby="login-field-error" autofocus>/);
     // The password was fine: not marked, no focus.
     expect(page).toMatch(/id="password" name="password" type="password" autocomplete="current-password" maxlength="200" required>/);
-    expect(page).toContain('<details class="pwd" open>');
+    expect(page).toContain('novalidate class="pwopen">');
   });
 
   it("keeps a mistyped email on the link form and points at the fix", async () => {
@@ -573,8 +579,8 @@ describe("sign-in page", () => {
     const response = await requestLink(h, "owner@synthetic");
     expect(response.status).toBe(400);
     const page = await response.text();
-    expect(page).toMatch(/id="link-email" [^>]*value="owner@synthetic" required aria-invalid="true" aria-describedby="login-field-error" autofocus>/);
-    expect(page).toContain('<a href="#link-email">Enter an email like you@yourshop.com.</a>');
+    expect(page).toMatch(/id="login-email" [^>]*value="owner@synthetic" required aria-invalid="true" aria-describedby="login-field-error" autofocus>/);
+    expect(page).toContain('<a href="#login-email">Enter an email like you@yourshop.com.</a>');
   });
 
   it("forgot and reset pages: kept email, errors on the field, focus on the field to fix", async () => {
@@ -588,7 +594,7 @@ describe("sign-in page", () => {
     const reset = (password: string, confirm: string) => fetch(`${h.baseUrl}/reset`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token: "synthetic-token", password, confirm }) });
     const short = await (await reset("short", "short")).text();
     expect(short).toMatch(/<input name="password" id="reset-password" [^>]*aria-describedby="reset-password-error" aria-invalid="true" autofocus>/);
-    expect(short).toContain('<span class="fielderror" id="reset-password-error">Make your password at least 12 characters.</span>');
+    expect(short).toContain('<span class="fielderror" id="reset-password-error">Make your password at least 8 characters.</span>');
     const mismatch = await (await reset("long-password-one", "long-password-two")).text();
     expect(mismatch).toMatch(/<input name="confirm" id="reset-confirm" [^>]*aria-invalid="true" autofocus>/);
     expect(mismatch).toContain("The two passwords don’t match. Type the same one twice.");
@@ -619,7 +625,7 @@ describe("login CSRF", () => {
     const forgedPage = await forged.text();
     expect(forgedPage).toContain("Open the link from your email again");
     // Nothing typed is wrong: the email box takes focus to send a new link, but isn't marked invalid.
-    expect(forgedPage).toMatch(/id="link-email" [^>]*value="" required aria-describedby="login-error" autofocus>/);
+    expect(forgedPage).toMatch(/id="login-email" [^>]*value="" required aria-describedby="login-error" autofocus>/);
     expect(forgedPage).not.toMatch(/<input[^>]*aria-invalid/);
     expect(forgedPage).not.toContain("login-field-error");
     expect(forgedPage).toContain('<div class="formerror" role="alert" id="login-error"><p>Open the link from your email again, then tap Sign me in.</p></div>');
@@ -701,7 +707,9 @@ describe("email link details", () => {
     const h = await harness();
     await ownerAccount(h, "owner@synthetic.example");
     const login = await (await fetch(`${h.baseUrl}/login?next=/app/settings/data`)).text();
-    expect(login).toMatch(/action="\/login\/email"><input type="hidden" name="next" value="\/app\/settings\/data">/);
+    // One form: "Sign in" posts the password, "Email me a sign-in link instead" posts the same email and next to the link route.
+    expect(login).toMatch(/action="\/login" novalidate><input type="hidden" name="next" value="\/app\/settings\/data">/);
+    expect(login).toContain('formaction="/login/email"');
     await requestLink(h, "owner@synthetic.example", "/app/settings/data");
     const [link] = await queuedLinks(h);
     expect(link!.url).toBe(`${BASE}/login/link?token=${link!.token}&next=%2Fapp%2Fsettings%2Fdata`);
@@ -760,11 +768,11 @@ describe("in-app browsers", () => {
 });
 
 describe("sign-up picks through Google and Microsoft", () => {
-  it("keeps the pricing page's plan, Unlimited and trade through the provider, and drops anything else", async () => {
+  it("keeps the pricing page's plan and Unlimited through the provider, and drops anything else (trade included)", async () => {
     const h = await harness({ MICROSOFT_CLIENT_ID: MICROSOFT_CLIENT, MICROSOFT_CLIENT_SECRET: "synthetic-microsoft-secret" });
     const page = await (await fetch(`${h.baseUrl}/signup?plan=team&unlimited=1&trade=hvac`)).text();
     const href = (provider: string): string => [...page.matchAll(/<a class="([a-z]+)" href="([^"]+)"/g)].find((match) => match[1] === provider)![2]!.replaceAll("&amp;", "&");
-    const picks = { plan: "team", unlimited: "1", trade: "hvac" };
+    const picks = { plan: "team", unlimited: "1" };
     for (const [provider, email] of [["google", "new-google@synthetic.example"], ["microsoft", "new-microsoft@outlook.com"]] as const) {
       const link = new URL(href(provider), BASE);
       expect(link.pathname).toBe(`/auth/${provider}`);
@@ -777,8 +785,8 @@ describe("sign-up picks through Google and Microsoft", () => {
       expect(landing.pathname).toBe("/signup");
       expect(Object.fromEntries(landing.searchParams)).toEqual(picks);
       const signup = await (await fetch(`${h.baseUrl}${landing.pathname}${landing.search}`, { headers: { cookie: cookieOf(done, "afo_pending_identity")! } })).text();
-      expect(signup).toContain(`value="${email}" readonly`);
-      expect(signup).toContain('<option value="hvac" selected>');
+      expect(signup).toContain(`Signing up as <b>${email}</b>.`);
+      expect(signup).not.toContain('name="trade"');
     }
     // Picks that aren't real plans or trades never ride along.
     const junk = await startAt(h, "/auth/google?plan=platinum&unlimited=yes&trade=%3Cscript%3E&next=%2Fapp");
@@ -786,14 +794,14 @@ describe("sign-up picks through Google and Microsoft", () => {
     expect((await finishGoogle(h, junk)).headers.get("location")).toBe("/signup");
   });
 
-  it("keeps the plan, Unlimited and trade through the emailed link when Google can't vouch for a new address", async () => {
+  it("keeps the plan and Unlimited through the emailed link when Google can't vouch for a new address", async () => {
     const h = await harness();
     const attempt = await startAt(h, "/auth/google?plan=team&unlimited=1&trade=hvac");
     h.claims = googleClaims(attempt.nonce, h.now(), { email: "new-person@synthetic.example", hd: undefined });
     expect((await finishGoogle(h, attempt)).status).toBe(200);
     const [link] = await queuedLinks(h);
     const emailed = new URL(link!.url);
-    expect(Object.fromEntries(emailed.searchParams)).toEqual({ token: link!.token, plan: "team", unlimited: "1", trade: "hvac" });
+    expect(Object.fromEntries(emailed.searchParams)).toEqual({ token: link!.token, plan: "team", unlimited: "1" });
     const opened = await fetch(`${h.baseUrl}${emailed.pathname}${emailed.search}`);
     const page = await opened.text();
     const picks = /name="picks" value="([^"]+)"/.exec(page)![1]!.replaceAll("&amp;", "&");
@@ -801,10 +809,10 @@ describe("sign-up picks through Google and Microsoft", () => {
     expect(done.status).toBe(303);
     const landing = new URL(done.headers.get("location")!, BASE);
     expect(landing.pathname).toBe("/signup");
-    expect(Object.fromEntries(landing.searchParams)).toEqual({ plan: "team", unlimited: "1", trade: "hvac" });
+    expect(Object.fromEntries(landing.searchParams)).toEqual({ plan: "team", unlimited: "1" });
     const signup = await (await fetch(`${h.baseUrl}${landing.pathname}${landing.search}`, { headers: { cookie: cookieOf(done, "afo_pending_identity")! } })).text();
-    expect(signup).toContain('value="new-person@synthetic.example" readonly');
-    expect(signup).toContain('<option value="hvac" selected>');
+    expect(signup).toContain("Signing up as <b>new-person@synthetic.example</b>.");
+    expect(signup).not.toContain('name="trade"');
     // Picks that aren't real plans or trades never ride along, from the link or the form.
     expect(await (await fetch(`${h.baseUrl}/login/link?token=${link!.token}&plan=platinum&trade=%3Cscript%3E`)).text()).not.toContain('name="picks"');
     h.store.notifications.clear();
@@ -816,19 +824,20 @@ describe("sign-up picks through Google and Microsoft", () => {
     expect((await postLink(h, { token: second!.token, picks: "plan=platinum&unlimited=yes" }, { cookie: bind })).headers.get("location")).toBe("/signup");
   });
 
-  it("keeps the plan, Unlimited and trade through the sign-up page's own email link", async () => {
+  it("keeps the plan and Unlimited through the sign-up page's own email link", async () => {
     const h = await harness();
     const body = new URLSearchParams({ email: "fresh@synthetic.example", picks: "plan=team&unlimited=1&trade=hvac" });
     expect((await fetch(`${h.baseUrl}/login/email`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body })).status).toBe(200);
     const [link] = await queuedLinks(h);
-    expect(Object.fromEntries(new URL(link!.url).searchParams)).toEqual({ token: link!.token, plan: "team", unlimited: "1", trade: "hvac" });
+    expect(Object.fromEntries(new URL(link!.url).searchParams)).toEqual({ token: link!.token, plan: "team", unlimited: "1" });
     h.store.notifications.clear();
     const bogus = new URLSearchParams({ email: "other@synthetic.example", picks: "plan=platinum&trade=%3Cscript%3E" });
     await fetch(`${h.baseUrl}/login/email`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: bogus });
     const [plain] = await queuedLinks(h);
     expect(Object.fromEntries(new URL(plain!.url).searchParams)).toEqual({ token: plain!.token });
     const page = renderOwnerSignup("", { plan: "team", unlimited: "yes", trade: "hvac" }, { emailLink: true, providers: {} });
-    expect(page).toContain('<form class="linkstart" method="post" action="/login/email"><input type="hidden" name="picks" value="plan=team&amp;unlimited=1&amp;trade=hvac">');
+    expect(page).toContain('<input type="hidden" name="step" value="account"><input type="hidden" name="plan" value="team"><input type="hidden" name="unlimited" value="yes"><input type="hidden" name="picks" value="plan=team&amp;unlimited=1">');
+    expect(page).toContain('<button class="linkbtn" formaction="/login/email" formnovalidate>Email me a sign-in link instead</button>');
   });
 });
 
