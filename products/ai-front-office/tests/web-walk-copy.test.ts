@@ -11,6 +11,18 @@ describe("owner app words that must match what the screen shows (walk 11-26 re-w
     expect(box.match(/<li>/g)).toHaveLength(2);
   });
 
+  it("starts the clear step over on every new choice, so a second switch-away still clears every call (FWD-01)", () => {
+    const card = source("components/app/forwarding-card.tsx");
+    expect(card).toContain("useEffect(() => { setCleared(null) }, [planForwardsAll])");
+  });
+
+  it("turning every call off with the iPhone switch still names the code for old ring-first rules (FWD-01)", () => {
+    const card = source("components/app/forwarding-card.tsx");
+    const off = card.slice(card.indexOf("{offViaSettings ? ("), card.indexOf('{steps?.off === "settings" && ('));
+    expect(off).toContain("SETTINGS_OFF_LINE");
+    expect(off).toContain("Used Ring my phone first before? Also dial");
+  });
+
   it("points to Alerts for emergency calls only in words that work without a saved mobile (SET-01)", () => {
     const sections = source("pages/settings-sections.tsx");
     expect(sections).toContain('settings.integrations.ownerPhoneConfigured ? "Turn on emergency calls in Alerts." : "Add your mobile in Alerts first."');

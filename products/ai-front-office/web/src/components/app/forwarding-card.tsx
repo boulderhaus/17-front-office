@@ -120,6 +120,9 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
   const onViaSettings = Boolean(ottoDigits) && steps?.on === "settings" && !codeWay
   const offViaSettings = steps?.off === "settings" && !codeWay
   const noSwitchLink = platform === "desktop" ? NO_SWITCH_LINK_DESKTOP : NO_SWITCH_LINK
+  // A new choice starts its clear step over: "I turned it off" for one switch-away doesn't count for the next.
+  const planForwardsAll = plan?.forwardsAll
+  useEffect(() => { setCleared(null) }, [planForwardsAll])
   // A copy on a computer isn't a dial (the code still has to go into the phone), so it never checks off step 2.
   const dialed = viaSettings
     ? !clearing && copied === ottoDigits && platform !== "desktop"
@@ -292,7 +295,11 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
                     <div className="mt-2 grid gap-2">
                       {offViaSettings ? (
                         // Every call was the iPhone's Settings switch: the same switch turns it off. The code stays behind the link.
-                        <p>{platform === "desktop" ? "On your iPhone: " : ""}{SETTINGS_OFF_LINE}</p>
+                        <>
+                          <p>{platform === "desktop" ? "On your iPhone: " : ""}{SETTINGS_OFF_LINE}</p>
+                          {/* The switch only turns off every call: ring-first rules set by code before stay until ##002#. */}
+                          {plan.off && <p className="text-muted-foreground">Used Ring my phone first before? Also dial <code className="rounded bg-muted px-1.5 py-0.5 font-mono font-semibold">{plan.off}</code> and press Call.</p>}
+                        </>
                       ) : (
                         <>
                           <p>On {formatPhone(business.number!)}, dial <code className="rounded bg-muted px-1.5 py-0.5 font-mono font-semibold">{plan.off}</code> and press Call.</p>
