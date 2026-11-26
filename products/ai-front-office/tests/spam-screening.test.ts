@@ -54,8 +54,8 @@ describe("call-minute guards in the assistant", () => {
     expect(update.dynamic_variables.caller_reputation).toBe("unknown");
   });
 
-  it("re-asks once on silence, checks in once, then says goodbye and hangs up", () => {
-    expect(prompt).toContain('If the caller goes silent after your question, repeat it once in a few words. If still silent, ask once, "Are you still there?"');
+  it("checks in once on silence with the last question, then says goodbye and hangs up", () => {
+    expect(prompt).toContain('If the caller goes silent, check in once: "Are you still there?" plus your last question in a few words. If still silent, save any intake');
     expect(prompt).toContain('say "I\'ll let you go. Goodbye.", and invoke the built-in hangup tool in the same turn');
   });
 

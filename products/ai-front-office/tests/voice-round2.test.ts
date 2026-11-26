@@ -133,7 +133,7 @@ describe("system prompt budget", () => {
       "If a tool result has ok=false, say its say line once, follow its instruction, and do not call that tool again.",
       // Booking and price refusal
       "The booking mode is direct",
-      "Don't promise a callback while you can book.",
+      "triage_call found no emergency, book an offered slot they pick instead of promising a callback. Safety and wrap-up rules win.",
       "Call book_slot only after the caller explicitly confirms one offered slot.",
       'Say "confirmed" only when book_slot returns status=confirmed',
       "Never pretend a booking succeeded.",
@@ -147,9 +147,9 @@ describe("system prompt budget", () => {
       "Never dial a number the caller gives you",
       // Ending
       'Never say "goodbye" without immediately invoking',
-      'If the caller goes silent after your question, repeat it once in a few words. If still silent, ask once, "Are you still there?"',
+      'If the caller goes silent, check in once: "Are you still there?" plus your last question in a few words. If still silent,',
       // Hearing and urgency (walk 3)
-      "Missed an answer? Say so and re-ask that one thing once. Never guess.",
+      "Missed an answer? Say so and re-ask it once. Never guess.",
       "Never ask how urgent or serious it is; judge it from their words and call triage_call.",
       "Any tool may return wrap_up=true once the call has run about five minutes",
       'say exactly "I\'ve got everything I need; the owner will call you back."',

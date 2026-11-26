@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
-import { CALENDAR_UNAVAILABLE_MESSAGE, CallService } from "../src/application/call-service.js";
+import { CALENDAR_UNAVAILABLE_MESSAGE, CallService, NO_SLOTS_MESSAGE } from "../src/application/call-service.js";
 import { createDemoConfig, normalizeBusinessConfig } from "../src/domain/config.js";
 import type { BusinessConfig } from "../src/domain/models.js";
 import type { Clock } from "../src/ports.js";
@@ -22,7 +22,7 @@ describe("Otto works out urgency itself", () => {
   it("never tells Otto to ask the caller how urgent or serious it is", () => {
     expect(prompt).not.toMatch(/and how urgent it is/);
     expect(prompt).toContain("Never ask how urgent or serious it is; judge it from their words and call triage_call.");
-    expect(prompt).toContain('Ask one plain fact only if it matters ("Is water still coming in?").');
+    expect(prompt).toContain('Ask one fact only if it matters ("Is water still coming in?").');
   });
 
   it("keeps every life-safety rule word for word", () => {
@@ -42,9 +42,28 @@ describe("Otto never leaves dead air and re-asks what it missed", () => {
   });
 
   it("re-asks the one thing it missed, once, instead of guessing or going quiet", () => {
-    expect(prompt).toContain("Missed an answer? Say so and re-ask that one thing once. Never guess.");
-    expect(prompt).toContain("If the caller goes silent after your question, repeat it once in a few words.");
-    expect(prompt.indexOf("repeat it once in a few words")).toBeLessThan(prompt.indexOf('"Are you still there?"'));
+    expect(prompt).toContain("Missed an answer? Say so and re-ask it once. Never guess.");
+  });
+
+  it("checks in once on silence, then saves and hangs up, inside the 10 s idle cap", () => {
+    expect(prompt).toContain(`If the caller goes silent, check in once: "Are you still there?" plus your last question in a few words. If still silent, save any intake, say "I'll let you go. Goodbye.", and invoke the built-in hangup tool in the same turn.`);
+    expect(prompt).not.toContain("repeat it once in a few words");
+  });
+});
+
+describe("booking never outranks safety", () => {
+  it("never books an emergency and keeps the 911 rule and wrap-up line on top", () => {
+    const prompt = buildVoiceSystemPrompt(createDemoConfig());
+    expect(prompt).not.toContain("Don't promise a callback while you can book.");
+    expect(prompt).toContain("triage_call found no emergency, book an offered slot they pick instead of promising a callback. Safety and wrap-up rules win.");
+    expect(prompt).toContain("If the caller reports gas odor, carbon monoxide, smoke, fire, or immediate danger, tell them to leave the building and call 911 or the gas utility.");
+  });
+
+  it("a full window looks once more before falling back to the owner confirming", () => {
+    expect(NO_SLOTS_MESSAGE).toContain("call check_availability once more with a window from the next day to a week out");
+    expect(NO_SLOTS_MESSAGE).toContain("never suggest a time");
+    expect(NO_SLOTS_MESSAGE).toContain("access_notes");
+    expect(CALENDAR_UNAVAILABLE_MESSAGE).toContain("access_notes");
   });
 });
 

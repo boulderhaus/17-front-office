@@ -42,8 +42,8 @@ const OFFER_GRACE_MINUTES = 10;
 /** Per try; see checkAvailability. */
 export const AVAILABILITY_TRY_TIMEOUT_MS = 1_700;
 /** No calendar connected, or it failed: take the details, never a time. */
-export const CALENDAR_UNAVAILABLE_MESSAGE = "No calendar time can be offered. Never suggest a time. Ask what day and time suits them, note it with save_intake, and say the owner will confirm it.";
-export const NO_SLOTS_MESSAGE = "No open time in that window. Never suggest a time. Ask what day and time suits them, note it with save_intake, and say the owner will confirm it.";
+export const CALENDAR_UNAVAILABLE_MESSAGE = "No calendar time can be offered. Never suggest a time. Ask what day and time suits them, put it in save_intake access_notes (\"Prefers: ...\"), and say the owner will confirm it.";
+export const NO_SLOTS_MESSAGE = "Nothing open then. If you have not yet, call check_availability once more with a window from the next day to a week out, and offer those. If still none, never suggest a time: ask what day and time suits them, put it in save_intake access_notes (\"Prefers: ...\"), and say the owner will confirm it.";
 
 type BookSlotResult = { status: "confirmed" | "pending" | "conflict" | "unknown"; message: string };
 

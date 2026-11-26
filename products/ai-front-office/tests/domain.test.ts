@@ -56,7 +56,7 @@ describe("coverage and voice policy", () => {
     expect(prompt).toContain("Quote only these approved snippets");
     expect(prompt).toContain("read the exact approved diagnostic fee");
     expect(prompt).toContain("The booking mode is direct");
-    expect(prompt).toContain("Don't promise a callback while you can book.");
+    expect(prompt).toContain("triage_call found no emergency, book an offered slot they pick instead of promising a callback. Safety and wrap-up rules win.");
     expect(buildVoiceSystemPrompt({ ...createDemoConfig(), bookingMode: "confirm" })).toContain("The booking mode is confirm. In confirm mode, save the preferred time but never claim it is booked.");
     expect(prompt).toContain("caller ID as {{caller_phone}}");
     expect(prompt).toContain("Most turns are one short sentence");
