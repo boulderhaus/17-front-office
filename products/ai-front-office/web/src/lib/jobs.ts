@@ -10,10 +10,31 @@ interface JobCall { id: string; startedAt: string; outcome: string; fields: { re
 interface JobTask { callId: string; priority: string; dueAt: string; completedAt: string | null; updatedAt: string }
 
 export interface JobCard<C> { call: C; label: string; tone: JobTone; when: string; whenLabel: string; action: "call" | null; sortAt: string }
+
+/** Rows a phone column shows before "Show all", and cards a computer column shows (it scrolls on its own). */
+export const PHONE_CAP = 5
+export const BOARD_CAP = 25
+
+/** How long ago, in the fewest words: Just now, 12m ago, 3h ago, 1d ago (elapsed time, so 25 hours is never "Yesterday" two days back). */
+export function agoLabel(iso: string, nowMs: number): string {
+  const minutes = Math.max(0, Math.floor((nowMs - Date.parse(iso)) / 60_000))
+  if (minutes < 1) return "Just now"
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
+/** The first `cap` cards, unless the owner asked for all; `hidden` is what "Show all" would add. */
+export function cappedCards<T>(cards: T[], cap: number, all: boolean): { shown: T[]; hidden: number } {
+  const shown = all ? cards : cards.slice(0, cap)
+  return { shown, hidden: cards.length - shown.length }
+}
 export interface JobColumn<C> { id: JobColumnId; title: string; empty: string; cards: Array<JobCard<C>> }
 
 /**
- * Every job lands in exactly one column. A call with a follow-up still open is in Needs reply or Waiting, even if
+ * Every job lands in exactly one column. Needs reply: urgent first, then the newest call; Waiting: the soonest back;
+ * Booked: the soonest visit. A call with a follow-up still open is in Needs reply or Waiting, even if
  * it was booked; a booked visit still ahead (however far) is in Booked; a visit that has passed, or a follow-up
  * the owner closed, is in Done, newest first.
  */
@@ -28,9 +49,12 @@ export function jobColumns<C extends JobCall, T extends JobTask>(input: {
   const reply = cards(input.actionable, (task, call) => {
     const urgent = task.priority === "high"
     const due = input.due(task)
-    return { call, label: urgent ? "Urgent" : call.fields.requestedStart ? "Confirm time" : "Call back", tone: urgent ? "danger" : call.fields.requestedStart ? "warn" : "neutral", whenLabel: "Call back", when: due === "Due now" ? "Now" : due.replace(/^Due today /, "Today ").replace(/^Due /, ""), action: "call", sortAt: task.dueAt } as JobCard<C>
-  })
+    // Due now (nearly always): say how long the caller has waited, so a busy column doesn't read "Now" on every card.
+    const now = due === "Due now"
+    return { call, label: urgent ? "Urgent" : call.fields.requestedStart ? "Confirm time" : "Call back", tone: urgent ? "danger" : call.fields.requestedStart ? "warn" : "neutral", whenLabel: now ? "Called" : "Call back", when: now ? agoLabel(call.startedAt, input.nowMs) : due.replace(/^Due today /, "Today ").replace(/^Due /, ""), action: "call", sortAt: call.startedAt } as JobCard<C>
+  }).sort((left, right) => Number(right.tone === "danger") - Number(left.tone === "danger") || right.sortAt.localeCompare(left.sortAt))
   const waiting = cards(input.snoozed, (task, call) => ({ call, label: "Later", tone: "neutral", whenLabel: "Back on", when: input.date(task.dueAt), action: "call", sortAt: task.dueAt }))
+    .sort((left, right) => left.sortAt.localeCompare(right.sortAt))
   const open = new Set([...reply, ...waiting].map((card) => card.call.id))
   const bookedCalls = [...input.callsById.values()].filter((call) => call.outcome === "booked" && !open.has(call.id))
   const ahead = (call: C) => Boolean(call.fields.requestedStart) && Date.parse(call.fields.requestedStart!) >= input.nowMs
