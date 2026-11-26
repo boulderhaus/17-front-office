@@ -1973,21 +1973,29 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (member) throw new HttpError(403, "Only the owner can delete the shop");
       const form = parseForm(await readBody(request, 8_000));
       if (!verifyOwnerCsrf(session, form.get("csrf"))) throw new HttpError(403, "Invalid CSRF token");
-      if (form.get("confirm")?.trim().toLowerCase() !== "delete") throw new HttpError(400, "Type DELETE to confirm");
-      // No password on the account (Google, Microsoft or email link): a sign-in in the last 10 minutes stands in for it.
+      // A browser goes back to the delete card with the problem next to the field; the JSON client gets the status.
+      const refuse = (status: number, reason: string, message: string): void => {
+        if (wantsPage(request)) return redirect(response, `/app/settings/data?delete=${reason}`);
+        throw new HttpError(status, message);
+      };
+      if (form.get("confirm")?.trim().toLowerCase() !== "delete") return refuse(400, "confirm", "Type DELETE to confirm");
+      // Proof it's the owner: a sign-in in the last 10 minutes (Google, Microsoft, email link or password), or the
+      // account's password. An account with no password (Google, Microsoft or email link) has only the first.
+      const typed = form.get("password") ?? "";
       if (isPasswordless(account.passwordHash)) {
-        if (!signedInRecently(session)) throw new HttpError(403, "For your safety, sign in again, then delete within 10 minutes.");
-      } else if (!await verifyOwnerPassword(form.get("password") ?? "", account.passwordHash)) throw new HttpError(403, "Password is incorrect");
+        if (!signedInRecently(session)) return refuse(403, "signin", "For your safety, sign in again, then delete within 10 minutes.");
+      } else if (typed || !signedInRecently(session)) {
+        if (!limiter.allow(`delete-password:${account.id}`, 10, 15 * 60_000)) return refuse(429, "slow", "Too many tries. Wait 15 minutes or sign in again.");
+        if (!await verifyOwnerPassword(typed, account.passwordHash)) return refuse(403, "password", "That password isn’t right");
+      }
       const subscription = await dependencies.store.getSubscription(account.tenantId);
       // Only once billing has fully ended: anything but a cancelled subscription may still charge.
       if (subscription?.providerSubscriptionId && subscription.status !== "canceled") {
-        throw new HttpError(409, "Cancel your subscription in Billing first. You can delete your account once it has ended.");
+        return refuse(409, "plan", "Cancel your subscription in Billing first. You can delete your account once it has ended.");
       }
-      await pauseLiveRoute(account.tenantId)
-        .catch(() => { throw new HttpError(502, "We couldn't disconnect your Call Otto line. Nothing was deleted; please retry."); });
+      try { await pauseLiveRoute(account.tenantId); } catch { return refuse(502, "line", "We couldn't disconnect your Call Otto line. Nothing was deleted; please retry."); }
       await releaseProvisionedLine(account.tenantId);
-      await deletionService.deleteWorkspace(account.tenantId)
-        .catch(() => { throw new HttpError(502, "A call recording couldn't be deleted. Nothing else was removed; please retry."); });
+      try { await deletionService.deleteWorkspace(account.tenantId); } catch { return refuse(502, "recording", "A call recording couldn't be deleted. Nothing else was removed; please retry."); }
       log({ level: "warn", event: "owner_workspace_deleted", tenantId: account.tenantId });
       response.setHeader("set-cookie", clearOwnerSessionCookie(dependencies.env.NODE_ENV === "production"));
       return redirect(response, "/?deleted=1");
