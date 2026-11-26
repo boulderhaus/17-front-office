@@ -80,18 +80,22 @@ export function triageEmergency(
   }
   // Owner and trade phrases: whole words, any case or apostrophes, and never when negated ("no flooding").
   const notes = plainWords(description);
+  let ownerMatches = 0;
   for (const keyword of config.emergencyKeywords) {
     const phrase = plainWords(keyword);
     if (phrase !== "" && saidPlainly(notes, phrase)) {
       evidence.push(`configured keyword: ${keyword}`);
       urgentMatches += 1;
+      ownerMatches += 1;
     }
   }
 
   const deterministicScore = urgentMatches === 0 ? 0 : Math.min(0.95, 0.55 + urgentMatches * 0.15);
   const boundedLlmScore = llmScore === undefined || !Number.isFinite(llmScore) ? 0 : Math.max(0, Math.min(1, llmScore));
-  const score = Math.max(deterministicScore, boundedLlmScore);
   const threshold = Math.min(0.9, Math.max(0.5, config.emergencyThreshold));
+  // Something the owner ticked as an emergency always counts, however strict the setting: the setting only
+  // tunes Otto's own judgment of everything else.
+  const score = Math.max(deterministicScore, boundedLlmScore, ownerMatches > 0 ? threshold : 0);
   if (llmReason && boundedLlmScore >= threshold) {
     evidence.push(`model judgment: ${llmReason}`);
   }

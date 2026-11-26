@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { continueOwnerAlertCall, ownerAlertState, urgentOwnerCallsConfigured } from "../adapters/telnyx-owner-call.js";
-import { grantOwnerCallConsent, hasOwnerCallConsent, OWNER_CALL_CONSENT_DETAIL, revokeOwnerCallConsent } from "../domain/owner-call-consent.js";
+import { grantOwnerCallConsent, hasOwnerCallConsent, OWNER_CALL_CONSENT_SETTINGS_DETAIL, OWNER_CALL_CONSENT_SETTINGS_VERSION, revokeOwnerCallConsent } from "../domain/owner-call-consent.js";
 import { deviceId, listPushSubscriptions, parsePushSubscription, removePushSubscriptions, savePushSubscription } from "../adapters/web-push.js";
 import { lineLiveNotifications, ownerPushNotification } from "../application/owner-alerts.js";
 import { SERVICE_WORKER, WEB_MANIFEST } from "./pwa.js";
@@ -29,6 +29,9 @@ import { renderDialHandoff, renderErrorPage } from "../admin/error-page.js";
 import { EMAILED_HANDOFF_TTL_MS, HANDOFF_PROVIDER, isShortHandoffId, readDialHandoffToken, readShortHandoff, SHORT_HANDOFF_PREFIX, shortHandoffId, shortHandoffRecord } from "../domain/dial-handoff.js";
 
 import { ALL_PARTY_CONSENT_STATES, serviceAreaState, stateForPhone, timezoneForState } from "../domain/area-codes.js";
+import { areaForPhone } from "../domain/area-cities.js";
+import { ALWAYS_ON_LINE, ALWAYS_ON_WORDS, EMERGENCY_CHOICES } from "../domain/emergency-choices.js";
+import { otherServiceProblem, REPEAT_CALLER_DAILY_LIMIT } from "../domain/owner-inputs.js";
 import { MAX_USAGE_ALERT_PERCENT, MIN_USAGE_ALERT_PERCENT, currentBillingPeriod, isValidUsageAlertPercent } from "../domain/usage.js";
 
 export { currentBillingPeriod };
@@ -43,7 +46,7 @@ import { anyGoogleClient, clientForAttempt, clientForNewConnections, encodeGoogl
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
-import { tradeForShopName } from "../domain/trades.js";
+import { TRADES, tradeForShopName } from "../domain/trades.js";
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import type { OwnerSession } from "../security/owner-auth.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hasUsablePassword, hashOwnerPassword, isPasswordless, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, ownerSessionIssuedAt, PASSWORDLESS_HASH, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
@@ -497,7 +500,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     return {
       available: urgentOwnerCallsConfigured(dependencies.env),
       on: await hasOwnerCallConsent(dependencies.store, tenantId, phone),
-      disclosure: OWNER_CALL_CONSENT_DETAIL,
+      disclosure: OWNER_CALL_CONSENT_SETTINGS_DETAIL,
       // The urgent number is the business number and it may send every call to Otto: urgent calls are held (the
       // owner-call sender skips them), so Settings says so instead of a switch that looks on and does nothing.
       held: await dialsBackToOtto(dependencies.store, tenantId, phone),
@@ -917,7 +920,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         updatedAt: now,
       };
       const splitList = (value: string): string[] => value.split(",").map((item) => item.trim()).filter(Boolean).slice(0, 100);
-      const serviceArea = normalizeServiceAreaInput(parsed.data.serviceAreaTerms || homeState || "");
+      // The owner's own area from the mobile's area code ("Sarasota FL, Bradenton FL…"), else their state.
+      const serviceArea = normalizeServiceAreaInput(parsed.data.serviceAreaTerms || areaForPhone(phone)?.join(", ") || homeState || "");
       if (serviceArea.errors.length > 0) return sendHtml(response, 400, signupPage(request, serviceAreaMessage(serviceArea.errors), values, identity));
       // The plan picked above the button; Solo when nothing was sent.
       const plan = pickPlan(plans, form.get("plan"));
@@ -1365,7 +1369,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (body.on) {
         const mobile = await dependencies.store.getIntegrationSecret(account.tenantId, "notifications", "owner-primary");
         if (!mobile) throw new HttpError(400, "Add your mobile number first.");
-        await grantOwnerCallConsent(dependencies.store, account.tenantId, { at: now, source: "settings", ip: requestIp(request), phone: mobile });
+        await grantOwnerCallConsent(dependencies.store, account.tenantId, { at: now, source: "settings", ip: requestIp(request), phone: mobile, wording: OWNER_CALL_CONSENT_SETTINGS_VERSION });
       } else {
         await revokeOwnerCallConsent(dependencies.store, account.tenantId, { at: now, source: "settings" });
       }
@@ -1727,6 +1731,19 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         urgentCalls: await urgentCallsState(account.tenantId),
         texts: await textsState(account.tenantId),
         values: apiSettings(config),
+        // The tick boxes for "What you fix" and "What counts as an emergency" (the stored lists stay plain words).
+        catalog: {
+          trades: TRADES.filter((trade) => trade.key !== "other").map((trade) => ({ key: trade.key, label: trade.label, services: trade.services })),
+          emergencies: EMERGENCY_CHOICES.map((choice) => ({ key: choice.key, label: choice.label, trades: choice.trades, words: choice.words })),
+          alwaysOnWords: ALWAYS_ON_WORDS,
+          alwaysOnLine: ALWAYS_ON_LINE,
+        },
+        // A shop that only has a whole state ("FL") gets its own area offered, from the mobile's area code.
+        areaSuggestion: (() => {
+          const area = areaForPhone(ownerPhone);
+          const onlyStates = config.serviceAreaTerms.length > 0 && config.serviceAreaTerms.every((term) => /^[A-Z]{2}$/.test(term));
+          return area && onlyStates ? area.join(", ") : null;
+        })(),
         status: account.status,
         // No password (Google, Microsoft or email link): deleting needs a sign-in from the last 10 minutes instead.
         signIn: { hasPassword: !isPasswordless(account.passwordHash), recent: signedInRecently(session) },
@@ -3644,7 +3661,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const recentCalls = /^\+1[2-9]\d{9}$/.test(callerPhone)
         ? await dependencies.store.countCallsFromNumberSince(config.tenantId, callerPhone, new Date(dependencies.clock.now().getTime() - 24 * 60 * 60_000).toISOString())
         : 0;
-      const callAccess = recentCalls >= config.maxCallsPerCallerPerDay ? "blocked_daily_limit" : "allowed";
+      // A fixed safeguard, not an owner setting: one number can't use up the shop's calls in a day.
+      const callAccess = recentCalls >= REPEAT_CALLER_DAILY_LIMIT ? "blocked_daily_limit" : "allowed";
       await service.recordStarted({
         eventId: telnyxEventId(envelope, rawBody),
         tenantId,
@@ -4448,7 +4466,8 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams, surface:
   const answerAfterRings = Number(form.get("answerAfterRings") ?? "0");
   // Half rings allowed: 2.5 rings is the 15-second default ("15 seconds (2–3 rings)").
   if (!Number.isInteger(answerAfterRings * 2) || answerAfterRings < 2 || answerAfterRings > 12) throw new HttpError(400, "Answer-after-rings must be between 2 and 12");
-  const dataRetentionDays = Number(form.get("dataRetentionDays") ?? "0");
+  // Calls are kept until the owner deletes them (no automatic deletion); only the platform form still sends this.
+  const dataRetentionDays = form.has("dataRetentionDays") ? Number(form.get("dataRetentionDays")) : current.dataRetentionDays;
   if (!Number.isInteger(dataRetentionDays) || dataRetentionDays < 7 || dataRetentionDays > 365) throw new HttpError(400, "Data retention must be 7–365 days");
   const supportEmail = form.get("supportEmail")?.trim() || null;
   if (supportEmail && !z.string().email().safeParse(supportEmail).success) throw new HttpError(400, "Support email is invalid");
@@ -4465,7 +4484,8 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams, surface:
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(bookableWeekdayStart) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(bookableWeekdayEnd)) throw new HttpError(400, "Bookable hours must use HH:MM");
   const minimumLeadTimeMinutes = Number(form.get("minimumLeadTimeMinutes") ?? "0");
   if (!Number.isInteger(minimumLeadTimeMinutes) || minimumLeadTimeMinutes < 0 || minimumLeadTimeMinutes > 10_080) throw new HttpError(400, "Minimum lead time must be 0–10080 minutes");
-  const maxCallsPerCallerPerDay = Number(form.get("maxCallsPerCallerPerDay") ?? "0");
+  // Not an owner setting any more (the fixed REPEAT_CALLER_DAILY_LIMIT applies); the platform form may still send it.
+  const maxCallsPerCallerPerDay = form.has("maxCallsPerCallerPerDay") ? Number(form.get("maxCallsPerCallerPerDay")) : current.maxCallsPerCallerPerDay;
   if (!Number.isInteger(maxCallsPerCallerPerDay) || maxCallsPerCallerPerDay < 1 || maxCallsPerCallerPerDay > 20) throw new HttpError(400, "Caller daily limit must be 1–20 calls");
   const ownerDailySmsHour = Number(form.get("ownerDailySmsHour") ?? current.ownerDailySmsHour);
   if (!Number.isInteger(ownerDailySmsHour) || ownerDailySmsHour < 0 || ownerDailySmsHour > 23) throw new HttpError(400, "Daily summary hour must be 0–23");
@@ -4490,7 +4510,15 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams, surface:
     minimumLeadTimeMinutes,
     maxCallsPerCallerPerDay,
     defaultServiceDurationMinutes,
-    serviceCategories: list("serviceCategories"),
+    serviceCategories: (() => {
+      const services = list("serviceCategories");
+      if (surface !== "owner") return services;
+      if (services.length === 0) throw new HttpError(400, "Pick at least one thing you fix.");
+      // Only what's new is checked, so an old entry never blocks saving another page.
+      const problem = otherServiceProblem(services.filter((item) => !current.serviceCategories.some((saved) => saved.toLowerCase() === item.toLowerCase())));
+      if (problem) throw new HttpError(400, problem);
+      return services;
+    })(),
     priceSnippets: parseLines(form.get("priceSnippets") ?? "", 50).map((line) => {
       const [label, ...rest] = line.split(":");
       return { label: label!.trim().slice(0, 120), text: rest.join(":").trim().slice(0, 1_000) };

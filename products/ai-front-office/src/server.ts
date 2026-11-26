@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { OutboxWorker } from "./application/outbox-worker.js";
 import { CallService } from "./application/call-service.js";
-import { DataDeletionService } from "./application/data-deletion.js";
+import { runRetentionCycle } from "./application/retention.js";
 import { GraceLineService } from "./application/grace-line.js";
 import { OwnerSummaryService } from "./application/owner-summary-service.js";
 import { CallLengthGuard } from "./application/call-length.js";
@@ -16,7 +16,6 @@ import { createTelemetry } from "./adapters/posthog.js";
 import { systemClock } from "./ports.js";
 import { createRuntime } from "./runtime.js";
 import { urgentOwnerCallsConfigured } from "./adapters/telnyx-owner-call.js";
-import { TOOL_LEDGER_RETENTION_MS } from "./voice/tool-results.js";
 
 const env = loadEnvironment(process.env);
 const runtime = await createRuntime(env);
@@ -31,10 +30,6 @@ server.maxRequestsPerSocket = 1_000;
 
 const worker = new OutboxWorker(runtime.store, runtime.sender, systemClock);
 const recovery = new CallService(runtime.store, runtime.calendar, systemClock, env.PUBLIC_BASE_URL, { callbackLinkKey: env.SESSION_SIGNING_KEY ?? null, ownerEmailAvailable: Boolean(env.RESEND_API_KEY && env.RESEND_FROM_EMAIL), pushAvailable: Boolean(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY), urgentCallAvailable: urgentOwnerCallsConfigured(env) });
-const deletion = new DataDeletionService(
-  runtime.store,
-  env.TELNYX_API_KEY ? new TelnyxRecordingClient(env.TELNYX_API_KEY) : null,
-);
 // A call whose end-of-call callback never arrives is finished from Telnyx's own conversation history, so its
 // transcript, summary, usage count and callback task are kept. Claimed per call in the shared ledger and
 // finalized under the call's lock, so every replica may run it.
@@ -98,20 +93,9 @@ const runWorker = async (): Promise<void> => {
     }
     if (Date.now() >= nextRetentionAt) {
       nextRetentionAt = Date.now() + 60 * 60_000;
-      for (const tenantId of await runtime.store.listTenantIds()) {
-        try {
-          const config = await runtime.store.getConfig(tenantId);
-          const cutoff = new Date(Date.now() - config.dataRetentionDays * 24 * 60 * 60_000).toISOString();
-          const result = await deletion.deleteExpired(tenantId, cutoff);
-          if (result.deleted > 0 || result.failed > 0) logger({ level: result.failed > 0 ? "error" : "info", event: "retention_cycle", tenantId, ...result, retentionDays: config.dataRetentionDays });
-        } catch (error) {
-          logger({ level: "error", event: "retention_cycle_failed", tenantId, error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });
-          telemetry.captureException(error, { route: "job:retention", tenantId });
-        }
-      }
-      const purgedWebhooks = await runtime.store.purgeWebhookEvents(new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString());
+      // Calls are kept for good (deleted only when the owner asks); only webhooks and the tool ledger expire.
+      const { purgedWebhooks, purgedToolLedger } = await runRetentionCycle(runtime.store, new Date());
       if (purgedWebhooks > 0) logger({ level: "info", event: "webhook_retention_cycle", purged: purgedWebhooks });
-      const purgedToolLedger = await runtime.store.purgeToolLedger(new Date(Date.now() - TOOL_LEDGER_RETENTION_MS).toISOString());
       if (purgedToolLedger > 0) logger({ level: "info", event: "tool_ledger_retention_cycle", purged: purgedToolLedger });
     }
     if (Date.now() >= nextSummaryAt) {

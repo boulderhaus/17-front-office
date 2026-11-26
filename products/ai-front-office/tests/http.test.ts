@@ -6,6 +6,7 @@ import { demoEnvironment, loadEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
 import type { CallRecord } from "../src/domain/models.js";
 import { createRequestHandler } from "../src/http/app.js";
+import { REPEAT_CALLER_DAILY_LIMIT } from "../src/domain/owner-inputs.js";
 import type { Clock } from "../src/ports.js";
 import { shopStepPage } from "./signup-steps.js";
 
@@ -599,7 +600,12 @@ describe("HTTP boundary", () => {
     expect(store.smsStopNotices.has("+15555550100")).toBe(false);
     await store.setSmsOptOut("demo", "+15555550100", true);
 
-    await store.saveConfig({ ...await store.getConfig("demo"), maxCallsPerCallerPerDay: 1 });
+    // The repeat-caller limit is a fixed safeguard: a saved per-shop number (old setting) no longer changes it.
+    await store.saveConfig({ ...await store.getConfig("demo"), maxCallsPerCallerPerDay: 20 });
+    for (let index = 0; index < REPEAT_CALLER_DAILY_LIMIT; index += 1) {
+      const id = `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+      await store.saveCall({ ...(await store.listCalls("demo", 1))[0]!, id, providerCallId: `v3:repeat-${index}`, fromNumber: "+15555550110", startedAt: "2026-01-15T07:00:00.000Z" } as CallRecord);
+    }
     const limitedInitialization = JSON.stringify({
       data: {
         record_type: "event", event_type: "assistant.initialization", id: "event-initialization-limited",
