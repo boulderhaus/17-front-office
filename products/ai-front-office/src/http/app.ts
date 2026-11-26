@@ -103,6 +103,8 @@ import {
 } from "../adapters/telnyx.js";
 import { firstChargeFromEvent, StripeBillingClient, subscriptionFromStripeEvent, verifyStripeWebhook } from "../adapters/stripe.js";
 import { noopTelemetry, type Telemetry } from "../adapters/posthog.js";
+import { TelnyxTranscriber, type Transcriber } from "../adapters/telnyx-transcribe.js";
+import { cleanHeard, parseClipUpload, withPronunciation, WORD_CLIP_MAX_BYTES } from "../domain/word-clips.js";
 import { injectAnalytics, POSTHOG_PROXY_PREFIX, proxyToPostHog } from "./posthog-proxy.js";
 import {
   adminCookie,
@@ -317,6 +319,8 @@ export interface AppDependencies {
   telemetry?: Telemetry;
   /** How long a voice tool may run before it is aborted and answers take-a-message (tests shorten it). */
   toolDeadlineMs?: number;
+  /** Speech-to-text for "Say it" clips; tests inject a fake. Defaults to Telnyx when its key is set (never in demo or test mode). */
+  transcriber?: Transcriber | null;
 }
 
 /** An authenticated voice tool call whose budget is already charged, before its arguments are parsed. */
@@ -526,6 +530,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   const deletionService = new DataDeletionService(dependencies.store, recordingClient);
   const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
   const limiter = new RateLimiter();
+  const transcriber: Transcriber | null = dependencies.transcriber !== undefined ? dependencies.transcriber
+    : dependencies.env.TELNYX_API_KEY && !dependencies.env.PROVIDER_TEST_MODE && !dependencies.env.DEMO_MODE
+      ? new TelnyxTranscriber(dependencies.env.TELNYX_API_KEY, dependencies.env.TELNYX_STT_MODEL, dependencies.fetcher ?? fetch) : null;
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));
   const signIn = createOwnerSignIn({ env: dependencies.env, store: dependencies.store, clock: dependencies.clock, fetcher: (input, init) => (dependencies.fetcher ?? globalThis.fetch)(input, init), limiter, log });
   /** A passwordless account re-confirms risky changes by having signed in within this long. */
@@ -1227,9 +1234,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     ownerWebIndex ??= readFile(resolve(dependencies.ownerWeb.dir, "index.html"), "utf8").then((html) => analyticsPage(html, false)).catch(() => null);
     return ownerWebIndex;
   }
-  async function sendOwnerWeb(response: ServerResponse): Promise<boolean> {
+  async function sendOwnerWeb(response: ServerResponse, microphone = false): Promise<boolean> {
     const html = await loadOwnerWebIndex();
     if (!html) return false;
+    // Only the signed-in owner app may use the microphone ("Say it" in Names and words); every other page sends microphone=().
+    if (microphone) response.setHeader("permissions-policy", "camera=(), microphone=(self), geolocation=()");
     sendHtml(response, 200, html);
     return true;
   }
@@ -1340,6 +1349,76 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const push = { publicKey: vapid?.publicKey ?? null, devices: vapid ? (await listPushSubscriptions(dependencies.store, account.tenantId)).length : 0 };
     return telemetry.enabled ? { ...model, push, analytics: { distinctId: account.id, tenantId: account.tenantId } } : { ...model, push };
   }
+  /**
+   * Settings > Names and words, "Say it" (walk 11-26, SET-05). POST saves the owner's clip of one word and turns it
+   * into that word's "sounds like" text; GET plays it back (this shop's owner only); DELETE removes the clip.
+   */
+  async function wordClipApi(request: IncomingMessage, response: ServerResponse, url: URL, account: OwnerAccount, session: OwnerSession): Promise<void> {
+    const method = request.method ?? "GET";
+    const tenantId = account.tenantId;
+    if (method === "GET") {
+      const clip = await dependencies.store.getWordClip(tenantId, url.searchParams.get("term") ?? "");
+      // Another shop's word is simply not found.
+      if (!clip) throw new HttpError(404, "Not found");
+      return sendClip(request, response, clip.audio, clip.mimeType);
+    }
+    if (method === "DELETE") {
+      const body = await readApiJson(request, session, 2_000) as { term?: unknown };
+      if (typeof body.term !== "string" || !body.term.trim()) throw new HttpError(400, "Which word?");
+      await dependencies.store.deleteWordClip(tenantId, body.term);
+      return sendJson(response, 200, { removed: true });
+    }
+    if (method !== "POST") throw new HttpError(405, "Method not allowed");
+    if (!limiter.allow(`word-clip:${tenantId}`, 30, 60 * 60_000)) throw new HttpError(429, "Too many recordings. Try again in a bit.");
+    // base64 grows the clip by a third.
+    const upload = parseClipUpload(await readApiJson(request, session, Math.ceil(WORD_CLIP_MAX_BYTES * 4 / 3) + 2_000));
+    if ("error" in upload) throw new HttpError(upload.status, upload.error);
+    let heard: string | null = null;
+    if (transcriber) {
+      try {
+        heard = cleanHeard(await transcriber.transcribe(upload.audio, upload.mimeType));
+      } catch (error) {
+        // The clip and its check stay; the typed "sounds like" is left alone.
+        log({ level: "warn", event: "word_clip_transcribe_failed", tenantId, error: safeError(error) });
+      }
+    }
+    const now = dependencies.clock.now().toISOString();
+    const saved = await dependencies.store.withLock(`config:${tenantId}`, async () => {
+      await dependencies.store.saveWordClip({ tenantId, term: upload.term, mimeType: upload.mimeType, audio: upload.audio, heard, createdAt: now });
+      if (!heard) return null;
+      const config = await dependencies.store.getConfig(tenantId);
+      const updated = { ...config, pronunciations: withPronunciation(config.pronunciations, upload.term, heard) };
+      await dependencies.store.saveConfig(updated);
+      return updated;
+    });
+    log({ level: "info", event: "word_clip_saved", tenantId, heard: Boolean(heard) });
+    return sendJson(response, 200, {
+      term: upload.term, heard, savedAt: now,
+      // The saved "Word: sounds like" lines, so the page shows the new text as saved.
+      pronunciations: saved ? apiSettings(saved, dependencies.clock.now()).pronunciations : null,
+    });
+  }
+
+  /** One clip, with byte ranges: iPhone Safari won't play audio from a server that ignores Range. */
+  function sendClip(request: IncomingMessage, response: ServerResponse, audio: Buffer, mimeType: string): void {
+    const range = /^bytes=(\d*)-(\d*)$/.exec(String(request.headers.range ?? ""));
+    const headers = { "content-type": mimeType, "accept-ranges": "bytes", "cache-control": "private, no-store" };
+    if (range && (range[1] || range[2])) {
+      const start = range[1] ? Number(range[1]) : Math.max(0, audio.length - Number(range[2]));
+      const end = range[1] && range[2] ? Math.min(Number(range[2]), audio.length - 1) : audio.length - 1;
+      if (start >= audio.length || start > end) {
+        response.writeHead(416, { ...headers, "content-range": `bytes */${audio.length}` });
+        response.end();
+        return;
+      }
+      response.writeHead(206, { ...headers, "content-range": `bytes ${start}-${end}/${audio.length}`, "content-length": end - start + 1 });
+      response.end(audio.subarray(start, end + 1));
+      return;
+    }
+    response.writeHead(200, { ...headers, "content-length": audio.length });
+    response.end(audio);
+  }
+
   async function handleOwnerApi(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
     const auth = await authenticateOwner(request);
     if (!auth) return sendJson(response, 401, { error: "Sign in again", login: "/login" });
@@ -1732,6 +1811,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       telemetry.capture("lead_guarantee_refunded", account.id, account.tenantId, { by: "owner" });
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
     }
+    if (url.pathname === "/api/app/words/clip") {
+      if (!owner) throw new HttpError(403, "Only the owner can change shop settings");
+      return wordClipApi(request, response, url, account, session);
+    }
     if (url.pathname === "/api/app/settings") {
       if (!owner) throw new HttpError(403, "Only the owner can change shop settings");
       if (method === "PUT") {
@@ -1751,6 +1834,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         urgentCalls: await urgentCallsState(account.tenantId),
         texts: await textsState(account.tenantId),
         values: apiSettings(config, dependencies.clock.now()),
+        // Names and words: the words the owner said ("Say it"), for the green check and Play.
+        wordClips: (await dependencies.store.listWordClips(account.tenantId)).map((clip) => ({ term: clip.term, heard: clip.heard, savedAt: clip.createdAt })),
         // The tick boxes for "What you fix" and "What counts as an emergency" (the stored lists stay plain words).
         catalog: {
           // Walk 11-26 (SET-04): the same trade names as the website.
@@ -2080,7 +2165,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       return redirect(response, "/app/team?confirm=done");
     }
     // /app/team is the owner app's Team screen (below); its data and changes are /api/app/team.
-    if (method === "GET" && isOwnerAppPath(url.pathname) && await sendOwnerWeb(response)) return;
+    if (method === "GET" && isOwnerAppPath(url.pathname) && await sendOwnerWeb(response, true)) return;
     // Setup steps live in the React app; without it, the server-rendered dashboard has the same buttons.
     if (method === "GET" && /^\/app\/start\/?$/.test(url.pathname)) return redirect(response, "/app");
     if (method === "POST" && url.pathname === "/app/line/go-live") {

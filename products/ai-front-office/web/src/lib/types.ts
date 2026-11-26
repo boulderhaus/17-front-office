@@ -242,6 +242,8 @@ export interface ApiSettings {
   catalog?: SettingsCatalog
   /** The shop's own area from the mobile's area code, offered when "Where you work" is only a state. */
   areaSuggestion?: string | null
+  /** Names and words: the words the owner said ("Say it"); heard is what speech-to-text made of it, or null. */
+  wordClips?: Array<{ term: string; heard: string | null; savedAt: string }>
   status: string
   /** No password on the account (Google, Microsoft or email link): deleting needs a sign-in from the last 10 minutes. */
   signIn?: { hasPassword: boolean; recent: boolean }

@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { slotTouchesDayOff } from "../domain/days-off.js";
 import { createHash, randomUUID } from "node:crypto";
-import type { CalendarPort, CallOptions, CreateEventOptions, NotificationPort, Store, ToolClaim } from "../ports.js";
+import { wordClipKey, type CalendarPort, type CallOptions, type CreateEventOptions, type NotificationPort, type Store, type ToolClaim, type WordClip } from "../ports.js";
 import type {
   AvailabilitySlot,
   BookingAttempt,
@@ -68,6 +68,7 @@ export class InMemoryStore implements Store {
   readonly retentionFailures = new Map<string, string>();
   readonly toolCallCounts = new Map<string, { count: number; updatedAt: string }>();
   readonly toolResults = new Map<string, { result: string | null; claimedAt: string; createdAt: string }>();
+  readonly wordClips = new Map<string, WordClip>();
   readonly #mutex = new KeyedMutex();
 
   async ping(): Promise<void> {}
@@ -211,7 +212,26 @@ export class InMemoryStore implements Store {
     for (const [key, route] of this.providerRoutes) if (route.tenantId === tenantId) this.providerRoutes.delete(key);
     for (const [id, account] of this.ownerAccounts) if (account.tenantId === tenantId) this.ownerAccounts.delete(id);
     this.subscriptions.delete(tenantId);
+    for (const [key, clip] of this.wordClips) if (clip.tenantId === tenantId) this.wordClips.delete(key);
     this.configs.delete(tenantId);
+  }
+
+  async saveWordClip(clip: WordClip): Promise<void> {
+    this.wordClips.set(`${clip.tenantId}:${wordClipKey(clip.term)}`, { ...clip, audio: Buffer.from(clip.audio) });
+  }
+
+  async getWordClip(tenantId: string, term: string): Promise<WordClip | null> {
+    const clip = this.wordClips.get(`${tenantId}:${wordClipKey(term)}`);
+    return clip ? { ...clip, audio: Buffer.from(clip.audio) } : null;
+  }
+
+  async listWordClips(tenantId: string): Promise<Array<Omit<WordClip, "audio">>> {
+    return [...this.wordClips.values()].filter((clip) => clip.tenantId === tenantId)
+      .map(({ audio: _audio, ...rest }) => rest).sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  async deleteWordClip(tenantId: string, term: string): Promise<boolean> {
+    return this.wordClips.delete(`${tenantId}:${wordClipKey(term)}`);
   }
 
   async markRetentionFailed(callId: string, at: string): Promise<void> {

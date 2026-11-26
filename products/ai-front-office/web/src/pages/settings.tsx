@@ -61,6 +61,8 @@ export interface SettingsContextValue {
   toggleUrgentCalls: (on: boolean) => Promise<boolean>
   /** Keeps what a save-on-its-own control changed (text consent, the mobile) when moving between pages; edits stay. */
   patchSettings: (patch: (current: ApiSettings) => ApiSettings) => void
+  /** One field the server already saved on its own ("Say it"): it shows as saved, and every other unsaved edit stays. */
+  markSaved: (name: string, saved: string, local: string, patch?: (current: ApiSettings) => ApiSettings) => void
 }
 
 const SettingsContext = createContext<SettingsContextValue | null>(null)
@@ -95,7 +97,13 @@ export function SettingsArea() {
     }
   }
   // Only a new set of saved values resets the form: a patch (consent, the mobile) never throws away an unsaved edit.
-  useEffect(() => { if (settings.data) setValues(settings.data.values) }, [settings.data?.values]) // eslint-disable-line react-hooks/exhaustive-deps
+  // markSaved changes one saved value and keeps the rest of the form as it is.
+  const keepEdits = useRef(false)
+  useEffect(() => {
+    if (!settings.data) return
+    if (keepEdits.current) { keepEdits.current = false; return }
+    setValues(settings.data.values)
+  }, [settings.data?.values]) // eslint-disable-line react-hooks/exhaustive-deps
   const section = SECTIONS.find((item) => item.id === sectionId) ?? null
 
   const context = useMemo<SettingsContextValue | null>(() => {
@@ -133,6 +141,13 @@ export function SettingsArea() {
       urgentBusy,
       toggleUrgentCalls,
       patchSettings: (patch) => { if (settings.data) settings.setData(patch(settings.data)) },
+      markSaved: (name, savedValue, local, patch) => {
+        if (!settings.data) return
+        keepEdits.current = true
+        const next = { ...settings.data, values: { ...settings.data.values, [name]: savedValue } }
+        settings.setData(patch ? patch(next) : next)
+        set(name, local)
+      },
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, values, saving, reloadDashboard, urgentBusy])
