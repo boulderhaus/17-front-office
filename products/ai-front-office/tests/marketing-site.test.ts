@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
@@ -134,8 +136,10 @@ describe("homepage pricing", () => {
     expect(plain).not.toContain("<s>");
     expect(plain).toContain('<span class="plan-price"><b>$49.99</b><i>/mo</i></span>');
     // The hero leads with what they pay now too.
-    expect(withOffer).toContain('<p class="hero-price"><strong>$24.99 first month</strong>, then $49.99/month · Keep your number</p>');
-    expect(noOffer).toContain('<p class="hero-price"><strong>$49.99/month</strong> · Keep your number</p>');
+        // "Keep your number" is already the intro's last sentence; repeating it here left "your number" alone on a phone.
+    expect(withOffer).toContain('<p class="hero-price"><strong>$24.99 first month</strong>, then $49.99/month</p>');
+    expect(noOffer).toContain('<p class="hero-price"><strong>$49.99/month</strong></p>');
+    expect(renderMarketing(config, [], { plans: planCatalog(demoEnvironment({})), trialDays: 7 })).toMatch(/<p class="hero-price"><strong>\$[\d.]+\/month<\/strong> · 7 days free<\/p>|<p class="hero-price"><strong>\$24\.99 first month<\/strong>, then \$49\.99\/month<\/p>/);
   });
 
   it("marks Solo with a Start here badge on its name row (SITE-07) and calls it one person (SITE-08)", () => {
@@ -152,10 +156,12 @@ describe("homepage pricing", () => {
     const items = [...notes.matchAll(/<li><svg[^>]*aria-hidden="true">.*?<\/svg><span><strong>(.*?)<\/strong><span>(.*?)<\/span><\/span><\/li>/g)].map((match) => [match[1], match[2]]);
     expect(items).toEqual([
       ["Limited time", "First month half off, every plan."],
-      ["Lead guarantee", "No real lead in your first 30 days? We refund your first month."],
+      ["Lead guarantee", "No real lead in 30 days? Tap Request&nbsp;refund and get your first month back."],
       ["One plan, whole team", "Your plan’s monthly calls are shared by your whole team."],
     ]);
-    for (const [, line] of items) expect(line!.length).toBeLessThanOrEqual(64);
+    for (const [, line] of items) expect(line!.length).toBeLessThanOrEqual(80);
+    // The guarantee says how to claim it: the refund is never automatic.
+    expect(items[1]![1]).toMatch(/Request refund/);
     expect(css).not.toMatch(/\.perks[^{]*\{[^}]*border-left/);
     expect(css).not.toMatch(/\.perks li\{[^}]*background/);
     // Without the offer there is no limited-time note.
@@ -204,10 +210,14 @@ describe("homepage math, compare and FAQ", () => {
   it("makes the shop's math one visual point with real numbers (SITE-13)", () => {
     const math = section(withOffer, '<section class="wrap section math"');
     // One flowing headline, no forced break between its two styles.
-    expect(math).toContain("<h2>One new paying customer <em>can cover the month.</em></h2>");
-    expect([...math.matchAll(/<li><b>(.*?)<\/b><span>(.*?)<\/span><\/li>/g)].map((match) => `${match[1]} ${match[2]!.replace(/&nbsp;/g, " ")}`)).toEqual(["3 calls a week", "1 in 10 becomes a job", "$100 from that one job"]);
+    expect(math).toContain("<h2>One job a month can cover Otto.</h2>");
+    expect(math).not.toMatch(/<h2>[^<]*<em>/);
+    // A week of calls becomes a month on screen: 3 a week is about 13 a month, and 1 in 10 of those is about one job.
+    expect([...math.matchAll(/<li><b>(.*?)<\/b><span>(.*?)<\/span><\/li>/g)].map((match) => `${match[1]} ${match[2]!.replace(/&nbsp;/g, " ")}`)).toEqual(["3 calls a week", "1 in 10 becomes a job", "$100 1 job a month"]);
+    expect(Math.floor(3 * 52 / 12 / 10)).toBe(1);
     expect(math).toContain('<span class="math-otto" style="width:50%"><small>Otto’s month</small><b>$49.99</b></span><span class="math-kept"><small>Left over</small><b>$50.01</b></span>');
-    expect(text(math)).toContain("Get more than a few calls a week?");
+    expect(text(math)).toContain("Get more calls than that? More left over.");
+    expect(text(math)).not.toMatch(/already ahead/i);
     expect(text(withOffer)).not.toMatch(/number that matters|size of the invoice|25% conversion|profit calculator/i);
     // Left-aligned, two columns on desktop: never a centered wall of text.
     expect(css).not.toMatch(/\.math\{[^}]*text-align:center/);
@@ -240,6 +250,32 @@ describe("homepage math, compare and FAQ", () => {
     expect(css).toContain("@supports selector(::details-content){.faq details::details-content{display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows .28s ease,opacity .28s ease,content-visibility .28s allow-discrete}.faq details[open]::details-content{grid-template-rows:1fr;opacity:1}.faq-a{min-height:0;overflow:hidden}}");
     // Older browsers still ease the answer in.
     expect(css).toContain("@supports not selector(::details-content){.faq details[open] .faq-a{animation:faqOpen .28s ease}}");
+    // Safari cannot animate a <details> closing in CSS: a small same-origin script (strict CSP) eases rows shut
+    // everywhere, steps aside under reduced motion, and the CSS transitions stand down while it runs.
+    expect(withOffer).toContain('<script src="/assets/faq.js" defer></script>');
+    const script = readFileSync(resolve(__dirname, "../public/assets/faq.js"), "utf8");
+    expect(script).toContain('matchMedia("(prefers-reduced-motion: reduce)")');
+    expect(script).toMatch(/if \(closing\) details\.open = false/);
+    expect(css).toContain(".faq-js details::details-content{transition:none}");
+  });
+});
+
+describe("homepage honesty and motion", () => {
+  it("names the real offer size, never a hard-coded half off", () => {
+    const plans = planCatalog(demoEnvironment({})).map((plan) => ({ ...plan, firstMonthCents: Math.round(plan.priceCents * 0.6) }));
+    const page = renderMarketing(config, [], { plans });
+    expect(text(page)).not.toMatch(/half off/i);
+    expect(text(page)).toContain("First month 40% off, every plan.");
+    expect(text(withOffer)).toContain("First month half off, every plan.");
+  });
+
+  it("shows a phone alert, not a text, in the example call until texts are live", () => {
+    expect(withOffer).toContain('<span class="sms push">');
+    expect(renderMarketing(config, [], { plans: planCatalog(demoEnvironment({})), textsLive: true })).toContain('<span class="sms"><b>New call');
+  });
+
+  it("stops the Unlimited switch sliding under reduced motion", () => {
+    expect(css).toContain(".unl-switch .track,.unl-switch .track:after{transition:none}}");
   });
 });
 

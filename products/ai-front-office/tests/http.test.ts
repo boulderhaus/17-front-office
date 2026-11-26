@@ -1095,7 +1095,7 @@ describe("HTTP boundary", () => {
     const landingText = landingHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
     expect(landingText).toContain("Don’t buy a call center to catch a missed call.");
     expect(landingHtml).toContain("Five-person shop?");
-    expect(landingText).toContain("One new paying customer can cover the month.");
+    expect(landingText).toContain("One job a month can cover Otto.");
     expect(landingHtml).toContain("$100 after job expenses");
     expect(landingHtml).toContain("3 steps to go live");
     expect(landingHtml).not.toContain("3 taps");
@@ -1106,7 +1106,7 @@ describe("HTTP boundary", () => {
     expect(landingHtml).not.toMatch(/team members (are )?free|teammates are (always )?free/i);
     expect(landingHtml).toContain("Your plan’s monthly calls are shared by your whole team.");
     // The homepage shows the guarantee in one short line; the full wording stays in the terms.
-    expect(landingHtml).toContain("No real lead in your first 30 days? We refund your first month.");
+    expect(landingHtml).toContain("No real lead in 30 days? Tap Request&nbsp;refund and get your first month back.");
     expect(await (await fetch(`${baseUrl}/terms`)).text()).toContain("If Call Otto doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month.");
     expect(landingHtml).not.toMatch(/connected AI minutes|\/minute/);
     expect(landingHtml).toContain("EXAMPLE CALL");

@@ -757,6 +757,13 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       response.end(asset);
       return;
     }
+    if (method === "GET" && url.pathname === "/assets/faq.js") {
+      const asset = await readFile(resolve(process.cwd(), "public/assets/faq.js"));
+      response.setHeader("content-type", "text/javascript; charset=utf-8");
+      response.setHeader("cache-control", "public, max-age=86400");
+      response.end(asset);
+      return;
+    }
     if (method === "GET" && url.pathname === "/assets/signup-wizard.js") {
       const asset = await readFile(resolve(process.cwd(), "public/assets/signup-wizard.js"));
       response.statusCode = 200;
@@ -771,11 +778,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     }
     if (method === "GET" && url.pathname.startsWith("/web/assets/")) return serveWebAsset(response, url.pathname.slice("/web/assets/".length));
     // The demo account is closed to visitors (founder decision 2026-11-26): its pages send them to the homepage
-    // and its data answers 404. Only a request that proves it is the admin still reaches the demo below: the admin
-    // bearer token today (the admin sign-in cookie is scoped to /admin, so browsers do not send it here).
+    // and its data answers 404. Only a request with the admin bearer token still reaches the demo below.
     if (url.pathname === "/demo" || url.pathname.startsWith("/demo/") || url.pathname.startsWith("/api/demo/")) {
-      const key = dependencies.env.SESSION_SIGNING_KEY;
-      const admin = bearerMatches(request, dependencies.env.ADMIN_TOKEN) || Boolean(key && verifyAdminSession(readCookie(request, "afo_admin"), key));
+      const admin = bearerMatches(request, dependencies.env.ADMIN_TOKEN);
       if (!admin && url.pathname.startsWith("/api/demo/")) throw new HttpError(404, "Not found");
       if (!admin) return redirect(response, "/");
     }
