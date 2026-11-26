@@ -168,7 +168,7 @@ const UNKNOWN_CALLER = "unknown";
 /** Why the provider's caller number can't be used, or null when it can. A kind for the log, never the value. */
 function fromNumberProblem(value: unknown): string | null {
   if (value === undefined) return "missing";
-  if (value === null) return "null";
+  if (isNotGiven(value)) return "null";
   if (typeof value !== "string") return typeof value;
   const text = value.trim();
   if (text.length < 3) return text ? "too_short" : "empty";
@@ -185,9 +185,24 @@ const lenient = <T extends z.ZodType>(schema: T) => schema.optional().catch(unde
 const FLAG_TEXT: ReadonlyMap<string, boolean> = new Map([["true", true], ["yes", true], ["false", false], ["no", false]]);
 /**
  * A yes/no the caller's rights hang on (wants a person, objects to recording, accepts a fee). The model may
- * send it as text; it is read, never dropped: an unreadable value fails the call instead of losing it.
+ * send it as text; it is read, never dropped: empty text means not given, and an unreadable value fails the
+ * call instead of losing it.
  */
-const flag = z.preprocess((value) => typeof value === "string" ? FLAG_TEXT.get(value.trim().toLowerCase()) ?? value : value, z.boolean()).optional();
+const flag = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const text = value.trim().toLowerCase();
+  return text === "" ? undefined : FLAG_TEXT.get(text) ?? value;
+}, z.boolean().optional()).optional();
+/**
+ * The model's own emergency score. It alone can tip triage to urgent, so it is read from text when sent that
+ * way and never dropped: empty text means not given, and an unreadable or out-of-range score fails the call
+ * (the model is then told triage is unavailable and to follow the safety rules itself).
+ */
+const emergencyScore = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  return text === "" ? undefined : Number.isFinite(Number(text)) ? Number(text) : value;
+}, z.number().min(0).max(1).optional()).optional();
 const availabilitySchema = baseToolSchema.extend({
   window_start: dateTime,
   window_end: dateTime,
@@ -199,7 +214,7 @@ const triageSchema = baseToolSchema.extend({
   from_number: providerFromNumber,
   caller_name: lenient(z.string().max(120)),
   problem_description: z.string().min(1).max(2_000),
-  llm_score: lenient(z.number().min(0).max(1)),
+  llm_score: emergencyScore,
   llm_reason: lenient(z.string().max(500)),
 });
 const bookingSchema = baseToolSchema.extend({
@@ -4026,10 +4041,15 @@ function toolForPath(pathname: string): VoiceToolName | null {
   return pathname.startsWith("/tools/") ? TOOL_ROUTES[pathname.slice(7)] ?? null : null;
 }
 
-/** The model writes null for a field it has nothing for. That means "not given", so the field is dropped (a required one still fails). */
+/** Null, or the words "null" / "undefined" as text: how a model or the provider writes a field it has nothing for. */
+function isNotGiven(value: unknown): boolean {
+  return value === null || (typeof value === "string" && /^\s*(null|undefined)\s*$/i.test(value));
+}
+
+/** A field with nothing in it means "not given", so it is dropped (a required one still fails). */
 function withoutNullFields(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== null));
+  return Object.fromEntries(Object.entries(value).filter(([, field]) => !isNotGiven(field)));
 }
 
 /**
@@ -4039,8 +4059,8 @@ function withoutNullFields(value: unknown): unknown {
 function inputRepairs(schema: z.ZodObject, sent: unknown, parsed: Record<string, unknown>): Record<string, unknown> | null {
   const body = sent && typeof sent === "object" && !Array.isArray(sent) ? sent as Record<string, unknown> : {};
   const fields = Object.keys(schema.shape);
-  const nullFields = Object.values(body).filter((value) => value === null).length;
-  const dropped = fields.filter((key) => key !== "from_number" && body[key] != null && parsed[key] === undefined);
+  const nullFields = Object.values(body).filter(isNotGiven).length;
+  const dropped = fields.filter((key) => key !== "from_number" && body[key] !== undefined && !isNotGiven(body[key]) && parsed[key] === undefined);
   const fromNumber = fields.includes("from_number") ? fromNumberProblem(body.from_number) : null;
   if (!nullFields && !dropped.length && !fromNumber) return null;
   return { ...(nullFields ? { nullFields } : {}), ...(dropped.length ? { dropped: dropped.join(",") } : {}), ...(fromNumber ? { fromNumber } : {}) };
