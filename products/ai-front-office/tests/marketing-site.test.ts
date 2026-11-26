@@ -76,7 +76,7 @@ describe("homepage hero motion", () => {
 
 describe("homepage trades and steps", () => {
   it("shows every trade name short enough for one line on a phone (SITE-03)", () => {
-    const names = [...section(withOffer, '<section class="wrap section trades"').matchAll(/<a class="trade" href="\/signup\?trade=(\w+)">.*?<strong>(.*?)<\/strong>/g)].map((match) => match[2]!.replace(/&#38;/g, "&"));
+    const names = [...section(withOffer, '<section class="wrap section trades"').matchAll(/<a class="trade" href="\/signup">.*?<strong>(.*?)<\/strong>/g)].map((match) => match[1]!.replace(/&#38;/g, "&"));
     expect(names).toEqual(["Heating & air", "Plumbing", "Electrical", "Roofing", "Contractors", "Water damage", "Garage doors", "Handyman", "Landscaping", "Pest control", "Locksmith", "Appliances", "Something else?"]);
     for (const name of names.slice(0, -1)) expect(name.length, name).toBeLessThanOrEqual(13);
     // And the phone layout never wraps a name.

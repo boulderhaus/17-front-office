@@ -34,9 +34,12 @@ describe.skipIf(!databaseUrl)("PostgreSQL advisory locks under overlapping calls
   });
 
   it("re-enters a lock already held by the same operation and leaves no locks behind", async () => {
-    expect(await store.withLock("config:reentry", () => store.withLock("config:reentry", async () => "ok"))).toBe("ok");
-    const held = await pool.query("SELECT count(*)::int AS count FROM pg_locks WHERE locktype='advisory'");
-    expect(held.rows[0].count).toBe(0);
+    // Only this test's own lock key counts: other suites share the database and may hold advisory locks of their own.
+    const key = `config:reentry-${randomUUID()}`;
+    const ours = async (): Promise<number> => (await pool.query("SELECT count(*)::int AS count FROM pg_locks, (SELECT hashtextextended($1, 0) AS h) AS k WHERE locktype='advisory' AND objsubid=1 AND classid::bigint = ((k.h >> 32) & 4294967295) AND objid::bigint = (k.h & 4294967295)", [key])).rows[0].count;
+    // While held, the query sees exactly our one lock; afterwards, none.
+    expect(await store.withLock(key, () => store.withLock(key, async () => ours()))).toBe(1);
+    expect(await ours()).toBe(0);
   });
 
   it("skips a call whose retention deletion failed in the last 24 hours, then retries it", async () => {
