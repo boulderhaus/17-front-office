@@ -29,13 +29,18 @@ export class DataDeletionService {
    * nothing local is removed so the owner can retry. Calendar appointments stay.
    */
   async deleteWorkspace(tenantId: string): Promise<void> {
+    await this.deleteRecordings(tenantId);
+    await this.store.deleteWorkspace(tenantId);
+  }
+
+  /** Every provider recording for the shop. Safe to repeat: recordings already gone aren't found again. */
+  async deleteRecordings(tenantId: string): Promise<void> {
     const calls = await this.store.listCalls(tenantId, 100_000);
     for (const call of calls) {
       if (!call.recordingUrl) continue;
       if (!this.recordings) throw new Error("Recording deletion is not configured");
       await this.recordings.deleteForCall(call.providerCallId);
     }
-    await this.store.deleteWorkspace(tenantId);
   }
 
   async deleteExpired(tenantId: string, endedBefore: string, limit = 100, now = new Date().toISOString()): Promise<{ deleted: number; failed: number }> {

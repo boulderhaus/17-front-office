@@ -544,7 +544,7 @@ const DELETE_PROBLEMS: Record<string, string> = {
   slow: "Too many tries. Wait 15 minutes, or sign in again with Google or an email link.",
   plan: "Cancel your plan first. You can delete once it has ended.",
   line: "We couldn’t disconnect your line, so nothing was deleted. Try again.",
-  recording: "A call recording couldn’t be deleted, so nothing else was removed. Try again.",
+  recording: "A call recording couldn’t be deleted. Your line is paused and nothing else was removed. Try again.",
 }
 /** Re-sign-in lands back here with the delete form open. */
 const SIGN_IN_TO_DELETE = `/login?next=${encodeURIComponent("/app/settings/data?delete=open")}`
@@ -552,7 +552,8 @@ const SIGN_IN_TO_DELETE = `/login?next=${encodeURIComponent("/app/settings/data?
 export function DataSection() {
   const { settings, text, bind } = useSettings()
   const [params] = useSearchParams()
-  const deleteBack = params.get("delete")
+  const deleteParam = params.get("delete")
+  const deleteBack = deleteParam === "open" || deleteParam === "signin" || (deleteParam && Object.prototype.hasOwnProperty.call(DELETE_PROBLEMS, deleteParam)) ? deleteParam : null
   const [confirmDelete, setConfirmDelete] = useState(Boolean(deleteBack))
   // Signed in within the last 10 minutes (any way): that proves it's the owner, no password needed.
   // Otherwise a password account types its password; Google, Microsoft or email-link accounts sign in again.
@@ -562,13 +563,14 @@ export function DataSection() {
   const askPassword = hasPassword && !recent
   const problem = deleteBack === "signin"
     ? (hasPassword ? "It’s been over 10 minutes since you signed in. Enter your password, or sign in again." : null)
-    : deleteBack ? DELETE_PROBLEMS[deleteBack] ?? null : null
-  const badPassword = deleteBack === "password"
+    : deleteBack && Object.prototype.hasOwnProperty.call(DELETE_PROBLEMS, deleteBack) ? DELETE_PROBLEMS[deleteBack]! : null
+  const badPassword = deleteBack === "password" || deleteBack === "signin"
+  const badConfirm = deleteBack === "confirm"
   useEffect(() => {
     if (!deleteBack) return
     document.getElementById("delete-account")?.scrollIntoView({ block: "center" })
-    if (badPassword) document.getElementById("delete-password")?.focus()
-  }, [deleteBack, badPassword])
+    document.getElementById(badConfirm ? "delete-confirm" : badPassword && askPassword ? "delete-password" : "delete-problem")?.focus()
+  }, [deleteBack, badPassword, badConfirm, askPassword])
   return (
     <>
       <SettingsCard title="Download your data" description="Files save straight to this phone or computer. Nothing is emailed.">
@@ -602,12 +604,13 @@ export function DataSection() {
         ) : (
           <form method="post" action="/app/account/delete" className="grid gap-4">
             <input type="hidden" name="csrf" value={settings.csrf} />
-            {problem && <p role="alert" id="delete-problem" className="rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-900">{problem}</p>}
+            <p className="text-[15px]">This deletes <strong>{settings.businessName || "this shop"}</strong> for good.</p>
+            {problem && <p role="alert" id="delete-problem" tabIndex={-1} className="rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-900">{problem}</p>}
             <Pair>
-              <Field label="Type DELETE"><Input name="confirm" autoComplete="off" required defaultValue={deleteBack && deleteBack !== "confirm" && deleteBack !== "open" ? "DELETE" : undefined} aria-invalid={deleteBack === "confirm" || undefined} className={fieldClass} /></Field>
+              <Field label="Type DELETE"><Input id="delete-confirm" name="confirm" autoComplete="off" required defaultValue={problem && !badConfirm && askPassword ? "DELETE" : undefined} aria-invalid={badConfirm || undefined} aria-describedby={badConfirm ? "delete-problem" : undefined} className={fieldClass} /></Field>
               {askPassword ? (
                 <Field label="Your password">
-                  <Input id="delete-password" name="password" type="password" autoComplete="current-password" required aria-invalid={badPassword || undefined} aria-describedby={badPassword ? "delete-problem" : undefined} className={fieldClass} />
+                  <Input id="delete-password" name="password" type="password" autoComplete="current-password" required aria-invalid={deleteBack === "password" || undefined} aria-describedby={badPassword && problem ? "delete-problem" : undefined} className={fieldClass} />
                 </Field>
               ) : null}
             </Pair>
