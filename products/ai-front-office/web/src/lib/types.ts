@@ -193,6 +193,8 @@ export interface ApiCallPath {
   steps: ApiCallPathStep[]
   extras: ApiCallPathStep[]
   live: boolean
+  /** The call is over; the path may still be settling (live) but never looks live. */
+  ended?: boolean
   done: number
   startedAt: string
 }

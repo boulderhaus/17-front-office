@@ -82,10 +82,12 @@ describe("Otto's path through a call", () => {
 
     clock.advance(20);
     await service.finalize({ webhookEventId: `end:${id}`, tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", startedAt: "2026-01-15T14:00:00.000Z", endedAt: clock.now().toISOString(), durationSeconds: 83, fields: { ...fields, requestedStart: slots.slots[0]!.start, explicitSlotConfirmation: true }, transcript: "Synthetic transcript", recordingUrl: null, consentState: "disclosed" });
-    // Right after hang-up it stays live briefly while the server finishes writing the outcome and alerts.
+    // Right after hang-up it keeps polling briefly while the server finishes writing the outcome and alerts,
+    // but it is ended: nothing on it looks live (walk 3, CALL-06).
     current = await path();
     expect(current.live).toBe(true);
-    expect(current.steps.find((step) => step.key === "wrap_up")?.state).toBe("current");
+    expect(current.ended).toBe(true);
+    expect(current.steps.find((step) => step.key === "wrap_up")?.state).toBe("todo");
     clock.advance(21);
     current = await path();
     expect(current.live).toBe(false);

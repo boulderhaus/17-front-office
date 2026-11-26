@@ -23,7 +23,10 @@ export interface CallPath {
   steps: CallPathStep[];
   /** Things that can come up at any point in a call, listed only once they did. */
   extras: Array<CallPathStep<CallPathExtraKey>>;
+  /** Still being watched: the call is up, or it just ended and the record is settling. */
   live: boolean;
+  /** The call is over (hung up, or the provider says so), even while the record settles. Never shown as live. */
+  ended: boolean;
   /** Checkpoints reached (done, waiting or flagged). */
   done: number;
   startedAt: string;
@@ -165,7 +168,11 @@ export function buildCallPath(input: {
   const firstCoverage = first(coverage);
   const lastCoverage = last(coverage);
   const addressTaken = intake("address");
-  found.push(firstCoverage && lastCoverage
+  // Once the call is over, an area check with no address on the record is not a captured address.
+  const areaOnly = !live && call.endedAt !== null && !hasAddress && !addressTaken;
+  found.push(firstCoverage && lastCoverage && areaOnly
+    ? { state: "skipped", at: null, note: "Area checked, no address saved" }
+    : firstCoverage && lastCoverage
     ? { state: "done", at: firstCoverage.completedAt, note: coverageWords(meta(lastCoverage, "status")) }
     : addressTaken ? { state: "done", at: addressTaken.completedAt, note: "Address taken" }
       : !live && hasAddress ? { state: "done", at: null, note: "Address taken" } : null);
@@ -195,7 +202,8 @@ export function buildCallPath(input: {
 
   const keys = Object.keys(CALL_PATH_LABELS) as CallPathStepKey[];
   // While the call is live, the first open checkpoint is where Otto is now.
-  const currentIndex = live && !spam ? found.findIndex((item) => item === null) : -1;
+  const ended = call.endedAt !== null || providerEnded;
+  const currentIndex = live && !ended && !spam ? found.findIndex((item) => item === null) : -1;
   const steps: CallPathStep[] = keys.map((key, index) => {
     // A spam call ends at the service check: nothing after it happened.
     const item = spam && index > 1 ? null : found[index] ?? null;
@@ -209,7 +217,7 @@ export function buildCallPath(input: {
   const extras: Array<CallPathStep<CallPathExtraKey>> = [];
   if (price) extras.push({ key: "price_question", label: "Price question", state: "done", at: price.completedAt, note: meta(price, "approved") === true ? "Gave your approved price" : "No approved price, took a message" });
   if (ownerAsk) extras.push({ key: "owner_request", label: "Asked for you", state: liveAlert === "failed" ? "flagged" : "done", at: ownerAsk.completedAt, note: alertWords(liveAlert, "callback alert") });
-  return { steps, extras, live, done: steps.filter((step) => step.state === "done" || step.state === "waiting" || step.state === "flagged").length, startedAt: call.startedAt };
+  return { steps, extras, live, ended, done: steps.filter((step) => step.state === "done" || step.state === "waiting" || step.state === "flagged").length, startedAt: call.startedAt };
 }
 
 /**

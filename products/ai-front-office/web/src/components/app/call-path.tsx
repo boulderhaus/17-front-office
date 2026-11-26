@@ -31,8 +31,8 @@ function Mark({ step, index, live }: { step: ApiCallPathStep; index: number | nu
 function Row({ step, index, path }: { step: ApiCallPathStep; index: number | null; path: ApiCallPath }) {
   const reached = step.state === "done" || step.state === "waiting" || step.state === "flagged"
   return (
-    <li className={cn("grid min-h-10 grid-cols-[28px_1fr_auto] items-center gap-2.5 rounded-lg px-1.5 py-1", step.state === "current" && path.live && "bg-lime-50")}>
-      <Mark step={step} index={index} live={path.live} />
+    <li className={cn("grid min-h-10 grid-cols-[28px_1fr_auto] items-center gap-2.5 rounded-lg px-1.5 py-1", step.state === "current" && path.live && !path.ended && "bg-lime-50")}>
+      <Mark step={step} index={index} live={path.live && !path.ended} />
       <span className={cn("grid min-w-0", !reached && step.state !== "current" && "text-muted-foreground")}>
         <strong className={cn("text-sm", step.state === "skipped" ? "font-medium" : "font-semibold")}>{step.label}</strong>
         {step.note && <small className="text-xs text-muted-foreground">{step.note}</small>}
@@ -54,8 +54,8 @@ export function CallPathCard({ path, stale, onRefresh }: { path: ApiCallPath; st
           <button type="button" onClick={onRefresh} className="min-h-11 rounded-md px-2 text-[13px] font-semibold text-primary underline-offset-2 hover:underline">Refresh for the latest</button>
         ) : (
           <span className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-muted-foreground">
-            {path.live && <i className="size-2 animate-pulse rounded-full bg-red-600" />}
-            {path.live ? "Live · " : "Ended · "}{path.done} of {path.steps.length}
+            {path.live && !path.ended && <i className="size-2 animate-pulse rounded-full bg-red-600" />}
+            {path.live && !path.ended ? "Live · " : "Ended · "}{path.done} of {path.steps.length}
           </span>
         )}
       </div>

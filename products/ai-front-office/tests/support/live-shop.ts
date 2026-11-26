@@ -241,3 +241,26 @@ export async function liveShop(options: { config?: Partial<BusinessConfig>; star
 }
 
 export type LiveShop = Awaited<ReturnType<typeof liveShop>>;
+
+/**
+ * The owner app's own home-screen numbers, from the dashboard JSON, by the app's own rules
+ * (web/src/lib/derive.ts). Loaded at run time: that file uses the web bundler's extension-less imports, which
+ * the server's NodeNext type-check does not accept.
+ */
+export async function ownerAppNumbers(dashboard: ApiDashboard) {
+  const specifier: string = "../../web/src/lib/derive.ts";
+  const { derive } = await import(specifier) as { derive: (data: ApiDashboard) => { actionable: Array<{ callId: string }>; booked: unknown[]; remaining: number; used: number; included: number; callsById: Map<string, unknown> } };
+  const d = derive(dashboard);
+  return {
+    /** Today: the "To call back" number, and the list under "Needs your attention". */
+    toCallBack: d.actionable.length,
+    /** Today shows "You’re all caught up." exactly when nobody is waiting. */
+    allCaughtUp: d.actionable.length === 0,
+    /** Jobs: rows under "Needs reply"; "Nobody is waiting on a reply." when there are none. */
+    jobsNeedingReply: d.actionable.filter((task) => d.callsById.has(task.callId)).length,
+    booked: d.booked.length,
+    callsLeft: d.remaining,
+    answered: d.used,
+    included: d.included,
+  };
+}
