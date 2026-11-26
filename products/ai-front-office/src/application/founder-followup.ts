@@ -244,8 +244,8 @@ export class FounderFollowup {
       const message = founderConfirmationEmail({ firstName: ownerFirstName(facts.ownerName), businessName: facts.businessName, when, callNumber: prettyPhone(facts.callNumber) });
       const ics = founderCallIcs({
         uid: key.replace(/[^\w-]/g, "-"), start: slot.start, end: slot.end, now: clock.now(),
-        summary: "Call Otto setup call with Brock (10 min)",
-        description: facts.callNumber ? `Brock will call you at ${prettyPhone(facts.callNumber)}.` : "Brock will call you.",
+        summary: "Call Otto setup call with our team (10 min)",
+        description: facts.callNumber ? `Our team will call you at ${prettyPhone(facts.callNumber)}.` : "Our team will call you.",
       });
       const at = clock.now().toISOString();
       await store.enqueueNotification({

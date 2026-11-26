@@ -111,9 +111,10 @@ describe("public page system", () => {
     expect(booked).toContain('<span class="nowrap">(941) 555-0199</span>');
     expect(booked).not.toContain('style="white-space:nowrap"');
     expect(booked).toMatch(/p\.done\{[^}]*text-wrap:balance/);
-    // Brock is named once per line.
+    // Our team, never a person's name.
     const reply = renderFounderBooking({ state: "reply", reason: "nothing_open" });
-    expect(reply).toContain("<p>Brock’s open times are full this week. Reply to his email with a good time and he’ll call you.</p>");
+    expect(reply).toContain("<p>Our team’s open times are full this week. Reply to our email with a good time and we’ll call you.</p>");
+    for (const page of [pick, booked, reply, renderFounderBooking({ state: "expired" })]) expect(page).not.toContain("Brock");
     // A taken time is said on load: the box takes focus so a screen reader reads it before the times.
     const taken = renderFounderBooking({ state: "pick", token: "t", businessName: "Synthetic Air", timeZone: "America/Chicago", slots, taken: true });
     expect(taken).toContain('<div class="formerror" role="alert" tabindex="-1" autofocus><p>That time just got taken. Pick another.</p></div>');

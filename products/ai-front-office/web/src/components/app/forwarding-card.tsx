@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode, type Ref } from "react"
-import { Check, Copy, LifeBuoy, Loader2, Mail, Phone, PhoneCall, PhoneForwarded } from "lucide-react"
+import { CalendarClock, Check, Copy, LifeBuoy, Loader2, Mail, Phone, PhoneCall, PhoneForwarded } from "lucide-react"
 import { QrCode } from "@/components/app/qr-code"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -54,7 +54,13 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
   const checking = line.check.status === "calling"
   const callerId = line.check.callerId ? formatPhone(line.check.callerId) : null
 
-  // While a check call is out, refresh until it lands or times out.
+  // While a check call or Otto's support call is out, refresh until it lands, ends or times out.
+  const supportLive = ["calling", "on_call"].includes(supportCallState(line.helpCall, dashboard.now) ?? "")
+  useEffect(() => {
+    if (!supportLive) return
+    const id = window.setInterval(() => void reload().catch(() => undefined), 3000)
+    return () => window.clearInterval(id)
+  }, [supportLive, reload])
   useEffect(() => {
     if (!checking) return
     const id = window.setInterval(() => void reload().catch(() => undefined), 3000)
@@ -140,20 +146,24 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
     return () => document.removeEventListener("visibilitychange", back)
   }, [dialed, clearing])
 
-  // "Set it up with me" was tapped in the last day (older requests are done with).
+  // "Call me now" was tapped in the last day (older requests are done with).
   const helpAsked = Boolean(line.helpRequestedAt) && Date.parse(dashboard.now) - Date.parse(line.helpRequestedAt!) < 24 * 60 * 60_000
-  // The setup call rings for up to 30 s and can run 15 min; show "calling now" for its first 2 minutes, until it ends.
-  const helpCalling = Boolean(line.helpCall && !line.helpCall.endedAt) && Date.parse(dashboard.now) - Date.parse(line.helpCall!.startedAt) < 2 * 60_000
+  const helpCallState = supportCallState(line.helpCall, dashboard.now)
+  const helpCalling = helpCallState === "calling"
+  const helpLive = helpCalling || helpCallState === "on_call"
   // Only what really went out: our team's email to the owner, or the request in our team's inbox. Never a check
   // mark for something that wasn't sent.
-  const helpLine = !helpAsked || helpCalling ? null
+  const helpLine = !helpAsked || helpLive || helpCallState === "ended" ? null
     : line.founderEmail ? teamEmailLine(line.founderEmail)
       : line.helpCall ? null
         : line.helpTeam ? "Our team has your request. We’ll get back to you within one business day."
           : null
-  const helpFailed = helpAsked && !helpCalling && !line.helpCall && !line.founderEmail && !line.helpTeam
-  // One tap is enough: once it reached someone, the button goes (after a setup call, "Have Otto call me again" stays).
-  const helpDone = Boolean(helpLine) && !line.helpCall
+  const helpFailed = helpAsked && !helpLive && !line.helpCall && !line.founderEmail && !line.helpTeam
+  // One tap is enough: once it reached someone, the button goes (after a support call, "Call me again" stays, unless
+  // their phone sends every call to Otto, where calling again only loops).
+  const helpDone = (Boolean(helpLine) && !line.helpCall) || (helpCallState === "ended" && line.helpCall?.outcome === "looped")
+  const helpEnded = helpCallState === "ended" ? endedLine(line.helpCall!) : null
+  const bookLink = line.helpBookUrl ?? null
   const asking = !editing && !business.number && Boolean(business.suggested)
   const startTest = () => void post("check", "/api/app/line/check")
   const cancelTest = () => void post("check", "/api/app/line/check/cancel")
@@ -322,21 +332,29 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
 
         {!current && line.number && (
           <div className="grid gap-1.5 border-t pt-3">
-            {helpCalling ? (
+            {helpLive ? (
               <p className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-950" role="status">
                 <PhoneCall className="mt-0.5 size-4 shrink-0" />
-                <span><strong>Otto is calling you now at <span className="whitespace-nowrap">{formatPhone(line.helpCall!.to)}</span>.</strong> Pick up{callerId ? <> (it’s from <span className="whitespace-nowrap">{callerId}</span>)</> : null}.</span>
+                {helpCalling
+                  ? <span><strong>Calling you now at <span className="whitespace-nowrap">{maskPhone(line.helpCall!.to)}</span>.</strong> Pick up{callerId ? <> (it’s from <span className="whitespace-nowrap">{callerId}</span>)</> : null}.</span>
+                  : <span><strong>On the call with <span className="whitespace-nowrap">{maskPhone(line.helpCall!.to)}</span>.</strong> Otto walks you through it.</span>}
               </p>
+            ) : helpEnded ? (
+              <p className="flex items-start gap-2 text-sm" role="status">{helpEnded.ok ? <Check className="mt-0.5 size-4 shrink-0 text-emerald-700" /> : <PhoneCall className="mt-0.5 size-4 shrink-0 text-muted-foreground" />}<span>{helpEnded.text}</span></p>
             ) : helpLine ? (
               <p className="flex items-start gap-2 text-sm" role="status"><Check className="mt-0.5 size-4 shrink-0 text-emerald-700" />{helpLine}</p>
             ) : helpFailed ? (
-              // Nothing could carry it (no setup call, no email): say where to write, never "try again" forever.
+              // Nothing could carry it (no support call, no email): say where to write, never "try again" forever.
               <p className="text-sm" role="status">That didn’t reach us. {line.helpEmail ? <>Email <a className="font-semibold underline underline-offset-4" href={`mailto:${line.helpEmail}`}>{line.helpEmail}</a> and we’ll help.</> : "Please try again."}</p>
             ) : null}
-            {!helpCalling && !helpDone && (
+            {!helpLive && !helpDone && (
               <Button type="button" variant="link" className={linkButton} disabled={busy === "help"} onClick={() => void post("help", "/api/app/line/help", { device: isIphone ? "iphone" : isAndroid ? "android" : "other" })}>
-                {busy === "help" ? <Loader2 className="size-4 motion-safe:animate-spin" /> : <LifeBuoy className="size-4" />}{busy === "help" ? "Sending…" : line.helpCall ? "Have Otto call me again" : "Set it up with me"}
+                {busy === "help" ? <Loader2 className="size-4 motion-safe:animate-spin" /> : <LifeBuoy className="size-4" />}{busy === "help" ? "Calling…" : line.helpCall ? "Call me again" : "Call me now"}
               </Button>
+            )}
+            {/* The quiet way out: a time with our team, whenever the call didn't ring or didn't get there. */}
+            {bookLink && (helpCalling || (helpEnded && !helpEnded.ok)) && (
+              <a className={cn(linkButton, "inline-flex items-center gap-2 font-normal")} href={bookLink}><CalendarClock aria-hidden className="size-4" />{helpCalling ? "Didn’t ring? Book a time" : "Book a time with our team"}</a>
             )}
           </div>
         )}
@@ -363,6 +381,39 @@ function Step({ n, title, done = false, last = false, children }: { n: number; t
 }
 
 /** What our team's email to the owner was: a booking link, or (no calendar connected yet) a note asking for a reply. */
+type SupportCall = NonNullable<ApiDashboard["line"]["helpCall"]>
+
+/**
+ * Otto's support call as the screen shows it: calling (ringing, up to 2 minutes), on_call (picked up, under the
+ * 6-minute cap plus a minute), ended (in the last hour), or nothing.
+ */
+function supportCallState(call: ApiDashboard["line"]["helpCall"], now: string): "calling" | "on_call" | "ended" | null {
+  if (!call) return null
+  const nowMs = Date.parse(now)
+  if (!call.endedAt) {
+    if (!call.answeredAt) return nowMs - Date.parse(call.startedAt) < 2 * 60_000 ? "calling" : null
+    return nowMs - Date.parse(call.answeredAt) < 7 * 60_000 ? "on_call" : null
+  }
+  return nowMs - Date.parse(call.endedAt) < 60 * 60_000 ? "ended" : null
+}
+
+/** How the support call ended, in one line. ok: nothing more to do. */
+function endedLine(call: SupportCall): { text: string; ok: boolean } {
+  if (call.booked) return { text: "You’re booked with our team. Check your email.", ok: true }
+  switch (call.outcome) {
+    case "voicemail": return { text: "Our call went to voicemail.", ok: false }
+    case "looped": return { text: "Your phone already sends every call to Otto, so our call can’t ring you.", ok: false }
+    case "missed": return { text: "We couldn’t reach you.", ok: false }
+    case "failed": return { text: "That call didn’t connect.", ok: false }
+    default: return { text: "Call ended.", ok: true }
+  }
+}
+
+/** "•••• 0199": only the last four on screen. */
+function maskPhone(phone: string): string {
+  return `•••• ${phone.replace(/\D/g, "").slice(-4)}`
+}
+
 function teamEmailLine(email: { sentAt: string; link: boolean }): string {
   return email.link ? "Our team emailed you a link to book a 10‑minute call." : "Our team emailed you to set up a quick call."
 }

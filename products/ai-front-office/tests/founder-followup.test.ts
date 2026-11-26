@@ -130,27 +130,29 @@ describe("Brock's emails", () => {
     const withLink = founderFollowupEmail({ firstName: "Mike", businessName: "Gulf Air", reason: "no_answer", link: "https://front-office.example/book-setup?t=abc" });
     expect(withLink.text).toMatch(/^Hi Mike,\n\nOur setup helper called you about call forwarding for Gulf Air and didn't reach you\.\n\n/);
     expect(withLink.text).toContain("https://front-office.example/book-setup?t=abc");
-    expect(withLink.text.endsWith("Brock\nFounder, Call Otto")).toBe(true);
+    expect(withLink.text.endsWith("The Call Otto team")).toBe(true);
+    expect(withLink.text).not.toContain("Brock");
     const noCalendar = founderFollowupEmail({ firstName: null, businessName: "Gulf Air", reason: "call_unavailable", link: null });
     expect(noCalendar.text.startsWith("Hi there,")).toBe(true);
     expect(noCalendar.text).toContain("Just reply with a good time for a quick 10-minute call.");
     expect(noCalendar.text).not.toContain("http");
-    for (const reason of ["call_unavailable", "helper_failed", "no_answer", "not_confirmed", "limit"] as const) {
+    for (const reason of ["call_unavailable", "helper_failed", "no_answer", "not_confirmed", "limit", "asked_for_team"] as const) {
       const email = founderFollowupEmail({ firstName: "Mike", businessName: "Gulf Air", reason, link: null });
       expect(`${email.subject}\n${email.text}`).not.toMatch(/ [—–] /);
       expect(email.text).not.toMatch(/\d{3}\D{0,2}\d{3}\D\d{4}/);
     }
     const confirmation = founderConfirmationEmail({ firstName: "Mike", businessName: "Gulf Air", when: "Mon, Nov 30 at 9:00 AM CST", callNumber: "(941) 555-0199" });
-    expect(confirmation.text).toContain("You're set for Mon, Nov 30 at 9:00 AM CST. I'll call you at (941) 555-0199");
+    expect(confirmation.text).toContain("You're set for Mon, Nov 30 at 9:00 AM CST. We'll call you at (941) 555-0199");
+    expect(confirmation.text).not.toContain("Brock");
     expect(confirmation.text).not.toMatch(/ [—–] /);
   });
 
-  it("sends as Brock from Call Otto, replying to support, with the calendar file attached", async () => {
+  it("sends as the Call Otto team, replying to support, with the calendar file attached", async () => {
     const env = loadEnvironment({ ...baseEnv(), RESEND_API_KEY: "re_synthetic", RESEND_FROM_EMAIL: "alerts@callotto.example", SUPPORT_EMAIL: "help@callotto.example" });
     const sender = founderEmailSender(env)!;
-    expect(sender).toEqual({ from: "Brock from Call Otto <brock@callotto.example>", replyTo: "help@callotto.example" });
+    expect(sender).toEqual({ from: "Call Otto team <team@callotto.example>", replyTo: "help@callotto.example" });
     expect(founderEmailSender(loadEnvironment({ ...baseEnv(), RESEND_API_KEY: "re_synthetic", RESEND_FROM_EMAIL: "alerts@callotto.example", FOUNDER_FROM_EMAIL: "founder@callotto.example", FOUNDER_REPLY_TO: "inbox@callotto.example" })))
-      .toEqual({ from: "Brock from Call Otto <founder@callotto.example>", replyTo: "inbox@callotto.example" });
+      .toEqual({ from: "Call Otto team <founder@callotto.example>", replyTo: "inbox@callotto.example" });
     const sent: Array<Record<string, unknown>> = [];
     const fetcher = (async (_url: string, init?: RequestInit) => {
       sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -161,7 +163,7 @@ describe("Brock's emails", () => {
     const base: OutboxNotification = { id: "n1", tenantId: "shop_1", callId: null, channel: "email", destinationRef: "email:owner@example.com", body: formatEmailBody("You're set", "Hi", [{ filename: "call-otto-setup.ics", content: ics }]), priority: "high", state: "pending", attempts: 0, nextAttemptAt: "", idempotencyKey: "k1", providerReceipt: null, lastError: null, createdAt: "", sentAt: null };
     await adapter.send({ ...base, senderRef: "founder" });
     await adapter.send({ ...base, id: "n2", idempotencyKey: "k2", body: formatEmailBody("Plain", "Hello") });
-    expect(sent[0]).toMatchObject({ from: "Brock from Call Otto <brock@callotto.example>", reply_to: "help@callotto.example", subject: "You're set", text: "Hi" });
+    expect(sent[0]).toMatchObject({ from: "Call Otto team <team@callotto.example>", reply_to: "help@callotto.example", subject: "You're set", text: "Hi" });
     const attachments = sent[0]!.attachments as Array<{ filename: string; content: string }>;
     expect(attachments[0]!.filename).toBe("call-otto-setup.ics");
     const file = Buffer.from(attachments[0]!.content, "base64").toString("utf8");
@@ -193,16 +195,17 @@ describe("Brock's emails", () => {
 
   it("the apology says only what was sent: a link, a note asking for a reply, or nothing", () => {
     expect(setupSorrySpeech({ fresh: true, link: true })).toBe(SETUP_SORRY_SPEECH);
-    expect(setupSorrySpeech({ fresh: true, link: false })).toBe("Hi, this is Call Otto. Our setup helper couldn't start just now. Brock, our founder, just emailed you to set up a quick 10 minute call. Sorry about that. Goodbye.");
-    expect(setupSorrySpeech({ fresh: false, link: true })).toContain("Brock, our founder, emailed you a link earlier to book a quick 10 minute call.");
+    expect(setupSorrySpeech({ fresh: true, link: false })).toBe("Hi, this is Call Otto. Our setup helper couldn't start just now. Our team just emailed you to set up a quick 10 minute call. Sorry about that. Goodbye.");
+    expect(setupSorrySpeech({ fresh: false, link: true })).toContain("Our team emailed you a link earlier to book a quick 10 minute call.");
     expect(setupSorrySpeech(null)).toBe("Hi, this is Call Otto. Our setup helper couldn't start just now. Please try again later from the Call Otto app. Sorry about that. Goodbye.");
   });
 
-  it("the setup helper promises Brock's email, never a person following up today", () => {
+  it("the setup helper offers a time with our team, never a person's name", () => {
     const instructions = setupInstructions({ businessName: "Gulf Air", businessNumber: "+19415550177", carrierName: "Spectrum", family: "office", code: null, offCode: null, confirm: null, ottoNumber: "+19415550123", device: "other" });
-    expect(instructions).toContain("Brock, our founder, will email them a link to book a 10-minute call");
-    expect(instructions).not.toMatch(/person from Call Otto|follow up by email today/);
-    expect(SETUP_SORRY_SPEECH).toBe("Hi, this is Call Otto. Our setup helper couldn't start just now. Brock, our founder, just emailed you a link to book a quick 10 minute call. Sorry about that. Goodbye.");
+    expect(instructions).toContain("offer a quick 10-minute call with our team (get_open_times, then book_time)");
+    expect(instructions).toContain("If it isn't working after about two minutes, or they ask for a person");
+    expect(instructions).not.toMatch(/Brock|founder|person from Call Otto|follow up by email today/);
+    expect(SETUP_SORRY_SPEECH).toBe("Hi, this is Call Otto. Our setup helper couldn't start just now. Our team just emailed you a link to book a quick 10 minute call. Sorry about that. Goodbye.");
   });
 });
 
@@ -325,7 +328,12 @@ async function app(options: { setupCalls?: boolean; failDial?: boolean; failHelp
     return fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(body, keys.privateKey, clock.now()), body });
   };
   const dialState = () => (recorded.filter((call) => call.url === "https://api.telnyx.com/v2/calls").at(-1)?.body as { client_state: string }).client_state;
-  return { store, clock, baseUrl, handler, recorded, busy, events, logs, owner, founderEmails, webhook, dialState, setTokenReply: (value: Record<string, unknown>) => { tokenReply = value; }, setDialFails: (value: boolean) => { dialFails = value; },
+  /** The setup helper calling one of its tools, signed like Telnyx does. */
+  const tool = async (name: string, payload: Record<string, unknown>, sign = true) => {
+    const body = JSON.stringify(payload);
+    return fetch(`${baseUrl}/setup-help/tools/${name}`, { method: "POST", headers: sign ? signed(body, keys.privateKey, clock.now()) : { "content-type": "application/json" }, body });
+  };
+  return { store, clock, baseUrl, handler, recorded, busy, events, logs, owner, founderEmails, webhook, dialState, tool, setTokenReply: (value: Record<string, unknown>) => { tokenReply = value; }, setDialFails: (value: boolean) => { dialFails = value; },
     holdEvents: () => { let release = () => {}; eventGate = new Promise<void>((resolve) => { release = () => { eventGate = null; resolve(); }; }); return release; } };
 }
 
@@ -412,7 +420,7 @@ describe("Brock emails when the AI setup helper can't finish", () => {
     expect(await made.handler.runFounderFollowups()).toEqual({ queued: 0 });
     const emails = made.founderEmails(account.tenantId);
     expect(emails).toHaveLength(1);
-    expect(emails[0]!.body).toContain("I don't see call forwarding working for Gulf Air yet.");
+    expect(emails[0]!.body).toContain("We don't see call forwarding working for Gulf Air yet.");
   });
 
   it("the loop leaves alone shops whose forwarding got confirmed, and old requests", async () => {
@@ -480,14 +488,23 @@ describe("Brock emails when the AI setup helper can't finish", () => {
   });
 
   it("the app, the 'called you a few times' message and the apology only mention a link when the email had one", async () => {
-    const withLink = await app({ setupCalls: false, founders: BROCK });
+    // Three support calls a day per shop (each rang and ended), then our team's email carries it.
+    const useUpCalls = async (made: Awaited<ReturnType<typeof app>>, owner: Awaited<ReturnType<Awaited<ReturnType<typeof app>>["owner"]>>) => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        expect((await owner.api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+        await made.webhook("call.hangup", `evt-used-${attempt}`, { call_control_id: "v3:help-call", client_state: made.dialState(), hangup_cause: "normal_clearing" });
+      }
+      expect(made.recorded.filter((call) => call.url === "https://api.telnyx.com/v2/calls")).toHaveLength(3);
+    };
+    const withLink = await app({ founders: BROCK });
     const linked = await withLink.owner();
-    const linkedLine = ((await (await linked.api("/api/app/line/help", { device: "iphone" })).json()) as { line: { founderEmail: unknown } }).line;
-    expect(linkedLine.founderEmail).toEqual({ sentAt: withLink.clock.now().toISOString(), link: true });
-    for (let attempt = 0; attempt < 3; attempt += 1) await linked.api("/api/app/line/help", { device: "iphone" });
+    await useUpCalls(withLink, linked);
     const limited = await linked.api("/api/app/line/help", { device: "iphone" });
     expect(limited.status).toBe(429);
     expect(((await limited.json()) as { error: string }).error).toBe("Otto has called you a few times today. Our team emailed you a link to book a 10-minute call.");
+    expect(withLink.recorded.filter((call) => call.url === "https://api.telnyx.com/v2/calls")).toHaveLength(3);
+    const linkedLine = ((await (await fetch(`${withLink.baseUrl}/api/app/dashboard`, { headers: { cookie: linked.cookie } })).json()) as { line: { founderEmail: unknown } }).line;
+    expect(linkedLine.founderEmail).toEqual({ sentAt: withLink.clock.now().toISOString(), link: true });
     await new Promise<void>((resolve) => server!.close(() => resolve()));
     server = null;
 
@@ -496,8 +513,13 @@ describe("Brock emails when the AI setup helper can't finish", () => {
     const unlinked = await noCalendar.owner();
     const line = ((await (await unlinked.api("/api/app/line/help", { device: "iphone" })).json()) as { line: { founderEmail: unknown } }).line;
     expect(line.founderEmail).toEqual({ sentAt: noCalendar.clock.now().toISOString(), link: false });
-    for (let attempt = 0; attempt < 3; attempt += 1) await unlinked.api("/api/app/line/help", { device: "iphone" });
-    const limitedNoLink = await unlinked.api("/api/app/line/help", { device: "iphone" });
+    await new Promise<void>((resolve) => server!.close(() => resolve()));
+    server = null;
+    const noCalendarCalls = await app({});
+    const unlinkedCalls = await noCalendarCalls.owner();
+    await useUpCalls(noCalendarCalls, unlinkedCalls);
+    const limitedNoLink = await unlinkedCalls.api("/api/app/line/help", { device: "iphone" });
+    expect(limitedNoLink.status).toBe(429);
     expect(((await limitedNoLink.json()) as { error: string }).error).toBe("Otto has called you a few times today. Our team emailed you to set up a quick call.");
     await new Promise<void>((resolve) => server!.close(() => resolve()));
     server = null;
@@ -540,7 +562,8 @@ describe("booking a call with Brock", () => {
     const page = await fetch(link);
     expect(page.status).toBe(200);
     const html = await page.text();
-    expect(html).toContain("Book a 10-minute call with Brock.");
+    expect(html).toContain("Book a 10-minute call with our team.");
+    expect(html).not.toContain("Brock");
     expect(html).toContain("Times are in your time zone (CST).");
     // Monday in Chicago: 9:00 AM (10 Eastern) and the morning picks; nothing in Brock's busy afternoon.
     expect(html).toContain(">9:00 AM<");
@@ -562,7 +585,7 @@ describe("booking a call with Brock", () => {
     expect(event.description).toContain("Carrier: T-Mobile USA");
     expect(event.description).toContain("Forwarding code: **21*19415550123#");
     const confirmation = made.founderEmails(account.tenantId).find((item) => item.idempotencyKey.endsWith(":confirmation"))!;
-    expect(confirmation.body).toContain("You're set for Mon, Nov 30 at 9:00 AM CST. I'll call you at (941) 555-0199");
+    expect(confirmation.body).toContain("You're set for Mon, Nov 30 at 9:00 AM CST. We'll call you at (941) 555-0199");
     expect(parseEmailBody(confirmation.body).attachments[0]!.filename).toBe("call-otto-setup.ics");
     // Opening the link again shows the booking instead of booking twice.
     expect(await (await fetch(link)).text()).toContain("<h1>You’re set.</h1>");
@@ -658,7 +681,7 @@ describe("booking a call with Brock", () => {
     const { account } = await made.owner();
     const token = founderBookingToken(KEY, account.tenantId, made.clock.now());
     const html = await (await fetch(`${made.baseUrl}/book-setup?t=${encodeURIComponent(token)}`)).text();
-    expect(html).toContain("Online booking isn’t open yet. Reply to Brock’s email with a good time and he’ll call you.");
+    expect(html).toContain("Online booking isn’t open yet. Reply to our team’s email with a good time and we’ll call you.");
   });
 });
 
@@ -868,5 +891,168 @@ describe("founder review fixes", () => {
     await third.api("/api/app/line/help", { device: "iphone" });
     expect((await post(linkFor(third.account.tenantId), held)).status).toBe(409);
     expect((await post(linkFor(second.account.tenantId), held)).status).toBe(200);
+  });
+});
+
+describe("Call me now: Otto's support call", () => {
+  type Line = { helpCall: { to: string; answeredAt: string | null; endedAt: string | null; outcome: string | null; booked: boolean } | null; helpBookUrl: string | null };
+  const line = async (made: Awaited<ReturnType<typeof app>>, cookie: string) => ((await (await fetch(`${made.baseUrl}/api/app/dashboard`, { headers: { cookie } })).json()) as { line: Line }).line;
+  const dials = (made: Awaited<ReturnType<typeof app>>) => made.recorded.filter((call) => call.url === "https://api.telnyx.com/v2/calls" && Buffer.from(String((call.body as { client_state?: string }).client_state ?? ""), "base64").toString().startsWith("setup-help:"));
+  const hangups = (made: Awaited<ReturnType<typeof app>>) => made.recorded.filter((call) => call.url.endsWith("/calls/v3%3Ahelp-call/actions/hangup")).length;
+  /** A shop that tapped Call me now and picked up. */
+  async function onTheCall(options: Parameters<typeof app>[0] = {}) {
+    const made = await app(options);
+    const owner = await made.owner();
+    expect((await owner.api("/api/app/line/help", { device: "android" })).status).toBe(200);
+    await made.webhook("call.answered", "evt-answered", { call_control_id: "v3:help-call", client_state: made.dialState() });
+    return { ...made, ...owner };
+  }
+
+  it("only a signed-in owner can start it, and it rings only the saved owner mobile, capped at six minutes, listening for voicemail", async () => {
+    const made = await app();
+    const unsigned = await fetch(`${made.baseUrl}/api/app/line/help`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(unsigned.status).toBe(401);
+    const owner = await made.owner();
+    expect((await owner.api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+    const dial = dials(made)[0]!.body as Record<string, unknown>;
+    // The saved owner mobile, never the business number on file.
+    expect(dial).toMatchObject({ to: "+19415550199", from: "+15555550199", time_limit_secs: 360, answering_machine_detection: "premium" });
+    // The screen: calling, masked on the screen side, with the booking fallback.
+    const calling = await line(made, owner.cookie);
+    expect(calling.helpCall).toMatchObject({ to: "+19415550199", answeredAt: null, endedAt: null, outcome: null });
+    expect(calling.helpBookUrl).toMatch(/^\/book-setup\?t=/);
+    // A second tap while it rings never dials again.
+    await owner.api("/api/app/line/help", { device: "iphone" });
+    expect(dials(made)).toHaveLength(1);
+    await made.webhook("call.answered", "evt-answered", { call_control_id: "v3:help-call", client_state: made.dialState() });
+    expect((await line(made, owner.cookie)).helpCall).toMatchObject({ answeredAt: made.clock.now().toISOString(), endedAt: null });
+    // On the call: still one call, even minutes in.
+    made.clock.at = new Date(made.clock.at.getTime() + 4 * 60_000);
+    await owner.api("/api/app/line/help", { device: "iphone" });
+    expect(dials(made)).toHaveLength(1);
+    await made.webhook("call.hangup", "evt-hangup", { call_control_id: "v3:help-call", client_state: made.dialState(), hangup_cause: "normal_clearing" });
+    expect((await line(made, owner.cookie)).helpCall).toMatchObject({ outcome: "done", booked: false });
+    // Logged with its outcome, never the number.
+    const ended = made.logs.find((entry) => entry.event === "setup_call_ended")!;
+    expect(ended).toMatchObject({ outcome: "done", talkedSec: 240 });
+    expect(JSON.stringify(made.logs)).not.toContain("9415550199");
+  });
+
+  it("no saved owner mobile: no call, our team's email instead", async () => {
+    const made = await app({ founders: BROCK });
+    const owner = await made.owner();
+    await made.store.deleteIntegrationSecret(owner.account.tenantId, "notifications", "owner-primary");
+    expect((await owner.api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+    expect(dials(made)).toHaveLength(0);
+    expect(made.founderEmails(owner.account.tenantId)).toHaveLength(1);
+  });
+
+  it("voicemail answers: we hang up, never start the helper, and the screen offers a time", async () => {
+    const made = await app();
+    const owner = await made.owner();
+    await owner.api("/api/app/line/help", { device: "iphone" });
+    await made.webhook("call.machine.premium.detection.ended", "evt-amd", { call_control_id: "v3:help-call", client_state: made.dialState(), result: "machine" });
+    expect(hangups(made)).toBe(1);
+    await made.webhook("call.answered", "evt-answered-late", { call_control_id: "v3:help-call", client_state: made.dialState() });
+    expect(made.recorded.some((call) => call.url.endsWith("/actions/ai_assistant_start"))).toBe(false);
+    await made.webhook("call.hangup", "evt-hangup", { call_control_id: "v3:help-call", client_state: made.dialState(), hangup_cause: "normal_clearing" });
+    expect((await line(made, owner.cookie)).helpCall).toMatchObject({ outcome: "voicemail" });
+    // A person picking up is left alone.
+    const person = await app();
+    const other = await person.owner();
+    await other.api("/api/app/line/help", { device: "iphone" });
+    await person.webhook("call.machine.premium.detection.ended", "evt-amd", { call_control_id: "v3:help-call", client_state: person.dialState(), result: "human_residence" });
+    expect(person.recorded.filter((call) => call.url.endsWith("/actions/hangup"))).toHaveLength(0);
+  });
+
+  it("their phone forwards every call to Otto: no call (it would come back to Otto), and the screen says so plainly", async () => {
+    const made = await app({ founders: BROCK });
+    const owner = await made.owner();
+    // The owner's mobile IS the business number, and every call is picked.
+    await made.store.saveIntegrationSecret(owner.account.tenantId, "forwarding", "business_number", "+19415550199");
+    await made.store.saveConfig({ ...await made.store.getConfig(owner.account.tenantId), operationMode: "always" });
+    expect((await owner.api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+    expect(dials(made)).toHaveLength(0);
+    expect((await line(made, owner.cookie)).helpCall).toMatchObject({ outcome: "looped", endedAt: made.clock.now().toISOString() });
+    expect(made.founderEmails(owner.account.tenantId)).toHaveLength(0);
+  });
+
+  it("tools only run for the live support call they were started on, signed by Telnyx", async () => {
+    const made = await onTheCall({ founders: BROCK });
+    expect((await made.tool("get_test_result", { provider_call_id: "v3:help-call" }, false)).status).toBe(401);
+    expect(await (await made.tool("get_test_result", { provider_call_id: "v3:someone-else" })).json()).toMatchObject({ status: "unavailable" });
+    expect((await made.tool("delete_everything", { provider_call_id: "v3:help-call" })).status).toBe(404);
+    expect(await (await made.tool("get_test_result", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "idle", minutes_on_call: 0, offer_team_time: false });
+    await made.webhook("call.hangup", "evt-hangup", { call_control_id: "v3:help-call", client_state: made.dialState(), hangup_cause: "normal_clearing" });
+    // Over: nothing more runs on it.
+    expect(await (await made.tool("email_steps", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "unavailable" });
+  });
+
+  it("a call that rang but was never answered can't run tools", async () => {
+    const made = await app();
+    const owner = await made.owner();
+    await owner.api("/api/app/line/help", { device: "iphone" });
+    expect(await (await made.tool("start_forwarding_test", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "unavailable" });
+    expect(made.recorded.filter((call) => call.url === "https://api.telnyx.com/v2/calls")).toHaveLength(1);
+  });
+
+  it("start_forwarding_test rings the business phone and get_test_result reads it; after two minutes it says to offer our team", async () => {
+    const made = await onTheCall();
+    const started = await (await made.tool("start_forwarding_test", { provider_call_id: "v3:help-call" })).json() as Record<string, unknown>;
+    expect(started).toMatchObject({ status: "calling" });
+    const check = made.recorded.filter((call) => call.url === "https://api.telnyx.com/v2/calls").at(-1)!.body as Record<string, unknown>;
+    expect(check.to).toBe("+19415550177");
+    expect(Buffer.from(String(check.client_state), "base64").toString()).not.toMatch(/^setup-help:/);
+    expect(await (await made.tool("get_test_result", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "calling" });
+    made.clock.at = new Date(made.clock.at.getTime() + 2 * 60_000 + 5_000);
+    expect(await (await made.tool("get_test_result", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "not_reached", minutes_on_call: 2.1, offer_team_time: true });
+  });
+
+  it("email_steps emails the owner the forwarding steps", async () => {
+    const made = await onTheCall();
+    expect(await (await made.tool("email_steps", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "sent" });
+    const email = [...made.store.notifications.values()].find((item) => item.idempotencyKey.startsWith("handoff-email:"))!;
+    expect(email.destinationRef).toBe("email:owner@synthetic.example");
+    expect(email.body).toContain("Your Call Otto forwarding");
+  });
+
+  it("book_time books inside our team's windows, says the time, and emails the owner and the support inbox with a calendar invite", async () => {
+    const made = await onTheCall({ founders: BROCK });
+    const open = await (await made.tool("get_open_times", { provider_call_id: "v3:help-call" })).json() as { status: string; times: Array<{ slot_start: string; label: string }> };
+    expect(open.status).toBe("open");
+    expect(open.times.length).toBeGreaterThan(0);
+    expect(open.times.length).toBeLessThanOrEqual(3);
+    expect(open.times[0]!.label).toMatch(/ at \d{1,2}:\d{2} (AM|PM) C[SD]T$/);
+    // Never without a yes.
+    expect(await (await made.tool("book_time", { provider_call_id: "v3:help-call", slot_start: open.times[0]!.slot_start, explicit_confirmation: false })).json()).toMatchObject({ status: "needs_confirmation" });
+    expect(made.recorded.some((call) => call.method === "POST" && call.url.includes("/calendars/primary/events"))).toBe(false);
+    // A time outside the windows is refused.
+    expect(await (await made.tool("book_time", { provider_call_id: "v3:help-call", slot_start: "2026-11-29T03:00:00.000Z", explicit_confirmation: true })).json()).toMatchObject({ status: "invalid" });
+    const booked = await (await made.tool("book_time", { provider_call_id: "v3:help-call", slot_start: open.times[0]!.slot_start, explicit_confirmation: true })).json() as { status: string; say: string; when: string };
+    expect(booked.status).toBe("booked");
+    expect(booked.say).toBe(`You're booked for ${open.times[0]!.label}. Our team will call you at the number ending in 0 1 9 9. A confirmation email is on its way.`);
+    expect(booked.say).not.toMatch(/Brock/);
+    const event = made.recorded.find((call) => call.method === "POST" && call.url.includes("/calendars/primary/events"))!.body as { summary: string };
+    expect(event.summary).toBe("Call Otto setup: Gulf Air (10 min)");
+    const confirmation = made.founderEmails(made.account.tenantId).find((item) => item.idempotencyKey.endsWith(":confirmation"))!;
+    expect(confirmation.destinationRef).toBe("email:owner@synthetic.example");
+    expect(parseEmailBody(confirmation.body).attachments[0]!.filename).toBe("call-otto-setup.ics");
+    const team = [...made.store.notifications.values()].find((item) => item.destinationRef === "email:help@callotto.example" && item.idempotencyKey.endsWith(":team"))!;
+    expect(team.senderRef).toBe("founder");
+    const invite = Buffer.from(parseEmailBody(team.body).attachments[0]!.content, "base64").toString("utf8");
+    expect(invite).toContain("BEGIN:VEVENT");
+    expect(invite).toContain(`DTSTART:${open.times[0]!.slot_start.replace(/[-:]/g, "").replace(/\.\d{3}/, "")}`);
+    expect(invite).toContain("SUMMARY:Call Otto setup: Gulf Air (10 min)");
+    for (const item of [confirmation, team]) expect(parseEmailBody(item.body).text).not.toContain("Brock");
+    // The screen shows it once the call ends.
+    await made.webhook("call.hangup", "evt-hangup", { call_control_id: "v3:help-call", client_state: made.dialState(), hangup_cause: "normal_clearing" });
+    expect((await line(made, made.cookie)).helpCall).toMatchObject({ outcome: "done", booked: true });
+  });
+
+  it("no team calendar connected: our team emails instead of booking", async () => {
+    const made = await onTheCall();
+    expect(await (await made.tool("get_open_times", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "no_calendar" });
+    const email = made.founderEmails(made.account.tenantId).at(-1)!;
+    expect(email.body).toContain("you asked for a time with our team");
   });
 });

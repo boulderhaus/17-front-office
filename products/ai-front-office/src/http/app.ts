@@ -56,10 +56,10 @@ import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANS
 import { MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_ROUTES, toolFailure, toolLimitReached, withinToolBudget, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
 import { callScreeningSetting, ensureCallEndCallback, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import { AMD_ENDED_EVENT, FORWARDING_CHECK_SPEECH, forwardingCheckState, GREETING_ENDED_EVENT, SCREENING_DETECTED_EVENT, TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
-import { setupHelpState, setupSorrySpeech, TelnyxSetupCaller, type SetupCallFacts } from "../adapters/telnyx-setup-call.js";
+import { SETUP_CALL_TIME_LIMIT_SECS, SETUP_CALLS_PER_DAY, SETUP_HELP_TOOL_NAMES, SETUP_HELP_TOOL_PREFIX, setupHelpState, setupSorrySpeech, TelnyxSetupCaller, type SetupCallFacts, type SetupHelpToolName, type SetupTestSummary } from "../adapters/telnyx-setup-call.js";
 import { FOUNDER_GOOGLE_SCOPES, FounderCalendarReadError, FounderCalendars, FounderConnectError } from "../adapters/founder-calendar.js";
 import { FounderFollowup, type FounderBookingFacts } from "../application/founder-followup.js";
-import { founderConnectTokenValid, ownerFirstName, prettyPhone, readFounderBookingToken } from "../domain/founder-booking.js";
+import { founderBookingToken, founderCallIcs, founderConnectTokenValid, ownerFirstName, prettyPhone, readFounderBookingToken, slotFullLabel } from "../domain/founder-booking.js";
 import { renderFounderBooking, renderFounderCalendars } from "../admin/founder.js";
 import { ensureReviewAccount, isLinkPreview, REVIEW_NO_LINE, ReviewAccountError, reviewAccountTokenValid } from "../application/review-account.js";
 import { renderReviewAccount } from "../admin/review-account.js";
@@ -147,6 +147,48 @@ interface SetupCallRecord {
   answeredAt?: string;
   endedAt?: string;
   hangupCause?: string | null;
+  /** How it ended, for the screen and the log. */
+  outcome?: SetupCallOutcome;
+  /** A time with our team was booked on this call. */
+  bookedAt?: string;
+}
+
+/** done: they talked; missed: never picked up; voicemail: a machine answered; looped: their phone sent it to Otto. */
+type SetupCallOutcome = "done" | "missed" | "voicemail" | "looped" | "failed";
+/**
+ * A forwarding test as the setup helper reads it (from the same status the screen shows): passed, failed with one
+ * plain reason, or still calling. `say` is what it reads to the owner.
+ */
+const SETUP_TEST_WORDS: Partial<Record<ReturnType<typeof forwardingCheckStatus>, SetupTestSummary & { say: string }>> = {
+  idle: { status: "not_run", detail: "No test yet.", say: "There's no test yet." },
+  calling: { status: "not_run", detail: "A test is calling their business phone now.", say: "The test is calling your business phone now." },
+  passed: { status: "passed", detail: "Calls reach Call Otto.", say: "It worked. Calls to your business number reach Otto." },
+  forwards_all: { status: "failed", detail: "Ring first is picked, but every call still goes to Otto with no ring: turn forwarding off first, then dial the ring-first code.", say: "Calls reach Otto, but your phone didn't ring first. Every call is still forwarded." },
+  rings_first: { status: "failed", detail: "Every call is picked, but their phone rang first: the every-call setting isn't on yet.", say: "Your phone rang first, so every call isn't on yet." },
+  phone_answers: { status: "failed", detail: "Their phone picked up the test itself (Live Voicemail or call screening).", say: "Your phone picked up the test by itself, so forwarding never got a chance." },
+  voicemail: { status: "failed", detail: "The test went to their voicemail: forwarding isn't on.", say: "The test went to your voicemail, so forwarding isn't on yet." },
+  you_answered: { status: "failed", detail: "Someone answered the test call.", say: "Someone answered the test. Don't answer it next time." },
+  declined: { status: "failed", detail: "The test was declined and didn't reach Otto.", say: "The test was declined and didn't reach Otto." },
+  not_reached: { status: "failed", detail: "The test didn't reach Otto: forwarding isn't on yet.", say: "The test didn't reach Otto, so forwarding isn't on yet." },
+};
+
+/** The helper's tools: callControlId -> tenantId, on the platform tenant. */
+const SETUP_HELP_PROVIDER = "setup-help";
+
+function parseTimes(value: string | null): string[] {
+  try {
+    const parsed = value ? JSON.parse(value) as unknown : [];
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string" && Number.isFinite(Date.parse(item))) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Ringing or on the call: not ended, inside the ring window or (answered) the call's hard cap plus a minute. */
+function setupCallLive(call: SetupCallRecord, nowMs: number): boolean {
+  if (call.endedAt || typeof call.startedAt !== "string") return false;
+  if (!call.answeredAt) return setupCallRinging(call, nowMs);
+  return nowMs - Date.parse(call.answeredAt) < (SETUP_CALL_TIME_LIMIT_SECS + 60) * 1_000;
 }
 
 function readSetupCall(value: string | null): SetupCallRecord | null {
@@ -1153,6 +1195,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (method === "POST" && url.pathname === "/webhooks/telnyx") return handleTelnyx(request, response);
     if (url.pathname.startsWith("/texml/voicemail")) return handleVoicemail(request, response, url);
     if (method === "POST" && url.pathname === "/webhooks/stripe") return handleStripe(request, response);
+    if (method === "POST" && url.pathname.startsWith(SETUP_HELP_TOOL_PREFIX)) return handleSetupHelpTool(request, response, url.pathname.slice(SETUP_HELP_TOOL_PREFIX.length));
     const tool = method === "POST" ? toolForPath(url.pathname) : null;
     if (tool) return runTool(tool, request, response, url);
     if (url.pathname.startsWith("/admin")) return handleAdmin(request, response, url);
@@ -1334,6 +1377,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const model = apiDashboard({
       account, config, calls, tasks, usage, googleConnected, subscription, csrf, lineNumber, ownerMobile,
       smsConsent: Boolean(smsConsent), textsLive: dependencies.env.TELNYX_MESSAGING_APPROVED, helpTeam: Boolean(helpTeamAt && helpAskedAt && helpTeamAt >= helpAskedAt),
+      // "Didn't ring? Book a time": the same signed booking page our team's email links to.
+      helpBookUrl: dependencies.env.SESSION_SIGNING_KEY ? `/book-setup?t=${encodeURIComponent(founderBookingToken(dependencies.env.SESSION_SIGNING_KEY, account.tenantId, dependencies.clock.now()))}` : null,
       googleAvailable: anyGoogleClient(dependencies.env),
       chargeNote: stripeClient ? planCharge(currentPlan(known, config.planId), config.timezone, config.unlimitedCalls === true) : null,
       plans: apiPlans(config.timezone),
@@ -1536,42 +1581,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (method === "POST" && url.pathname === "/api/app/line/check") {
       if (!owner) throw new HttpError(403, "Only the owner can check call forwarding");
       await readApiJson(request, session, 1_000);
-      const [lineNumber, state] = await Promise.all([
-        dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
-        readForwarding(account.tenantId),
-      ]);
-      if (!lineNumber) throw new HttpError(409, "Turn on your Call Otto line first.");
-      if (!state.businessNumber) throw new HttpError(409, "Add your business phone number first.");
-      if (!limiter.allow(`forwarding-check:${account.tenantId}`, 6, 60 * 60_000)) throw new HttpError(429, "That’s a lot of checks. Please wait a few minutes and try again.");
-      // What the owner is set up for right now (their choice and the code on screen): a pass records it.
-      const config = await dependencies.store.getConfig(account.tenantId);
-      const code = state.carrier ? forwardingPlan(state.carrier.family, lineNumber, config.operationMode, config.answerAfterRings).on : null;
-      const choice = forwardingChoice(config.operationMode);
-      await hangUpLiveCheck(account.tenantId);
-      const startedAt = dependencies.clock.now().toISOString();
-      const connectionId = dependencies.env.TELNYX_CHECK_CONNECTION_ID;
-      const from = dependencies.env.TELNYX_FROM_NUMBER;
-      let method: "auto" | "manual" = "manual";
-      let callControlId: string | null = null;
-      const autoConfigured = Boolean(connectionId && from && dependencies.env.TELNYX_API_KEY && !dependencies.env.PROVIDER_TEST_MODE);
-      if (connectionId && from && dependencies.env.TELNYX_API_KEY && !dependencies.env.PROVIDER_TEST_MODE) {
-        callControlId = await new TelnyxForwardingClient({ apiKey: dependencies.env.TELNYX_API_KEY, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })
-          .placeCheckCall({ connectionId, from, to: state.businessNumber, tenantId: account.tenantId, startedAt, webhookUrl: `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx` })
-          .catch((error) => { log({ level: "error", event: "forwarding_check_call_failed", tenantId: account.tenantId, error: safeError(error) }); return null; });
-        if (callControlId) method = "auto";
-      }
-      // autoFailed: we meant to call their phone and couldn't, so the app says why and asks for a call from another phone.
-      const autoFailed = autoConfigured && method === "manual";
-      await dependencies.store.withLock(`forwarding-check:${account.tenantId}`, async () => {
-        // The last finished test is kept, so Cancel on this one brings back what the card said before (a failure
-        // stays a failure). A test still running when this one replaced it was never a result: the older one stays.
-        const prior = await dependencies.store.getIntegrationSecret(account.tenantId, "forwarding", "check");
-        if (prior && state.check && forwardingCheckStatus(state.check, state.confirmedAt, startedAt) !== "calling") {
-          await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "previous_check", prior);
-        }
-        await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "check", JSON.stringify({ startedAt, method, callControlId, code, choice, ...(autoFailed ? { autoFailed: true } : {}) }));
-      });
-      log({ level: "info", event: "forwarding_check_started", tenantId: account.tenantId, method, autoFailed });
+      await startForwardingCheck(account.tenantId);
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
     }
     if (method === "POST" && url.pathname === "/api/app/line/handoff") {
@@ -1588,22 +1598,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       await readApiJson(request, session, 1_000);
       if (!limiter.allow(`handoff-email:${account.tenantId}`, 5, 24 * 60 * 60_000)) throw new HttpError(429, "We’ve sent a few already. Check your inbox and spam folder.");
       if (!dependencies.env.RESEND_API_KEY || !dependencies.env.RESEND_FROM_EMAIL) throw new HttpError(503, "Email isn’t switched on yet. Scan the code instead.");
-      const link = await newHandoffLink(account.tenantId, EMAILED_HANDOFF_TTL_MS);
-      const now = dependencies.clock.now().toISOString();
-      // The same steps the computer shows: every call on an iPhone (GSM family) is the Settings switch, with the
-      // link for the rest (the code, for Verizon-family phones and odd carriers).
-      const { plan, lineNumber } = await handoffPlan(account.tenantId);
-      const iphone = plan && lineNumber && forwardingSteps({ device: "desktop", family: plan.family, everyCall: plan.forwardsAll }).on === "settings";
-      const body = iphone
-        ? formatEmailBody("Your Call Otto forwarding steps", `${settingsStepsText(lineNumber)}\n\nNot an iPhone, or no Call Forwarding? Open this on the phone your customers call:\n\n${link}\n\nThe link works for 24 hours.`)
-        : formatEmailBody("Your Call Otto forwarding code", `Open this on the phone your customers call. It shows your code and how to dial it:\n\n${link}\n\nThe link works for 24 hours.`);
-      const queued = await dependencies.store.enqueueNotification({
-        id: randomUUID(), tenantId: account.tenantId, callId: null, channel: "email", destinationRef: `email:${account.email}`,
-        body,
-        priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
-        idempotencyKey: `handoff-email:${account.tenantId}:${now}`, providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
-      });
-      if (!queued) throw new HttpError(502, "That didn’t send. Please try again.");
+      if (!await emailForwardingSteps(account.tenantId, account.email)) throw new HttpError(502, "That didn’t send. Please try again.");
       log({ level: "info", event: "handoff_emailed", tenantId: account.tenantId });
       return sendJson(response, 200, { sentTo: account.email });
     }
@@ -1650,14 +1645,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
     }
     if (method === "POST" && url.pathname === "/api/app/line/help") {
+      // "Call me now": Otto's setup helper calls the shop's saved owner mobile, and only that number.
       if (!owner) throw new HttpError(403, "Only the owner can ask for setup help");
       const helpRequest = await readApiJson(request, session, 1_000) as { device?: unknown };
-      if (!limiter.allow(`forwarding-help:${account.tenantId}`, 4, 24 * 60 * 60_000)) {
-        // Brock's email (at most one a day) carries it from here.
-        await founder.queueSafely(account.tenantId, "limit");
-        const sent = await founder.lastEmail(account.tenantId).catch(() => null);
-        throw new HttpError(429, `Otto has called you a few times today. ${!sent ? "Please try again tomorrow." : sent.link ? "Our team emailed you a link to book a 10-minute call." : "Our team emailed you to set up a quick call."}`);
-      }
+      // Taps (a slow connection, two devices) are cheap to refuse; the real cap is the durable 3 calls a day below.
+      if (!limiter.allow(`forwarding-help:${account.tenantId}`, 10, 24 * 60 * 60_000)) throw new HttpError(429, "Too many tries. Please try again tomorrow.");
       const [config, state, ownerPhone, lineNumber] = await Promise.all([
         dependencies.store.getConfig(account.tenantId),
         readForwarding(account.tenantId),
@@ -1665,36 +1657,53 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
       ]);
       const now = dependencies.clock.now().toISOString();
+      const nowMs = Date.parse(now);
       await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "help_requested_at", now);
-      // Otto's AI setup helper calls right away. If it can't, Brock emails the owner a link to book a call with him;
-      // the support email below tells us the request came in.
+      // Otto's AI setup helper calls right away. If it can't, our team emails the owner a link to book a call; the
+      // support email below tells us the request came in.
       const device = helpRequest.device === "iphone" || helpRequest.device === "android" ? helpRequest.device : "other";
-      const candidate = ownerPhone && /^\+1[2-9]\d{9}$/.test(ownerPhone) ? ownerPhone : state.businessNumber;
-      // Never ring a business number that may forward every call to Otto (Otto would call Otto): every call is picked,
-      // or the last passed test was (or they left it untested) for every call. A separate mobile is preferred above;
-      // with none, Brock's email below takes over.
-      const loops = forwardsBackToOtto({ mode: config.operationMode, businessNumber: state.businessNumber, phone: candidate, testedFor: state.testedFor ?? null });
+      const callTo = ownerPhone && /^\+1[2-9]\d{9}$/.test(ownerPhone) ? ownerPhone : null;
+      // Never ring a mobile that forwards every call to Otto (Otto would call Otto): every call is picked on the
+      // business number they ring, or the last passed test was (or they left it untested) for every call.
+      const loops = Boolean(callTo) && forwardsBackToOtto({ mode: config.operationMode, businessNumber: state.businessNumber, phone: callTo, testedFor: state.testedFor ?? null });
       if (loops) log({ level: "info", event: "setup_call_skipped_forwards_to_otto", tenantId: account.tenantId });
-      const callTo = loops ? null : candidate;
       // One setup call per shop at a time, written only under this lock (here and by the call's webhooks).
-      const calling = await dependencies.store.withLock(`setup-call:${account.tenantId}`, async (): Promise<string | null> => {
+      const calling = await dependencies.store.withLock(`setup-call:${account.tenantId}`, async (): Promise<string | "limit" | "looped" | null> => {
         const current = readSetupCall(await dependencies.store.getIntegrationSecret(account.tenantId, "forwarding", "setup_call"));
-        // Already ringing (a double tap, another device): that call carries it. Never dial over it or clear it.
-        if (current?.to && setupCallRinging(current, Date.parse(now))) return current.to;
-        if (setupCallsConfigured() && callTo && lineNumber) {
+        // Already ringing or on the call (a double tap, another device): that call carries it. Never dial over it.
+        if (current?.to && setupCallLive(current, nowMs)) return current.to;
+        if (loops) {
+          await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "setup_call", JSON.stringify({ startedAt: now, to: callTo!, endedAt: now, outcome: "looped" } satisfies SetupCallRecord));
+          return "looped";
+        }
+        // At most SETUP_CALLS_PER_DAY placed calls a day per shop, counted durably (restarts and replicas included).
+        const placed = parseTimes(await dependencies.store.getIntegrationSecret(account.tenantId, "forwarding", "setup_calls_placed")).filter((at) => nowMs - Date.parse(at) < 24 * 60 * 60_000);
+        if (placed.length >= SETUP_CALLS_PER_DAY) return "limit";
+        if (setupCallsConfigured() && callTo && lineNumber && account.status !== "suspended") {
           const callControlId = await setupCaller()!
             .dial({ connectionId: dependencies.env.TELNYX_CHECK_CONNECTION_ID!, from: dependencies.env.TELNYX_FROM_NUMBER!, to: callTo, tenantId: account.tenantId, webhookUrl: `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx` })
             .catch((error) => { log({ level: "error", event: "setup_call_dial_failed", tenantId: account.tenantId, error: safeError(error) }); return null; });
           if (callControlId) {
-            await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "setup_call", JSON.stringify({ startedAt: now, callControlId, device, to: callTo }));
+            await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "setup_calls_placed", JSON.stringify([...placed, now]));
+            await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "setup_call", JSON.stringify({ startedAt: now, callControlId, device, to: callTo } satisfies SetupCallRecord));
+            // The helper's tools find this shop by the call they're on (signed by Telnyx), never by anything said.
+            await dependencies.store.saveIntegrationSecret(PLATFORM_TENANT_ID, SETUP_HELP_PROVIDER, callControlId, account.tenantId);
+            log({ level: "info", event: "setup_call_placed", tenantId: account.tenantId, callsToday: placed.length + 1 });
             return callTo;
           }
         }
-        // No call is coming (not set up, no number, or the dial failed): clear the older, finished call so the app
-        // shows Brock's email.
+        // No call is coming (not set up, no mobile, or the dial failed): clear the older, finished call so the app
+        // shows our team's email.
         await dependencies.store.deleteIntegrationSecret(account.tenantId, "forwarding", "setup_call");
         return null;
       });
+      if (calling === "limit") {
+        // Our team's email (at most one a day) carries it from here.
+        await founder.queueSafely(account.tenantId, "limit");
+        const sent = await founder.lastEmail(account.tenantId).catch(() => null);
+        log({ level: "info", event: "setup_call_limited", tenantId: account.tenantId });
+        throw new HttpError(429, `Otto has called you a few times today. ${!sent ? "Book a time with our team instead." : sent.link ? "Our team emailed you a link to book a 10-minute call." : "Our team emailed you to set up a quick call."}`);
+      }
       if (!calling) await founder.queueSafely(account.tenantId, "call_unavailable");
       if (dependencies.env.SUPPORT_EMAIL) {
         // The app says "we got it" only once this email is really in the outbox for this request.
@@ -1718,7 +1727,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         const sameEmail = Boolean(earlier) && earlier!.slice(0, 13) === now.slice(0, 13);
         await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "help_team_at", queuedForTeam || sameEmail ? now : "");
       }
-      log({ level: "warn", event: "forwarding_help_requested", tenantId: account.tenantId, emailed: Boolean(dependencies.env.SUPPORT_EMAIL), calling: Boolean(calling) });
+      log({ level: "warn", event: "forwarding_help_requested", tenantId: account.tenantId, emailed: Boolean(dependencies.env.SUPPORT_EMAIL), calling: Boolean(calling) && calling !== "looped", looped: calling === "looped" });
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
     }
     if (method === "POST" && url.pathname === "/api/app/line/go-live") {
@@ -2975,7 +2984,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       businessNumber, carrier: parse<CarrierInfo>(carrierJson), confirmedAt, testedFor: parseTestedFor(testedForJson),
       check: check ? { startedAt: check.startedAt, method: check.method, answeredAt: check.answeredAt ?? null, endedAt: check.endedAt ?? null, hangupCause: check.hangupCause ?? null, screenedAt: check.screenedAt ?? null, amdResult: check.amdResult ?? null, code: check.code ?? null, choice: check.choice ?? null, autoFailed: check.autoFailed === true, forwardedAfterMs: typeof check.forwardedAfterMs === "number" ? check.forwardedAfterMs : null, atOnce: check.atOnce === true, rangFirst: check.rangFirst === true } : null,
       helpRequestedAt,
-      helpCall: ((call) => call?.to && call.startedAt ? { to: call.to, startedAt: call.startedAt, endedAt: call.endedAt ?? null } : null)(readSetupCall(setupCallJson)),
+      helpCall: ((call) => call?.to && call.startedAt ? { to: call.to, startedAt: call.startedAt, answeredAt: call.answeredAt ?? null, endedAt: call.endedAt ?? null, outcome: call.outcome ?? null, booked: Boolean(call.bookedAt) } : null)(readSetupCall(setupCallJson)),
       founderEmail,
     };
   }
@@ -2996,10 +3005,117 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     return new TelnyxSetupCaller({
       apiKey: dependencies.env.TELNYX_API_KEY,
       templateAssistantId: dependencies.env.TELNYX_TEMPLATE_ASSISTANT_ID ?? dependencies.env.TELNYX_ASSISTANT_ID ?? null,
+      setupAssistantId: dependencies.env.TELNYX_SETUP_ASSISTANT_ID ?? null,
+      publicBaseUrl: dependencies.env.PUBLIC_BASE_URL,
+      voice: dependencies.env.TELNYX_VOICE,
       getSecret: (tenantId, provider, key) => dependencies.store.getIntegrationSecret(tenantId, provider, key),
       saveSecret: (tenantId, provider, key, value) => dependencies.store.saveIntegrationSecret(tenantId, provider, key, value),
       ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}),
     });
+  }
+
+  /**
+   * Start a forwarding test: our call to the business phone (or a manual test from another phone). The owner app's
+   * Test it and the setup helper's start_forwarding_test both come here. Throws HttpError with the owner's words.
+   */
+  async function startForwardingCheck(tenantId: string): Promise<void> {
+    const [lineNumber, state] = await Promise.all([
+      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
+      readForwarding(tenantId),
+    ]);
+    if (!lineNumber) throw new HttpError(409, "Turn on your Call Otto line first.");
+    if (!state.businessNumber) throw new HttpError(409, "Add your business phone number first.");
+    if (!limiter.allow(`forwarding-check:${tenantId}`, 6, 60 * 60_000)) throw new HttpError(429, "That’s a lot of checks. Please wait a few minutes and try again.");
+    // What the owner is set up for right now (their choice and the code on screen): a pass records it.
+    const config = await dependencies.store.getConfig(tenantId);
+    const code = state.carrier ? forwardingPlan(state.carrier.family, lineNumber, config.operationMode, config.answerAfterRings).on : null;
+    const choice = forwardingChoice(config.operationMode);
+    await hangUpLiveCheck(tenantId);
+    const startedAt = dependencies.clock.now().toISOString();
+    const connectionId = dependencies.env.TELNYX_CHECK_CONNECTION_ID;
+    const from = dependencies.env.TELNYX_FROM_NUMBER;
+    let method: "auto" | "manual" = "manual";
+    let callControlId: string | null = null;
+    const autoConfigured = Boolean(connectionId && from && dependencies.env.TELNYX_API_KEY && !dependencies.env.PROVIDER_TEST_MODE);
+    if (connectionId && from && dependencies.env.TELNYX_API_KEY && !dependencies.env.PROVIDER_TEST_MODE) {
+      callControlId = await new TelnyxForwardingClient({ apiKey: dependencies.env.TELNYX_API_KEY, ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}) })
+        .placeCheckCall({ connectionId, from, to: state.businessNumber, tenantId: tenantId, startedAt, webhookUrl: `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx` })
+        .catch((error) => { log({ level: "error", event: "forwarding_check_call_failed", tenantId: tenantId, error: safeError(error) }); return null; });
+      if (callControlId) method = "auto";
+    }
+    // autoFailed: we meant to call their phone and couldn't, so the app says why and asks for a call from another phone.
+    const autoFailed = autoConfigured && method === "manual";
+    await dependencies.store.withLock(`forwarding-check:${tenantId}`, async () => {
+      // The last finished test is kept, so Cancel on this one brings back what the card said before (a failure
+      // stays a failure). A test still running when this one replaced it was never a result: the older one stays.
+      const prior = await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "check");
+      if (prior && state.check && forwardingCheckStatus(state.check, state.confirmedAt, startedAt) !== "calling") {
+        await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "previous_check", prior);
+      }
+      await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check", JSON.stringify({ startedAt, method, callControlId, code, choice, ...(autoFailed ? { autoFailed: true } : {}) }));
+    });
+    log({ level: "info", event: "forwarding_check_started", tenantId: tenantId, method, autoFailed });
+  }
+
+  /** "Email me these steps" (the owner app and the setup helper): the same steps the computer shows. True once queued. */
+  async function emailForwardingSteps(tenantId: string, email: string): Promise<boolean> {
+    const link = await newHandoffLink(tenantId, EMAILED_HANDOFF_TTL_MS);
+    const now = dependencies.clock.now().toISOString();
+    // The same steps the computer shows: every call on an iPhone (GSM family) is the Settings switch, with the
+    // link for the rest (the code, for Verizon-family phones and odd carriers).
+    const { plan, lineNumber } = await handoffPlan(tenantId);
+    const iphone = plan && lineNumber && forwardingSteps({ device: "desktop", family: plan.family, everyCall: plan.forwardsAll }).on === "settings";
+    const body = iphone
+      ? formatEmailBody("Your Call Otto forwarding steps", `${settingsStepsText(lineNumber)}\n\nNot an iPhone, or no Call Forwarding? Open this on the phone your customers call:\n\n${link}\n\nThe link works for 24 hours.`)
+      : formatEmailBody("Your Call Otto forwarding code", `Open this on the phone your customers call. It shows your code and how to dial it:\n\n${link}\n\nThe link works for 24 hours.`);
+    const queued = await dependencies.store.enqueueNotification({
+      id: randomUUID(), tenantId: tenantId, callId: null, channel: "email", destinationRef: `email:${email}`,
+      body,
+      priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
+      idempotencyKey: `handoff-email:${tenantId}:${now}`, providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
+    });
+    return queued;
+  }
+
+  /** What the setup helper is told about this shop: only what we stored. Null until the line has a number. */
+  async function setupCallFacts(tenantId: string, device: SetupCallFacts["device"]): Promise<{ facts: SetupCallFacts; state: ForwardingState } | null> {
+    const [config, state, lineNumber] = await Promise.all([
+      dependencies.store.getConfig(tenantId),
+      readForwarding(tenantId),
+      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
+    ]);
+    if (!lineNumber) return null;
+    const family = state.carrier?.family ?? null;
+    const plan = family ? forwardingPlan(family, lineNumber, config.operationMode, config.answerAfterRings) : null;
+    const everyCall = family ? forwardingPlan(family, lineNumber, "always") : null;
+    const ringFirst = family ? forwardingPlan(family, lineNumber, "overflow", config.answerAfterRings) : null;
+    const facts: SetupCallFacts = {
+      businessName: config.businessName,
+      businessNumber: state.businessNumber,
+      carrierName: state.carrier?.name ?? null,
+      family,
+      code: plan?.on ?? null,
+      offCode: plan?.off ?? null,
+      confirm: plan?.confirm ?? null,
+      ottoNumber: lineNumber,
+      device,
+      ringSeconds: plan?.ringSeconds ?? null,
+      forwardsAll: plan?.forwardsAll ?? false,
+      everyCallCode: everyCall?.on ?? null,
+      ringFirstCode: ringFirst?.on ?? null,
+      ringFirstSeconds: ringFirst?.ringSeconds ?? null,
+      // Only while ring first is picked: after switching to every call, the screen asks for the new code instead.
+      phoneAnswersTest: !plan?.forwardsAll && forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "phone_answers",
+      // Leaving every call: the off code first, then the ring-first code (forward-all wins over it otherwise).
+      everyCallOn: state.testedFor?.mode === "every-call",
+    };
+    return { facts, state };
+  }
+
+  /** The last forwarding test, in one plain line for the helper. */
+  function setupTestSummary(state: ForwardingState): SetupTestSummary {
+    const status = forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString());
+    return SETUP_TEST_WORDS[status] ?? { status: "not_run", detail: "No test yet." };
   }
 
   /** Answered: start the setup helper with this shop's exact numbers and code. Only the latest setup call. */
@@ -3011,7 +3127,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const clientState = typeof envelope.data.payload.client_state === "string" ? envelope.data.payload.client_state : "";
     // Only our apology ends in a hang-up; nothing the helper itself says ever does.
     if (phase === "sorry") { if (envelope.data.event_type === "call.speak.ended") await caller.hangUp(callControlId); return; }
-    if (envelope.data.event_type !== "call.answered" && envelope.data.event_type !== "call.hangup") return;
+    const type = envelope.data.event_type;
+    if (type !== "call.answered" && type !== "call.hangup" && type !== AMD_ENDED_EVENT) return;
     const at = dependencies.clock.now().toISOString();
     // Read and write the call record under the same lock as the help endpoint, so an answer and a hang-up that
     // arrive together (or out of order) never both act on a stale record.
@@ -3019,59 +3136,55 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const call = readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"));
       return call && call.callControlId === callControlId ? task(call) : null;
     });
-    if (envelope.data.event_type === "call.hangup") {
+    if (type === AMD_ENDED_EVENT) {
+      // Voicemail picked up: hang up (never leave a message) and the screen offers a time with our team instead.
+      const result = typeof envelope.data.payload.result === "string" ? envelope.data.payload.result : null;
+      if (result !== "machine") return;
+      const machine = await lockedCall(async (call) => {
+        if (call.endedAt || call.outcome === "voicemail") return null;
+        await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...call, outcome: "voicemail" } satisfies SetupCallRecord));
+        return call;
+      });
+      if (machine) {
+        log({ level: "info", event: "setup_call_voicemail", tenantId });
+        await caller.hangUp(callControlId);
+      }
+      return;
+    }
+    if (type === "call.hangup") {
       const cause = typeof envelope.data.payload.hangup_cause === "string" ? envelope.data.payload.hangup_cause.slice(0, 40) : null;
       const ended = await lockedCall(async (call) => {
         if (call.endedAt) return null;
-        await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...call, endedAt: at, hangupCause: cause }));
-        return call;
+        const outcome: SetupCallOutcome = call.outcome ?? (call.answeredAt ? "done" : "missed");
+        await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...call, endedAt: at, hangupCause: cause, outcome } satisfies SetupCallRecord));
+        return { ...call, outcome };
       });
-      // Rang out, busy or declined: the helper never got to talk, so Brock emails now. Any other ending without a
+      if (ended) {
+        // Every support call is logged with how it ended (never the number or anything said).
+        const talkedSec = ended.answeredAt ? Math.max(0, Math.round((Date.parse(at) - Date.parse(ended.answeredAt)) / 1_000)) : 0;
+        log({ level: "info", event: "setup_call_ended", tenantId, outcome: ended.outcome, cause, talkedSec, booked: Boolean(ended.bookedAt) });
+        await dependencies.store.deleteIntegrationSecret(PLATFORM_TENANT_ID, SETUP_HELP_PROVIDER, callControlId).catch(() => undefined);
+      }
+      // Rang out, busy or declined: the helper never got to talk, so our team emails now. Any other ending without a
       // recorded answer (a normal hang-up whose answer we haven't seen yet) is left to the 20-minute check.
       if (ended && !ended.answeredAt && cause && SETUP_CALL_MISSED_CAUSES.has(cause)) await founder.queueSafely(tenantId, "no_answer");
       return;
     }
     const call = await lockedCall(async (current) => {
-      // The hang-up already came in: the call is over, so there's no one to start the helper for.
-      if (current.endedAt) return null;
+      // The hang-up already came in (or voicemail did): there's no one to start the helper for.
+      if (current.endedAt || current.outcome === "voicemail") return null;
       if (!current.answeredAt) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...current, answeredAt: at }));
       return current;
     });
     if (!call) return;
-    const [config, state, lineNumber] = await Promise.all([
-      dependencies.store.getConfig(tenantId),
-      readForwarding(tenantId),
-      dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
-    ]);
-    if (!lineNumber) return;
-    const family = state.carrier?.family ?? null;
-    const plan = family ? forwardingPlan(family, lineNumber, config.operationMode, config.answerAfterRings) : null;
-    const everyCall = family ? forwardingPlan(family, lineNumber, "always") : null;
-    const ringFirst = family ? forwardingPlan(family, lineNumber, "overflow", config.answerAfterRings) : null;
+    const built = await setupCallFacts(tenantId, call.device ?? "other");
+    if (!built) return;
     await caller.start({
       callControlId,
       commandId: `setup-start:${envelope.data.id}`,
       clientState,
-      facts: {
-        businessName: config.businessName,
-        businessNumber: state.businessNumber,
-        carrierName: state.carrier?.name ?? null,
-        family,
-        code: plan?.on ?? null,
-        offCode: plan?.off ?? null,
-        confirm: plan?.confirm ?? null,
-        ottoNumber: lineNumber,
-        device: call.device ?? "other",
-        ringSeconds: plan?.ringSeconds ?? null,
-        forwardsAll: plan?.forwardsAll ?? false,
-        everyCallCode: everyCall?.on ?? null,
-        ringFirstCode: ringFirst?.on ?? null,
-        ringFirstSeconds: ringFirst?.ringSeconds ?? null,
-        // Only while ring first is picked: after switching to every call, the screen asks for the new code instead.
-        phoneAnswersTest: !plan?.forwardsAll && forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "phone_answers",
-        // Leaving every call: the off code first, then the ring-first code (forward-all wins over it otherwise).
-        everyCallOn: state.testedFor?.mode === "every-call",
-      },
+      test: setupTestSummary(built.state),
+      facts: built.facts,
     }).then(() => log({ level: "info", event: "setup_call_started", tenantId }), async (error: unknown) => {
       // Never leave the owner on a silent line: queue Brock's email first, so the apology can say he just sent it,
       // then apologize and hang up when that's said.
@@ -3083,7 +3196,141 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     });
   }
 
-  /** What Brock's calendar event and confirmation need about the shop. */
+  /**
+   * The setup helper's tools. Signed by Telnyx; the shop comes from the call the tool runs on (our own record of the
+   * call we placed), never from anything in the conversation, and only while that call is live.
+   */
+  async function handleSetupHelpTool(request: IncomingMessage, response: ServerResponse, name: string): Promise<void> {
+    if (!(SETUP_HELP_TOOL_NAMES as readonly string[]).includes(name)) throw new HttpError(404, "Not found");
+    const tool = name as SetupHelpToolName;
+    const rawBody = await readBody(request, 8_000);
+    requireProviderAuth(request, rawBody);
+    let payload: Record<string, unknown> = {};
+    try {
+      const parsed = unwrapToolPayload(JSON.parse(rawBody));
+      payload = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+    } catch {
+      payload = {};
+    }
+    // The call id from the signed body (the preset {{call_control_id}}), else the provider header.
+    const fromBody = typeof payload.provider_call_id === "string" ? payload.provider_call_id : null;
+    const callId = fromBody ?? singleHeader(request.headers["x-telnyx-call-control-id"]) ?? null;
+    if (!callId || callId.length > MAX_PROVIDER_CALL_ID_LENGTH) return sendJson(response, 200, { status: "unavailable", say: "Sorry, I can't do that on this call." });
+    if (!limiter.allow(`setup-help:${callId}`, 60, 60_000)) return sendJson(response, 200, { status: "unavailable", say: "One moment, then try again." });
+    const tenantId = await dependencies.store.getIntegrationSecret(PLATFORM_TENANT_ID, SETUP_HELP_PROVIDER, callId);
+    const call = tenantId ? readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call")) : null;
+    if (!tenantId || !call || call.callControlId !== callId || call.endedAt || !call.answeredAt) {
+      log({ level: "warn", event: "setup_help_tool_refused", tool });
+      return sendJson(response, 200, { status: "unavailable", say: "Sorry, I can't do that on this call." });
+    }
+    const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
+    if (!account || account.status === "suspended") return sendJson(response, 200, { status: "unavailable", say: "Sorry, I can't do that on this call." });
+    const now = dependencies.clock.now();
+    const minutes = Math.max(0, Math.round((now.getTime() - Date.parse(call.answeredAt)) / 6_000) / 10);
+    // About two minutes in and not solved: the helper offers a time with our team.
+    const timing = { minutes_on_call: minutes, offer_team_time: minutes >= 2 };
+    const reply = (body: Record<string, unknown>) => {
+      log({ level: "info", event: "setup_help_tool", tenantId, tool, status: body.status });
+      return sendJson(response, 200, { ...body, ...timing });
+    };
+    const config = await dependencies.store.getConfig(tenantId);
+    if (tool === "start_forwarding_test") {
+      try {
+        await startForwardingCheck(tenantId);
+      } catch (error) {
+        if (error instanceof HttpError) return reply({ status: "not_started", say: error.message });
+        throw error;
+      }
+      return reply({ status: "calling", say: "The test is calling your business phone now. Don't answer it. I'll tell you in a few seconds." });
+    }
+    if (tool === "get_test_result") {
+      const state = await readForwarding(tenantId);
+      const status = forwardingCheckStatus(state.check, state.confirmedAt, now.toISOString());
+      const words = SETUP_TEST_WORDS[status];
+      return reply({ status, say: words?.say ?? "There's no test yet." });
+    }
+    if (tool === "email_steps") {
+      if (!dependencies.env.RESEND_API_KEY || !dependencies.env.RESEND_FROM_EMAIL) return reply({ status: "unavailable", say: "I can't email right now. The steps are on your Call Otto screen." });
+      if (!limiter.allow(`handoff-email:${tenantId}`, 5, 24 * 60 * 60_000)) return reply({ status: "already_sent", say: "We've emailed these a few times today. Check your inbox and spam folder." });
+      const queued = await emailForwardingSteps(tenantId, account.email);
+      return reply(queued ? { status: "sent", say: "Done. The steps are in your email." } : { status: "failed", say: "That didn't send. The steps are on your Call Otto screen." });
+    }
+    if (tool === "get_open_times") {
+      const existing = await founder.existingBooking(tenantId);
+      if (existing) return reply({ status: "already_booked", say: `You're already booked with our team for ${slotFullLabel(existing.start, config.timezone)}.` });
+      if (!await founderCalendars.connected().catch(() => false)) {
+        await founder.queueSafely(tenantId, "asked_for_team");
+        return reply({ status: "no_calendar", say: "I can't see our team's times right now. Our team will email you to set one up." });
+      }
+      const slots = await founder.openSlots().catch(() => null);
+      if (!slots || slots.length === 0) {
+        await founder.queueSafely(tenantId, "asked_for_team");
+        return reply({ status: "nothing_open", say: "Nothing's open in the next few days. Our team will email you to set a time." });
+      }
+      // Three choices, the soonest on different days where possible.
+      const picked: typeof slots = [];
+      for (const slot of slots) if (picked.length < 3 && !picked.some((item) => slotFullLabel(item.start, config.timezone).split(" at ")[0] === slotFullLabel(slot.start, config.timezone).split(" at ")[0])) picked.push(slot);
+      for (const slot of slots) if (picked.length < 3 && !picked.includes(slot)) picked.push(slot);
+      return reply({ status: "open", times: picked.map((slot) => ({ slot_start: slot.start, label: slotFullLabel(slot.start, config.timezone) })) });
+    }
+    // book_time
+    const start = typeof payload.slot_start === "string" ? payload.slot_start : "";
+    if (payload.explicit_confirmation !== true) return reply({ status: "needs_confirmation", say: "Ask them to say yes to that exact time first." });
+    const facts = await founderBookingFacts(account);
+    let result: Awaited<ReturnType<typeof founder.book>>;
+    try {
+      result = await founder.book(tenantId, start, facts);
+    } catch (error) {
+      log({ level: "error", event: "setup_help_booking_failed", tenantId, error: safeError(error) });
+      await founder.queueSafely(tenantId, "asked_for_team");
+      return reply({ status: "failed", say: "I couldn't book that just now. Our team will email you to set a time." });
+    }
+    if (result.status === "taken") return reply({ status: "taken", say: "That time just got taken. Let me get the open times again." });
+    if (result.status === "invalid") return reply({ status: "invalid", say: "That time isn't open. Let me get the open times again." });
+    if (result.status === "no_calendar") {
+      await founder.queueSafely(tenantId, "asked_for_team");
+      return reply({ status: "no_calendar", say: "I can't book right now. Our team will email you to set a time." });
+    }
+    const when = slotFullLabel(result.slot.start, config.timezone);
+    await dependencies.store.withLock(`setup-call:${tenantId}`, async () => {
+      const latest = readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"));
+      if (latest?.callControlId === callId && !latest.bookedAt) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...latest, bookedAt: now.toISOString() } satisfies SetupCallRecord));
+    });
+    await queueTeamBookingEmail(tenantId, result.slot, facts);
+    const last4 = facts.callNumber ? facts.callNumber.slice(-4) : null;
+    return reply({ status: "booked", when, say: `You're booked for ${when}. Our team will call you${last4 ? ` at the number ending in ${spokenDigits(last4)}` : ""}. A confirmation email is on its way.` });
+  }
+
+  /** The support inbox's copy of a booking, with a calendar invite so it lands on the team calendar. Never throws. */
+  async function queueTeamBookingEmail(tenantId: string, slot: { start: string; end: string }, facts: FounderBookingFacts): Promise<void> {
+    if (!dependencies.env.SUPPORT_EMAIL) return;
+    try {
+      const at = dependencies.clock.now().toISOString();
+      const details = [
+        `Business: ${facts.businessName}`,
+        `Call them at: ${prettyPhone(facts.callNumber) ?? "no number on file"}`,
+        `Business number: ${prettyPhone(facts.businessNumber) ?? "not entered"}`,
+        `Carrier: ${facts.carrier ?? "unknown"}`,
+        `Forwarding code: ${facts.forwardingCode ?? "none yet"}`,
+        `Call Otto number: ${prettyPhone(facts.ottoNumber) ?? "line not on yet"}`,
+        `Account email: ${facts.email}`,
+      ].join("\n");
+      const ics = founderCallIcs({
+        uid: `setup-help-${tenantId}-${slot.start}`.replace(/[^\w-]/g, "-"), start: slot.start, end: slot.end, now: dependencies.clock.now(),
+        summary: `Call Otto setup: ${facts.businessName} (10 min)`, description: details,
+      });
+      await dependencies.store.enqueueNotification({
+        id: randomUUID(), tenantId, callId: null, channel: "email", senderRef: "founder", destinationRef: `email:${dependencies.env.SUPPORT_EMAIL}`,
+        body: formatEmailBody(`Setup call booked: ${facts.businessName}, ${slotFullLabel(slot.start, dependencies.env.FOUNDER_TIMEZONE)}`, `Booked by Otto's setup helper on a support call.\n\n${details}`, [{ filename: "call-otto-setup.ics", content: ics }]),
+        priority: "high", state: "pending", attempts: 0, nextAttemptAt: at,
+        idempotencyKey: `setup-help-booking:${tenantId}:${slot.start}:team`, providerReceipt: null, lastError: null, createdAt: at, sentAt: null,
+      });
+    } catch (error) {
+      log({ level: "error", event: "setup_help_team_email_failed", tenantId, error: safeError(error) });
+    }
+  }
+
+  /** What the team's calendar event and confirmation need about the shop. */
   async function founderBookingFacts(account: OwnerAccount): Promise<FounderBookingFacts> {
     const [config, state, ownerPhone, lineNumber] = await Promise.all([
       dependencies.store.getConfig(account.tenantId),
@@ -3444,27 +3691,37 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
 
   /**
    * Our own call reached the shop's line while the setup helper was ringing the business number (placed in the last
-   * minute, still up): it's the helper's leg, forwarded back. Mark it ended under the setup-call lock (so its answer
-   * never starts the helper), hang it up, and let Brock email like any missed helper call. How fast it came back
+   * minute, still up): it's the helper's leg, forwarded back. Mark it ended as looped under the setup-call lock (so its
+   * answer never starts the helper) and hang it up; the screen says their phone already sends every call to Otto. How fast it came back
    * never decides what's on: a Decline, a busy phone or no signal forward as fast as forward-all does.
    * A test that started after the helper call is open: this call is that test (say the owner, on the phone with the
    * helper, tapped Call me now and the busy phone forwarded it), so the helper is left alone.
    */
   async function endLoopedSetupCall(tenantId: string, businessNumber: string | null, now: Date, openTestStartedAt: string | null): Promise<void> {
     if (!businessNumber) return;
+    // Every call is on (picked, or what the last test found): their phone sends every call to Otto. Otherwise it was
+    // missed or declined and forwarded like any missed call.
+    const [config, testedFor] = await Promise.all([
+      dependencies.store.getConfig(tenantId),
+      dependencies.store.getIntegrationSecret(tenantId, "forwarding", "tested_for"),
+    ]);
+    const outcome: SetupCallOutcome = config.operationMode === "always" || parseTestedFor(testedFor)?.mode === "every-call" ? "looped" : "missed";
     const ended = await dependencies.store.withLock(`setup-call:${tenantId}`, async () => {
       const call = readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"));
-      if (!call?.callControlId || call.to !== businessNumber || call.endedAt || !call.startedAt) return null;
+      // Any phone we rang for the helper (the owner's mobile, often the business number itself) that forwards here.
+      if (!call?.callControlId || call.endedAt || !call.startedAt) return null;
       if (openTestStartedAt && Date.parse(openTestStartedAt) >= Date.parse(call.startedAt)) return null;
       const afterMs = now.getTime() - Date.parse(call.startedAt);
       if (!(afterMs < 60_000)) return null;
-      await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...call, endedAt: now.toISOString(), hangupCause: "no_answer" }));
+      await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...call, endedAt: now.toISOString(), hangupCause: "no_answer", outcome } satisfies SetupCallRecord));
       return { callControlId: call.callControlId, afterMs };
     });
     if (!ended) return;
     log({ level: "info", event: "setup_call_forwarded_back", tenantId, afterMs: ended.afterMs });
+    log({ level: "info", event: "setup_call_ended", tenantId, outcome, cause: "forwarded_back", talkedSec: 0, booked: false });
     await setupCaller()?.hangUp(ended.callControlId).catch((error: unknown) => log({ level: "warn", event: "setup_call_hangup_failed", tenantId, error: safeError(error) }));
-    await founder.queueSafely(tenantId, "no_answer");
+    // Looped: the screen says their phone already sends every call to Otto, with a time to book. Missed: our team emails.
+    if (outcome === "missed") await founder.queueSafely(tenantId, "no_answer");
   }
 
   /**
@@ -4428,6 +4685,11 @@ function inputRepairs(schema: z.ZodObject, sent: unknown, parsed: Record<string,
 /** Which fields failed and how (names and types only, never what the caller said), so a rejected tool call can be fixed from the log. */
 function invalidFields(error: z.ZodError): string {
   return error.issues.slice(0, 8).map((issue) => `${issue.path.join(".") || "(body)"}:${issue.code}`).join(",");
+}
+
+/** "0 1 9 9": digits read one at a time. */
+function spokenDigits(digits: string): string {
+  return digits.split("").join(" ");
 }
 
 function unwrapToolPayload(value: unknown): unknown {
