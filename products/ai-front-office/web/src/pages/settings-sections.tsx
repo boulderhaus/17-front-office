@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Link, useLocation, useSearchParams } from "react-router-dom"
-import { Check, CheckCircle2, ChevronDown, ChevronRight, Download, Loader2, LogOut, Plus, X } from "lucide-react"
+import { Check, CheckCircle2, ChevronDown, ChevronRight, CreditCard, Download, ExternalLink, Loader2, LogOut, Plus, X } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -15,7 +15,8 @@ import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescript
 import { api, ApiError } from "@/lib/api"
 import { money, perCall } from "@/lib/format"
 import { useMode } from "@/lib/mode"
-import type { ApiPlan, BillingQuote, BillingSummary, PlanId } from "@/lib/types"
+import type { ApiPlan, BillingDetails, BillingQuote, BillingSummary, CardChangeStart, PlanId } from "@/lib/types"
+import { mountEmbeddedCheckout } from "@/lib/stripe-embed"
 import { ringChoicesWith, VERIZON_RING_LINE } from "@/lib/dial"
 import { pauseHint } from "@/lib/pause-hint"
 import { recordingHint } from "@/lib/recording-hint"
@@ -721,6 +722,172 @@ function confirmWords(input: { quote: BillingQuote; from: { label: string; unlim
   return { title: `Switch to ${to.label}?`, body: `${to.label}${quote.unlimited ? " with Unlimited calls" : ""} is ${cents(quote.monthlyCents)} a month. ${today}`, action: quote.todayCents > 0 ? `Switch for ${about}${cents(quote.todayCents)}` : `Switch to ${to.label}` }
 }
 
+const BRANDS: Record<string, string> = { visa: "Visa", mastercard: "Mastercard", amex: "Amex", discover: "Discover", diners: "Diners", jcb: "JCB", unionpay: "UnionPay" }
+
+/** "Visa ending 4242", "Expires 08/28". */
+function cardWords(card: NonNullable<BillingDetails["card"]>): { name: string; expires: string } {
+  return { name: `${BRANDS[card.brand] ?? "Card"} ending ${card.last4}`, expires: `Expires ${String(card.expMonth).padStart(2, "0")}/${String(card.expYear).slice(-2)}` }
+}
+
+/** The card on file, and changing it right here: Stripe's form opens inside this card, never on another site unless it can't. */
+function CardOnFileCard({ details, onChanged }: { details: BillingDetails | null; onChanged: (next: BillingDetails) => void }) {
+  const [open, setOpen] = useState(false)
+  const [starting, setStarting] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [problem, setProblem] = useState<string | null>(null)
+  const target = useRef<HTMLDivElement>(null)
+  const mounted = useRef<{ destroy: () => void } | null>(null)
+  const close = () => { mounted.current?.destroy(); mounted.current = null; setOpen(false) }
+  useEffect(() => () => { mounted.current?.destroy() }, [])
+
+  const finish = async (sessionId: string) => {
+    setSaving(true)
+    try {
+      onChanged(await api<BillingDetails>("/api/app/billing/card/complete", { method: "POST", body: { sessionId } }))
+      close()
+      toast.success("Card updated")
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : "We couldn’t switch to the new card. Try again.")
+    } finally {
+      setSaving(false)
+    }
+  }
+  // Stripe's own card page: it sends the owner back here by itself when the card is saved.
+  const hosted = async () => {
+    const start = await api<CardChangeStart>("/api/app/billing/card", { method: "POST", body: { hosted: true } })
+    if (start.mode === "hosted") window.location.assign(start.url)
+  }
+  const change = async () => {
+    setProblem(null)
+    setStarting(true)
+    try {
+      const start = await api<CardChangeStart>("/api/app/billing/card", { method: "POST", body: {} })
+      if (start.mode === "hosted") { window.location.assign(start.url); return }
+      setOpen(true)
+      // The form box is on screen after this render.
+      await new Promise((resolve) => window.requestAnimationFrame(resolve))
+      if (!target.current) throw new Error("no form box")
+      const sessionId = start.clientSecret.split("_secret_")[0]!
+      try {
+        mounted.current = await mountEmbeddedCheckout({ publishableKey: start.publishableKey, clientSecret: start.clientSecret, uiMode: start.uiMode, target: target.current, onComplete: () => void finish(sessionId) })
+      } catch {
+        // Stripe's script was blocked or refused: its own card page instead.
+        setOpen(false)
+        await hosted()
+      }
+    } catch (error) {
+      setOpen(false)
+      setProblem(error instanceof Error ? error.message : "We couldn’t open the card form. Nothing changed. Try again.")
+    } finally {
+      setStarting(false)
+    }
+  }
+  const words = details?.card ? cardWords(details.card) : null
+  return (
+    <SettingsCard title="Card">
+      {details === null
+        ? <span aria-hidden className="h-12 w-3/5 animate-pulse rounded bg-muted motion-reduce:animate-none" />
+        : (
+          <div className="flex items-center gap-3">
+            <CreditCard className="size-6 shrink-0 text-muted-foreground" aria-hidden />
+            <span className="grid min-w-0">
+              <span className="text-[16px] font-semibold">{words ? words.name : "No card on file"}</span>
+              {words && <span className="tabular text-[15px] text-muted-foreground">{words.expires}</span>}
+            </span>
+          </div>
+        )}
+      {problem && <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">{problem}</p>}
+      {open && (
+        <div className="grid gap-3">
+          {/* Stripe's own form, inside our page. It saves the card; nothing is charged. */}
+          <div ref={target} className="min-h-80 overflow-hidden rounded-lg border bg-white" aria-busy={saving} />
+          <Button size="tap" variant="ghost" className={actionClass} disabled={saving} onClick={close}>{saving ? <Loader2 className="animate-spin" /> : null}{saving ? "Saving your card…" : "Not now"}</Button>
+        </div>
+      )}
+      {!open && details !== null && (
+        <Button size="tap" variant="outline" className={actionClass} disabled={starting} onClick={() => void change()}>{starting ? <Loader2 className="animate-spin" /> : null}Change card</Button>
+      )}
+    </SettingsCard>
+  )
+}
+
+const BILL_STATUS: Record<BillingDetails["invoices"][number]["status"], { label: string; className: string }> = {
+  paid: { label: "Paid", className: "border-emerald-200 bg-emerald-50 text-emerald-900" },
+  failed: { label: "Failed", className: "border-red-200 bg-red-50 text-red-800" },
+  due: { label: "Due", className: "border-amber-200 bg-amber-50 text-amber-950" },
+}
+
+/** Past bills: date, amount, paid or failed, and Stripe's own PDF in a new tab. */
+function BillsCard({ details, tz }: { details: BillingDetails | null; tz: string }) {
+  const bills = details?.invoices ?? []
+  return (
+    <SettingsCard title="Bills">
+      {details === null
+        ? <span aria-hidden className="h-14 w-full animate-pulse rounded bg-muted motion-reduce:animate-none" />
+        : bills.length === 0
+          ? <p className="text-[15px] text-muted-foreground">No bills yet.</p>
+          : (
+            <ul className="divide-y rounded-lg border">
+              {bills.map((bill) => (
+                <li key={bill.id} className="flex min-h-14 items-center gap-3 py-1 pr-1 pl-4">
+                  <span className="tabular w-16 shrink-0 text-[15px]">{new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "short", day: "numeric" }).format(new Date(bill.at))}</span>
+                  <span className="tabular min-w-0 flex-1 text-[15px] font-semibold">{cents(bill.amountCents)}</span>
+                  <span className={cn("shrink-0 rounded-md border px-2 py-0.5 text-sm font-medium", BILL_STATUS[bill.status].className)}>{BILL_STATUS[bill.status].label}</span>
+                  {bill.pdfUrl
+                    ? <Button variant="ghost" size="tap" className="shrink-0 px-3" asChild><a href={bill.pdfUrl} target="_blank" rel="noopener noreferrer" aria-label={`PDF of the ${cents(bill.amountCents)} bill`}>PDF<ExternalLink /></a></Button>
+                    : <span className="w-[4.5rem] shrink-0" aria-hidden />}
+                </li>
+              ))}
+            </ul>
+          )}
+    </SettingsCard>
+  )
+}
+
+/** Cancel right here: it stops at the end of the paid month, and "Keep my plan" undoes it until then. */
+function CancelCard({ summary, tz, onSummary }: { summary: BillingSummary | null; tz: string; onSummary: (next: BillingSummary) => void }) {
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const endsAt = summary?.endsAt ?? null
+  // The date the line stops: the end of what's paid for (the next bill date).
+  const stopDay = summary?.next?.at ? shortDay(summary.next.at, tz) : null
+  const send = async (path: "/api/app/billing/cancel" | "/api/app/billing/keep") => {
+    setBusy(true)
+    try {
+      const next = await api<BillingSummary>(path, { method: "POST", body: {} })
+      onSummary(next)
+      setConfirmOpen(false)
+      toast.success(path.endsWith("/cancel") ? (next.endsAt ? `Your plan ends ${shortDay(next.endsAt, tz)}.` : "Your plan is cancelled.") : "You’re keeping your plan.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Nothing changed. Please try again.")
+    } finally {
+      setBusy(false)
+    }
+  }
+  if (!summary) return null
+  return (
+    <SettingsCard title={endsAt ? `Ends ${shortDay(endsAt, tz)}` : "Cancel plan"} description={endsAt ? "Otto answers until then. You won’t be charged again." : undefined}>
+      {endsAt
+        ? <Button size="tap" variant="brand" className={actionClass} disabled={busy} onClick={() => void send("/api/app/billing/keep")}>{busy ? <Loader2 className="animate-spin" /> : null}Keep my plan</Button>
+        : <Button size="tap" variant="outline" className={cn(actionClass, "text-red-700")} disabled={busy} onClick={() => setConfirmOpen(true)}>Cancel plan</Button>}
+      <AlertDialog open={confirmOpen} onOpenChange={(value) => { if (!busy) setConfirmOpen(value) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancel your plan?</AlertDialogTitle>
+            <AlertDialogDescription className="text-[16px] text-pretty text-brand-ink">
+              {stopDay ? `Otto answers until ${stopDay}, then your line stops. No more charges.` : "Otto answers until your paid month ends, then your line stops. No more charges."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>Keep my plan</AlertDialogCancel>
+            <Button size="tap" variant="destructive" disabled={busy} onClick={() => void send("/api/app/billing/cancel")}>{busy ? <Loader2 className="animate-spin" /> : null}Cancel plan</Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </SettingsCard>
+  )
+}
+
 export function PlanSection() {
   const { settings, reload } = useSettings()
   const { dashboard } = useMode()
@@ -733,10 +900,11 @@ export function PlanSection() {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [summary, setSummary] = useState<BillingSummary | null>(null)
+  const [details, setDetails] = useState<BillingDetails | null>(null)
   // Bumped on every new pick or cancel, so a slow price reply for an old pick never overwrites the new one.
   const quoteGeneration = useRef(0)
   // Back from Stripe's billing page, or it couldn't open: say so here, in one line.
-  const [params] = useSearchParams()
+  const [params, setParams] = useSearchParams()
   const billing = params.get("billing")
   const usage = dashboard?.usage
   const comp = dashboard?.billing.status === "comp"
@@ -759,6 +927,28 @@ export function PlanSection() {
       .catch(() => { if (alive) setSummary({ lastPaid: null, next: null, endsAt: null, monthlyCents: 0 }) })
     return () => { alive = false }
   }, [plan.paid, comp, plan.id, plan.unlimited])
+  useEffect(() => {
+    if (!plan.paid || comp) return
+    let alive = true
+    api<BillingDetails>("/api/app/billing/details")
+      .then((value) => { if (alive) setDetails(value) })
+      .catch(() => { if (alive) setDetails({ card: null, invoices: [], cardChange: null }) })
+    return () => { alive = false }
+  }, [plan.paid, comp])
+  // Back from Stripe's form after a bank check (card=done), or from Stripe's own card page (card=back):
+  // say "Card updated" by itself and tidy the address.
+  const cardReturn = params.get("card")
+  const cardSession = params.get("session_id")
+  useEffect(() => {
+    if (cardReturn !== "done" && cardReturn !== "back") return
+    const tidy = () => setParams((current) => { const next = new URLSearchParams(current); next.delete("card"); next.delete("session_id"); return next }, { replace: true })
+    if (cardReturn === "back") { toast.success("Card updated"); tidy(); return }
+    if (!cardSession) { tidy(); return }
+    api<BillingDetails>("/api/app/billing/card/complete", { method: "POST", body: { sessionId: cardSession } })
+      .then((value) => { setDetails(value); toast.success("Card updated") })
+      .catch((error) => toast.error(error instanceof Error ? error.message : "We couldn’t switch to the new card. Try again."))
+      .finally(tidy)
+  }, [cardReturn, cardSession, setParams])
   // The live total: Stripe's own price for the change on screen, refreshed on every pick.
   useEffect(() => {
     const generation = ++quoteGeneration.current
@@ -872,17 +1062,26 @@ export function PlanSection() {
 
       {/* A complimentary shop (the Google review account) has no card or Stripe billing to open. */}
       {comp && billingNote && <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">{billingNote}</p>}
-      {!comp && (
-        <SettingsCard title={plan.paid ? "Card, invoices, cancel" : "Start your plan"} description={plan.paid ? "Opens our billing page (Stripe) to change your card, see invoices or cancel." : "Add a card to start answering calls."}>
+      {/* Paying: card, bills and cancel, all on this page. */}
+      {!comp && plan.paid && (
+        <>
           {billingNote && <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">{billingNote}</p>}
-          <form method="post" action={plan.paid ? "/app/billing/portal" : "/app/billing/checkout"}>
+          <CardOnFileCard details={details} onChanged={setDetails} />
+          <BillsCard details={details} tz={tz} />
+          <CancelCard summary={summary} tz={tz} onSummary={setSummary} />
+        </>
+      )}
+      {!comp && !plan.paid && (
+        <SettingsCard title="Start your plan" description="Add a card to start answering calls.">
+          {billingNote && <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">{billingNote}</p>}
+          <form method="post" action="/app/billing/checkout">
             <input type="hidden" name="csrf" value={csrf} />
             {/* Paying from here continues setup, where the line turns on the moment the owner is back. */}
-            {!plan.paid && <input type="hidden" name="from" value="start" />}
+            <input type="hidden" name="from" value="start" />
             {/* The plan and add-on picked above, so Stripe opens on exactly that price. */}
-            {!plan.paid && <input type="hidden" name="plan" value={proposal.plan} />}
-            {!plan.paid && <input type="hidden" name="unlimited" value={proposalUnlimited ? "yes" : "no"} />}
-            <Button size="tap" variant={plan.paid ? "outline" : "brand"} className={actionClass}>{plan.paid ? "Manage billing or cancel" : "Start your plan"}</Button>
+            <input type="hidden" name="plan" value={proposal.plan} />
+            <input type="hidden" name="unlimited" value={proposalUnlimited ? "yes" : "no"} />
+            <Button size="tap" variant="brand" className={actionClass}>Start your plan</Button>
           </form>
         </SettingsCard>
       )}

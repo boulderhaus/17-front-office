@@ -37,6 +37,20 @@ export interface StripeSubscriptionSnapshot {
 }
 
 const PORTAL_CONFIGURATION_TAG = "v1";
+/** Marks our card-change Checkout Sessions, so the webhook can tell them from a plan purchase. */
+export const CARD_UPDATE_TAG = "card_update";
+
+/** The card on file, as Plan and billing shows it. */
+export interface CardOnFile { brand: string; last4: string; expMonth: number; expYear: number }
+/** One past bill. pdfUrl is Stripe's own invoice PDF. */
+export interface BillLine { id: string; at: string; amountCents: number; status: "paid" | "failed" | "due"; pdfUrl: string | null }
+
+function cardFrom(value: unknown): CardOnFile | null {
+  if (!value || typeof value !== "object") return null;
+  const card = (value as { card?: { brand?: unknown; last4?: unknown; exp_month?: unknown; exp_year?: unknown } }).card;
+  if (!card || typeof card.last4 !== "string" || typeof card.exp_month !== "number" || typeof card.exp_year !== "number") return null;
+  return { brand: typeof card.brand === "string" ? card.brand : "card", last4: card.last4, expMonth: card.exp_month, expYear: card.exp_year };
+}
 
 export class StripeBillingClient {
   private portalConfiguration: string | null = null;
@@ -288,6 +302,120 @@ export class StripeBillingClient {
     }), `lead-refund:${input.tenantId}`);
     if (!refund.ok || typeof refund.payload.id !== "string") throw new Error(`Stripe refund failed with HTTP ${refund.status}${refund.payload.error?.message ? `: ${refund.payload.error.message}` : ""}`);
     return { refundId: refund.payload.id, amountCents: typeof refund.payload.amount === "number" ? refund.payload.amount : first.amount_paid ?? 0, invoiceId: first.id };
+  }
+
+  /**
+   * The card the subscription pays with (the subscription's own default, else the customer's) and the last bills,
+   * for Plan and billing. Read only. Each half fails on its own: a refused read shows nothing, never a guess.
+   */
+  async paymentDetails(customerId: string, subscriptionId: string): Promise<{ card: CardOnFile | null; invoices: BillLine[] }> {
+    const [subscription, invoices] = await Promise.all([
+      this.get(`subscriptions/${encodeURIComponent(subscriptionId)}?expand[]=default_payment_method`).catch(() => null) as Promise<{ default_payment_method?: unknown } | null>,
+      this.get(`invoices?customer=${encodeURIComponent(customerId)}&limit=12`).catch(() => null) as Promise<{ data?: Array<Record<string, unknown>> } | null>,
+    ]);
+    let card = cardFrom(subscription?.default_payment_method);
+    if (!card) {
+      const customer = await this.get(`customers/${encodeURIComponent(customerId)}?expand[]=invoice_settings.default_payment_method`).catch(() => null) as { invoice_settings?: { default_payment_method?: unknown } } | null;
+      card = cardFrom(customer?.invoice_settings?.default_payment_method);
+    }
+    const bills = (invoices?.data ?? []).flatMap((invoice): BillLine[] => {
+      const status = invoice.status;
+      const due = typeof invoice.amount_due === "number" ? invoice.amount_due : 0;
+      const paid = typeof invoice.amount_paid === "number" ? invoice.amount_paid : 0;
+      const created = typeof invoice.created === "number" ? invoice.created : null;
+      if (typeof invoice.id !== "string" || created === null) return [];
+      // Drafts and voided bills were never charged; a $0 bill (a trial) is noise.
+      if (status !== "paid" && status !== "open" && status !== "uncollectible") return [];
+      if (Math.max(due, paid) <= 0) return [];
+      const attempts = typeof invoice.attempt_count === "number" ? invoice.attempt_count : 0;
+      const state: BillLine["status"] = status === "paid" ? "paid" : status === "uncollectible" || attempts > 0 ? "failed" : "due";
+      const pdf = typeof invoice.invoice_pdf === "string" && invoice.invoice_pdf.startsWith("https://") ? invoice.invoice_pdf : null;
+      return [{ id: invoice.id, at: new Date(created * 1_000).toISOString(), amountCents: status === "paid" ? paid : due, status: state, pdfUrl: pdf }];
+    }).sort((left, right) => right.at.localeCompare(left.at));
+    return { card, invoices: bills };
+  }
+
+  /**
+   * A setup-mode Checkout Session shown inside our own page (embedded Checkout): it saves a new card and charges
+   * nothing. Accounts on Stripe's newest API name the embedded form "embedded_page"; that name is tried when the
+   * older one is refused. Returns the client secret Stripe.js mounts and which name worked.
+   */
+  async createCardSetup(input: { customerId: string; tenantId: string; returnUrl: string }): Promise<{ clientSecret: string; uiMode: "embedded" | "embedded_page" }> {
+    const attempt = async (uiMode: "embedded" | "embedded_page") => this.post("checkout/sessions", new URLSearchParams({
+      mode: "setup",
+      ui_mode: uiMode,
+      customer: input.customerId,
+      currency: "usd",
+      "payment_method_types[0]": "card",
+      return_url: input.returnUrl,
+      redirect_on_completion: "if_required",
+      "metadata[tenant_id]": input.tenantId,
+      "metadata[front_office]": CARD_UPDATE_TAG,
+      "setup_intent_data[metadata][tenant_id]": input.tenantId,
+    }));
+    let created = await attempt("embedded");
+    let uiMode: "embedded" | "embedded_page" = "embedded";
+    if (!created.ok && created.status === 400 && /ui_mode/i.test(`${created.payload.error?.message ?? ""} ${(created.payload.error as { param?: string } | undefined)?.param ?? ""}`)) {
+      created = await attempt("embedded_page");
+      uiMode = "embedded_page";
+    }
+    const secret = created.payload.client_secret;
+    if (!created.ok || typeof secret !== "string" || !secret) throw new Error(`Stripe card setup failed with HTTP ${created.status}${created.payload.error?.message ? `: ${created.payload.error.message}` : ""}`);
+    return { clientSecret: secret, uiMode };
+  }
+
+  /** A finished card-setup session: whose it is and the card it saved (null until the owner finished). */
+  async retrieveCardSetup(sessionId: string): Promise<{ tenantId: string | null; customerId: string | null; paymentMethodId: string | null; isCardUpdate: boolean }> {
+    const session = await this.get(`checkout/sessions/${encodeURIComponent(sessionId)}?expand[]=setup_intent`) as {
+      id?: string; mode?: string; status?: string; customer?: string | { id?: string } | null; metadata?: Record<string, string>;
+      setup_intent?: string | { status?: string; payment_method?: string | { id?: string } | null; metadata?: Record<string, string> } | null;
+    };
+    if (session.id !== sessionId) throw new Error("Stripe card setup lookup returned another session");
+    const intent = typeof session.setup_intent === "object" && session.setup_intent ? session.setup_intent : null;
+    const method = intent?.status === "succeeded" ? (typeof intent.payment_method === "string" ? intent.payment_method : intent.payment_method?.id ?? null) : null;
+    return {
+      tenantId: session.metadata?.tenant_id ?? intent?.metadata?.tenant_id ?? null,
+      customerId: typeof session.customer === "string" ? session.customer : session.customer?.id ?? null,
+      paymentMethodId: session.status === "complete" ? method : null,
+      isCardUpdate: session.mode === "setup" && session.metadata?.front_office === CARD_UPDATE_TAG,
+    };
+  }
+
+  /**
+   * Make a saved card the one the subscription and the customer pay with. The subscription is the one that bills,
+   * so it must succeed; the customer's default (used by one-off invoices such as extra calls) is set too.
+   */
+  async setDefaultCard(input: { customerId: string; subscriptionId: string; paymentMethodId: string }): Promise<{ customerUpdated: boolean }> {
+    const subscription = await this.post(`subscriptions/${encodeURIComponent(input.subscriptionId)}`, new URLSearchParams({ default_payment_method: input.paymentMethodId }));
+    if (!subscription.ok) throw new Error(`Stripe default card update failed with HTTP ${subscription.status}${subscription.payload.error?.message ? `: ${subscription.payload.error.message}` : ""}`);
+    const customer = await this.post(`customers/${encodeURIComponent(input.customerId)}`, new URLSearchParams({ "invoice_settings[default_payment_method]": input.paymentMethodId })).catch(() => null);
+    return { customerUpdated: customer?.ok === true };
+  }
+
+  /** Cancel at the end of the paid period (true), or undo that (false). Nothing is charged or refunded. */
+  async setCancelAtPeriodEnd(subscriptionId: string, cancel: boolean): Promise<void> {
+    const update = await this.post(`subscriptions/${encodeURIComponent(subscriptionId)}`, new URLSearchParams({ cancel_at_period_end: cancel ? "true" : "false" }));
+    if (!update.ok) throw new Error(`Stripe cancel change failed with HTTP ${update.status}${update.payload.error?.message ? `: ${update.payload.error.message}` : ""}`);
+  }
+
+  /**
+   * Stripe's own card-update page, used when the embedded form can't be: it opens straight on "update card" and
+   * sends the owner back to Plan and billing by itself once the card is saved.
+   */
+  async createCardUpdatePortal(customerId: string, returnUrl: string, doneUrl: string): Promise<string> {
+    if (!this.portalConfiguration) this.portalConfiguration = await this.findPortalConfiguration();
+    const body = new URLSearchParams({
+      customer: customerId,
+      return_url: returnUrl,
+      "flow_data[type]": "payment_method_update",
+      "flow_data[after_completion][type]": "redirect",
+      "flow_data[after_completion][redirect][return_url]": doneUrl,
+    });
+    if (this.portalConfiguration) body.set("configuration", this.portalConfiguration);
+    const session = await this.post("billing_portal/sessions", body);
+    const url = session.payload.url;
+    if (!session.ok || typeof url !== "string" || !url.startsWith("https://billing.stripe.com/")) throw new Error(`Stripe card update page failed with HTTP ${session.status}`);
+    return url;
   }
 
   private async findPortalConfiguration(): Promise<string | null> {

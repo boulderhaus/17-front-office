@@ -27,14 +27,26 @@ export function parseForm(raw: string): URLSearchParams {
   return new URLSearchParams(raw);
 }
 
-export function setSecurityHeaders(response: ServerResponse): void {
+/**
+ * Stripe's embedded card form, allowed only on owner-app pages (where Plan and billing lives): its script from
+ * js.stripe.com, its frames and the calls they make, and its card-brand images. Nothing else gains anything.
+ */
+const STRIPE_EMBED = {
+  script: " https://js.stripe.com",
+  frame: "; frame-src https://js.stripe.com https://checkout.stripe.com https://hooks.stripe.com",
+  connect: " https://api.stripe.com https://checkout.stripe.com",
+  img: " https://*.stripe.com",
+};
+
+export function setSecurityHeaders(response: ServerResponse, options: { stripeEmbed?: boolean } = {}): void {
   response.setHeader("cache-control", "no-store");
   response.setHeader("x-content-type-options", "nosniff");
   response.setHeader("x-frame-options", "DENY");
   response.setHeader("referrer-policy", "no-referrer");
   response.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=()");
   response.setHeader("strict-transport-security", "max-age=31536000; includeSubDomains");
-  response.setHeader("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; media-src 'self'; manifest-src 'self'; form-action 'self' https://checkout.stripe.com https://billing.stripe.com; base-uri 'none'; frame-ancestors 'none'");
+  const stripe = options.stripeEmbed ? STRIPE_EMBED : { script: "", frame: "", connect: "", img: "" };
+  response.setHeader("content-security-policy", `default-src 'none'; script-src 'self'${stripe.script}; style-src 'self' 'unsafe-inline'; img-src 'self'${stripe.img}; font-src 'self'; connect-src 'self'${stripe.connect}${stripe.frame}; media-src 'self'; manifest-src 'self'; form-action 'self' https://checkout.stripe.com https://billing.stripe.com; base-uri 'none'; frame-ancestors 'none'`);
 }
 
 export function sendJson(response: ServerResponse, status: number, value: unknown): void {
