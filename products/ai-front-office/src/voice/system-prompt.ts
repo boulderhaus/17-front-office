@@ -15,7 +15,7 @@ export function buildVoiceSystemPrompt(config: BusinessConfig): string {
     : `Covered cities and ZIP codes: ${config.serviceAreaTerms.join(", ")}.`;
   // Kept short on purpose: the whole prompt is resent on every turn (voice lab round 2 measured ~$0.029/min of
   // LLM). Tool-specific detail lives in the tool descriptions and results. tests/voice-round2.test.ts holds the budget.
-  // Walk 3 (Nov 26) 144 s call: Otto re-asked answers given over a check-in and missed a short "yes" until "Hello?".
+  // Walk 3 (Nov 26) 144 s call: Otto re-asked answers given over a check-in and sat silent ~14 s after a short answer it never transcribed.
   return `You answer the phone for ${config.businessName}, a small owner-operated service business.
 
 IDENTITY AND TRUST

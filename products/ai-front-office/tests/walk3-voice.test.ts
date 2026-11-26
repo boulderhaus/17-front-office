@@ -46,7 +46,7 @@ describe("Otto never leaves dead air and re-asks what it missed", () => {
   });
 
   // Measured on the 144 s walk call: Otto twice re-asked what the caller had just said over a check-in,
-  // and sat silent ~14 s after a short answer it never heard, until the caller said "Hello?".
+  // and sat silent ~14 s after a short answer it never transcribed, until the caller spoke again.
   it("uses an answer given over a check-in and treats a caller's 'Hello?' as a missed answer", () => {
     expect(prompt).toContain("If the caller cuts you off, drop what you were saying. Use their answer; never re-ask it.");
     expect(prompt).toContain('Missed an answer? Say so and re-ask it once. Never guess. "Hello?" means you missed one.');
