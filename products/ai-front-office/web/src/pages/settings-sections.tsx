@@ -324,7 +324,7 @@ function EmergenciesSection() {
         </RadioGroup>
       </fieldset></div>
       <Link className="group flex min-h-12 items-center justify-between gap-3 border-t pt-3 text-[15px]" to="/app/settings/alerts">
-        <span className="grid"><strong className="font-semibold group-hover:underline">Want a phone call too?</strong><span className="text-sm text-muted-foreground">{settings.integrations.ownerPhoneConfigured ? "Turn on emergency calls in Alerts." : "Add your mobile in Alerts, then turn on emergency calls."}</span></span>
+        <span className="grid"><strong className="font-semibold group-hover:underline">Want a phone call too?</strong><span className="text-sm text-muted-foreground">{settings.integrations.ownerPhoneConfigured ? "Turn on emergency calls in Alerts." : "Add your mobile in Alerts first."}</span></span>
         <ChevronRight className="size-5 shrink-0 text-muted-foreground" />
       </Link>
     </SettingsCard>

@@ -13,7 +13,7 @@ describe("owner app words that must match what the screen shows (walk 11-26 re-w
 
   it("points to Alerts for emergency calls only in words that work without a saved mobile (SET-01)", () => {
     const sections = source("pages/settings-sections.tsx");
-    expect(sections).toContain('settings.integrations.ownerPhoneConfigured ? "Turn on emergency calls in Alerts." : "Add your mobile in Alerts, then turn on emergency calls."');
+    expect(sections).toContain('settings.integrations.ownerPhoneConfigured ? "Turn on emergency calls in Alerts." : "Add your mobile in Alerts first."');
   });
 
   it("never claims unticked emergencies are always flagged (SET-07)", () => {
@@ -34,8 +34,10 @@ describe("owner app controls (walk 11-26 re-walk)", () => {
     expect(jobs).not.toContain("overflow-x-auto");
   });
 
-  it("gives Call, Text and Map equal widths in one row", () => {
-    expect(source("components/app/call-parts.tsx")).toContain('<div className="grid auto-cols-fr grid-flow-col gap-2">{top.map(render)}</div>');
+  it("gives Call, Text and Map equal widths in one row, with a plain Call when all three share it", () => {
+    const parts = source("components/app/call-parts.tsx");
+    expect(parts).toContain('<div className="grid auto-cols-fr grid-flow-col gap-2">{top.map(render)}</div>');
+    expect(parts).toContain('label: address ? "Call" : callLabel(call)');
   });
 
   it("keeps a two-up row of fields level when only one has a hint", () => {

@@ -234,7 +234,7 @@ const SIGN_IN_STYLE = `<style>
 </style>`;
 
 function authHeader(link: "signup" | "login"): string {
-  return `${AUTH_APP_STYLE}<header class="publicnav"><a class="brand smallbrand" href="/"><b class="mark" aria-hidden="true">CO</b>Call <em>Otto</em></a><nav>${link === "signup" ? `<a href="/signup">Get started</a>` : `<a href="/login">Sign in</a>`}</nav></header>`;
+  return `${AUTH_APP_STYLE}<header class="publicnav"><a class="brand smallbrand" href="/"><b class="mark" aria-hidden="true">CO</b><span>Call <em>Otto</em></span></a><nav>${link === "signup" ? `<a href="/signup">Get started</a>` : `<a href="/login">Sign in</a>`}</nav></header>`;
 }
 
 /**

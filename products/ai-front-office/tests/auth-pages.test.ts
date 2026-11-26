@@ -91,7 +91,7 @@ describe("public page system", () => {
   });
 
   it("signup and sign-in carry the Call Otto wordmark, not plain text", () => {
-    for (const page of [renderOwnerSignup(), renderOwnerLogin()]) expect(page).toContain('<a class="brand smallbrand" href="/"><b class="mark" aria-hidden="true">CO</b>Call <em>Otto</em></a>');
+    for (const page of [renderOwnerSignup(), renderOwnerLogin()]) expect(page).toContain('<a class="brand smallbrand" href="/"><b class="mark" aria-hidden="true">CO</b><span>Call <em>Otto</em></span></a>');
   });
 
   it("sign-in, check-email, link, forgot and reset pages share one eyebrow", async () => {

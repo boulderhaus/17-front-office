@@ -50,8 +50,7 @@ export function SpamNote() {
 /** "Call Linda": who you're about to call, not a generic "Call back". */
 export function callLabel(call: ApiCall): string {
   const first = call.fields.callerName?.trim().split(/\s+/)[0]
-  // Short enough to fit a third of a phone row; a longer name says "Call back".
-  return first && first.length <= 8 ? `Call ${first}` : "Call back"
+  return first && first.length <= 10 ? `Call ${first}` : "Call back"
 }
 
 /**
@@ -63,7 +62,7 @@ export function CallBackNote({ call }: { call: ApiCall }) {
   if (!call.phone || call.outcome === "ignored_spam") return null
   const name = call.fields.callerName?.trim().split(/\s+/)[0] ?? "The caller"
   return (
-    <p className="ph-no-capture -mt-1 text-sm text-muted-foreground">
+    <p className="ph-no-capture -mt-1 text-sm text-muted-foreground text-pretty">
       <span className="lg:hidden">Calls {formatPhone(call.phone)} from your phone. {name} sees your number.</span>
       <span className="max-lg:hidden">Dials {formatPhone(call.phone)} with your computer’s calling app, or call it from your phone. {name} sees your number.</span>
     </p>
@@ -96,7 +95,8 @@ export function ActionBar({ call, extra = [], reachNote }: { call: ApiCall; extr
   if (call.phone && !spam) {
     // The demo's numbers are made up: Call and Text say what they'd do instead of dialing a fake number.
     const demo = (what: string) => () => toast(`In your account, this ${what} ${call.fields.callerName?.split(" ")[0] ?? "the caller"} from your phone.`)
-    actions.push({ key: "call", label: callLabel(call), icon: <Phone />, ...(preview ? { onClick: demo("calls") } : { href: `tel:${call.phone}` }), primary: true, group: "reach" })
+    // Three equal buttons in a phone row leave no room for a name: "Call" there, "Call Linda" when it's Call and Text.
+    actions.push({ key: "call", label: address ? "Call" : callLabel(call), icon: <Phone />, ...(preview ? { onClick: demo("calls") } : { href: `tel:${call.phone}` }), primary: true, group: "reach" })
     // A draft written from the call ("Hi Linda, this is ... Saw you called about ..."): the owner only taps Send.
     const draft = smsDraft({ callerName: call.fields.callerName, problem: call.fields.problemDescription, shop: dashboard?.shop.businessName ?? null })
     const touchMac = typeof navigator !== "undefined" && navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1
@@ -118,8 +118,8 @@ export function ActionBar({ call, extra = [], reachNote }: { call: ApiCall; extr
     "flex min-h-14 flex-col items-center justify-center gap-1 rounded-xl px-1 text-[14px] font-semibold transition-colors [&_svg]:size-5",
     // Walk 11-26 re-walk: one row of equal widths, one filled action and the rest in one outline style.
     action.primary
-      ? "min-h-13 min-w-0 flex-row gap-2 bg-primary text-[16px] text-primary-foreground hover:bg-primary/90"
-      : "min-h-13 min-w-0 flex-row gap-2 rounded-xl border-2 border-primary bg-card px-2 text-[15px] font-semibold text-primary hover:bg-primary/5",
+      ? "min-h-13 min-w-0 flex-row gap-1.5 bg-primary px-2 text-[15px] text-primary-foreground hover:bg-primary/90"
+      : "min-h-13 min-w-0 flex-row gap-1.5 rounded-xl border-2 border-primary bg-card px-2 text-[15px] font-semibold text-primary hover:bg-primary/5",
     focus,
     action.disabled && "pointer-events-none opacity-50",
   )
