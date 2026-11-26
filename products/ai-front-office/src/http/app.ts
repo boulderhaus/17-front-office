@@ -2000,9 +2000,15 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (subscription?.providerSubscriptionId && subscription.status !== "canceled") {
         return refuse(409, "plan", "Cancel your subscription in Billing first. You can delete your account once it has ended.");
       }
-      try { await pauseLiveRoute(account.tenantId); } catch { return refuse(502, "line", "We couldn't disconnect your Call Otto line. Nothing was deleted; please retry."); }
+      try { await pauseLiveRoute(account.tenantId); } catch (error) {
+        log({ level: "error", event: "account_delete_pause_failed", tenantId: account.tenantId, error: withoutNumbers(safeError(error)) });
+        return refuse(502, "line", "We couldn't disconnect your Call Otto line. Nothing was deleted; please retry.");
+      }
       // Recordings before the line: a failed one leaves the number and assistant in place, so a retry starts clean.
-      try { await deletionService.deleteRecordings(account.tenantId); } catch { return refuse(502, "recording", "A call recording couldn't be deleted. Your line is paused and nothing else was removed; please retry."); }
+      try { await deletionService.deleteRecordings(account.tenantId); } catch (error) {
+        log({ level: "error", event: "account_delete_recordings_failed", tenantId: account.tenantId, error: withoutNumbers(safeError(error)) });
+        return refuse(502, "recording", "A call recording couldn't be deleted. Your line is paused and nothing else was removed; please retry.");
+      }
       // Never throws; a release that fails is logged and the number is retried by hand. It runs before the store
       // delete because that removes the record of which number to give back.
       await releaseProvisionedLine(account.tenantId);
@@ -4219,6 +4225,11 @@ function isIsoDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const date = new Date(`${value}T00:00:00.000Z`);
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+/** Provider error text can quote the phone number; logs keep the HTTP status and wording, not the number. */
+function withoutNumbers(text: string): string {
+  return text.replace(/\+?\d[\d\s().-]{6,}\d/g, "[number]");
 }
 
 function safeError(error: unknown): string {

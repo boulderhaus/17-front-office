@@ -426,7 +426,7 @@ export class TelnyxVoiceRoutingClient {
     const number = response.data?.find((candidate) => candidate.phone_number === this.options.phoneNumber) ?? response.data?.[0];
     const numberId = typeof number?.id === "string" ? number.id : null;
     if (!numberId) throw new Error("Telnyx phone number was not found");
-    const currentConnectionId = typeof number?.connection_id === "string" ? number.connection_id : null;
+    const currentConnectionId = connectionOf(number?.connection_id);
     if (currentConnectionId === desiredConnectionId) return { changed: false, numberId };
     const ours = new Set([assistantConnectionId, this.options.voicemailConnectionId].filter(Boolean));
     if (currentConnectionId && !ours.has(currentConnectionId)) {
@@ -437,8 +437,7 @@ export class TelnyxVoiceRoutingClient {
       method: "PATCH",
       body: JSON.stringify({ connection_id: desiredConnectionId }),
     });
-    const updatedConnectionId = objectData(updated).connection_id;
-    if ((typeof updatedConnectionId === "string" ? updatedConnectionId : null) !== desiredConnectionId) {
+    if (connectionOf(objectData(updated).connection_id) !== desiredConnectionId) {
       throw new Error("Telnyx did not persist the requested voice-routing state");
     }
     return { changed: true, numberId };
@@ -454,6 +453,11 @@ export class TelnyxVoiceRoutingClient {
     if (!response.ok) throw new Error(`Telnyx routing request failed with HTTP ${response.status}${payload.errors?.[0]?.detail ? `: ${payload.errors[0].detail}` : ""}`);
     return payload;
   }
+}
+
+/** Telnyx reports a number with no voice connection as "" (not null). */
+function connectionOf(value: unknown): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
 }
 
 function objectData(value: unknown): Record<string, unknown> {
