@@ -148,9 +148,27 @@ export type PlanId = "solo" | "pro" | "team" | "fleet"
 /** A plan: Solo first and picked by default. chargeNote is the line under the card button. */
 export interface ApiPlan {
   id: PlanId; label: string; priceCents: number; firstMonthCents: number; includedCalls: number; overageCentsPerCall: number; blurb: string; who: string; chargeNote: string
+  /** What adding a card today costs (src/domain/plans.ts priceQuote): the one price summary shows this. */
+  quote: PriceQuote
   /** The Unlimited calls add-on on this plan (totals include the plan), or null where it isn't offered. */
-  unlimited: { addOnCents: number; priceCents: number; firstMonthCents: number; fairUseCalls: number; chargeNote: string } | null
+  unlimited: { addOnCents: number; priceCents: number; firstMonthCents: number; fairUseCalls: number; chargeNote: string; quote: PriceQuote } | null
 }
+
+/** Today's charge, the regular monthly price, the struck-through full price and when the monthly price starts. */
+export interface PriceQuote { todayCents: number; monthlyCents: number; strikeCents: number | null; renewsAt: string }
+
+/** A plan change priced before anything is charged (POST /api/app/billing/preview). */
+export interface BillingQuote {
+  plan: PlanId; unlimited: boolean; monthlyCents: number; renewsAt: string | null; live: boolean; noChange: boolean
+  /** Charged to the card today, and credited to the next bill. */
+  todayCents: number; creditCents: number
+  /** Stripe refused its preview: our own estimate, shown as "about". */
+  estimated: boolean
+  prorationDate: number | null
+}
+
+/** The top line of Plan and billing (GET /api/app/billing/summary). */
+export interface BillingSummary { lastPaid: { amountCents: number; paidAt: string } | null; next: { amountCents: number; at: string } | null; endsAt: string | null; monthlyCents: number }
 
 export interface Guarantee {
   state: "none" | "watching" | "eligible" | "pending" | "refunded" | "closed"

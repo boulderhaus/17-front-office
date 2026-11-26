@@ -4,7 +4,7 @@ import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
 import { CARRIER_CHOICES, forwardingChoice, forwardingPlan, mayForwardAll, ringFirstSeconds, type CarrierInfo, type ForwardingChoice, type ForwardingMode, type ForwardingPlan, type TestedFor } from "../domain/forwarding.js";
 import { hasPlanAccess } from "../domain/billing.js";
 import { describeHours } from "../domain/hours.js";
-import { fairUseCalls, type PlanId } from "../domain/plans.js";
+import { fairUseCalls, type PlanId, type PriceQuote } from "../domain/plans.js";
 import { extraCalls } from "../domain/usage.js";
 import { COMPANY } from "../admin/footer.js";
 import type { GuaranteeStatus } from "../application/billing-jobs.js";
@@ -139,8 +139,10 @@ export interface ApiDashboard {
 /** A plan on the card step: cheapest first, picked by default. chargeNote is the line under the button. */
 export interface ApiPlan {
   id: PlanId; label: string; priceCents: number; firstMonthCents: number; includedCalls: number; overageCentsPerCall: number; blurb: string; who: string; chargeNote: string;
+  /** What adding a card today costs on this plan (priceQuote): the one price summary reads this. */
+  quote: PriceQuote;
   /** The Unlimited add-on on this plan (totals include the plan), or null where it isn't offered. */
-  unlimited: { addOnCents: number; priceCents: number; firstMonthCents: number; fairUseCalls: number; chargeNote: string } | null;
+  unlimited: { addOnCents: number; priceCents: number; firstMonthCents: number; fairUseCalls: number; chargeNote: string; quote: PriceQuote } | null;
 }
 
 export interface ApiCallDetail {

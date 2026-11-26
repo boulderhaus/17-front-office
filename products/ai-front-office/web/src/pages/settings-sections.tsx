@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Link, useLocation, useSearchParams } from "react-router-dom"
 import { CheckCircle2, ChevronRight, Download, Loader2, LogOut } from "lucide-react"
 import { toast } from "sonner"
@@ -8,10 +8,12 @@ import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { CallAlertsCard } from "@/components/app/call-alerts"
-import { api } from "@/lib/api"
-import { FAIR_USE_LINE, money, perCall } from "@/lib/format"
+import { cents, monthlyOf, PlanCards, PriceSummary, shortDay, UnlimitedAddOn } from "@/components/app/plan-picker"
+import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
+import { api, ApiError } from "@/lib/api"
+import { money, perCall } from "@/lib/format"
 import { useMode } from "@/lib/mode"
-import type { PlanId } from "@/lib/types"
+import type { ApiPlan, BillingQuote, BillingSummary, PlanId } from "@/lib/types"
 import { ringChoicesWith, VERIZON_RING_LINE } from "@/lib/dial"
 import { pauseHint } from "@/lib/pause-hint"
 import { recordingHint } from "@/lib/recording-hint"
@@ -386,45 +388,119 @@ function Price({ cents, size = "lg" }: { cents: number; size?: "lg" | "md" }) {
   )
 }
 
+/** "You paid $24.99 on Nov 26. $49.99 a month from Dec 26." from Stripe, or null while it loads. */
+function paidLine(summary: BillingSummary | null, tz: string): string | null {
+  if (!summary) return null
+  const paid = summary.lastPaid ? `You paid ${cents(summary.lastPaid.amountCents)} on ${shortDay(summary.lastPaid.paidAt, tz)}.` : null
+  if (summary.endsAt) return [paid, `Your plan ends ${shortDay(summary.endsAt, tz)}.`].filter(Boolean).join(" ")
+  if (!summary.next) return paid
+  const day = shortDay(summary.next.at, tz)
+  const next = summary.next.amountCents === summary.monthlyCents
+    ? `${cents(summary.monthlyCents)} a month from ${day}.`
+    : `Next bill ${day}: ${cents(summary.next.amountCents)}${summary.next.amountCents < summary.monthlyCents ? " after your credit" : ""}. Then ${cents(summary.monthlyCents)} a month.`
+  return paid ? `${paid} ${next}` : next
+}
+
+/** What the confirm dialog says: the exact amount and when, in one or two plain sentences. */
+function confirmWords(input: { quote: BillingQuote; from: { label: string; unlimited: boolean }; to: ApiPlan; tz: string }): { title: string; body: string; action: string } {
+  const { quote, from, to, tz } = input
+  const about = quote.estimated ? "about " : ""
+  const day = quote.renewsAt ? shortDay(quote.renewsAt, tz) : "your next bill"
+  const planChanged = from.label !== to.label
+  const today = quote.todayCents > 0
+    ? `${about}${cents(quote.todayCents)} is charged to your card today for the days left until ${day}.`
+    : quote.creditCents > 0
+      ? `Nothing is charged today. The unused ${about}${cents(quote.creditCents)} comes off your next bill on ${day}.`
+      : "Nothing is charged today."
+  if (!planChanged && quote.unlimited && to.unlimited) {
+    return { title: "Add Unlimited calls?", body: `Add Unlimited calls for ${cents(to.unlimited.addOnCents)} a month. ${today}`, action: quote.todayCents > 0 ? `Add for ${about}${cents(quote.todayCents)}` : "Add Unlimited calls" }
+  }
+  if (!planChanged && !quote.unlimited) {
+    return { title: "Turn off Unlimited calls?", body: `You go back to ${cents(quote.monthlyCents)} a month. ${today}`, action: "Turn off" }
+  }
+  return { title: `Switch to ${to.label}?`, body: `${to.label}${quote.unlimited ? " with Unlimited calls" : ""} is ${cents(quote.monthlyCents)} a month. ${today}`, action: quote.todayCents > 0 ? `Switch for ${about}${cents(quote.todayCents)}` : `Switch to ${to.label}` }
+}
+
 export function PlanSection() {
   const { settings, reload } = useSettings()
   const { dashboard } = useMode()
   const plan = settings.plan
   const csrf = settings.csrf
-  const [picked, setPicked] = useState<PlanId>(plan.id)
+  // What the owner is looking at: the switch and the plan cards move at once, and nothing is charged until confirmed.
+  const [proposal, setProposal] = useState<{ plan: PlanId; unlimited: boolean }>({ plan: plan.id, unlimited: plan.unlimited })
+  const [quote, setQuote] = useState<BillingQuote | null>(null)
+  const [quoteError, setQuoteError] = useState<string | null>(null)
+  const [confirmOpen, setConfirmOpen] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [unlimitedBusy, setUnlimitedBusy] = useState(false)
-  // Back from "Manage billing" when it couldn't open: say so here, in one line.
+  const [summary, setSummary] = useState<BillingSummary | null>(null)
+  // Bumped on every new pick or cancel, so a slow price reply for an old pick never overwrites the new one.
+  const quoteGeneration = useRef(0)
+  // Back from Stripe's billing page, or it couldn't open: say so here, in one line.
   const [params] = useSearchParams()
   const billing = params.get("billing")
-  const choice = plan.plans.find((item) => item.id === picked)
   const usage = dashboard?.usage
   const comp = dashboard?.billing.status === "comp"
   const billingNote = billing === "comp" || (comp && billing) ? "This is a complimentary account. There’s no billing to manage." : billing === "none" ? "There’s no paid plan to manage yet." : billing === "unavailable" ? "Billing couldn’t open just now. Nothing changed. Try again in a minute." : null
   const tz = dashboard?.shop.timezone ?? "America/New_York"
   const leads = dashboard?.guarantee.state === "watching" ? dashboard.guarantee.leads : null
   const monthly = plan.unlimited && plan.unlimitedOffer ? plan.unlimitedOffer.priceCents : plan.flatMonthlyPriceCents
-  const toggleUnlimited = async (on: boolean) => {
-    setUnlimitedBusy(true)
-    try {
-      await api("/api/app/billing/unlimited", { method: "POST", body: { on } })
-      await reload()
-      toast.success(on ? "Unlimited calls are on." : "Unlimited calls are off.")
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unlimited calls didn’t change. Please try again.")
-    } finally {
-      setUnlimitedBusy(false)
-    }
+  const target = plan.plans.find((item) => item.id === proposal.plan) ?? null
+  const proposalUnlimited = Boolean(proposal.unlimited && target?.unlimited)
+  const changed = proposal.plan !== plan.id || proposalUnlimited !== plan.unlimited
+  const shownUnlimitedPlan = target ?? plan.plans.find((item) => item.id === plan.id) ?? null
+
+  useEffect(() => { setProposal({ plan: plan.id, unlimited: plan.unlimited }) }, [plan.id, plan.unlimited])
+  useEffect(() => {
+    if (!plan.paid || comp) return
+    let alive = true
+    api<BillingSummary>("/api/app/billing/summary")
+      .then((value) => { if (alive) setSummary(value) })
+      // Couldn't read it: show no top line rather than a placeholder that never ends.
+      .catch(() => { if (alive) setSummary({ lastPaid: null, next: null, endsAt: null, monthlyCents: 0 }) })
+    return () => { alive = false }
+  }, [plan.paid, comp, plan.id, plan.unlimited])
+  // The live total: Stripe's own price for the change on screen, refreshed on every pick.
+  useEffect(() => {
+    const generation = ++quoteGeneration.current
+    setQuote(null)
+    setQuoteError(null)
+    if (!changed || !target) return
+    let alive = true
+    const timer = window.setTimeout(() => {
+      api<BillingQuote>("/api/app/billing/preview", { method: "POST", body: { plan: proposal.plan, unlimited: proposalUnlimited } })
+        .then((value) => { if (alive && generation === quoteGeneration.current) setQuote(value) })
+        .catch((error) => { if (alive && generation === quoteGeneration.current) setQuoteError(error instanceof Error ? error.message : "We couldn’t get the price. Try again.") })
+    }, 150)
+    return () => { alive = false; window.clearTimeout(timer) }
+  }, [changed, target, proposal.plan, proposalUnlimited])
+
+  const revert = () => { quoteGeneration.current++; setProposal({ plan: plan.id, unlimited: plan.unlimited }); setConfirmOpen(false) }
+  const flipUnlimited = (on: boolean) => {
+    setProposal((current) => ({ ...current, unlimited: on }))
+    // A paying shop confirms the exact amount first; before paying, the pick is just remembered (below).
+    if (plan.paid) setConfirmOpen(true)
   }
-  const change = async () => {
-    if (!choice) return
+  const apply = async () => {
+    if (!target) return
     setBusy(true)
     try {
-      await api("/api/app/billing/plan", { method: "POST", body: { plan: choice.id } })
+      const confirm = quote && quote.prorationDate !== null ? { prorationDate: quote.prorationDate, todayCents: quote.todayCents, creditCents: quote.creditCents, estimated: quote.estimated } : undefined
+      await api("/api/app/billing/change", { method: "POST", body: { plan: target.id, unlimited: proposalUnlimited, confirm } })
+      setConfirmOpen(false)
       await reload()
-      toast.success(`You’re on ${choice.label}.`)
+      toast.success(quote && quote.todayCents > 0 ? `Done. ${cents(quote.todayCents)} charged.` : proposalUnlimited !== plan.unlimited && proposal.plan === plan.id ? (proposalUnlimited ? "Unlimited calls are on." : "Unlimited calls are off.") : `You’re on ${target.label}.`)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Your plan didn’t change. Please try again.")
+      if (error instanceof ApiError && error.status === 409) {
+        // The price moved (or went stale): show the new one in the same dialog. Nothing was charged.
+        setQuote(null)
+        const generation = ++quoteGeneration.current
+        api<BillingQuote>("/api/app/billing/preview", { method: "POST", body: { plan: target.id, unlimited: proposalUnlimited } })
+          .then((value) => { if (generation === quoteGeneration.current) setQuote(value) })
+          .catch(() => undefined)
+      } else {
+        revert()
+      }
+      toast.error(error instanceof Error ? error.message : "Nothing changed. Please try again.")
     } finally {
       setBusy(false)
     }
@@ -435,9 +511,21 @@ export function PlanSection() {
     ...(usage ? [["Answered this period", usage.countedCalls.toLocaleString("en-US")] as [string, string], ["Period ends", new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "short", day: "numeric" }).format(new Date(usage.periodEnd))] as [string, string]] : []),
     ...(leads !== null ? [["Real leads so far", String(leads)] as [string, string]] : []),
   ]
+  const topLine = plan.paid && !comp ? paidLine(summary, tz) : null
+  const words = quote && target ? confirmWords({ quote, from: { label: plan.label, unlimited: plan.unlimited }, to: target, tz }) : null
+  const newMonthly = target ? monthlyOf(target, proposalUnlimited) : monthly
+  const todayLine = !plan.paid ? "Charged when you add your card" : quoteError ? quoteError : !quote ? "Checking the price…"
+    : quote.todayCents > 0 ? `${quote.estimated ? "About " : ""}${cents(quote.todayCents)} charged today`
+    : quote.creditCents > 0 ? `${quote.estimated ? "About " : ""}${cents(quote.creditCents)} off your next bill` : "Nothing charged today"
   return (
     <>
+      {billing === "back" && <p role="status" className="flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-[15px] text-emerald-950"><CheckCircle2 className="size-4.5 shrink-0" />You’re back from billing. Your plan below is up to date.</p>}
       <section className="grid gap-4 rounded-xl border-2 border-brand-ink bg-card p-4 md:p-5">
+        {plan.paid && !comp && (
+          topLine
+            ? <p className="text-[16px] font-semibold text-brand-ink text-balance">{topLine}</p>
+            : !summary && <span aria-hidden className="h-6 w-4/5 animate-pulse rounded bg-muted motion-reduce:animate-none" />
+        )}
         <div className="grid gap-2">
           <span className="text-[15px] font-semibold text-muted-foreground">Your plan: {plan.label}{plan.unlimited ? " with Unlimited calls" : ""}</span>
           <Price cents={monthly} />
@@ -452,38 +540,37 @@ export function PlanSection() {
           ))}
         </dl>
         <p className="text-sm text-muted-foreground">Spam and calls under 15 seconds are never counted.</p>
-        {plan.unlimitedOffer && (
-          <div className="grid gap-1 border-t pt-4">
-            <label htmlFor="settings-unlimited" className="flex min-h-11 cursor-pointer items-center justify-between gap-3">
-              <span className="flex items-center gap-3 text-base font-semibold"><Switch id="settings-unlimited" checked={plan.unlimited} disabled={unlimitedBusy} onCheckedChange={(on) => void toggleUnlimited(on)} />Unlimited calls</span>
-              <span className="tabular text-base font-semibold">+{money(plan.unlimitedOffer.addOnCents)}/mo</span>
-            </label>
-            <span className="text-sm text-muted-foreground">{FAIR_USE_LINE}</span>
-          </div>
-        )}
       </section>
 
-      {plan.plans.length > 1 && (
-        <SettingsCard title="Change plan" description={plan.paid ? "You pay or get credit for the difference right away. Teammates are always free." : "We’ll use this plan when you add your card."}>
-          <div className="grid gap-2.5 md:grid-cols-3" role="radiogroup" aria-label="Plans">
-            {plan.plans.map((item) => (
-              <button key={item.id} type="button" role="radio" aria-checked={picked === item.id} onClick={() => setPicked(item.id)}
-                className={cn("grid content-start gap-2 rounded-xl border-2 bg-card p-4 text-left transition focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none", picked === item.id ? "border-brand-ink" : "border-border hover:border-brand-ink/40")}>
-                <span className="flex items-center justify-between gap-2">
-                  <strong className="text-[17px] font-semibold">{item.label}</strong>
-                  {item.id === plan.id && <span className="rounded-md bg-brand-yellow px-2 py-0.5 text-[13px] font-semibold text-brand-ink">Current</span>}
-                </span>
-                <Price cents={item.priceCents} size="md" />
-                <span className="text-[15px]"><span className="tabular font-semibold">{item.includedCalls}</span> answered calls</span>
-                <span className="text-sm text-muted-foreground">{item.who}</span>
-              </button>
-            ))}
-          </div>
-          {choice && choice.id !== plan.id && (
-            <Button size="tap" variant="brand" className={actionClass} disabled={busy} onClick={() => void change()}>{busy ? "Switching…" : `Switch to ${choice.label}`}</Button>
-          )}
+      {plan.plans.length > 0 && (
+        <SettingsCard title="Change plan" description={plan.paid ? "Your team shares the plan’s calls. You see the price before anything is charged." : "Your team shares the plan’s calls. We’ll use this plan when you add your card."}>
+          <PlanCards columns plans={plan.plans} picked={proposal.plan} currentId={plan.id} disabled={busy} onPick={(id) => setProposal((current) => ({ ...current, plan: id }))} />
+          {shownUnlimitedPlan?.unlimited && <UnlimitedAddOn id="settings-unlimited" plan={shownUnlimitedPlan} checked={proposalUnlimited} disabled={busy} onCheckedChange={flipUnlimited} />}
+          {changed && <PriceSummary label="New price" big={<>{cents(newMonthly)}<span className="text-[15px] font-medium text-muted-foreground"> a month</span></>} line={todayLine}>
+            <span className="grid gap-2 sm:flex sm:items-center">
+              <Button size="tap" variant="brand" className={actionClass} disabled={busy || (plan.paid && !quote)} onClick={() => (plan.paid ? setConfirmOpen(true) : void apply())}>
+                {target && target.id !== plan.id ? `Switch to ${target.label}` : proposalUnlimited ? "Add Unlimited calls" : "Turn off Unlimited calls"}
+              </Button>
+              <Button size="tap" variant="ghost" className="sm:w-auto" disabled={busy} onClick={revert}>Keep my plan</Button>
+            </span>
+          </PriceSummary>}
         </SettingsCard>
       )}
+
+      <AlertDialog open={confirmOpen} onOpenChange={(open) => { if (!open && !busy) revert() }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{words?.title ?? "Checking the price…"}</AlertDialogTitle>
+            <AlertDialogDescription className="text-[16px] text-pretty text-brand-ink">
+              {words?.body ?? (quoteError ?? "One moment. Nothing is charged until you confirm.")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy} onClick={revert}>Cancel</AlertDialogCancel>
+            <Button size="tap" variant="brand" disabled={busy || !quote} onClick={() => void apply()}>{busy ? <Loader2 className="animate-spin" /> : null}{words?.action ?? "Confirm"}</Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* A complimentary shop (the Google review account) has no card or Stripe billing to open. */}
       {comp && billingNote && <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">{billingNote}</p>}
@@ -492,6 +579,11 @@ export function PlanSection() {
           {billingNote && <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">{billingNote}</p>}
           <form method="post" action={plan.paid ? "/app/billing/portal" : "/app/billing/checkout"}>
             <input type="hidden" name="csrf" value={csrf} />
+            {/* Paying from here continues setup, where the line turns on the moment the owner is back. */}
+            {!plan.paid && <input type="hidden" name="from" value="start" />}
+            {/* The plan and add-on picked above, so Stripe opens on exactly that price. */}
+            {!plan.paid && <input type="hidden" name="plan" value={proposal.plan} />}
+            {!plan.paid && <input type="hidden" name="unlimited" value={proposalUnlimited ? "yes" : "no"} />}
             <Button size="tap" variant={plan.paid ? "outline" : "brand"} className={actionClass}>{plan.paid ? "Manage billing or cancel" : "Start your plan"}</Button>
           </form>
         </SettingsCard>
@@ -510,7 +602,7 @@ export function TeamSection() {
           ["They can", "See Calls, Jobs and Calendar, call customers back and mark jobs done."],
           ["They can’t", "Change billing, these settings, or delete calls."],
           ["Their calendar", "Each connects their own Google Calendar and sets their own hours."],
-          ["Cost", "Free. Teammates never change your price."],
+          ["Calls", "Your team shares your plan’s calls."],
         ].map(([key, value]) => (
           <div key={key} className="grid gap-0.5 py-3 sm:grid-cols-[9rem_1fr] sm:gap-4">
             <dt className="text-[15px] text-muted-foreground">{key}</dt>

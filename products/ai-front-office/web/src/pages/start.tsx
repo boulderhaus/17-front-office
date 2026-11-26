@@ -6,9 +6,9 @@ import { CallAlertsCard } from "@/components/app/call-alerts"
 import { ForwardingCard } from "@/components/app/forwarding-card"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
-import { Switch } from "@/components/ui/switch"
+import { cents, PlanCards, PriceSummary, shortDay, UnlimitedAddOn } from "@/components/app/plan-picker"
 import { api } from "@/lib/api"
-import { FAIR_USE_LINE, formatPhone, LEAD_GUARANTEE, money, perCall } from "@/lib/format"
+import { formatPhone, LEAD_GUARANTEE, money, perCall } from "@/lib/format"
 import { useMode } from "@/lib/mode"
 import { forwardingOn } from "@/lib/line-status"
 import type { Activation, ApiDashboard, PlanId } from "@/lib/types"
@@ -135,16 +135,18 @@ function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDa
   const plans = dashboard.billing.plans
   // The plan picked at signup, or Solo: picking costs no extra tap.
   const [picked, setPicked] = useState<PlanId>(plans.some((plan) => plan.id === dashboard.billing.planId) ? dashboard.billing.planId : plans[0]?.id ?? "solo")
-  const [showAll, setShowAll] = useState(false)
   // Unlimited calls: off unless the owner picked it (pricing page or signup). Solo without it is the default.
   const [unlimited, setUnlimited] = useState(dashboard.billing.unlimited)
   if (confirming) {
     return <Card><CardContent className="flex items-center gap-3 text-[15px] font-medium"><Loader2 className="size-5 animate-spin" />Confirming your card…</CardContent></Card>
   }
   const plan = plans.find((item) => item.id === picked) ?? null
-  const others = plans.filter((item) => item.id !== picked)
   const withUnlimited = Boolean(unlimited && plan?.unlimited)
-  const shown = withUnlimited && plan?.unlimited ? plan.unlimited : plan
+  // One quote for the summary and the button: the same numbers Stripe's page shows.
+  const quote = plan ? (withUnlimited && plan.unlimited ? plan.unlimited.quote : plan.quote) : null
+  // The same words as offerWords in src/domain/plans.ts: "half off" or "40% off", never a vague "off".
+  const percent = quote?.strikeCents ? Math.round(100 - (quote.todayCents * 100) / quote.strikeCents) : 0
+  const offer = percent > 0 ? (percent === 50 ? "First month half off" : `First month ${percent}% off`) : null
   return (
     <>
       <Heading title={<span className="marker">Add a card to turn on your line</span>}>Your Call Otto line turns on the moment you’re back here. No extra button.</Heading>
@@ -152,65 +154,42 @@ function CardStep({ dashboard, confirming, cancelled, note }: { dashboard: ApiDa
       {cancelled && <p role="status" className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-950">No charge was made. Add a card whenever you’re ready.</p>}
       <Card className="relative overflow-hidden border-brand-ink/15">
         <span aria-hidden className="absolute inset-x-0 top-0 h-1.5 bg-brand-yellow" />
-        <CardContent className="grid gap-5 pt-2">
-          {plan ? (
-            <div className="grid gap-1">
-              <div className="flex items-baseline justify-between gap-3">
-                <strong className="text-lg font-semibold">{plan.label}</strong>
-                <span><strong className="tabular text-3xl font-semibold tracking-tight">{money(shown!.priceCents)}</strong><span className="text-sm text-muted-foreground">/month</span></span>
-              </div>
-              <span className="text-[14px] text-muted-foreground">{withUnlimited && plan.unlimited ? `Unlimited calls, fair use up to ${plan.unlimited.fairUseCalls.toLocaleString("en-US")} a month. Past that, ${perCall(plan.overageCentsPerCall)} each.` : `${plan.blurb}. Extra calls ${perCall(plan.overageCentsPerCall)} each.`}</span>
-              {shown!.firstMonthCents < shown!.priceCents && <span className="text-[14px] font-semibold text-red-700">Limited time: first month half off</span>}
-            </div>
-          ) : null}
-          {plan?.unlimited && (
-            <div className="grid gap-1 rounded-lg border-2 border-brand-ink/15 px-3 py-2.5">
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <label htmlFor="card-unlimited" className="flex min-h-11 cursor-pointer items-center gap-2.5 text-[15px] font-semibold">
-                  <Switch id="card-unlimited" checked={unlimited} onCheckedChange={setUnlimited} />
-                  Unlimited calls
-                </label>
-                <span className="rounded border border-brand-ink/40 px-1.5 py-0.5 text-[13px] font-semibold">{FAIR_USE_LINE}</span>
-              </div>
-              <span className="text-[13px] text-muted-foreground">+{money(plan.unlimited.addOnCents)}/month. Turn it off anytime in Settings.</span>
-            </div>
-          )}
-          {/* The picked plan is already chosen; bigger (or smaller) shops open one compact line. No extra tap for Solo. */}
-          {others.length > 0 && (showAll ? (
-            <div className="grid gap-2" role="radiogroup" aria-label="Other plans">
-              {others.map((item) => (
-                <button key={item.id} type="button" role="radio" aria-checked={false} onClick={() => { setPicked(item.id); setShowAll(false) }}
-                  className="flex min-h-12 items-center justify-between gap-3 rounded-lg border-2 border-brand-ink/15 bg-card px-3 py-2 text-left text-sm transition hover:border-brand-ink focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none">
-                  <span className="grid"><strong className="font-semibold">{item.label} <span className="font-medium text-muted-foreground">· {item.who}</span></strong><small className="text-[12.5px] text-muted-foreground">{item.includedCalls} answered calls a month</small></span>
-                  <span className="tabular font-semibold">{money(item.priceCents)}<small className="text-[12px] font-medium text-muted-foreground">/mo</small></span>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <button type="button" onClick={() => setShowAll(true)} className="inline-flex min-h-11 w-fit items-center text-[15px] font-semibold text-brand-ink underline underline-offset-4">
-              {picked === plans[0]?.id ? `Bigger shop? ${others.map((item) => item.label).join(", ")}` : "See other plans"}
-            </button>
-          ))}
+        <CardContent className="grid gap-4 pt-2">
+          {plans.length > 0 && <PlanCards plans={plans} picked={picked} onPick={setPicked} />}
+          {plan && !withUnlimited && <p className="-mt-1 pl-1 text-[14px] text-muted-foreground">Extra calls {perCall(plan.overageCentsPerCall)} each.</p>}
+          {plan?.unlimited && <UnlimitedAddOn id="card-unlimited" plan={plan} checked={unlimited} onCheckedChange={setUnlimited} />}
           <ul className="grid gap-1.5 text-[15px]">
             <li className="flex gap-2"><CheckCircle2 className="mt-0.5 size-4.5 shrink-0 text-emerald-700" />Keep your number</li>
             <li className="flex gap-2"><CheckCircle2 className="mt-0.5 size-4.5 shrink-0 text-emerald-700" />Cancel anytime from your dashboard</li>
           </ul>
-          {dashboard.checkoutConfigured ? (
-            <form method="post" action="/app/billing/checkout" className="grid gap-2.5">
-              <input type="hidden" name="csrf" value={dashboard.csrf} />
-              <input type="hidden" name="from" value="start" />
-              {plan && <input type="hidden" name="plan" value={plan.id} />}
-              <input type="hidden" name="unlimited" value={withUnlimited ? "yes" : "no"} />
-              <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")}>Add card<ArrowRight /></Button>
-              {((withUnlimited ? plan?.unlimited?.chargeNote : plan?.chargeNote) ?? dashboard.billing.chargeNote) && <p className="text-center text-[15px] font-semibold text-balance md:text-left">{(withUnlimited ? plan?.unlimited?.chargeNote : plan?.chargeNote) ?? dashboard.billing.chargeNote}</p>}
-            </form>
-          ) : (
-            <p className="text-sm text-muted-foreground">Checkout isn’t switched on yet. We’ll reach out to finish this with you.</p>
-          )}
           <p className="border-l-4 border-brand-yellow pl-3 text-[13px] text-brand-ink"><strong className="font-semibold">Lead guarantee.</strong> {LEAD_GUARANTEE}</p>
-          <p className="text-[13px] text-muted-foreground">Secure checkout by Stripe. We never see your card number. Team members are free.</p>
+          <p className="text-[13px] text-muted-foreground">Secure checkout by Stripe. We never see your card number.</p>
         </CardContent>
       </Card>
+      {dashboard.checkoutConfigured && quote ? (
+        <PriceSummary
+          label={quote.todayCents === 0 ? "Today" : offer ? `Today · ${offer}` : "Today"}
+          big={cents(quote.todayCents)}
+          struck={quote.strikeCents ? cents(quote.strikeCents) : null}
+          line={<>then {cents(quote.monthlyCents)} a month from {shortDay(quote.renewsAt, dashboard.shop.timezone)}</>}
+        >
+          <form method="post" action="/app/billing/checkout">
+            <input type="hidden" name="csrf" value={dashboard.csrf} />
+            <input type="hidden" name="from" value="start" />
+            {plan && <input type="hidden" name="plan" value={plan.id} />}
+            <input type="hidden" name="unlimited" value={withUnlimited ? "yes" : "no"} />
+            <Button size="tap" variant="brand" className="h-14 w-full text-base md:w-52 lg:h-12">{quote.todayCents > 0 ? `Pay ${cents(quote.todayCents)}` : "Add card"}<ArrowRight /></Button>
+          </form>
+        </PriceSummary>
+      ) : dashboard.checkoutConfigured ? (
+        <form method="post" action="/app/billing/checkout">
+          <input type="hidden" name="csrf" value={dashboard.csrf} />
+          <input type="hidden" name="from" value="start" />
+          <Button size="tap" variant="brand" className={cn(tapWidth, "h-14 text-base lg:h-12")}>Add card<ArrowRight /></Button>
+        </form>
+      ) : (
+        <p className="text-sm text-muted-foreground">Checkout isn’t switched on yet. We’ll reach out to finish this with you.</p>
+      )}
       {/* Never a dead end: look around first, or leave. */}
       <nav aria-label="Leave setup" className="flex flex-wrap items-center gap-x-6 px-1">
         <Link to="/app" className="inline-flex min-h-11 items-center text-[15px] font-semibold text-brand-ink underline underline-offset-4">Not now</Link>

@@ -19,7 +19,7 @@ export const DEFAULT_OVERAGE_CENTS_PER_CALL = 75;
  * unlimitedAddOnCents is the monthly price of the Unlimited add-on on that plan (null: not offered, e.g. legacy Pro).
  */
 export const DEFAULT_PLANS: Record<PlanId, { label: string; priceCents: number; includedCalls: number; who: string; unlimitedAddOnCents: number | null }> = {
-  solo: { label: "Solo", priceCents: 4_999, includedCalls: 60, who: "One truck", unlimitedAddOnCents: 5_000 },
+  solo: { label: "Solo", priceCents: 4_999, includedCalls: 60, who: "One person", unlimitedAddOnCents: 5_000 },
   pro: { label: "Pro", priceCents: 9_999, includedCalls: 125, who: "A busy owner", unlimitedAddOnCents: null },
   team: { label: "Team", priceCents: 17_999, includedCalls: 250, who: "About 5 people", unlimitedAddOnCents: 7_500 },
   fleet: { label: "Fleet", priceCents: 34_999, includedCalls: 500, who: "About 10 people", unlimitedAddOnCents: 12_500 },
@@ -53,7 +53,7 @@ export interface Plan {
   overageCentsPerCall: number;
   /** Plain words: "60 answered calls a month, about 2 a day". */
   blurb: string;
-  /** Who it's for: "One truck", "About 5 people". */
+  /** Who it's for: "One person", "About 5 people". */
   who: string;
   /** Stripe price, or null where checkout isn't configured (the plan is display-only). */
   priceId: string | null;
@@ -231,3 +231,65 @@ export function perCall(cents: number): string {
 
 /** The guarantee, word for word, wherever it is shown. */
 export const LEAD_GUARANTEE = "If Call Otto doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month.";
+
+/** What a plan costs, in the one shape every price summary shows (signup card step and Settings). */
+export interface PriceQuote {
+  /** Charged today when the card is added: the first month, intro offer applied; 0 during a free trial. */
+  todayCents: number;
+  /** The regular monthly price from the renewal on (plan plus the Unlimited add-on when it is on). */
+  monthlyCents: number;
+  /** The full price shown struck through next to today's price, or null when today's price is the full price. */
+  strikeCents: number | null;
+  /** When the regular monthly price is first charged (ISO): one month from now, or the end of a free trial. */
+  renewsAt: string;
+}
+
+/** One calendar month later, clamped to the month's last day (Jan 31 → Feb 28), as Stripe bills monthly. */
+export function addOneMonth(date: Date): Date {
+  return shiftMonths(date, 1);
+}
+
+/** One calendar month earlier, clamped the same way: the start of a monthly period that ends on this date. */
+export function oneMonthBefore(date: Date): Date {
+  return shiftMonths(date, -1);
+}
+
+function shiftMonths(date: Date, months: number): Date {
+  const next = new Date(date.getTime());
+  const day = next.getUTCDate();
+  next.setUTCDate(1);
+  next.setUTCMonth(next.getUTCMonth() + months);
+  const last = new Date(Date.UTC(next.getUTCFullYear(), next.getUTCMonth() + 1, 0)).getUTCDate();
+  next.setUTCDate(Math.min(day, last));
+  return next;
+}
+
+/**
+ * The single price function behind every summary: plan, Unlimited on or off, the intro offer (already in the
+ * plan's firstMonthCents) and any free trial. There is no yearly price, so there is no interval to pick.
+ */
+export function priceQuote(input: { plan: Pick<Plan, "priceCents" | "firstMonthCents" | "unlimited">; unlimited: boolean; now: Date; trialDays?: number }): PriceQuote {
+  const total = input.unlimited && input.plan.unlimited ? input.plan.unlimited : input.plan;
+  const trialDays = Math.max(0, Math.floor(input.trialDays ?? 0));
+  if (trialDays > 0) {
+    return { todayCents: 0, monthlyCents: total.priceCents, strikeCents: null, renewsAt: new Date(input.now.getTime() + trialDays * 86_400_000).toISOString() };
+  }
+  const today = total.firstMonthCents;
+  return { todayCents: today, monthlyCents: total.priceCents, strikeCents: today < total.priceCents ? total.priceCents : null, renewsAt: addOneMonth(input.now).toISOString() };
+}
+
+/** The plan plus the add-on, monthly: what a shop pays each month on this plan with Unlimited on or off. */
+export function monthlyCents(plan: Pick<Plan, "priceCents" | "unlimited">, unlimited: boolean): number {
+  return unlimited && plan.unlimited ? plan.unlimited.priceCents : plan.priceCents;
+}
+
+/**
+ * A local stand-in for Stripe's proration, used only when Stripe's preview is refused (and then shown as "about"):
+ * the monthly difference times the share of the period still to run, rounded to the cent. Negative is a credit.
+ */
+export function prorationEstimateCents(input: { fromMonthlyCents: number; toMonthlyCents: number; periodStart: Date; periodEnd: Date; at: Date }): number {
+  const total = input.periodEnd.getTime() - input.periodStart.getTime();
+  if (total <= 0) return 0;
+  const left = Math.min(total, Math.max(0, input.periodEnd.getTime() - input.at.getTime()));
+  return Math.round((input.toMonthlyCents - input.fromMonthlyCents) * left / total);
+}

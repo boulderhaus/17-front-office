@@ -19,7 +19,7 @@ import { joinTeam, teamRoutes } from "./team-routes.js";
 import { CALL_PATH_SCRIPT, renderCallPath, renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
 import { buildCallPath, type CallPath } from "../domain/call-path.js";
 import { chargeSentence, hasPlanAccess, isCompStatus, isPaidStatus } from "../domain/billing.js";
-import { currentPlan, hasUnlimitedPrice, introCouponId, knownPlans, legacyPlanPriceIds, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, unlimitedPriceIds, type Plan, type PlanId } from "../domain/plans.js";
+import { addOneMonth, currentPlan, oneMonthBefore, hasUnlimitedPrice, introCouponId, knownPlans, legacyPlanPriceIds, monthlyCents, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, priceQuote, prorationEstimateCents, unlimitedPriceIds, type Plan, type PlanId } from "../domain/plans.js";
 import { GuaranteeError, LeadGuaranteeService, recordFirstPaid, recordUnlimitedObservation, type UnlimitedItem } from "../application/billing-jobs.js";
 import { callbackLinkMatches, OWNER_SMS_OPT_IN_CONFIRMATION, readCallbackLinkToken } from "../domain/owner-sms.js";
 import { callsCsv, callsCsvFileName } from "./calls-csv.js";
@@ -553,7 +553,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   const apiPlans = (timezone?: string): ApiPlan[] => stripeClient ? plans.map((plan) => ({
     id: plan.id, label: plan.label, priceCents: plan.priceCents, firstMonthCents: plan.firstMonthCents, includedCalls: plan.includedCalls,
     overageCentsPerCall: plan.overageCentsPerCall, blurb: plan.blurb, who: plan.who, chargeNote: planCharge(plan, timezone),
-    unlimited: plan.unlimited ? { addOnCents: plan.unlimited.addOnCents, priceCents: plan.unlimited.priceCents, firstMonthCents: plan.unlimited.firstMonthCents, fairUseCalls: plan.unlimited.fairUseCalls, chargeNote: planCharge(plan, timezone, true) } : null,
+    quote: priceQuote({ plan, unlimited: false, now: dependencies.clock.now(), trialDays }),
+    unlimited: plan.unlimited ? { addOnCents: plan.unlimited.addOnCents, priceCents: plan.unlimited.priceCents, firstMonthCents: plan.unlimited.firstMonthCents, fairUseCalls: plan.unlimited.fairUseCalls, chargeNote: planCharge(plan, timezone, true), quote: priceQuote({ plan, unlimited: true, now: dependencies.clock.now(), trialDays }) } : null,
   })) : [];
   const signupPage = (request: IncomingMessage, error = "", values: Record<string, string> = {}, identity: VerifiedIdentity | null = null, fieldErrors: SignupFieldErrors = {}): string => renderOwnerSignup(error, values, {
     fieldErrors,
@@ -1558,22 +1559,32 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       telemetry.capture("onboarding_completed", account.id, account.tenantId);
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
     }
-    if (method === "POST" && url.pathname === "/api/app/billing/plan") {
+    // Billing changes never charge on a tap: the owner app asks for a quote (Stripe's own preview, nothing written),
+    // shows the exact amount, and only a confirmed change carrying that quote reaches Stripe.
+    if (method === "POST" && url.pathname === "/api/app/billing/preview") {
       if (!owner) throw new HttpError(403, "Only the owner can change the plan");
-      const body = await readApiJson(request, session, 1_000) as { plan?: unknown };
-      const id = normalizePlanId(body.plan);
-      const plan = plans.find((item) => item.id === id);
+      const body = await readApiJson(request, session, 1_000) as { plan?: unknown; unlimited?: unknown };
+      const plan = plans.find((item) => item.id === normalizePlanId(body.plan));
       if (!plan) throw new HttpError(400, "Pick a plan");
-      if (!limiter.allow(`plan-change:${account.tenantId}`, 10, 60 * 60_000)) throw new HttpError(429, "That’s a lot of plan changes. Please try again in a bit.");
-      await changePlan(account, plan);
-      return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+      if (typeof body.unlimited !== "boolean") throw new HttpError(400, "Say on or off");
+      if (!limiter.allow(`plan-preview:${account.tenantId}`, 120, 60 * 60_000)) throw new HttpError(429, "Please try again in a bit.");
+      return sendJson(response, 200, await quoteChange(account, plan, body.unlimited));
     }
-    if (method === "POST" && url.pathname === "/api/app/billing/unlimited") {
-      if (!owner) throw new HttpError(403, "Only the owner can change Unlimited calls");
-      const body = await readApiJson(request, session, 1_000) as { on?: unknown };
-      if (typeof body.on !== "boolean") throw new HttpError(400, "Say on or off");
+    if (method === "GET" && url.pathname === "/api/app/billing/summary") {
+      if (!owner) throw new HttpError(403, "Only the owner can see billing");
+      return sendJson(response, 200, await billingSummary(account));
+    }
+    if (method === "POST" && (url.pathname === "/api/app/billing/change" || url.pathname === "/api/app/billing/plan" || url.pathname === "/api/app/billing/unlimited")) {
+      if (!owner) throw new HttpError(403, url.pathname.endsWith("/unlimited") ? "Only the owner can change Unlimited calls" : "Only the owner can change the plan");
+      const body = await readApiJson(request, session, 2_000) as { plan?: unknown; unlimited?: unknown; on?: unknown; confirm?: unknown };
+      const config = await dependencies.store.getConfig(account.tenantId);
+      // /plan and /unlimited are the older one-field forms; /change names both. All three need the confirmed quote once paying.
+      const plan = url.pathname.endsWith("/unlimited") ? currentPlan(known, config.planId) : plans.find((item) => item.id === normalizePlanId(body.plan));
+      if (!plan) throw new HttpError(400, "Pick a plan");
+      const unlimited = url.pathname.endsWith("/unlimited") ? body.on : url.pathname.endsWith("/plan") ? config.unlimitedCalls === true : body.unlimited;
+      if (typeof unlimited !== "boolean") throw new HttpError(400, "Say on or off");
       if (!limiter.allow(`plan-change:${account.tenantId}`, 10, 60 * 60_000)) throw new HttpError(429, "That’s a lot of plan changes. Please try again in a bit.");
-      await setUnlimited(account, body.on);
+      await applyChange(account, plan, unlimited, parseConfirm(body.confirm));
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
     }
     if (method === "POST" && url.pathname === "/api/app/billing/lead-refund") {
@@ -1937,7 +1948,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         if (wantsPage(request)) return redirect(response, "/app/settings/plan?billing=none");
         throw new HttpError(409, "No paid subscription to manage yet");
       }
-      const portalUrl = await stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`).catch(() => null);
+      const portalUrl = await stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app/settings/plan?billing=back`).catch(() => null);
       if (!portalUrl) {
         if (wantsPage(request)) return redirect(response, "/app/settings/plan?billing=unavailable");
         throw new HttpError(502, "Billing could not be opened. Please retry; your subscription has not changed.");
@@ -2190,7 +2201,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (hasPlanAccess(subscription?.status)) return app;
       if (subscription?.providerCustomerId && (subscription.status === "past_due" || subscription.status === "unpaid")) {
         // Fix payment on the existing subscription instead of starting a second one.
-        return stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app`)
+        return stripeClient.createPortal(subscription.providerCustomerId, `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app/settings/plan?billing=back`)
           .catch(() => { throw new HttpError(502, "Billing could not be opened. Please retry; your subscription has not changed."); });
       }
       // Any other live subscription (e.g. a first payment still processing) blocks a second one.
@@ -2284,25 +2295,61 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     });
   }
 
+  /** A paying subscription that a plan change would bill in Stripe now. */
+  function liveSubscription(subscription: SubscriptionRecord | null): subscription is SubscriptionRecord & { providerSubscriptionId: string } {
+    return Boolean(subscription?.providerSubscriptionId && subscription.status !== "canceled");
+  }
+
   /**
-   * The owner picks another plan in Settings. A paying shop's Stripe subscription moves first (prorated,
-   * the difference invoiced now); only then is the shop saved on the new plan. Before paying it is just remembered.
+   * What moving to this plan (Unlimited on or off) costs: the new monthly price and what is charged, or credited,
+   * today. A paying shop's amount is Stripe's own invoice preview at prorationDate; if Stripe refuses the preview,
+   * a local estimate stands in and is marked estimated (the app says "about"). Nothing is written anywhere.
    */
-  async function changePlan(account: OwnerAccount, plan: Plan): Promise<void> {
+  async function quoteChange(account: OwnerAccount, plan: Plan, unlimitedAsked: boolean, prorationDate?: number): Promise<BillingQuote> {
+    const [subscription, config] = await Promise.all([dependencies.store.getSubscription(account.tenantId), dependencies.store.getConfig(account.tenantId)]);
+    if (unlimitedAsked && !plan.unlimited) throw new HttpError(409, plan.sold ? "Unlimited calls aren’t available on this plan yet." : `Unlimited calls aren’t available on ${plan.label}. Switch to Solo, Team or Fleet to add it.`);
+    const unlimited = wantsUnlimited(plan, unlimitedAsked);
+    const current = currentPlan(known, config.planId);
+    const base = { plan: plan.id, unlimited, monthlyCents: monthlyCents(plan, unlimited), renewsAt: subscription?.currentPeriodEnd ?? null };
+    const noChange = isOnPlan(config, plan, unlimited);
+    if (noChange || !liveSubscription(subscription) || !stripeClient) return { ...base, live: liveSubscription(subscription), noChange, todayCents: 0, creditCents: 0, estimated: false, prorationDate: null };
+    const date = prorationDate ?? Math.floor(dependencies.clock.now().getTime() / 1_000);
+    try {
+      const preview = await stripeClient.previewChange(subscription.providerSubscriptionId, plan.id, { unlimited, prorationDate: date });
+      return { ...base, live: true, noChange: preview.noChange, todayCents: preview.chargeCents, creditCents: preview.creditCents, estimated: false, prorationDate: date };
+    } catch (error) {
+      log({ level: "warn", event: "plan_preview_failed", tenantId: account.tenantId, error: safeError(error) });
+      const periodEnd = subscription.currentPeriodEnd ? new Date(subscription.currentPeriodEnd) : addOneMonth(dependencies.clock.now());
+      const periodStart = oneMonthBefore(periodEnd);
+      const change = prorationEstimateCents({ fromMonthlyCents: monthlyCents(current, config.unlimitedCalls === true), toMonthlyCents: base.monthlyCents, periodStart, periodEnd, at: new Date(date * 1_000) });
+      return { ...base, live: true, noChange: false, todayCents: Math.max(0, change), creditCents: Math.max(0, -change), estimated: true, prorationDate: date };
+    }
+  }
+
+  /**
+   * The owner confirmed a plan or Unlimited change. Before paying it is just remembered. A paying shop must send
+   * the quote it was shown: the server previews again at the same proration date and writes to Stripe only if
+   * the amount still matches, so the card is charged exactly what the owner agreed to, once.
+   */
+  async function applyChange(account: OwnerAccount, plan: Plan, unlimitedAsked: boolean, confirm: ConfirmedQuote | null): Promise<void> {
     await dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
-      const [subscription, config] = await Promise.all([
-        dependencies.store.getSubscription(account.tenantId),
-        dependencies.store.getConfig(account.tenantId),
-      ]);
-      // Unlimited stays on across a plan change, at the new plan's add-on price (off where the plan has none).
-      const unlimited = wantsUnlimited(plan, config.unlimitedCalls === true);
+      const [subscription, config] = await Promise.all([dependencies.store.getSubscription(account.tenantId), dependencies.store.getConfig(account.tenantId)]);
+      if (unlimitedAsked && !plan.unlimited) throw new HttpError(409, plan.sold ? "Unlimited calls aren’t available on this plan yet." : `Unlimited calls aren’t available on ${plan.label}. Switch to Solo, Team or Fleet to add it.`);
+      const unlimited = wantsUnlimited(plan, unlimitedAsked);
       if (isOnPlan(config, plan, unlimited)) return;
-      const live = Boolean(subscription?.providerSubscriptionId && subscription.status !== "canceled");
+      const live = liveSubscription(subscription);
       let addOnItems: UnlimitedItem[] | null = null;
       if (live) {
         if (!stripeClient) throw new HttpError(503, "Plan changes aren’t available yet");
-        addOnItems = (await stripeClient.changePlan(subscription!.providerSubscriptionId!, plan.id, { unlimited }).catch((error) => {
-          log({ level: "error", event: "plan_change_failed", tenantId: account.tenantId, plan: plan.id, error: safeError(error) });
+        if (!confirm) throw new HttpError(409, "Check the price first. Nothing was charged.");
+        const nowSeconds = Math.floor(dependencies.clock.now().getTime() / 1_000);
+        if (confirm.prorationDate > nowSeconds + 60 || confirm.prorationDate < nowSeconds - 20 * 60) throw new HttpError(409, "That price is out of date. Check the new price. Nothing was charged.");
+        const fresh = await quoteChange(account, plan, unlimitedAsked, confirm.prorationDate);
+        if (fresh.estimated !== confirm.estimated || fresh.todayCents !== confirm.todayCents || fresh.creditCents !== confirm.creditCents) {
+          throw new HttpError(409, "The price changed. Check the new price. Nothing was charged.");
+        }
+        addOnItems = (await stripeClient.changePlan(subscription.providerSubscriptionId, plan.id, { unlimited, prorationDate: confirm.prorationDate }).catch((error) => {
+          log({ level: "error", event: "plan_change_failed", tenantId: account.tenantId, plan: plan.id, unlimited, error: safeError(error) });
           throw new HttpError(502, "Your plan couldn’t be changed just now. Nothing was changed; please try again.");
         })).addOnItems;
       }
@@ -2310,9 +2357,23 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         await dependencies.store.saveConfig(onPlan(await dependencies.store.getConfig(account.tenantId), plan, unlimited));
       });
       if (live) await observeOwnChange(account.tenantId, unlimited, addOnItems);
-      log({ level: "info", event: "plan_changed", tenantId: account.tenantId, from: config.planId ?? "solo", to: plan.id });
-      telemetry.capture("plan_changed", account.id, account.tenantId, { from: config.planId ?? "solo", to: plan.id });
+      log({ level: "info", event: "plan_changed", tenantId: account.tenantId, from: config.planId ?? "solo", to: plan.id, unlimited });
+      telemetry.capture("plan_changed", account.id, account.tenantId, { from: config.planId ?? "solo", to: plan.id, unlimited });
     });
+  }
+
+  /** The top line of Plan and billing: what was last paid and what the next bill is, from Stripe. Read only. */
+  async function billingSummary(account: OwnerAccount): Promise<{ lastPaid: { amountCents: number; paidAt: string } | null; next: { amountCents: number; at: string } | null; endsAt: string | null; monthlyCents: number }> {
+    const [subscription, config] = await Promise.all([dependencies.store.getSubscription(account.tenantId), dependencies.store.getConfig(account.tenantId)]);
+    const monthly = monthlyCents(currentPlan(known, config.planId), config.unlimitedCalls === true);
+    if (!stripeClient || !liveSubscription(subscription) || isCompStatus(subscription.status)) return { lastPaid: null, next: null, endsAt: null, monthlyCents: monthly };
+    const read = await stripeClient.billingSummary(subscription.providerSubscriptionId).catch((error) => {
+      log({ level: "warn", event: "billing_summary_failed", tenantId: account.tenantId, error: safeError(error) });
+      return { lastPaid: null, next: null, endsAt: null };
+    });
+    // Only Stripe's own preview names a next bill; never invent one (a cancelling plan has none).
+    const at = read.next ? read.next.at ?? subscription.currentPeriodEnd : null;
+    return { lastPaid: read.lastPaid, next: read.next && at ? { amountCents: read.next.amountCents, at } : null, endsAt: read.endsAt, monthlyCents: monthly };
   }
 
   /** Keep the shop's plan and price in step with what Stripe says it is paying for (e.g. a switch in the billing portal). */
@@ -2337,38 +2398,6 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   async function observeOwnChange(tenantId: string, on: boolean, items: UnlimitedItem[] | null): Promise<void> {
     const at = dependencies.clock.now().toISOString();
     await recordUnlimitedObservation(dependencies.store, tenantId, { at, items: items ?? (on ? [{ id: `owner:${at}`, createdAt: at }] : []), live: true });
-  }
-
-  /**
-   * The owner turns the Unlimited add-on on or off in Settings. A paying shop's Stripe subscription changes first
-   * (the add-on item is added or removed, prorated, the difference invoiced now); only then is the shop saved and
-   * the add-on's window recorded for the overage job. Before paying it is just remembered for checkout.
-   */
-  async function setUnlimited(account: OwnerAccount, on: boolean): Promise<void> {
-    await dependencies.store.withLock(`billing:${account.tenantId}`, async () => {
-      const [subscription, config] = await Promise.all([
-        dependencies.store.getSubscription(account.tenantId),
-        dependencies.store.getConfig(account.tenantId),
-      ]);
-      const plan = currentPlan(known, config.planId);
-      if (on && !plan.unlimited) throw new HttpError(409, plan.sold ? "Unlimited calls aren’t available on this plan yet." : `Unlimited calls aren’t available on ${plan.label}. Switch to Solo, Team or Fleet to add it.`);
-      if ((config.unlimitedCalls === true) === on) return;
-      const live = Boolean(subscription?.providerSubscriptionId && subscription.status !== "canceled");
-      let addOnItems: UnlimitedItem[] | null = null;
-      if (live) {
-        if (!stripeClient) throw new HttpError(503, "Plan changes aren’t available yet");
-        addOnItems = (await stripeClient.changePlan(subscription!.providerSubscriptionId!, plan.id, { unlimited: on }).catch((error) => {
-          log({ level: "error", event: "unlimited_change_failed", tenantId: account.tenantId, on, error: safeError(error) });
-          throw new HttpError(502, "Unlimited calls couldn’t be changed just now. Nothing was changed; please try again.");
-        })).addOnItems;
-      }
-      await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
-        await dependencies.store.saveConfig({ ...await dependencies.store.getConfig(account.tenantId), unlimitedCalls: on });
-      });
-      if (live) await observeOwnChange(account.tenantId, on, addOnItems);
-      log({ level: "info", event: "unlimited_changed", tenantId: account.tenantId, on });
-      telemetry.capture("unlimited_changed", account.id, account.tenantId, { on, plan: plan.id });
-    });
   }
 
   /** Turn the line on with no button, and say calmly what happens next if it can't be yet. */
@@ -4108,6 +4137,24 @@ export function createStripeClient(env: Environment, fetcher: typeof fetch): Str
     legacy: Object.values(legacyPlanPriceIds(env)).flat(),
     unlimited: Object.fromEntries(Object.entries(unlimitedPriceIds(env)).filter(([, price]) => Boolean(price))) as Partial<Record<PlanId, string>>,
   }, fetcher);
+}
+
+/** A plan change priced for the owner before anything is charged. */
+interface BillingQuote {
+  plan: PlanId; unlimited: boolean; monthlyCents: number; renewsAt: string | null; live: boolean; noChange: boolean;
+  /** Charged to the card today (after any account credit), and credited to the next bill. */
+  todayCents: number; creditCents: number;
+  /** True when Stripe refused the preview and this is our own estimate ("about"). */
+  estimated: boolean;
+  /** Unix seconds the proration is computed at; the confirmed change sends it back so Stripe bills the same amount. */
+  prorationDate: number | null;
+}
+interface ConfirmedQuote { prorationDate: number; todayCents: number; creditCents: number; estimated: boolean }
+function parseConfirm(value: unknown): ConfirmedQuote | null {
+  if (!value || typeof value !== "object") return null;
+  const { prorationDate, todayCents, creditCents, estimated } = value as Record<string, unknown>;
+  const whole = (item: unknown): item is number => typeof item === "number" && Number.isSafeInteger(item) && item >= 0;
+  return whole(prorationDate) && whole(todayCents) && whole(creditCents) && typeof estimated === "boolean" ? { prorationDate, todayCents, creditCents, estimated } : null;
 }
 
 /** The shop's config on a plan: label lives in the catalog; price, included calls and overage are saved with the shop. */

@@ -299,6 +299,8 @@ describe("Unlimited over HTTP: card step, Settings toggle, webhook sync", () => 
       if (request.method === "GET" && request.url.includes("/v1/subscriptions/sub_synthetic")) {
         return { json: { id: "sub_synthetic", status: "active", customer: "cus_synthetic", current_period_end: 1_770_000_000, metadata: {}, items: { data: items } } };
       }
+      // Stripe's invoice preview for a proposed change: one proration line.
+      if (request.method === "POST" && request.url.endsWith("/v1/invoices/create_preview")) return { json: { lines: { data: [{ amount: 1_000, proration: true }] } } };
       if (request.method === "POST" && request.url.endsWith("/v1/subscriptions/sub_synthetic")) return { json: { id: "sub_synthetic" } };
       return null;
     });
@@ -326,7 +328,12 @@ describe("Unlimited over HTTP: card step, Settings toggle, webhook sync", () => 
     }
     const { csrf } = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie } })).json() as { csrf: string };
     const post = (path: string, body: unknown = {}) => fetch(`${baseUrl}${path}`, { method: "POST", headers: { cookie, "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify(body) });
-    return { cookie, csrf, tenantId: account.tenantId, post };
+    // A paying shop's change goes through the price check first: preview, then confirm with that quote.
+    const change = async (plan: string, unlimited: boolean) => {
+      const quote = await (await post("/api/app/billing/preview", { plan, unlimited })).json() as { prorationDate: number | null; todayCents: number; creditCents: number; estimated: boolean };
+      return post("/api/app/billing/change", { plan, unlimited, confirm: quote.prorationDate === null ? undefined : { prorationDate: quote.prorationDate, todayCents: quote.todayCents, creditCents: quote.creditCents, estimated: quote.estimated } });
+    };
+    return { cookie, csrf, tenantId: account.tenantId, post, change };
   }
 
   it("signs up with Unlimited from the pricing page and checks out with the add-on and the half-off coupon", async () => {
@@ -365,7 +372,7 @@ describe("Unlimited over HTTP: card step, Settings toggle, webhook sync", () => 
     expect(settings.plan.unlimited).toBe(false);
     expect((await shop.post("/api/app/billing/plan", { plan: "pro" })).status).toBe(400);
     stripe.requests.length = 0;
-    const on = await shop.post("/api/app/billing/unlimited", { on: true });
+    const on = await shop.change("solo", true);
     expect(on.status).toBe(200);
     const update = stripe.requests.find((request) => request.method === "POST" && request.url.endsWith("/v1/subscriptions/sub_synthetic"))!;
     expect(Object.fromEntries(update.body)).toMatchObject({ "items[0][price]": "price_unl_solo", proration_behavior: "always_invoice", payment_behavior: "error_if_incomplete" });
@@ -377,7 +384,7 @@ describe("Unlimited over HTTP: card step, Settings toggle, webhook sync", () => 
     // Off again.
     items = [{ id: "si_plan", price: { id: "price_solo_synthetic" } }, { id: "si_unl", price: { id: "price_unl_solo" } }];
     now = new Date("2026-01-20T08:00:00.000Z");
-    expect((await shop.post("/api/app/billing/unlimited", { on: false })).status).toBe(200);
+    expect((await shop.change("solo", false)).status).toBe(200);
     expect(Object.fromEntries(stripe.requests.at(-1)!.body)).toMatchObject({ "items[0][id]": "si_unl", "items[0][deleted]": "true" });
     expect(await store.getConfig(shop.tenantId)).toMatchObject({ unlimitedCalls: false });
     expect(await unlimitedWindows(store, shop.tenantId)).toEqual([{ from: "2026-01-15T08:00:00.000Z", to: "2026-01-20T08:00:00.000Z" }]);
@@ -385,10 +392,10 @@ describe("Unlimited over HTTP: card step, Settings toggle, webhook sync", () => 
 
   it("keeps the add-on on a plan change, at the new plan's add-on price", async () => {
     const shop = await owner(true);
-    await shop.post("/api/app/billing/unlimited", { on: true });
+    await shop.change("solo", true);
     items = [{ id: "si_plan", price: { id: "price_solo_synthetic" } }, { id: "si_unl", price: { id: "price_unl_solo" } }];
     stripe.requests.length = 0;
-    expect((await shop.post("/api/app/billing/plan", { plan: "fleet" })).status).toBe(200);
+    expect((await shop.change("fleet", true)).status).toBe(200);
     expect(Object.fromEntries(stripe.requests.at(-1)!.body)).toMatchObject({ "items[0][price]": "price_fleet_synthetic", "items[1][id]": "si_unl", "items[1][price]": "price_unl_fleet" });
     expect(await store.getConfig(shop.tenantId)).toMatchObject({ planId: "fleet", includedCalls: 500, unlimitedCalls: true });
   });

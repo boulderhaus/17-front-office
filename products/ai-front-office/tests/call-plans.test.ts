@@ -274,6 +274,8 @@ describe("plan changes and the guarantee over HTTP", () => {
     stripe = fakeStripe((request) => {
       if (request.method === "POST" && request.url.endsWith("/v1/checkout/sessions")) return { json: { id: "cs_test_synthetic", url: "https://checkout.stripe.com/c/pay/cs_test_synthetic" } };
       if (request.method === "GET" && request.url.endsWith("/v1/subscriptions/sub_synthetic")) return { json: { id: "sub_synthetic", items: { data: [{ id: "si_plan", price: { id: subscriptionPrice } }, { id: "si_addon", price: { id: "price_addon" } }] } } };
+      // Stripe's invoice preview for a proposed change: one proration line.
+      if (request.method === "POST" && request.url.endsWith("/v1/invoices/create_preview")) return { json: { lines: { data: [{ amount: 1_000, proration: true }] } } };
       if (request.method === "POST" && request.url.endsWith("/v1/subscriptions/sub_synthetic")) return { json: { id: "sub_synthetic" } };
       if (request.url.includes("/v1/invoices?")) return { json: { data: [{ id: "in_first", amount_paid: 2_499, created: 1, charge: "ch_first" }] } };
       if (request.method === "GET" && request.url.includes("/v1/refunds?")) return { json: { data: [] } };
@@ -303,16 +305,21 @@ describe("plan changes and the guarantee over HTTP", () => {
     }
     const { csrf } = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie } })).json() as { csrf: string };
     const post = (path: string, body: unknown = {}) => fetch(`${baseUrl}${path}`, { method: "POST", headers: { cookie, "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify(body) });
-    return { cookie, tenantId: account.tenantId, accountId: account.id, post };
+    // A paying shop's change goes through the price check first: preview, then confirm with that quote.
+    const change = async (plan: string, unlimited: boolean) => {
+      const quote = await (await post("/api/app/billing/preview", { plan, unlimited })).json() as { prorationDate: number | null; todayCents: number; creditCents: number; estimated: boolean };
+      return post("/api/app/billing/change", { plan, unlimited, confirm: quote.prorationDate === null ? undefined : { prorationDate: quote.prorationDate, todayCents: quote.todayCents, creditCents: quote.creditCents, estimated: quote.estimated } });
+    };
+    return { cookie, tenantId: account.tenantId, accountId: account.id, post, change };
   }
 
   it("moves a paying owner to Team in Stripe with proration, then saves the new calls", async () => {
     const shop = await owner(true);
     stripe.requests.length = 0;
-    const response = await shop.post("/api/app/billing/plan", { plan: "team" });
+    const response = await shop.change("team", false);
     expect(response.status).toBe(200);
     const update = stripe.requests.find((request) => request.method === "POST" && request.url.endsWith("/v1/subscriptions/sub_synthetic"))!;
-    expect(Object.fromEntries(update.body)).toMatchObject({ "items[0][id]": "si_plan", "items[0][price]": "price_team_synthetic", proration_behavior: "always_invoice", payment_behavior: "error_if_incomplete" });
+    expect(Object.fromEntries(update.body)).toMatchObject({ "items[0][id]": "si_plan", "items[0][price]": "price_team_synthetic", proration_behavior: "always_invoice", payment_behavior: "error_if_incomplete", proration_date: String(Math.floor(now.getTime() / 1_000)) });
     expect(await store.getConfig(shop.tenantId)).toMatchObject({ planId: "team", flatMonthlyPriceCents: 17_999, includedCalls: 250 });
     const dashboard = await response.json() as { billing: { planId: string }; usage: { includedCalls: number } };
     expect(dashboard.billing.planId).toBe("team");
@@ -330,7 +337,7 @@ describe("plan changes and the guarantee over HTTP", () => {
 
   it("keeps the plan when settings are saved, whatever the price", async () => {
     const shop = await owner(true);
-    await shop.post("/api/app/billing/plan", { plan: "fleet" });
+    await shop.change("fleet", false);
     const settings = await (await fetch(`${baseUrl}/api/app/settings`, { headers: { cookie: shop.cookie } })).json() as { csrf: string; values: Record<string, unknown>; plan: { id: string; includedCalls: number; plans: unknown[] } };
     expect(settings.plan).toMatchObject({ id: "fleet", includedCalls: 500 });
     expect(settings.plan.plans).toHaveLength(3);
