@@ -13,7 +13,7 @@ import { api } from "@/lib/api"
 import { derive, forwardingOn, shortAddress, urgency } from "@/lib/derive"
 import { allCallsRowSelected, attentionRowSelected, nextOpenCall, PANEL_EDGE, panelSearch, revealDelta, ROW_FOCUS, rowShowsDone, SELECTED_ROW, stillOpenCalls } from "@/lib/selection"
 import { createTaskGate, QUIET_MS, runTaskAction, type TaskAction, type TaskDeps, type TaskMoves } from "@/lib/task-action"
-import { compactDate, dateKey, money, perCall, timeOnly } from "@/lib/format"
+import { callerLabel, compactDate, dateKey, money, perCall, timeOnly } from "@/lib/format"
 import { useMediaQuery, useMode } from "@/lib/mode"
 import type { ApiCall, ApiDashboard, ApiTask } from "@/lib/types"
 import { cn, tapWidth } from "@/lib/utils"
@@ -191,7 +191,7 @@ function TaskRow({ task, call, due, selected, open, wide }: { task: ApiTask; cal
   const body = (
     <>
       <span className="flex items-start justify-between gap-3">
-        <strong className="truncate text-[17px] font-semibold">{call?.fields.callerName ?? "Unknown caller"}</strong>
+        <strong className="truncate text-[17px] font-semibold">{callerLabel(call)}</strong>
         <ToneBadge tone={badge.tone}>{badge.label}</ToneBadge>
       </span>
       <span className="line-clamp-2 text-[15px] text-foreground/90">{call?.fields.problemDescription || task.reason}</span>
@@ -288,7 +288,7 @@ function VisitRow({ call, tz, nowMs, done }: { call: ApiCall; tz: string; nowMs:
       <DateTile value={call.fields.requestedStart!} tz={tz} nowMs={nowMs} />
       <span className="grid min-w-0 flex-1">
         <strong className="tabular text-base font-semibold">{timeOnly(call.fields.requestedStart!, tz)}</strong>
-        <span className="truncate text-[15px] text-muted-foreground">{call.fields.callerName ?? "Unknown caller"}</span>
+        <span className="truncate text-[15px] text-muted-foreground">{callerLabel(call)}</span>
       </span>
       <ToneBadge tone={booked ? "good" : done ? "neutral" : "warn"}>{booked ? "Booked" : done ? "Done" : "Confirm time"}</ToneBadge>
     </CallLink>
@@ -317,7 +317,7 @@ export function CallRow({ call, task, tz, selected, list }: { call: ApiCall; tas
   const spam = call.outcome === "ignored_spam"
   return (
     <CallLink callId={call.id} list={list} aria-current={selected} className={cn("grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-0.5 px-4 py-3 hover:bg-muted/50", ROW_FOCUS, selected && SELECTED_ROW)}>
-      <strong className={cn("truncate text-base font-semibold", spam && "font-medium text-muted-foreground")}>{call.fields.callerName ?? "Unknown caller"}</strong>
+      <strong className={cn("truncate text-base font-semibold", spam && "font-medium text-muted-foreground")}>{callerLabel(call)}</strong>
       <time className="tabular text-right text-sm text-muted-foreground">{compactDate(call.startedAt, tz)}</time>
       <span className="truncate text-[15px] text-muted-foreground">{call.fields.problemDescription || (spam ? "Robocall or sales pitch" : "No summary")}</span>
       <span className="flex items-center justify-end gap-1.5">

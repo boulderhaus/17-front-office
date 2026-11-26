@@ -5,7 +5,7 @@ import { useMode } from "@/lib/mode"
 import { ToneBadge } from "./bits"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import type { Tone } from "@/lib/derive"
-import { formatPhone, mapsUrl } from "@/lib/format"
+import { callerLabel, formatPhone, mapsUrl } from "@/lib/format"
 import type { ApiCall } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -18,7 +18,7 @@ export function CallHeader({ call, tone, label, page = false }: { call: ApiCall;
     // ph-no-capture on every block that shows a caller's name, number or address: never sent to PostHog.
     <div className="ph-no-capture grid gap-1.5">
       <div className="flex items-start justify-between gap-3">
-        <Heading className="text-2xl leading-tight font-semibold tracking-tight">{call.fields.callerName ?? "Unknown caller"}</Heading>
+        <Heading className="text-2xl leading-tight font-semibold tracking-tight">{callerLabel(call)}</Heading>
         <ToneBadge tone={tone} className="mt-0.5 h-7 px-2.5 text-sm">{label}</ToneBadge>
       </div>
       <p className="text-base text-foreground/85">{call.fields.problemDescription || (call.outcome === "ignored_spam" ? "Robocall or sales pitch. Nothing to do." : "No problem summary captured")}</p>

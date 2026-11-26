@@ -22,6 +22,14 @@ export function formatPhone(phone: string): string {
   return match ? `(${match[1]}) ${match[2]}-${match[3]}` : phone
 }
 
+/**
+ * Who called: the name they gave, else the number they called from. "Unknown caller" only when there is no
+ * number either (blocked or withheld).
+ */
+export function callerLabel(call: { phone: string | null; fields: { callerName: string | null } } | undefined): string {
+  return call?.fields.callerName?.trim() || (call?.phone ? formatPhone(call.phone) : "Unknown caller")
+}
+
 export function outcomeWords(outcome: string): string {
   return ({ in_progress: "On the call", booked: "Booked", pending_confirmation: "Needs your OK", handoff_queued: "Call back", ignored_spam: "Likely spam", failed: "Failed" } as Record<string, string>)[outcome] ?? outcome
 }
