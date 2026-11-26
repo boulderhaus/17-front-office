@@ -85,3 +85,8 @@ export function callBack(input: { key: string; state: unknown; base: string }): 
 export function leavesSettings(next: { pathname: string }): boolean {
   return !/^\/app\/settings(\/|$)/.test(next.pathname)
 }
+
+/** Where a settings row goes. Team is a page of its own (/app/team): every menu and list goes straight there, never through a stub. */
+export function settingsPageHref(id: string, base = "/app"): string {
+  return id === "team" ? `${base}/team` : `${base}/settings/${id}`
+}
