@@ -161,7 +161,7 @@ describe("homepage pricing", () => {
     ]);
     for (const [, line] of items) expect(line!.length).toBeLessThanOrEqual(80);
     // The guarantee says how to claim it: the refund is never automatic.
-    expect(items[1]![1]).toMatch(/Request refund/);
+    expect(items[1]![1]).toMatch(/Request(&nbsp;| )refund/);
     expect(css).not.toMatch(/\.perks[^{]*\{[^}]*border-left/);
     expect(css).not.toMatch(/\.perks li\{[^}]*background/);
     // Without the offer there is no limited-time note.
