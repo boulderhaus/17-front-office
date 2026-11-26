@@ -170,6 +170,140 @@ describe("HTTP boundary", () => {
     expect((await store.getCallByProviderId("triage-call"))?.emergency?.severity).toBe("life_safety");
   });
 
+  it("still triages when the provider's caller number is missing, not text or an unfilled placeholder", async () => {
+    const headers = { authorization: `Bearer ${toolToken}`, "content-type": "application/json" };
+    const unusable: Array<[string, unknown]> = [["from-missing", undefined], ["from-number", 15555550110], ["from-placeholder", "{{telnyx_end_user_target}}"], ["from-empty", ""], ["from-long", "5".repeat(41)], ["from-null-text", "null"]];
+    for (const [id, from] of unusable) {
+      const response = await fetch(`${baseUrl}/tools/triage`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ provider_call_id: id, ...(from === undefined ? {} : { from_number: from }), problem_description: "The basement smells like gas" }),
+      });
+      expect(await response.json(), id).toMatchObject({ severity: "life_safety", emergency: true });
+      expect((await store.getCallByProviderId(id))?.fromNumber, id).toBe("unknown");
+    }
+    expect(logs.some((entry) => entry.event === "tool_request_failed")).toBe(false);
+    expect(logs.filter((entry) => entry.event === "tool_input_repaired").map((entry) => entry.fromNumber)).toEqual(["missing", "number", "placeholder", "empty", "too_long", "null"]);
+  });
+
+  it("uses the number the call started with when the provider sends none on a later tool", async () => {
+    const headers = { authorization: `Bearer ${toolToken}`, "content-type": "application/json" };
+    await fetch(`${baseUrl}/tools/save-intake`, { method: "POST", headers, body: JSON.stringify({ provider_call_id: "kept-number", from_number: "+15555550110", problem_description: "No heat" }) });
+    const handoff = await fetch(`${baseUrl}/tools/request-human`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ provider_call_id: "kept-number", reason: "explicit_request", caller_quote: "I want to speak to the owner" }),
+    });
+    expect(await handoff.json()).toMatchObject({ status: "handoff_queued" });
+    const call = await store.getCallByProviderId("kept-number");
+    expect(call?.fromNumber).toBe("+15555550110");
+    expect(call?.fields.callbackNumber).toBe("+15555550110");
+  });
+
+  it("reads a null optional field as not given", async () => {
+    const headers = { authorization: `Bearer ${toolToken}`, "content-type": "application/json" };
+    const triage = await fetch(`${baseUrl}/tools/triage`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ provider_call_id: "null-fields", from_number: "+15555550110", caller_name: null, llm_score: null, llm_reason: null, problem_description: "Routine maintenance" }),
+    });
+    expect(await triage.json()).toMatchObject({ emergency: false });
+    const intake = await fetch(`${baseUrl}/tools/save-intake`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ provider_call_id: "null-fields", from_number: "+15555550110", caller_name: "Sam", company_name: null, equipment_details: null, confidence: null, human_requested: null, problem_description: "Routine maintenance" }),
+    });
+    expect(await intake.json()).toMatchObject({ status: "saved" });
+    expect((await store.getCallByProviderId("null-fields"))?.fields).toMatchObject({ callerName: "Sam", problemDescription: "Routine maintenance" });
+    expect(logs.some((entry) => entry.event === "tool_request_failed")).toBe(false);
+    expect(logs.filter((entry) => entry.event === "tool_input_repaired")).toEqual([
+      expect.objectContaining({ tool: "triage_call", nullFields: 3 }),
+      expect.objectContaining({ tool: "save_intake", nullFields: 4 }),
+    ]);
+  });
+
+  it("drops an optional field the model got wrong instead of failing triage or the save", async () => {
+    const headers = { authorization: `Bearer ${toolToken}`, "content-type": "application/json" };
+    const triage = await fetch(`${baseUrl}/tools/triage`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ provider_call_id: "bad-optional", from_number: "+15555550110", caller_name: "N".repeat(200), llm_score: 0.2, llm_reason: 7, problem_description: "The basement smells like gas" }),
+    });
+    expect(await triage.json()).toMatchObject({ severity: "life_safety", emergency: true });
+    const intake = await fetch(`${baseUrl}/tools/save-intake`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ provider_call_id: "bad-optional-intake", from_number: "+15555550110", caller_name: "Sam", confidence: "My number is 555-555-0142", company_name: 42, problem_description: "Routine maintenance" }),
+    });
+    expect(await intake.json()).toMatchObject({ status: "saved" });
+    expect((await store.getCallByProviderId("bad-optional-intake"))?.fields).toMatchObject({ callerName: "Sam", problemDescription: "Routine maintenance", companyName: null });
+    const repaired = logs.filter((entry) => entry.event === "tool_input_repaired");
+    expect(repaired).toEqual([
+      expect.objectContaining({ tool: "triage_call", dropped: "caller_name,llm_reason" }),
+      expect.objectContaining({ tool: "save_intake", dropped: "company_name,confidence" }),
+    ]);
+    expect(JSON.stringify(repaired)).not.toMatch(/0142|NNNN|42/);
+  });
+
+  it("reads a yes or no sent as text, and never drops a request for a person or a recording objection", async () => {
+    const headers = { authorization: `Bearer ${toolToken}`, "content-type": "application/json" };
+    const save = (id: string, fields: Record<string, unknown>) => fetch(`${baseUrl}/tools/save-intake`, {
+      method: "POST", headers, body: JSON.stringify({ provider_call_id: id, from_number: "+15555550110", problem_description: "Routine maintenance", ...fields }),
+    });
+    expect(await (await save("text-flags", { human_requested: "Yes", recording_disclosure_declined: "true", diagnostic_fee_accepted: "no" })).json()).toMatchObject({ status: "saved" });
+    const call = await store.getCallByProviderId("text-flags");
+    expect(call?.fields).toMatchObject({ humanRequested: true, diagnosticFeeAccepted: false });
+    expect(call?.consentState).toBe("declined");
+
+    expect(await (await save("unreadable-flag", { human_requested: "maybe" })).json()).toMatchObject({ ok: false, status: "unavailable" });
+    expect(await (await save("unreadable-objection", { recording_disclosure_declined: 1 })).json()).toMatchObject({ ok: false, status: "unavailable" });
+    expect(logs.filter((entry) => entry.event === "tool_request_failed").map((entry) => entry.fields)).toEqual(["human_requested:invalid_type", "recording_disclosure_declined:invalid_type"]);
+    expect(await store.getCallByProviderId("unreadable-flag")).toBeNull();
+  });
+
+  it("reads the model's emergency score sent as text, and never treats an unreadable score as routine", async () => {
+    const headers = { authorization: `Bearer ${toolToken}`, "content-type": "application/json" };
+    const triage = (id: string, score: unknown) => fetch(`${baseUrl}/tools/triage`, {
+      method: "POST", headers, body: JSON.stringify({ provider_call_id: id, from_number: "+15555550110", llm_score: score, problem_description: "The ceiling is sagging and about to collapse" }),
+    });
+    expect(await (await triage("score-number", 0.95)).json()).toMatchObject({ emergency: true });
+    expect(await (await triage("score-text", " 0.95 ")).json()).toMatchObject({ emergency: true });
+    expect(await (await triage("score-empty", "")).json()).toMatchObject({ emergency: false });
+    expect(await (await triage("score-words", "high")).json()).toMatchObject({ ok: false, status: "unavailable" });
+    expect(await (await triage("score-percent", "95")).json()).toMatchObject({ ok: false, status: "unavailable" });
+    expect(logs.filter((entry) => entry.event === "tool_request_failed").map((entry) => entry.fields)).toEqual(["llm_score:invalid_type", "llm_score:too_big"]);
+  });
+
+  it("treats empty text or the word null in an optional field as not given", async () => {
+    const response = await fetch(`${baseUrl}/tools/save-intake`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${toolToken}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        provider_call_id: "empty-optionals", from_number: "+15555550110", problem_description: "Routine maintenance", caller_name: "null", company_name: "undefined",
+        confidence: "", service_category_confidence: "", human_requested: "", diagnostic_fee_accepted: "", recording_disclosure_declined: "",
+      }),
+    });
+    expect(await response.json()).toMatchObject({ status: "saved" });
+    const call = await store.getCallByProviderId("empty-optionals");
+    expect(call?.fields).toMatchObject({ callerName: null, companyName: null, humanRequested: false });
+    expect(call?.consentState).not.toBe("declined");
+    expect(logs.some((entry) => entry.event === "tool_request_failed")).toBe(false);
+    expect(logs.find((entry) => entry.event === "tool_input_repaired")).toMatchObject({ nullFields: 2, dropped: expect.stringContaining("human_requested") });
+  });
+
+  it("logs which field a rejected tool call failed on, never what was said", async () => {
+    const response = await fetch(`${baseUrl}/tools/save-intake`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${toolToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ provider_call_id: "bad-fields", from_number: "+15555550110", problem_description: null, caller_name: "My number is 555-555-0142" }),
+    });
+    expect(await response.json()).toMatchObject({ ok: false, status: "unavailable" });
+    const failed = logs.find((entry) => entry.event === "tool_request_failed");
+    expect(failed).toMatchObject({ tool: "save_intake", status: 400, fields: "problem_description:invalid_type" });
+    expect(JSON.stringify(logs)).not.toContain("0142");
+    expect(await store.getCallByProviderId("bad-fields")).toBeNull();
+  });
+
   it("rejects audio complaints as handoff requests but accepts an explicit request for a person", async () => {
     const headers = { authorization: `Bearer ${toolToken}`, "content-type": "application/json" };
     const rejected = await fetch(`${baseUrl}/tools/request-human`, {

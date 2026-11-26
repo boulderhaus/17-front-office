@@ -220,6 +220,47 @@ describe("every tool failure answers 200 in plain English", () => {
   });
 });
 
+describe("a signed tool call whose provider-filled caller number is unusable", () => {
+  it("still triages, saves and marks on the number the call started with, and logs why", async () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const rawPublicKey = (publicKey.export({ type: "spki", format: "der" }) as Buffer).subarray(-32).toString("base64");
+    const store = new InMemoryStore();
+    await store.saveConfig({ ...createDemoConfig(), paused: false });
+    await new CallService(store, new InMemoryCalendar(), clock, "https://front-office.example")
+      .recordStarted({ eventId: "start:forwarded", tenantId: "demo", providerCallId: "v3:forwarded", fromNumber: "+15555550110", startedAt: clock.now().toISOString() });
+    const logs: Array<Record<string, unknown>> = [];
+    const env = loadEnvironment({
+      NODE_ENV: "production", DEMO_MODE: "false", PROVIDER_TEST_MODE: "true",
+      PUBLIC_BASE_URL: "https://front-office.example", ADMIN_TOKEN: "admin-token-abcdefghijklmnopqrstuvwxyz", TOOL_TOKEN: toolToken,
+      SESSION_SIGNING_KEY: "session-signing-key-abcdefghijklmnopqrstuvwxyz",
+      DATABASE_URL: "postgresql://synthetic", DATA_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+      TELNYX_API_KEY: "synthetic", TELNYX_PUBLIC_KEY: rawPublicKey, TELNYX_FROM_NUMBER: "+15555550199",
+      TELNYX_MESSAGING_PROFILE_ID: "00000000-0000-4000-8000-000000000001", TELNYX_ASSISTANT_ID: "assistant-synthetic",
+      GOOGLE_CLIENT_ID: "synthetic", GOOGLE_CLIENT_SECRET: "synthetic",
+      OWNER_DESTINATIONS_JSON: "{\"owner-primary\":\"+15555550100\"}",
+    });
+    const baseUrl = await listen({ env, store, calendar: new InMemoryCalendar(), clock, integrations: {}, logger: (entry) => { logs.push(entry); } });
+    const signed = async (path: string, payload: Record<string, unknown>) => {
+      const body = JSON.stringify({ provider_call_id: "v3:forwarded", ...payload });
+      return json(await fetch(`${baseUrl}${path}`, { method: "POST", headers: { ...signedHeaders(body, privateKey, clock.now()), "x-telnyx-call-control-id": "v3:forwarded" }, body }));
+    };
+
+    expect(await signed("/tools/triage", { from_number: null, problem_description: "No heat, wants service tomorrow" })).toMatchObject({ severity: expect.any(String) });
+    expect(await signed("/tools/save-intake", { caller_name: "Sam", company_name: null, problem_description: "No heat, wants service tomorrow" })).toMatchObject({ status: "saved" });
+    expect(await signed("/tools/mark-spam", { from_number: 15555550110, category: "wrong_number", caller_quote: "Sorry, wrong number" })).toMatchObject({ status: expect.stringMatching(/^(marked|continue)$/) });
+    expect(await signed("/tools/request-human", { from_number: "{{telnyx_end_user_target}}", reason: "explicit_request", caller_quote: "I want to speak to the owner" })).toMatchObject({ status: "handoff_queued" });
+
+    const call = await store.getCallByProviderId("v3:forwarded");
+    expect(call?.fromNumber).toBe("+15555550110");
+    expect(call?.fields).toMatchObject({ callerName: "Sam", problemDescription: "No heat, wants service tomorrow", callbackNumber: "+15555550110" });
+    expect(logs.some((entry) => entry.event === "tool_request_failed")).toBe(false);
+    expect(logs.filter((entry) => entry.event === "tool_input_repaired").map((entry) => [entry.tool, entry.fromNumber])).toEqual([
+      ["triage_call", "null"], ["save_intake", "missing"], ["mark_spam_call", "number"], ["request_human", "placeholder"],
+    ]);
+    expect(JSON.stringify(logs)).not.toContain("5555550110");
+  });
+});
+
 describe("the tool deadline aborts work and a late write lands at most once", () => {
   const booking = (callId: string, slotStart: string) => ({
     provider_call_id: callId, slot_start: slotStart, caller_name: "Synthetic Caller", callback_number: "+15555550110",

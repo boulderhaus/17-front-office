@@ -163,6 +163,46 @@ const dateTime = z.string().datetime({ offset: true });
 const baseToolSchema = z.object({
   provider_call_id: z.string().min(1),
 });
+/** The call record's value when the caller's number isn't known. */
+const UNKNOWN_CALLER = "unknown";
+/** Why the provider's caller number can't be used, or null when it can. A kind for the log, never the value. */
+function fromNumberProblem(value: unknown): string | null {
+  if (value === undefined) return "missing";
+  if (isNotGiven(value)) return "null";
+  if (typeof value !== "string") return typeof value;
+  const text = value.trim();
+  if (text.length < 3) return text ? "too_short" : "empty";
+  if (text.length > 40) return "too_long";
+  return text.includes("{{") ? "placeholder" : null;
+}
+/**
+ * The provider fills this in, not the model. A missing, non-text or unresolved value must never fail a tool
+ * (triage is the safety check): it reads as unknown, and the tool uses the number the call started with.
+ */
+const providerFromNumber = z.string().refine((value) => fromNumberProblem(value) === null).transform((value) => value.trim()).catch(UNKNOWN_CALLER);
+/** An optional field the model got wrong is dropped, not fatal: the tool still runs on its required fields. */
+const lenient = <T extends z.ZodType>(schema: T) => schema.optional().catch(undefined);
+const FLAG_TEXT: ReadonlyMap<string, boolean> = new Map([["true", true], ["yes", true], ["false", false], ["no", false]]);
+/**
+ * A yes/no the caller's rights hang on (wants a person, objects to recording, accepts a fee). The model may
+ * send it as text; it is read, never dropped: empty text means not given, and an unreadable value fails the
+ * call instead of losing it.
+ */
+const flag = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const text = value.trim().toLowerCase();
+  return text === "" ? undefined : FLAG_TEXT.get(text) ?? value;
+}, z.boolean().optional()).optional();
+/**
+ * The model's own emergency score. It alone can tip triage to urgent, so it is read from text when sent that
+ * way and never dropped: empty text means not given, and an unreadable or out-of-range score fails the call
+ * (the model is then told triage is unavailable and to follow the safety rules itself).
+ */
+const emergencyScore = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  return text === "" ? undefined : Number.isFinite(Number(text)) ? Number(text) : value;
+}, z.number().min(0).max(1).optional()).optional();
 const availabilitySchema = baseToolSchema.extend({
   window_start: dateTime,
   window_end: dateTime,
@@ -171,11 +211,11 @@ const serviceAreaSchema = baseToolSchema.extend({
   address: z.string().min(3).max(500),
 });
 const triageSchema = baseToolSchema.extend({
-  from_number: z.string().min(3).max(40),
-  caller_name: z.string().max(120).optional(),
+  from_number: providerFromNumber,
+  caller_name: lenient(z.string().max(120)),
   problem_description: z.string().min(1).max(2_000),
-  llm_score: z.number().min(0).max(1).optional(),
-  llm_reason: z.string().max(500).optional(),
+  llm_score: emergencyScore,
+  llm_reason: lenient(z.string().max(500)),
 });
 const bookingSchema = baseToolSchema.extend({
   slot_start: dateTime,
@@ -188,28 +228,28 @@ const bookingSchema = baseToolSchema.extend({
   diagnostic_fee_accepted: z.boolean(),
 });
 const handoffSchema = baseToolSchema.extend({
-  from_number: z.string().min(3).max(40),
+  from_number: providerFromNumber,
   reason: z.enum(["explicit_request", "emergency"]),
   caller_quote: z.string().min(1).max(500),
-  caller_name: z.string().max(120).optional(),
-  problem_description: z.string().max(2_000).optional(),
+  caller_name: lenient(z.string().max(120)),
+  problem_description: lenient(z.string().max(2_000)),
 });
 const intakeSchema = baseToolSchema.extend({
-  from_number: z.string().min(3).max(40),
-  caller_name: z.string().max(120).optional(),
-  company_name: z.string().max(120).optional(),
-  callback_number: z.string().max(40).optional(),
-  service_address: z.string().max(500).optional(),
-  service_category: z.string().max(120).optional(),
-  service_category_confidence: z.number().min(0).max(1).optional(),
+  from_number: providerFromNumber,
+  caller_name: lenient(z.string().max(120)),
+  company_name: lenient(z.string().max(120)),
+  callback_number: lenient(z.string().max(40)),
+  service_address: lenient(z.string().max(500)),
+  service_category: lenient(z.string().max(120)),
+  service_category_confidence: lenient(z.number().min(0).max(1)),
   problem_description: z.string().min(1).max(2_000),
-  equipment_details: z.string().max(1_000).optional(),
-  access_notes: z.string().max(1_000).optional(),
-  diagnostic_fee_accepted: z.boolean().optional(),
-  human_requested: z.boolean().optional(),
-  confidence: z.number().min(0).max(1).optional(),
-  recording_disclosure_given: z.boolean().optional(),
-  recording_disclosure_declined: z.boolean().optional(),
+  equipment_details: lenient(z.string().max(1_000)),
+  access_notes: lenient(z.string().max(1_000)),
+  diagnostic_fee_accepted: flag,
+  human_requested: flag,
+  confidence: lenient(z.number().min(0).max(1)),
+  recording_disclosure_given: lenient(z.boolean()),
+  recording_disclosure_declined: flag,
 });
 const pilotSignupSchema = z.object({
   ownerName: z.string().trim().min(2).max(120),
@@ -276,6 +316,7 @@ export interface AppDependencies {
 
 /** An authenticated voice tool call whose budget is already charged, before its arguments are parsed. */
 interface ToolRequest {
+  name: VoiceToolName;
   rawBody: string;
   /** The provider call id the budget was charged to. */
   callId: string;
@@ -555,7 +596,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       log({ level: "warn", event: "tool_call_limited", requestId, tool, reason: error.reason });
     } else {
       const status = error instanceof HttpError ? error.status : error instanceof z.ZodError ? 400 : error instanceof ToolWriteInProgressError ? 409 : 500;
-      log({ level: status >= 500 ? "error" : "warn", event: "tool_request_failed", requestId, tool, status, error: safeError(error) });
+      log({ level: status >= 500 ? "error" : "warn", event: "tool_request_failed", requestId, tool, status, error: safeError(error), ...(error instanceof z.ZodError ? { fields: invalidFields(error) } : {}) });
       if (status >= 500) telemetry.captureException(error, { route: `tool:${tool}`, method: "POST", status, requestId });
     }
     if (response.headersSent) {
@@ -1031,7 +1072,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (!limiter.allow(`provider:${callId}:${tool}`, 240, 60_000)) throw new ToolLimitError(tool, "rate_limited");
     await spendToolBudget(callId, tool);
     signal.throwIfAborted();
-    const context: ToolRequest = { rawBody, callId, signal };
+    const context: ToolRequest = { name: tool, rawBody, callId, signal };
     const result = await toolResult(url.pathname, context);
     signal.throwIfAborted();
     if (!response.headersSent) sendJson(response, 200, result);
@@ -1040,7 +1081,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   async function toolResult(pathname: string, tool: ToolRequest): Promise<unknown> {
     if (pathname === "/tools/save-intake") return handleIntake(tool);
     if (pathname === "/tools/approved-answer") {
-      const input = baseToolSchema.extend({ kind: z.enum(["price", "answer"]), key: z.string().max(120) }).strict().parse(toolPayload(tool));
+      const input = parseTool(tool, baseToolSchema.extend({ kind: z.enum(["price", "answer"]), key: z.string().max(120) }).strict());
       requireToolCallId(tool, input.provider_call_id);
       const tenantId = await tenantForCall(input.provider_call_id);
       await requireOperational(tenantId);
@@ -1054,17 +1095,31 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (pathname === "/tools/book") return handleBooking(tool);
     if (pathname === "/tools/request-human") return handleHandoff(tool);
     if (pathname === "/tools/mark-spam") {
-      const input = baseToolSchema.extend({ from_number: z.string().min(3).max(40), category: z.enum(SPAM_CATEGORIES), caller_quote: z.string().min(1).max(500) }).parse(toolPayload(tool));
+      const input = parseTool(tool, baseToolSchema.extend({ from_number: providerFromNumber, category: z.enum(SPAM_CATEGORIES), caller_quote: z.string().min(1).max(500) }));
       requireToolCallId(tool, input.provider_call_id);
       const tenantId = await tenantForCall(input.provider_call_id);
       await requireOperational(tenantId);
-      return service.markSpam({ tenantId, providerCallId: input.provider_call_id, fromNumber: input.from_number, category: input.category, callerQuote: input.caller_quote });
+      return service.markSpam({ tenantId, providerCallId: input.provider_call_id, fromNumber: await callerNumber(input.provider_call_id, input.from_number), category: input.category, callerQuote: input.caller_quote });
     }
     throw new HttpError(404, "Not found");
   }
 
-  function toolPayload(tool: ToolRequest): unknown {
-    return unwrapToolPayload(parseJson<unknown>(tool.rawBody));
+  /**
+   * Validate a tool body. Whatever had to be tolerated to get there (nulls, a dropped optional field, an
+   * unusable caller number) is logged by kind and field name, so a broken provider preset never hides.
+   */
+  function parseTool<S extends z.ZodObject>(tool: ToolRequest, schema: S): z.infer<S> {
+    const sent = unwrapToolPayload(parseJson<unknown>(tool.rawBody));
+    const input = schema.parse(withoutNullFields(sent));
+    const repairs = inputRepairs(schema, sent, input);
+    if (repairs) log({ level: "warn", event: "tool_input_repaired", tool: tool.name, ...repairs });
+    return input;
+  }
+
+  /** The caller's number for a tool: the provider's value when usable, otherwise the number the call started with. */
+  async function callerNumber(providerCallId: string, provided: string): Promise<string> {
+    if (provided !== UNKNOWN_CALLER) return provided;
+    return (await dependencies.store.getCallByProviderId(providerCallId))?.fromNumber ?? UNKNOWN_CALLER;
   }
 
   /** The signed payload must name the call the budget was charged to. */
@@ -3458,14 +3513,14 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   }
 
   async function handleIntake(tool: ToolRequest): Promise<unknown> {
-    const input = intakeSchema.parse(toolPayload(tool));
+    const input = parseTool(tool, intakeSchema);
     requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
     const result = await service.saveIntake({
       tenantId,
       providerCallId: input.provider_call_id,
-      fromNumber: input.from_number,
+      fromNumber: await callerNumber(input.provider_call_id, input.from_number),
       fields: {
         problemDescription: input.problem_description,
         ...(input.caller_name === undefined ? {} : { callerName: input.caller_name }),
@@ -3487,7 +3542,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   }
 
   async function handleAvailability(tool: ToolRequest): Promise<unknown> {
-    const input = availabilitySchema.parse(toolPayload(tool));
+    const input = parseTool(tool, availabilitySchema);
     requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
@@ -3502,7 +3557,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   }
 
   async function handleServiceArea(tool: ToolRequest): Promise<unknown> {
-    const input = serviceAreaSchema.parse(toolPayload(tool));
+    const input = parseTool(tool, serviceAreaSchema);
     requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
@@ -3515,14 +3570,14 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   }
 
   async function handleTriage(tool: ToolRequest): Promise<unknown> {
-    const input = triageSchema.parse(toolPayload(tool));
+    const input = parseTool(tool, triageSchema);
     requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
     const result = await service.triageCall({
       tenantId,
       providerCallId: input.provider_call_id,
-      fromNumber: input.from_number,
+      fromNumber: await callerNumber(input.provider_call_id, input.from_number),
       problemDescription: input.problem_description,
       ...(input.caller_name === undefined ? {} : { callerName: input.caller_name }),
       ...(input.llm_score === undefined ? {} : { llmScore: input.llm_score }),
@@ -3532,7 +3587,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   }
 
   async function handleBooking(tool: ToolRequest): Promise<unknown> {
-    const input = bookingSchema.parse(toolPayload(tool));
+    const input = parseTool(tool, bookingSchema);
     requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
@@ -3553,7 +3608,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   }
 
   async function handleHandoff(tool: ToolRequest): Promise<unknown> {
-    const input = handoffSchema.parse(toolPayload(tool));
+    const input = parseTool(tool, handoffSchema);
     requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
@@ -3570,7 +3625,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const result = await service.queueHumanHandoff({
       tenantId,
       providerCallId: input.provider_call_id,
-      fromNumber: input.from_number,
+      fromNumber: await callerNumber(input.provider_call_id, input.from_number),
       ...(input.caller_name === undefined ? {} : { callerName: input.caller_name }),
       ...(input.problem_description === undefined ? {} : { problemDescription: input.problem_description }),
       reason: input.reason,
@@ -3984,6 +4039,36 @@ const OWNER_SETUP_STUCK = "We couldn’t finish setting up your line. We’ve be
 
 function toolForPath(pathname: string): VoiceToolName | null {
   return pathname.startsWith("/tools/") ? TOOL_ROUTES[pathname.slice(7)] ?? null : null;
+}
+
+/** Null, or the words "null" / "undefined" as text: how a model or the provider writes a field it has nothing for. */
+function isNotGiven(value: unknown): boolean {
+  return value === null || (typeof value === "string" && /^\s*(null|undefined)\s*$/i.test(value));
+}
+
+/** A field with nothing in it means "not given", so it is dropped (a required one still fails). */
+function withoutNullFields(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  return Object.fromEntries(Object.entries(value).filter(([, field]) => !isNotGiven(field)));
+}
+
+/**
+ * What was tolerated in a tool body, or null when nothing was: how many fields were null, which of our optional
+ * fields were sent but unusable, and why the caller number was. Our field names, counts and kinds only.
+ */
+function inputRepairs(schema: z.ZodObject, sent: unknown, parsed: Record<string, unknown>): Record<string, unknown> | null {
+  const body = sent && typeof sent === "object" && !Array.isArray(sent) ? sent as Record<string, unknown> : {};
+  const fields = Object.keys(schema.shape);
+  const nullFields = Object.values(body).filter(isNotGiven).length;
+  const dropped = fields.filter((key) => key !== "from_number" && body[key] !== undefined && !isNotGiven(body[key]) && parsed[key] === undefined);
+  const fromNumber = fields.includes("from_number") ? fromNumberProblem(body.from_number) : null;
+  if (!nullFields && !dropped.length && !fromNumber) return null;
+  return { ...(nullFields ? { nullFields } : {}), ...(dropped.length ? { dropped: dropped.join(",") } : {}), ...(fromNumber ? { fromNumber } : {}) };
+}
+
+/** Which fields failed and how (names and types only, never what the caller said), so a rejected tool call can be fixed from the log. */
+function invalidFields(error: z.ZodError): string {
+  return error.issues.slice(0, 8).map((issue) => `${issue.path.join(".") || "(body)"}:${issue.code}`).join(",");
 }
 
 function unwrapToolPayload(value: unknown): unknown {
