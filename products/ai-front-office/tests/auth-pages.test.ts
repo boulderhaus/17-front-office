@@ -90,6 +90,10 @@ describe("public page system", () => {
     expect(page).not.toContain("Bigger shop");
   });
 
+  it("signup and sign-in carry the Call Otto wordmark, not plain text", () => {
+    for (const page of [renderOwnerSignup(), renderOwnerLogin()]) expect(page).toContain('<a class="brand smallbrand" href="/"><b class="mark" aria-hidden="true">CO</b>Call <em>Otto</em></a>');
+  });
+
   it("sign-in, check-email, link, forgot and reset pages share one eyebrow", async () => {
     const render = await import("../src/admin/render.js");
     for (const page of [render.renderOwnerLogin(), render.renderSignInLinkSent("owner@synthetic.example"), render.renderSignInLinkConfirm("token"), render.renderForgotPassword({ emailEnabled: true }), render.renderResetPassword("token")]) {

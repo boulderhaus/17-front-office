@@ -59,7 +59,8 @@ export function SettingsCard({ title, description, children, danger, id, action 
 
 function Field({ label, hint, children, className, error }: { label: string; hint?: ReactNode; children: ReactNode; className?: string; error?: string | null }) {
   return (
-    <label className={cn("grid min-w-0 gap-1.5", className)}>
+    // content-start: in a two-up row, a field without a hint keeps its box level with the one beside it.
+    <label className={cn("grid min-w-0 content-start gap-1.5", className)}>
       <span className="text-[15px] font-medium">{label}</span>
       {children}
       {error ? <span role="alert" className="text-sm font-medium text-red-700">{error}</span> : hint && <span className="text-sm text-muted-foreground text-pretty">{hint}</span>}
@@ -683,11 +684,9 @@ export function PlanSection() {
   }, [changed, target, proposal.plan, proposalUnlimited])
 
   const revert = () => { quoteGeneration.current++; setProposal({ plan: plan.id, unlimited: plan.unlimited }); setConfirmOpen(false) }
-  const flipUnlimited = (on: boolean) => {
-    setProposal((current) => ({ ...current, unlimited: on }))
-    // A paying shop confirms the exact amount first; before paying, the pick is just remembered (below).
-    if (plan.paid) setConfirmOpen(true)
-  }
+  // Like a plan pick: the switch only proposes. The price bar's one button asks for the exact amount (walk 11-26
+  // re-walk: the switch used to open the question too, so Unlimited was confirmed twice).
+  const flipUnlimited = (on: boolean) => setProposal((current) => ({ ...current, unlimited: on }))
   const apply = async () => {
     if (!target) return
     setBusy(true)

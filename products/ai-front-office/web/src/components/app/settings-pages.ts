@@ -19,6 +19,6 @@ export function settingsPage(id: SettingsPageId) {
 }
 
 /** Where a settings row goes. Team is a page of its own (/app/team): every menu and list goes straight there, never through a stub. */
-export function settingsPageHref(id: SettingsPageId, base = "/app"): string {
+export function settingsPageHref(id: SettingsPageId | (string & {}), base = "/app"): string {
   return id === "team" ? `${base}/team` : `${base}/settings/${id}`
 }

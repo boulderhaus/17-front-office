@@ -234,7 +234,7 @@ const SIGN_IN_STYLE = `<style>
 </style>`;
 
 function authHeader(link: "signup" | "login"): string {
-  return `${AUTH_APP_STYLE}<header class="publicnav"><a class="brand smallbrand" href="/"><span>Call</span> Otto</a><nav>${link === "signup" ? `<a href="/signup">Get started</a>` : `<a href="/login">Sign in</a>`}</nav></header>`;
+  return `${AUTH_APP_STYLE}<header class="publicnav"><a class="brand smallbrand" href="/"><b class="mark" aria-hidden="true">CO</b>Call <em>Otto</em></a><nav>${link === "signup" ? `<a href="/signup">Get started</a>` : `<a href="/login">Sign in</a>`}</nav></header>`;
 }
 
 /**
@@ -246,7 +246,7 @@ const AUTH_APP_STYLE = `<style>
 body:has(.authpage){background-image:none;background-color:#faf8f1}
 body:has(.authpage) .publicnav{padding-top:10px;padding-bottom:10px;border-bottom:1px solid #e6e1d3;align-items:center}
 body:has(.authpage) .brand.smallbrand{font:600 22px/44px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:-.01em;color:#0b2545;display:inline-block;min-height:44px}
-body:has(.authpage) .brand.smallbrand span{font-style:normal}
+body:has(.authpage) .brand.smallbrand{display:inline-flex;align-items:center;gap:10px}body:has(.authpage) .brand.smallbrand .mark{display:grid;place-items:center;width:36px;height:36px;border-radius:10px;background:#e9f447;color:#0b2545;font:900 14px/1 ui-sans-serif,system-ui,-apple-system,sans-serif;letter-spacing:-.02em}body:has(.authpage) .brand.smallbrand em{font-family:Georgia,serif;font-style:italic;font-weight:600}
 body:has(.authpage) .publicnav nav a{display:inline-flex;align-items:center;min-height:44px;color:#0b2545}
 .authpage{color:#0b2545}
 .authpage .formintro h1{font:650 clamp(30px,7vw,40px)/1.15 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:-.02em}

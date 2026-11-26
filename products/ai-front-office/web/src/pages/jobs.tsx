@@ -37,13 +37,14 @@ export function JobsPage() {
   const shown = columns.find((column) => column.id === tab)!
   return (
     <div className="grid gap-4">
-      <div role="tablist" aria-label="Jobs" className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      {/* All four fit on one line on a phone (walk 11-26, APP-08): the name over its count, nothing scrolls off the edge. */}
+      <div role="tablist" aria-label="Jobs" className="grid grid-cols-4 gap-1 rounded-xl bg-secondary/70 p-1">
         {columns.map((column) => {
           const active = column.id === tab
           return (
             <button key={column.id} type="button" role="tab" aria-selected={active} onClick={() => setParams({ tab: column.id }, { replace: true })}
-              className={cn("inline-flex h-11 shrink-0 items-center gap-2 rounded-full border px-4 text-[15px] font-semibold whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-ink",
-                active ? "border-brand-ink bg-brand-ink text-white" : "bg-card text-foreground/80 hover:bg-muted")}>
+              className={cn("flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-lg px-1 py-1.5 text-[13px] leading-tight font-semibold whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-ink sm:text-[15px]",
+                active ? "bg-brand-ink text-white" : "text-foreground/80 hover:bg-card")}>
               {column.title}
               <Count column={column} inverted={active} />
             </button>
