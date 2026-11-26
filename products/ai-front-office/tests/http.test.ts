@@ -93,8 +93,17 @@ describe("HTTP boundary", () => {
     expect(logs.some((entry) => entry.event === "tool_request_failed" && entry.status === 401)).toBe(true);
   });
 
-  it("shows a public read-only owner dashboard with synthetic data", async () => {
-    const response = await fetch(`${baseUrl}/demo`);
+  it("closes the demo dashboard to visitors and keeps it, read-only, for the admin", async () => {
+    // A visitor is sent to the homepage from the demo and every page under it; its data answers 404.
+    for (const path of ["/demo", "/demo?view=pipeline", "/demo/jobs", "/demo/calendar", "/demo/calls/anything", "/demo/unknown"]) {
+      const visitor = await fetch(`${baseUrl}${path}`, { redirect: "manual" });
+      expect(visitor.status, path).toBe(303);
+      expect(visitor.headers.get("location"), path).toBe("/");
+    }
+    expect((await fetch(`${baseUrl}/api/demo/dashboard`)).status).toBe(404);
+    expect((await fetch(`${baseUrl}/demo`, { headers: { authorization: "Bearer wrong-token-abcdefghijklmnopqrstuvwxyz" }, redirect: "manual" })).status).toBe(303);
+    const asAdmin = { headers: { authorization: `Bearer ${adminToken}` } };
+    const response = await fetch(`${baseUrl}/demo`, asAdmin);
     expect(response.status).toBe(200);
     const html = await response.text();
     expect(html).toContain("Read-only demo");
@@ -111,14 +120,14 @@ describe("HTTP boundary", () => {
     expect(html).not.toContain("task/complete");
     expect(html).not.toContain('method="post"');
 
-    const pipeline = await fetch(`${baseUrl}/demo?view=pipeline`);
+    const pipeline = await fetch(`${baseUrl}/demo?view=pipeline`, asAdmin);
     const pipelineHtml = await pipeline.text();
     expect(pipelineHtml).toContain("Every job at a glance");
     expect(pipelineHtml).toContain("Needs reply");
     expect(pipelineHtml).toContain("Booked");
     expect(pipelineHtml).toContain('class="active" href="/demo?view=pipeline"');
 
-    const calendar = await fetch(`${baseUrl}/demo?view=calendar`);
+    const calendar = await fetch(`${baseUrl}/demo?view=calendar`, asAdmin);
     const calendarHtml = await calendar.text();
     expect(calendarHtml).toContain("Next seven days");
     expect(calendarHtml).toContain("Taylor S.");
@@ -866,7 +875,9 @@ describe("HTTP boundary", () => {
     const dashboard = await (await fetch(`${baseUrl}/app`, { headers: { cookie: ownerCookie } })).text();
     expect(dashboard).toContain("Set your call rules");
     expect(dashboard).toContain("Urgent alerts are off.");
-    expect(await (await fetch(`${baseUrl}/demo`)).text()).not.toContain("Urgent alerts are off.");
+    const demoPage = await fetch(`${baseUrl}/demo`, { headers: { authorization: `Bearer ${adminToken}` } });
+    expect(demoPage.status).toBe(200);
+    expect(await demoPage.text()).not.toContain("Urgent alerts are off.");
     const teamPage = await (await fetch(`${baseUrl}/app/team`, { headers: { cookie: ownerCookie } })).text();
     const csrf = /name="csrf" value="([^"]+)"/.exec(teamPage)![1]!;
     const inviteTeammate = () => fetch(`${baseUrl}/app/team/invite`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, email: "teammate@synthetic.example" }) });
@@ -1084,20 +1095,25 @@ describe("HTTP boundary", () => {
     const landingText = landingHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
     expect(landingText).toContain("Don’t buy a call center to catch a missed call.");
     expect(landingHtml).toContain("Five-person shop?");
-    expect(landingText).toContain("One new paying customer can cover the month.");
+    expect(landingText).toContain("One job a month can cover Otto.");
     expect(landingHtml).toContain("$100 after job expenses");
     expect(landingHtml).toContain("3 steps to go live");
     expect(landingHtml).not.toContain("3 taps");
-    // Three plans in plain words, priced by answered calls, with the guarantee and free teammates. Pro is no longer sold.
-    for (const item of ["Solo", "Team", "Fleet", "60 answered calls a month, about 2 a day", "250 answered calls a month, about 8 a day", "500 answered calls a month, about 17 a day", "$49.99", "$179.99", "$349.99", "Lead guarantee", "Team members free", "Extra calls are 75¢ each"]) expect(landingHtml).toContain(item);
+    // Three plans in plain words, priced by answered calls, with the guarantee and shared calls. Pro is no longer sold.
+    for (const item of ["Solo", "Team", "Fleet", "60 answered calls a month", "About 2 a day", "250 answered calls a month", "About 8 a day", "500 answered calls a month", "About 17 a day", "$49.99", "$179.99", "$349.99", "Lead guarantee", "each extra call is&nbsp;75¢"]) expect(landingHtml).toContain(item);
     expect(landingHtml).not.toContain("125 answered calls a month");
-    expect(landingHtml).toContain("If Call Otto doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month.");
+    // Teammates are not free (plans are sized by team); what is true is that the plan's calls are shared.
+    expect(landingHtml).not.toMatch(/team members (are )?free|teammates are (always )?free/i);
+    expect(landingHtml).toContain("Your plan’s monthly calls are shared by your whole team.");
+    // The homepage shows the guarantee in one short line; the full wording stays in the terms.
+    expect(landingHtml).toContain("No real lead in 30 days? Tap Request&nbsp;refund and get your first month back.");
+    expect(await (await fetch(`${baseUrl}/terms`)).text()).toContain("If Call Otto doesn’t send you at least one real customer lead in your first 30 days, reply to your receipt (or tap Request refund) and we’ll refund your first month.");
     expect(landingHtml).not.toMatch(/connected AI minutes|\/minute/);
     expect(landingHtml).toContain("EXAMPLE CALL");
     for (const item of ["A customer calls", "Otto picks up", "What you get on your phone", "New call: Maria", "- AC not cooling", "41 Palm Ave, Sarasota", "Wants someone today", "Call back", "Booked Tue 9 AM"]) expect(landingHtml).toContain(item);
-    // The example plays once with CSS only (no endless loop), ends on its last frame, and holds still for people who turn motion off.
+    // The example keeps cycling with CSS only (a phone reaches it after it would have ended), and holds still for people who turn motion off.
     expect(landingHtml).toContain("@keyframes demoFrame");
-    expect(landingHtml).not.toContain("infinite");
+    expect(landingHtml).toContain("animation:demoFrame 12s infinite both");
     // Both ways calls can work, never "rings first" as the default.
     expect(landingText).toContain("Otto answers every call, or only the ones you miss");
     expect(landingHtml).not.toMatch(/rings first|missed calls ring through|Missed-call and after-hours/);
@@ -1156,8 +1172,8 @@ describe("HTTP boundary", () => {
     expect(termsHtml).not.toContain("By continuing, you consent");
     // Public business details for carrier (10DLC) review: company, business address, phone and email, and nothing personal.
     const company = "Call Otto is a product of Dutchworks LLC, 16192 Coastal Highway, Lewes, DE 19958. Phone <a href=\"tel:+19296108092\">(929) 610-8092</a>, email <a href=\"mailto:hello@bydutchworks.com\">hello@bydutchworks.com</a>.";
-    expect(privacyHtml).toContain(`<h2>Who we are</h2><p>${company}</p>`);
-    expect(termsHtml).toContain(`<h2>Who we are</h2><p>${company}</p>`);
+    expect(privacyHtml).toContain(`<h2 id="who-we-are">Who we are</h2><p>${company}</p>`);
+    expect(termsHtml).toContain(`<h2 id="who-we-are">Who we are</h2><p>${company}</p>`);
     expect(termsHtml).toContain("Call Otto, a product of Dutchworks LLC, sends account notifications");
     // Carrier review: "notifications", never "alerts", and a real support contact instead of a placeholder.
     for (const page of [termsHtml, privacyHtml]) {
@@ -1187,7 +1203,8 @@ describe("HTTP boundary", () => {
     }
     expect(await store.listPilotSignups(10)).toHaveLength(0);
     const landing = await (await fetch(`${baseUrl}/`)).text();
-    expect(landing).toContain("Get started for $49.99");
+    expect(landing).toContain(">Get started</span>");
+    expect(landing).toContain("<b>$49.99</b><i>/mo</i>");
     expect(landing).not.toMatch(/free trial|founding pilot/i);
   });
 

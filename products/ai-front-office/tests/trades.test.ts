@@ -101,13 +101,15 @@ describe("trades", () => {
     // "Why Call Otto" stays first: tablet widths hide the first nav link, and Trades must stay visible.
     expect(html).toContain('<nav aria-label="Main"><a href="#compare">Why Call Otto</a><a href="#trades">Trades</a>');
     expect(html).not.toContain("get started\"");
-    expect(html).toContain("Water damage &#38; mold");
+    // The homepage shows short names that fit one line on a phone; signup and Settings keep the full ones.
+    for (const name of ["Contractors", "Water damage", "Landscaping", "Appliances"]) expect(html).toContain(`<strong>${name}</strong>`);
+    for (const long of ["Contractors &#38; remodelers", "Water damage &#38; mold", "Landscaping &#38; tree", "Appliance repair"]) expect(html).not.toContain(long);
+    expect(TRADES.find((trade) => trade.key === "restoration")?.label).toBe("Water damage & mold");
     expect(html).not.toMatch(/fire restoration|Fire and smoke/i);
     for (const trade of TRADES) expect(html).toContain(`href="/signup?trade=${trade.key}"`);
     expect(html).toContain("Sewage is backing up into the tub.");
     expect(html).toContain("<b>Urgent if they say</b><span>burst pipe</span><span>sewage is backing up</span>");
     expect(html).toContain("<span>won’t close</span>");
-    expect(html).toContain("Contractors &#38; remodelers");
     // Strict CSP: icons are inline SVG, never a script.
     expect(html).not.toMatch(/<script(?![^>]*src=)/);
   });

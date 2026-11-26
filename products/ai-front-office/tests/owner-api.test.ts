@@ -241,16 +241,26 @@ describe("Owner JSON API and React app serving", () => {
     expect(dashboard.usage).toMatchObject({ countedCalls: 3, includedCalls: 1, extraCalls: 2, extraCents: 150 });
   });
 
-  it("keeps the public demo read-only", async () => {
-    const demo = await (await fetch(`${baseUrl}/api/demo/dashboard`)).json() as { preview: boolean; calls: Array<{ id: string }> };
+  it("keeps the demo read-only, and for the admin only", async () => {
+    const asAdmin = { authorization: "Bearer admin-token-abcdefghijklmnopqrstuvwxyz" };
+    const demo = await (await fetch(`${baseUrl}/api/demo/dashboard`, { headers: asAdmin })).json() as { preview: boolean; calls: Array<{ id: string }> };
     expect(demo.preview).toBe(true);
     expect(demo.calls.length).toBeGreaterThan(0);
-    expect((await fetch(`${baseUrl}/api/demo/calls/${encodeURIComponent(demo.calls[0]!.id)}`)).status).toBe(200);
-    expect((await fetch(`${baseUrl}/api/demo/dashboard`, { method: "POST" })).status).toBe(405);
+    expect((await fetch(`${baseUrl}/api/demo/calls/${encodeURIComponent(demo.calls[0]!.id)}`, { headers: asAdmin })).status).toBe(200);
+    expect((await fetch(`${baseUrl}/api/demo/dashboard`, { method: "POST", headers: asAdmin })).status).toBe(405);
+    // A visitor gets nothing: no demo data, with or without an owner sign-in.
+    expect((await fetch(`${baseUrl}/api/demo/dashboard`)).status).toBe(404);
+    expect((await fetch(`${baseUrl}/api/demo/calls/${encodeURIComponent(demo.calls[0]!.id)}`)).status).toBe(404);
+    const owner = await signUp("demo-visitor@synthetic.example");
+    expect((await fetch(`${baseUrl}/api/demo/dashboard`, { headers: { cookie: owner.cookie } })).status).toBe(404);
   });
 
   it("serves the React app for owner and demo screens with a CSP that allows only our own origin", async () => {
-    const demo = await fetch(`${baseUrl}/demo/jobs`);
+    // The demo screens are the admin's only; a visitor is sent to the homepage.
+    const visitor = await fetch(`${baseUrl}/demo/jobs`, { redirect: "manual" });
+    expect(visitor.status).toBe(303);
+    expect(visitor.headers.get("location")).toBe("/");
+    const demo = await fetch(`${baseUrl}/demo/jobs`, { headers: { authorization: "Bearer admin-token-abcdefghijklmnopqrstuvwxyz" } });
     expect(demo.status).toBe(200);
     expect(await demo.text()).toContain('id="root"');
     const csp = demo.headers.get("content-security-policy") ?? "";

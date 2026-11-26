@@ -433,7 +433,8 @@ describe("homepage pricing and terms", () => {
     for (const price of ["$49.99", "$179.99", "$349.99", "$99.99", "$254.99", "$474.99"]) expect(html).toContain(price);
     // Nothing is half off without the coupon.
     expect(html).not.toContain("half off");
-    expect(html).toContain('href="/signup?unlimited=1"');
+    // Every card carries its own link; with the switch on, each one starts signup with Unlimited picked.
+    for (const plan of plans) expect(html).toContain(`href="/signup?plan=${plan.id}&amp;unlimited=1"`);
   });
 
   it("gives every plan card a standard and an Unlimited link, shown one at a time, named by the card's own text", () => {
