@@ -14,6 +14,7 @@ import { renderMarketing } from "../src/admin/marketing.js";
 import { renderTerms } from "../src/admin/render.js";
 import { createRequestHandler, createStripeClient } from "../src/http/app.js";
 import { isDirectRun, planStripeSetup } from "../scripts/create-stripe-plans.js";
+import { shopStepPage } from "./signup-steps.js";
 
 const fields: CollectedCallFields = {
   callerName: "Maria G.", companyName: null, callbackNumber: "+15555550142", address: "41 Palm Ave, Springfield, IL",
@@ -337,10 +338,10 @@ describe("Unlimited over HTTP: card step, Settings toggle, webhook sync", () => 
   }
 
   it("signs up with Unlimited from the pricing page and checks out with the add-on and the half-off coupon", async () => {
-    const page = await (await fetch(`${baseUrl}/signup?unlimited=1`)).text();
+    const page = await shopStepPage(baseUrl, "unlimited=1");
     expect(page).toMatch(/<input[^>]*id="unlimited"[^>]*checked/);
     expect(page).toContain("Fair use: up to 3× your plan’s calls.");
-    expect((await (await fetch(`${baseUrl}/signup`)).text())).not.toMatch(/<input[^>]*id="unlimited"[^>]*checked/);
+    expect(await shopStepPage(baseUrl)).not.toMatch(/<input[^>]*id="unlimited"[^>]*checked/);
     const { response, account } = await signup({ unlimited: "yes" });
     expect(response.headers.get("location")).toBe("https://checkout.stripe.com/c/pay/cs_test_synthetic");
     const checkout = Object.fromEntries(stripe.requests.find((request) => request.url.endsWith("/v1/checkout/sessions"))!.body);

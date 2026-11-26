@@ -5,6 +5,7 @@ import type { OwnerAccount } from "../domain/models.js";
 import type { Clock, Store } from "../ports.js";
 import { EmailNotProvedError, TeamService } from "../application/team-service.js";
 import { renderJoinPage, renderTeamPage } from "../admin/team.js";
+import { PASSWORD_MIN_LENGTH } from "../admin/render.js";
 import { mintOwnerSession, ownerSessionCookie, verifyOwnerCsrf, type OwnerSession } from "../security/owner-auth.js";
 import { HttpError, parseForm, readBody, redirect, sendHtml } from "./security.js";
 
@@ -18,8 +19,8 @@ export async function joinTeam(request: IncomingMessage, response: ServerRespons
   const invitation = await teams.invitation(tenantId, token);
   if (!invitation) throw new HttpError(410, "This invitation expired or was used. Ask the owner for a new link.");
   if (request.method === "GET") return sendHtml(response, 200, renderJoinPage(tenantId, token, invitation.email, (await context.store.getConfig(tenantId)).businessName));
-  const input = z.object({ name: z.string().trim().min(2).max(120), password: z.string().min(12).max(200), consent: z.literal("yes") }).safeParse(Object.fromEntries(form));
-  if (!input.success) throw new HttpError(400, "Enter your name, a password of at least 12 characters, and accept the terms.");
+  const input = z.object({ name: z.string().trim().min(2).max(120), password: z.string().min(PASSWORD_MIN_LENGTH).max(200), consent: z.literal("yes") }).safeParse(Object.fromEntries(form));
+  if (!input.success) throw new HttpError(400, `Enter your name, a password of at least ${PASSWORD_MIN_LENGTH} characters, and accept the terms.`);
   const account = await teams.accept(tenantId, token, input.data.name, input.data.password).catch(() => { throw new HttpError(409, "Invitation could not be accepted. Sign in if you already have an account, or ask for a new invitation."); });
   response.setHeader("set-cookie", ownerSessionCookie(mintOwnerSession(account, context.env.SESSION_SIGNING_KEY!, context.clock.now().getTime()), context.env.NODE_ENV === "production"));
   redirect(response, "/app/team");

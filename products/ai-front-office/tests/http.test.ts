@@ -7,6 +7,7 @@ import { createDemoConfig } from "../src/domain/config.js";
 import type { CallRecord } from "../src/domain/models.js";
 import { createRequestHandler } from "../src/http/app.js";
 import type { Clock } from "../src/ports.js";
+import { shopStepPage } from "./signup-steps.js";
 
 describe("HTTP boundary", () => {
   let server: Server;
@@ -1112,7 +1113,10 @@ describe("HTTP boundary", () => {
     expect(landingHtml).not.toContain("ServiceTitan’s contractor benchmarks");
     expect(landingHtml).not.toContain("approve the setup before it ever answers a customer");
     expect((await fetch(`${baseUrl}/activationz`)).status).toBe(503);
-    const signupPage = await (await fetch(`${baseUrl}/signup`)).text();
+    const accountPage = await (await fetch(`${baseUrl}/signup`)).text();
+    // Screen 1 asks only for the account: email and password (or Google, or an email link).
+    expect([...accountPage.matchAll(/<input name="(\w+)"/g)].map((match) => match[1])).toEqual(["email", "password"]);
+    const signupPage = await shopStepPage(baseUrl);
     // 10DLC opt-in: a separate, unchecked, optional box naming the brand and the message type.
     expect(signupPage).toMatch(/<input name="ownerSmsConsent" type="checkbox" value="yes" >/);
     expect(signupPage).not.toContain('name="ownerSmsConsent" type="checkbox" value="yes" required');
@@ -1120,8 +1124,9 @@ describe("HTTP boundary", () => {
       expect(signupPage).toContain(phrase);
     }
     expect(signupPage.slice(signupPage.indexOf('name="ownerSmsConsent"'), signupPage.indexOf("</label>", signupPage.indexOf('name="ownerSmsConsent"')))).not.toMatch(/\balerts?\b/i);
-    // The fewest fields: shop, mobile, email, password (plus the two optional, unchecked consent boxes).
-    expect([...signupPage.matchAll(/<input name="(\w+)"/g)].map((match) => match[1]).filter((name) => !["ownerSmsConsent", "ownerCallConsent", "faxNumber"].includes(name!))).toEqual(["businessName", "phone", "email", "password"]);
+    // Screen 2, once they're in: shop and mobile (plus the two optional, unchecked consent boxes). No trade.
+    expect([...signupPage.matchAll(/<input name="(\w+)"/g)].map((match) => match[1]).filter((name) => !["ownerSmsConsent", "ownerCallConsent", "faxNumber"].includes(name!))).toEqual(["businessName", "phone"]);
+    expect(signupPage).not.toContain('name="trade"');
     // Three steps now: Your shop, Your card, Forward your calls. No hours step.
     expect(signupPage).toContain("Step 1 of 3 · Your shop");
     expect(signupPage).toContain("<li>Forward your calls</li></ol>");

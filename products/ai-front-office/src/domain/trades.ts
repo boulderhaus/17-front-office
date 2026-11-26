@@ -1,6 +1,6 @@
 /**
- * The trades Call Otto starts a shop with. Picking one at signup seeds the shop's services and
- * the extra words that mark a call urgent; the owner changes either anytime in Settings.
+ * The trades Call Otto starts a shop with. Signup never asks: the shop name picks one (see tradeForShopName),
+ * which seeds the shop's services and the extra words that mark a call urgent; the owner changes either in Settings.
  * Life-safety rules (gas, carbon monoxide, fire) apply to every trade regardless of these words.
  */
 export interface Trade {
@@ -44,4 +44,37 @@ export const TRADES: readonly Trade[] = [
 export function findTrade(key: string | null | undefined): Trade | null {
   const wanted = key?.trim().toLowerCase();
   return wanted ? TRADES.find((trade) => trade.key === wanted) ?? null : null;
+}
+
+/**
+ * Words in a shop name that say its trade, matched as whole words (prefixes where a word grows: "Plumbing", "Plumbers").
+ * Checked in the order they appear in the name, so "Gulf Plumbing & Heating" is plumbing.
+ */
+const NAME_WORDS: ReadonlyArray<{ trade: string; pattern: RegExp }> = [
+  { trade: "hvac", pattern: /\b(?:hvac|heating|heat|air|a\/c|ac|cooling|furnaces?|climate|mechanical|refrigeration)\b/ },
+  { trade: "plumbing", pattern: /\b(?:plumb\w*|drains?|rooter|sewers?|pipes?|water heaters?)\b/ },
+  { trade: "electrical", pattern: /\b(?:electric\w*|wiring|volts?)\b/ },
+  { trade: "roofing", pattern: /\b(?:roof\w*|gutters?)\b/ },
+  { trade: "restoration", pattern: /\b(?:restoration|restore|mold|water damage|dry ?out)\b/ },
+  { trade: "garage", pattern: /\b(?:garage\w*|overhead doors?)\b/ },
+  { trade: "construction", pattern: /\b(?:construction|contract\w*|remodel\w*|renovat\w*|builders?)\b/ },
+  { trade: "handyman", pattern: /\b(?:handy\w*|odd jobs?)\b/ },
+  { trade: "landscaping", pattern: /\b(?:landscap\w*|lawns?|trees?|yards?|irrigation|gardens?|turf|mowing)\b/ },
+  { trade: "pest", pattern: /\b(?:pests?|termites?|extermin\w*|bugs?|wildlife)\b/ },
+  { trade: "locksmith", pattern: /\b(?:locks?|locksmiths?|keys?)\b/ },
+  { trade: "appliance", pattern: /\b(?:appliances?)\b/ },
+];
+
+/**
+ * The trade a new shop starts with, from its name; "Another trade" (general home services) when the name doesn't
+ * say. Never blocks signup: the owner fixes services and urgent words in Settings.
+ */
+export function tradeForShopName(name: string | null | undefined): Trade {
+  const text = (name ?? "").toLowerCase().replace(/[’']/g, "").replace(/&/g, " ");
+  let best: { trade: string; at: number } | null = null;
+  for (const word of NAME_WORDS) {
+    const at = text.search(word.pattern);
+    if (at >= 0 && (!best || at < best.at)) best = { trade: word.trade, at };
+  }
+  return findTrade(best?.trade) ?? findTrade("other")!;
 }

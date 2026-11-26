@@ -3,10 +3,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
 import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
-import { findTrade, TRADES } from "../src/domain/trades.js";
+import { tradeForShopName, findTrade, TRADES } from "../src/domain/trades.js";
 import { triageEmergency } from "../src/domain/triage.js";
 import { renderMarketing } from "../src/admin/marketing.js";
 import { createRequestHandler } from "../src/http/app.js";
+import { shopStepPage } from "./signup-steps.js";
 
 describe("trades", () => {
   it("gives every trade its services (no bookable catch-all) and specific urgent phrases that triage right", () => {
@@ -137,43 +138,52 @@ describe("signup by trade", () => {
 
   const signup = (fields: Record<string, string>) => fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Shop", password: "long-password-for-tests", consent: "yes", ...fields }) });
 
-  it("asks for the trade, and a homepage tile arrives with it picked", async () => {
+  it("never asks for the trade, and an old ?trade= link opens sign-up as usual", async () => {
+    // Walk 11-26 (SIGNUP-01): no trade question on either sign-up screen.
     const plain = await (await fetch(`${baseUrl}/signup`)).text();
-    expect(plain).toContain('<select name="trade" id="signup-trade" required aria-describedby="signup-trade-hint">');
-    expect(plain).toContain('<option value="" selected disabled>Pick one</option>');
-    expect(plain).toContain("Five quick answers.");
-    const picked = await (await fetch(`${baseUrl}/signup?trade=plumbing`)).text();
-    expect(picked).toContain('<option value="plumbing" selected>Plumbing</option>');
-    expect(picked).toContain('<option value="" disabled>Pick one</option>');
-    const unknown = await (await fetch(`${baseUrl}/signup?trade=%22%3E%3Cscript%3E`)).text();
-    expect(unknown).toContain('<option value="" selected disabled>Pick one</option>');
-    expect(unknown).not.toContain('"><script>');
+    const shop = await shopStepPage(baseUrl);
+    for (const page of [plain, shop]) {
+      expect(page).not.toContain('name="trade"');
+      expect(page).not.toContain("Pick one");
+      expect(page).not.toContain("Sets your services and emergency words.");
+    }
+    const tile = await fetch(`${baseUrl}/signup?trade=plumbing`);
+    expect(tile.status).toBe(200);
+    expect(await tile.text()).not.toContain('name="trade"');
+    const odd = await (await fetch(`${baseUrl}/signup?trade=%22%3E%3Cscript%3E`)).text();
+    expect(odd).not.toContain('"><script>');
   });
 
-  it("starts the shop with its trade's services and urgent words", async () => {
-    expect((await signup({ email: "sparky@synthetic.example", trade: "electrical" })).status).toBe(303);
-    const account = await store.getOwnerAccountByEmail("sparky@synthetic.example");
-    const config = await store.getConfig(account!.tenantId);
+  it("starts the shop with the trade its name says, ignoring any trade sent", async () => {
+    expect((await signup({ email: "sparky@synthetic.example", businessName: "Bright Spark Electric", trade: "roofing" })).status).toBe(303);
+    const config = await store.getConfig((await store.getOwnerAccountByEmail("sparky@synthetic.example"))!.tenantId);
     expect(config.serviceCategories).toEqual(findTrade("electrical")!.services);
     expect(config.emergencyKeywords).toEqual(findTrade("electrical")!.urgentWords);
   });
 
-  it("keeps the old defaults when no trade or an unknown one is sent, and explicit lists still win", async () => {
-    expect((await signup({ email: "none@synthetic.example" })).status).toBe(303);
+  it("a name that says nothing gets general home services, and explicit lists still win", async () => {
+    expect((await signup({ email: "none@synthetic.example", businessName: "Synthetic Brothers" })).status).toBe(303);
     const none = await store.getConfig((await store.getOwnerAccountByEmail("none@synthetic.example"))!.tenantId);
-    expect(none.serviceCategories).toEqual(["HVAC repair", "HVAC maintenance"]);
-    expect((await signup({ email: "odd@synthetic.example", trade: "submarines" })).status).toBe(303);
-    const odd = await store.getConfig((await store.getOwnerAccountByEmail("odd@synthetic.example"))!.tenantId);
-    expect(odd.serviceCategories).toEqual(["HVAC repair", "HVAC maintenance"]);
-    expect((await signup({ email: "explicit@synthetic.example", trade: "plumbing", serviceCategories: "Septic pumping, Other" })).status).toBe(303);
+    expect(none.serviceCategories).toEqual(findTrade("other")!.services);
+    expect(none.emergencyKeywords).toEqual(findTrade("other")!.urgentWords);
+    expect((await signup({ email: "explicit@synthetic.example", businessName: "Gulf Plumbing", serviceCategories: "Septic pumping, Other" })).status).toBe(303);
     const explicit = await store.getConfig((await store.getOwnerAccountByEmail("explicit@synthetic.example"))!.tenantId);
     expect(explicit.serviceCategories).toEqual(["Septic pumping", "Other"]);
     expect(explicit.emergencyKeywords).toEqual(findTrade("plumbing")!.urgentWords);
   });
+});
 
-  it("keeps the picked trade when the form comes back with an error", async () => {
-    const failed = await signup({ email: "short@synthetic.example", trade: "roofing", password: "short" });
-    expect(failed.status).toBe(400);
-    expect(await failed.text()).toContain('<option value="roofing" selected>Roofing</option>');
+describe("trade from the shop name", () => {
+  it("reads the obvious trade words, first one in the name wins, and never guesses from parts of words", () => {
+    const cases: Array<[string, string]> = [
+      ["Gulf Air", "hvac"], ["Sunshine A/C & Heating", "hvac"], ["Comfort HVAC", "hvac"],
+      ["ABC Plumbing & Heating", "plumbing"], ["Rapid Rooter", "plumbing"],
+      ["Bright Electric LLC", "electrical"], ["Top Notch Roofing", "roofing"], ["Smith Remodeling", "construction"],
+      ["Coastal Restoration", "restoration"], ["Pro Garage Doors", "garage"], ["Mike’s Handyman Service", "handyman"],
+      ["Green Lawns", "landscaping"], ["Bug Busters", "pest"], ["Key Locksmith", "locksmith"], ["Acme Appliance Repair", "appliance"],
+      // Nothing to go on, or a trade word only inside another word: general home services.
+      ["Synthetic Brothers", "other"], ["Blockbuster Repair", "other"], ["Airtight Sealing", "other"], ["Power Washing Pros", "other"], ["", "other"],
+    ];
+    for (const [name, key] of cases) expect(tradeForShopName(name).key, name).toBe(key);
   });
 });

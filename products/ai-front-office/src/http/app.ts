@@ -10,7 +10,7 @@ import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { renderAdminResetLink, renderCallbackLink, renderForgotPassword, renderResetPassword, renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms, SIGNUP_EMAIL_TAKEN, type SignupFieldErrors } from "../admin/render.js";
+import { renderAdminResetLink, renderCallbackLink, renderForgotPassword, renderResetPassword, renderCallDetail, renderConfig, renderDashboard, renderLanding, renderLogin, renderOwnerAccounts, renderOwnerDashboard, renderOwnerLogin, renderOwnerSignup, renderPilotSignups, renderPrivacy, renderPrompt, renderReadiness, renderSimulator, renderStart, renderStartReceived, renderTerms, PASSWORD_MIN_LENGTH, SIGNUP_EMAIL_TAKEN, type SignupFieldErrors } from "../admin/render.js";
 import { buildActivationReport, shopActivationBlockers, type ActivationReport } from "../application/readiness.js";
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService, ToolWriteInProgressError } from "../application/call-service.js";
@@ -43,11 +43,11 @@ import { anyGoogleClient, clientForAttempt, clientForNewConnections, encodeGoogl
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
-import { findTrade } from "../domain/trades.js";
+import { tradeForShopName } from "../domain/trades.js";
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import type { OwnerSession } from "../security/owner-auth.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hasUsablePassword, hashOwnerPassword, isPasswordless, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, ownerSessionIssuedAt, PASSWORDLESS_HASH, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
-import { createOwnerSignIn, GOOGLE_SIGN_IN_CALLBACK, isSignInState, safeNext, verifiedSignupEmail, type VerifiedIdentity } from "./owner-sign-in.js";
+import { createOwnerSignIn, GOOGLE_SIGN_IN_CALLBACK, isSignInState, safeNext, verifiedSignupEmail, type PendingSignup } from "./owner-sign-in.js";
 import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
 import { MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_ROUTES, toolFailure, toolLimitReached, withinToolBudget, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
 import { callScreeningSetting, ensureCallEndCallback, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
@@ -270,7 +270,7 @@ const ownerSignupSchema = z.object({
   businessName: z.string().trim().min(2).max(120).default("Your service business"),
   email: z.string().trim().toLowerCase().email().max(254),
   // Required unless Google, Microsoft or an email link already verified the email (checked in the handler).
-  password: z.string().min(12).max(200).optional(),
+  password: z.string().min(PASSWORD_MIN_LENGTH).max(200).optional(),
   phone: z.string().trim().max(30).optional(),
   timezone: z.string().trim().max(100).optional(),
   serviceAreaTerms: z.string().trim().max(800).default(""),
@@ -283,7 +283,7 @@ const ownerSignupSchema = z.object({
   bookableWeekdayEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default("17:00"),
   serviceCategories: z.string().trim().min(2).max(800).default("HVAC repair, HVAC maintenance"),
   emergencyKeywords: z.string().trim().min(2).max(800).default("gas smell, carbon monoxide, no heat, frozen pipes"),
-  // Picks the starting services and urgent words below; unknown or missing keeps the defaults.
+  // Sent by old links and forms; ignored. The shop name picks the starting services and urgent words.
   trade: z.string().trim().max(40).optional(),
   weekends: z.string().optional(),
   ownerSmsConsent: z.literal("yes").optional(),
@@ -556,7 +556,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     quote: priceQuote({ plan, unlimited: false, now: dependencies.clock.now(), trialDays }),
     unlimited: plan.unlimited ? { addOnCents: plan.unlimited.addOnCents, priceCents: plan.unlimited.priceCents, firstMonthCents: plan.unlimited.firstMonthCents, fairUseCalls: plan.unlimited.fairUseCalls, chargeNote: planCharge(plan, timezone, true), quote: priceQuote({ plan, unlimited: true, now: dependencies.clock.now(), trialDays }) } : null,
   })) : [];
-  const signupPage = (request: IncomingMessage, error = "", values: Record<string, string> = {}, identity: VerifiedIdentity | null = null, fieldErrors: SignupFieldErrors = {}): string => renderOwnerSignup(error, values, {
+  const signupPage = (request: IncomingMessage, error = "", values: Record<string, string> = {}, identity: PendingSignup | null = null, fieldErrors: SignupFieldErrors = {}): string => renderOwnerSignup(error, values, {
     fieldErrors,
     supportEmail: dependencies.env.SUPPORT_EMAIL ?? null,
     providers: signIn.providersFor(request),
@@ -565,6 +565,13 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     chargeNote: stripeClient ? planCharge(plans[0]!) : null,
     plans: stripeClient ? plans.map((plan) => ({ ...plan, chargeNote: planCharge(plan), unlimitedChargeNote: plan.unlimited ? planCharge(plan, undefined, true) : null })) : [],
   });
+  /** The owner this browser is signed in as, if any (a live session for an account that still matches it). */
+  const signedInOwner = async (request: IncomingMessage): Promise<OwnerAccount | null> => {
+    const session = verifyOwnerSession(readCookie(request, "afo_owner"), dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
+    if (!session) return null;
+    const account = await dependencies.store.getOwnerAccountById(session.accountId);
+    return account && account.tenantId === session.tenantId && account.status !== "suspended" && sessionMatchesAccount(session, account) ? account : null;
+  };
   /** The add-on can be bought only where this plan's Unlimited price exists. */
   const wantsUnlimited = (plan: Plan, value: unknown): boolean => Boolean(plan.unlimited) && (value === "yes" || value === "1" || value === "on" || value === true);
 
@@ -806,22 +813,39 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         response.setHeader("set-cookie", signIn.clearPendingIdentity());
         return redirect(response, "/signup");
       }
-      // The pricing page's picks carry over: ?unlimited=1 and ?plan=team preselect the form.
+      // Already in (Back after sign-up, or a second tab): their shop, never a second workspace.
+      if (await signedInOwner(request)) return redirect(response, "/app");
+      // The pricing page's picks carry over: ?unlimited=1 and ?plan=team preselect the form. ?trade= is ignored.
       const preset: Record<string, string> = {};
       if (url.searchParams.get("unlimited") === "1") preset.unlimited = "yes";
       const presetPlan = normalizePlanId(url.searchParams.get("plan"));
       if (presetPlan && plans.some((plan) => plan.id === presetPlan)) preset.plan = presetPlan;
-      const presetTrade = findTrade(url.searchParams.get("trade"));
-      if (presetTrade) preset.trade = presetTrade.key;
       return sendHtml(response, 200, analyticsPage(signupPage(request, "", preset, signIn.pendingIdentity(request))));
     }
     if (method === "POST" && url.pathname === "/signup") {
-      if (!limiter.allow(`${ip}:owner-signup`, 5, 60 * 60_000)) throw new HttpError(429, "Too many signup attempts from this connection");
       const form = parseForm(await readBody(request, 48_000));
-      // Google, Microsoft or an email link verified this email: it is the account email, and no password is set.
-      const identity = signIn.pendingIdentity(request);
+      // The account screen and the shop screen are counted apart, so a normal two-screen sign-up uses one of each.
+      if (!limiter.allow(`${ip}:owner-signup${form.get("step") === "account" ? "-account" : ""}`, 5, 60 * 60_000)) throw new HttpError(429, "Too many signup attempts from this connection");
+      // Sign-up's first screen (Google, Microsoft, an email link, or email and password) left this browser a pending
+      // sign-up: its email is the account email. Google, Microsoft and the link verified it; a password sign-up did not.
+      let identity = signIn.pendingIdentity(request);
       if (form.get("faxNumber")?.trim()) return sendHtml(response, 200, signupPage(request, "", {}, identity));
       const values = Object.fromEntries(form.entries());
+      const keepPicks = (): Record<string, string> => ({ ...(values.plan ? { plan: values.plan } : {}), ...(values.unlimited === "yes" ? { unlimited: "yes" } : {}) });
+      if (values.step === "account") {
+        // Screen 1, email and password: nothing is stored yet. A good pair waits in a short-lived cookie while they
+        // fill in the shop; leaving now leaves no account and no workspace behind.
+        const account = ownerSignupSchema.pick({ email: true, password: true }).safeParse({ email: values.email ?? "", password: values.password ?? "" });
+        const errors = signupFieldErrors(account.success ? [] : account.error.issues, { email: values.email ?? "", password: values.password ?? "" }, false, ["email", "password"]);
+        // A good email and no password yet: open the password box (the no-script path; the page reveals it as they type).
+        if (!values.password && !errors.email) return sendHtml(response, 200, signupPage(request, "", { ...keepPicks(), email: account.success ? account.data.email : values.email ?? "" }));
+        if (!account.success || Object.keys(errors).length > 0) return sendHtml(response, 400, signupPage(request, "", { ...keepPicks(), email: values.email ?? "" }, null, errors));
+        if (await dependencies.store.getOwnerAccountByEmail(account.data.email)) return sendHtml(response, 409, signupPage(request, "", { ...keepPicks(), email: account.data.email }, null, { email: SIGNUP_EMAIL_TAKEN }));
+        response.setHeader("set-cookie", signIn.startPasswordSignup(account.data.email, await hashOwnerPassword(account.data.password!)));
+        const picks = new URLSearchParams(keepPicks().plan ? { plan: values.plan! } : {});
+        if (values.unlimited === "yes") picks.set("unlimited", "1");
+        return redirect(response, picks.toString() ? `/signup?${picks.toString()}` : "/signup");
+      }
       if (identity) {
         values.email = identity.email;
         delete values.password;
@@ -830,7 +854,18 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       // Every problem at once, each under its own field and naming the fix.
       const fieldErrors = signupFieldErrors(parsed.success ? [] : parsed.error.issues, values, identity !== null);
       if (!parsed.success || Object.keys(fieldErrors).length > 0) {
-        return sendHtml(response, 400, signupPage(request, Object.keys(fieldErrors).length > 0 ? "" : "Check the form and try again.", values, identity, fieldErrors));
+        const message = Object.keys(fieldErrors).length > 0 ? "" : "Check the form and try again.";
+        // A one-piece post (old form) with a good email and password but a shop problem: hold the account like screen 1
+        // would, so the owner fixes the shop on the shop screen instead of retyping everything.
+        if (!identity && !fieldErrors.email && !fieldErrors.password && values.email && values.password && !await dependencies.store.getOwnerAccountByEmail(values.email.trim().toLowerCase())) {
+          const held = ownerSignupSchema.pick({ email: true, password: true }).safeParse({ email: values.email, password: values.password });
+          if (held.success && held.data.password) {
+            identity = { provider: "password", email: held.data.email, name: null, passwordHash: await hashOwnerPassword(held.data.password) };
+            response.setHeader("set-cookie", signIn.startPasswordSignup(identity.email, identity.passwordHash));
+          }
+        }
+        if (!identity) delete values.password;
+        return sendHtml(response, 400, signupPage(request, message, values, identity, fieldErrors));
       }
       const phoneInput = parsed.data.phone?.trim() ?? "";
       const phone = phoneInput ? normalizeUsPhone(phoneInput) : null;
@@ -853,9 +888,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         tenantId,
         email: parsed.data.email,
         displayName: identity?.name && !form.has("displayName") ? identity.name : parsed.data.displayName,
-        passwordHash: identity || !parsed.data.password ? PASSWORDLESS_HASH : await hashOwnerPassword(parsed.data.password),
+        passwordHash: identity?.provider === "password" ? identity.passwordHash : identity || !parsed.data.password ? PASSWORDLESS_HASH : await hashOwnerPassword(parsed.data.password),
         // A password sign-up proves nothing about the email; the first Google, Microsoft, email or reset link does.
-        emailVerifiedAt: identity ? now : null,
+        emailVerifiedAt: identity && identity.provider !== "password" ? now : null,
         status: "pending_activation",
         createdAt: now,
         updatedAt: now,
@@ -865,7 +900,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (serviceArea.errors.length > 0) return sendHtml(response, 400, signupPage(request, serviceAreaMessage(serviceArea.errors), values, identity));
       // The plan picked above the button; Solo when nothing was sent.
       const plan = pickPlan(plans, form.get("plan"));
-      const trade = findTrade(parsed.data.trade);
+      // No trade question: the shop name says it ("Gulf Plumbing"), else general home services. Changed in Settings.
+      const trade = tradeForShopName(parsed.data.businessName);
       const config: BusinessConfig = {
         ...createDemoConfig(tenantId),
         paused: true,
@@ -881,9 +917,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         recordingDisclosure: ALL_PARTY_CONSENT_STATES.has(serviceAreaState(serviceArea.terms) ?? homeState ?? "") ? RECORDING_NOTICE : "",
         timezone,
         serviceAreaTerms: serviceArea.terms,
-        // An explicit list wins; otherwise the picked trade's, then the form defaults.
-        emergencyKeywords: !form.has("emergencyKeywords") && trade ? [...trade.urgentWords] : splitList(parsed.data.emergencyKeywords),
-        serviceCategories: !form.has("serviceCategories") && trade ? [...trade.services] : splitList(parsed.data.serviceCategories),
+        // An explicit list wins; otherwise the trade's from the shop name.
+        emergencyKeywords: form.has("emergencyKeywords") ? splitList(parsed.data.emergencyKeywords) : [...trade.urgentWords],
+        serviceCategories: form.has("serviceCategories") ? splitList(parsed.data.serviceCategories) : [...trade.services],
         requireDiagnosticFeeAcceptance: false,
         operationMode: parsed.data.operationMode,
         ownerNotificationRefs: parsed.data.ownerSmsConsent === "yes" ? ["owner-primary"] : [],
@@ -903,7 +939,21 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         },
       };
       const created = await dependencies.store.createOwnerWorkspace({ account, config, ownerPhone: phone });
-      if (!created) return sendHtml(response, 409, signupPage(request, "", values, identity, { email: SIGNUP_EMAIL_TAKEN }));
+      if (!created) {
+        // A second tap, a refresh or a retry of this same sign-up: the account it made is theirs, so sign them in to
+        // it rather than show an error or make another. Anyone else's account with this email: sign in instead.
+        const existing = await dependencies.store.getOwnerAccountByEmail(parsed.data.email);
+        const sameSignup = existing && existing.status !== "suspended" && identity && dependencies.clock.now().getTime() - Date.parse(existing.createdAt) < 30 * 60_000
+          && (identity.provider === "password" ? existing.passwordHash === identity.passwordHash : existing.emailVerifiedAt !== null && isPasswordless(existing.passwordHash));
+        if (existing && sameSignup) {
+          const again = mintOwnerSession(existing, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
+          response.setHeader("set-cookie", [ownerSessionCookie(again, dependencies.env.NODE_ENV === "production"), signIn.clearPendingIdentity()]);
+          return redirect(response, "/app/start");
+        }
+        if (identity) response.setHeader("set-cookie", signIn.clearPendingIdentity());
+        delete values.password;
+        return sendHtml(response, 409, signupPage(request, "", { ...keepPicks(), email: parsed.data.email }, null, { email: SIGNUP_EMAIL_TAKEN }));
+      }
       if (parsed.data.founderSmsConsent === "yes") {
         const welcomeConfigured = dependencies.env.FOUNDER_WELCOME_ENABLED
           && dependencies.env.TELNYX_MESSAGING_APPROVED
@@ -958,6 +1008,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const form = parseForm(await readBody(request, 16_000));
       const next = safeNext(form.get("next"));
       const parsed = ownerLoginSchema.safeParse({ email: form.get("email") ?? "", password: form.get("password") ?? "" });
+      // A good email and no password yet: open the password box with the cursor in it (the no-script path).
+      if (!form.get("password") && z.string().trim().email().safeParse(form.get("email") ?? "").success) {
+        return sendHtml(response, 200, renderOwnerLogin("", signIn.loginOptions(request, { passwordOpen: true, email: (form.get("email") ?? "").trim(), next })));
+      }
       if (!parsed.success) {
         // A malformed email the browser let through points at the email, not the password.
         const badEmail = parsed.error.issues.some((issue) => issue.path[0] === "email");
@@ -1006,7 +1060,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const form = parseForm(await readBody(request, 4_000));
       const token = form.get("token") ?? "";
       const password = form.get("password") ?? "";
-      if (password.length < 12 || password.length > 200) return sendHtml(response, 400, renderResetPassword(token, "Make your password at least 12 characters.", dependencies.env.SUPPORT_EMAIL ?? null, "password"));
+      if (password.length < PASSWORD_MIN_LENGTH || password.length > 200) return sendHtml(response, 400, renderResetPassword(token, `Make your password at least ${PASSWORD_MIN_LENGTH} characters.`, dependencies.env.SUPPORT_EMAIL ?? null, "password"));
       if (password !== form.get("confirm")) return sendHtml(response, 400, renderResetPassword(token, "The two passwords don’t match. Type the same one twice.", dependencies.env.SUPPORT_EMAIL ?? null, "confirm"));
       const accountId = token ? await dependencies.store.consumePasswordReset(hashPasswordResetToken(token), dependencies.clock.now().toISOString()) : null;
       if (!accountId) return sendHtml(response, 400, renderForgotPassword({ emailEnabled: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL), supportEmail: dependencies.env.SUPPORT_EMAIL ?? null, error: "That reset link is expired or already used. Ask for a new one." }));
@@ -4227,9 +4281,14 @@ function timingSafeEqualBuffers(left: Buffer, right: Buffer): boolean {
 const RECORDING_NOTICE = TRANSFER_RECORDING_NOTICE;
 
 /** Sign-up problems by field, each naming the fix. The schema's issues plus the checks it can't make (phone, password). */
-function signupFieldErrors(issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey> }>, values: Record<string, string>, verified: boolean): SignupFieldErrors {
+function signupFieldErrors(issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey> }>, values: Record<string, string>, verified: boolean, only?: ReadonlyArray<keyof SignupFieldErrors>): SignupFieldErrors {
   const errors: SignupFieldErrors = {};
   const bad = new Set(issues.map((issue) => issue.path[0]));
+  if (only) {
+    if (only.includes("email") && bad.has("email")) errors.email = "Enter an email like you@yourshop.com.";
+    if (only.includes("password") && (bad.has("password") || !values.password)) errors.password = `Make your password at least ${PASSWORD_MIN_LENGTH} characters.`;
+    return errors;
+  }
   if (bad.has("businessName")) {
     const shop = (values.businessName ?? "").trim();
     errors.businessName = !shop ? "Enter your shop name." : shop.length < 2 ? "Use at least 2 characters for your shop name." : "Shorten your shop name to 120 characters.";
@@ -4238,7 +4297,7 @@ function signupFieldErrors(issues: ReadonlyArray<{ path: ReadonlyArray<PropertyK
   if (bad.has("phone") || (phoneInput && !normalizeUsPhone(phoneInput))) errors.phone = "Enter a 10-digit US mobile number.";
   else if (!phoneInput && (values.ownerSmsConsent === "yes" || values.founderSmsConsent === "yes")) errors.phone = "Add your mobile number to get texts.";
   if (bad.has("email")) errors.email = "Enter an email like you@yourshop.com.";
-  if (!verified && (bad.has("password") || !values.password)) errors.password = "Make your password at least 12 characters.";
+  if (!verified && (bad.has("password") || !values.password)) errors.password = `Make your password at least ${PASSWORD_MIN_LENGTH} characters.`;
   return errors;
 }
 

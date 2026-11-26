@@ -1,4 +1,4 @@
-import { createHmac, createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, verify, type KeyObject } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHmac, createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, verify, type KeyObject } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { clientForNewConnections } from "../adapters/google-oauth-clients.js";
@@ -9,7 +9,6 @@ import { TeamService } from "../application/team-service.js";
 import type { Environment } from "../config/environment.js";
 import type { OwnerAccount } from "../domain/models.js";
 import { normalizePlanId } from "../domain/plans.js";
-import { findTrade } from "../domain/trades.js";
 import type { Clock, Store } from "../ports.js";
 import { createSignInLinkToken, hashSignInLinkToken, isPasswordless, mintOwnerSession, ownerSessionCookie, PASSWORDLESS_HASH, SIGN_IN_LINK_OUTBOX_TENANT } from "../security/owner-auth.js";
 import { HttpError, isCrossSiteFormPost, parseForm, readBody, readCookie, redirect, sendHtml, type RateLimiter } from "./security.js";
@@ -42,6 +41,12 @@ const emailSchema = z.string().trim().toLowerCase().email().max(254);
 
 export type IdentityProvider = "google" | "microsoft";
 export interface VerifiedIdentity { provider: IdentityProvider | "email"; email: string; name: string | null }
+/**
+ * Sign-up's first screen done, shop details next: a verified email (Google, Microsoft, email link) or an email and
+ * password typed on sign-up (unverified, like any password sign-up; its hash rides encrypted in the same cookie).
+ * No account or workspace exists until the shop screen is sent, so leaving halfway leaves nothing behind.
+ */
+export type PendingSignup = VerifiedIdentity | { provider: "password"; email: string; name: null; passwordHash: string };
 
 interface ProviderConfig {
   name: IdentityProvider;
@@ -87,7 +92,7 @@ export function isInAppBrowser(userAgent: string | undefined): boolean {
 }
 
 /**
- * The pricing page's picks on sign-up (plan, Unlimited, trade) as a query string, real plans and trades only, so
+ * The pricing page's picks on sign-up (plan, Unlimited) as a query string, real plans only, so
  * "Continue with Google" on /signup?plan=team lands back on sign-up with Team still picked.
  */
 export function signupPicks(params: URLSearchParams): string {
@@ -95,8 +100,7 @@ export function signupPicks(params: URLSearchParams): string {
   const plan = normalizePlanId(params.get("plan"));
   if (plan) picks.set("plan", plan);
   if (params.get("unlimited") === "1") picks.set("unlimited", "1");
-  const trade = findTrade(params.get("trade"));
-  if (trade) picks.set("trade", trade.key);
+  // ?trade= from an old homepage link is dropped: the shop name sets the trade now.
   return picks.toString();
 }
 
@@ -172,21 +176,49 @@ export function createOwnerSignIn(deps: SignInDependencies) {
 
   const clearAttempt = (provider: ProviderConfig): string => `${provider.cookie}=; Path=${provider.cookiePath}; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
 
-  function pendingIdentityCookie(identity: VerifiedIdentity): string {
-    const payload = b64(JSON.stringify({ p: identity.provider, e: identity.email, n: identity.name, x: clock.now().getTime() + PENDING_TTL_MS }));
+  /** The password hash in the pending cookie is encrypted (AES-256-GCM), not just signed: the browser never holds it readable. */
+  const sealKey = createHash("sha256").update(`owner-pending-password:${key}`).digest();
+  const seal = (value: string): string => {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", sealKey, iv);
+    const body = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+    return [iv, cipher.getAuthTag(), body].map((part) => part.toString("base64url")).join("~");
+  };
+  const unseal = (value: unknown): string | null => {
+    if (typeof value !== "string") return null;
+    const [iv, tag, body, extra] = value.split("~");
+    if (!iv || !tag || !body || extra !== undefined) return null;
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", sealKey, Buffer.from(iv, "base64url"));
+      decipher.setAuthTag(Buffer.from(tag, "base64url"));
+      return Buffer.concat([decipher.update(Buffer.from(body, "base64url")), decipher.final()]).toString("utf8");
+    } catch {
+      return null;
+    }
+  };
+
+  function pendingIdentityCookie(identity: PendingSignup): string {
+    const payload = b64(JSON.stringify({ p: identity.provider, e: identity.email, n: identity.name, x: clock.now().getTime() + PENDING_TTL_MS, ...(identity.provider === "password" ? { h: seal(identity.passwordHash) } : {}) }));
     return `${PENDING_COOKIE}=${payload}.${sign("owner-pending-identity", payload)}; Path=/signup; HttpOnly; SameSite=Lax; Max-Age=${PENDING_TTL_MS / 1_000}${secure}`;
   }
 
-  /** The verified email waiting for sign-up in this browser, if it is still fresh. */
-  function pendingIdentity(request: IncomingMessage): VerifiedIdentity | null {
+  /** The sign-up waiting for its shop details in this browser (verified email, or email and password), if still fresh. */
+  function pendingIdentity(request: IncomingMessage): PendingSignup | null {
     const [payload, signature, extra] = (readCookie(request, PENDING_COOKIE) ?? "").split(".");
     if (!payload || !signature || extra !== undefined || !same(signature, sign("owner-pending-identity", payload))) return null;
-    const data = parseJson(payload) as { p?: unknown; e?: unknown; n?: unknown; x?: unknown } | null;
-    if (!data || (data.p !== "google" && data.p !== "microsoft" && data.p !== "email") || typeof data.x !== "number" || data.x <= clock.now().getTime()) return null;
+    const data = parseJson(payload) as { p?: unknown; e?: unknown; n?: unknown; x?: unknown; h?: unknown } | null;
+    if (!data || (data.p !== "google" && data.p !== "microsoft" && data.p !== "email" && data.p !== "password") || typeof data.x !== "number" || data.x <= clock.now().getTime()) return null;
     const email = emailSchema.safeParse(data.e);
     if (!email.success) return null;
+    if (data.p === "password") {
+      const passwordHash = unseal(data.h);
+      return passwordHash ? { provider: "password", email: email.data, name: null, passwordHash } : null;
+    }
     return { provider: data.p, email: email.data, name: typeof data.n === "string" ? data.n : null };
   }
+
+  /** Email and password typed on sign-up's first screen: hold them (no account yet) while the owner fills in the shop. */
+  const startPasswordSignup = (email: string, passwordHash: string): string => pendingIdentityCookie({ provider: "password", email, name: null, passwordHash });
 
   const clearPendingIdentity = (): string => `${PENDING_COOKIE}=; Path=/signup; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
 
@@ -360,7 +392,7 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     // Same answer either way; past the per-email limit nothing more is sent.
     if (limiter.allow(`owner-login-link-email:${email}`, 5, 60 * 60_000)) {
       const account = await store.getOwnerAccountByEmail(email);
-      // A sign-up started from the pricing page keeps its plan, Unlimited and trade through the link.
+      // A sign-up started from the pricing page keeps its plan and Unlimited through the link.
       if (account?.status !== "suspended") await sendLink(email, account, next, signupPicks(new URLSearchParams(form.get("picks") ?? "")));
     }
     return sendHtml(response, 200, renderSignInLinkSent(email));
@@ -421,13 +453,14 @@ export function createOwnerSignIn(deps: SignInDependencies) {
     googleCallback: (request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> => callback(providers.google, request, response, url),
     loginOptions,
     pendingIdentity,
+    startPasswordSignup,
     clearPendingIdentity,
     providersFor,
   };
 }
 
 /** Sign-up's view of a pending identity. */
-export function verifiedSignupEmail(identity: VerifiedIdentity | null): VerifiedSignupEmail | null {
+export function verifiedSignupEmail(identity: PendingSignup | null): VerifiedSignupEmail | null {
   return identity ? { email: identity.email, provider: identity.provider } : null;
 }
 

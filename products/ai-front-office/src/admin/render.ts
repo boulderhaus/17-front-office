@@ -6,13 +6,12 @@ import { SIMULATION_SCENARIOS, type SimulationResult } from "../application/simu
 import { buildTelnyxAssistantUpdate } from "../voice/system-prompt.js";
 import { renderMarketing } from "./marketing.js";
 import { COMPANY, companyStatementHtml } from "./footer.js";
-import { OWNER_CALL_CONSENT_DETAIL, OWNER_CALL_CONSENT_LABEL } from "../domain/owner-call-consent.js";
+import { OWNER_CALL_CONSENT_SIGNUP_LABEL } from "../domain/owner-call-consent.js";
 
 /** Call Otto support on the Terms and Privacy pages: the company's own email and phone, never a placeholder. */
 function supportContactHtml(): string {
   return `Call Otto support at <a href="mailto:${COMPANY.email}">${COMPANY.email}</a> or <a href="tel:${COMPANY.phoneE164}">${COMPANY.phoneDisplay}</a>`;
 }
-import { TRADES } from "../domain/trades.js";
 import { FAIR_USE_LINE, FAIR_USE_MULTIPLIER, LEAD_GUARANTEE, money, perCall, type Plan, type UnlimitedAddOn } from "../domain/plans.js";
 
 type OwnerDashboardView = "today" | "pipeline" | "calendar";
@@ -22,18 +21,32 @@ export const renderLanding = renderMarketing;
 /** A plan offered on the signup form, with the exact line shown under the button when it's picked. */
 export interface SignupPlan { id: string; label: string; priceCents: number; firstMonthCents: number; includedCalls: number; blurb: string; who: string; chargeNote: string; unlimited?: UnlimitedAddOn | null; unlimitedChargeNote?: string | null }
 
-/** An email already confirmed by Google, Microsoft or an email link: sign-up shows it locked and asks for no password. */
-export interface VerifiedSignupEmail { email: string; provider: "google" | "microsoft" | "email" }
+/**
+ * Who sign-up's second screen (the shop) is for: an email Google, Microsoft or an email link confirmed, or an email
+ * and password typed on the first screen. Its account and workspace are made only when the shop screen is sent.
+ */
+export interface VerifiedSignupEmail { email: string; provider: "google" | "microsoft" | "email" | "password" }
 
-/** Sign-up fields that can carry their own error, in page order. */
+/** Sign-up fields that can carry their own error, in page order. Email and password are on the first screen, the rest on the second. */
 export const SIGNUP_FIELDS = ["businessName", "phone", "email", "password"] as const;
 export type SignupField = (typeof SIGNUP_FIELDS)[number];
-/** Per-field problems, each naming the fix ("Use at least 12 characters."). */
+/** Per-field problems, each naming the fix ("Use at least 8 characters."). */
 export type SignupFieldErrors = Partial<Record<SignupField, string>>;
 const SIGNUP_FIELD_IDS: Record<SignupField, string> = { businessName: "signup-shop", phone: "signup-phone", email: "signup-email", password: "signup-password" };
 /** The email error whose fix is signing in: both the field error and the summary link to /login. */
 export const SIGNUP_EMAIL_TAKEN = "That email already has an account.";
+/** Shortest password anyone may set (sign-up, reset, joining a team). */
+export const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_HINT = `At least ${PASSWORD_MIN_LENGTH} characters.`;
+/** An envelope, drawn like the provider logos beside it. */
+const MAIL_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>`;
 
+/**
+ * Sign-up, in two screens. First the account: "Continue with Google" (and Microsoft when set up), or "Continue with
+ * email", which opens the email box, then the password box, with an email link as the small second choice. Then,
+ * once they're in, the shop: its name and the owner's mobile, with the text-message opt-in. No trade question: the
+ * shop name sets it.
+ */
 export function renderOwnerSignup(error = "", values: Record<string, string> = {}, options: { supportEmail?: string | null; chargeNote?: string | null; plans?: SignupPlan[]; providers?: SignInProviders; verified?: VerifiedSignupEmail | null; fieldErrors?: SignupFieldErrors; emailLink?: boolean } = {}): string {
   const value = (name: string): string => escapeHtml(values[name] ?? "");
   const plans = options.plans ?? [];
@@ -81,43 +94,49 @@ export function renderOwnerSignup(error = "", values: Record<string, string> = {
 .charge.always{display:block}
 .agree{margin:8px 0 0;text-align:center;text-wrap:balance;font:600 14px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif}
 .verified{font-weight:700}
+.signedin{margin:0 0 10px;font:600 15px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif;overflow-wrap:anywhere}.signedin b{font-weight:700}.signedin a{display:inline-flex;align-items:center;min-height:44px;color:#0b2545}
+.optin label.check span{text-wrap:pretty}
 ${planCss}
 </style>`;
-  // The trade seeds the shop's services and urgent words; a homepage tile arrives with it picked.
-  const pickedTrade = TRADES.some((trade) => trade.key === values.trade) ? values.trade : "";
-  const tradeOptions = `<option value=""${pickedTrade ? "" : " selected"} disabled>Pick one</option>${TRADES.map((trade) => `<option value="${escapeHtml(trade.key)}"${trade.key === pickedTrade ? " selected" : ""}>${escapeHtml(trade.label)}</option>`).join("")}`;
-  const steps = `<div class="onboard-steps"><span>Step 1 of 3 · Your shop</span><ol aria-hidden="true"><li class="on">Your shop</li><li>Your card</li><li>Forward your calls</li></ol></div>`;
-  const button = options.chargeNote ? "Continue to card" : "Create my account";
-  // Google, Microsoft or an email link already confirmed the email: show it locked, and no password to make up.
   const verified = options.verified ?? null;
-  const verifiedBy = verified ? { google: "Verified with Google.", microsoft: "Verified with Microsoft.", email: "Verified by your email link." }[verified.provider] : "";
-  // Each field's own problem sits under it; focus starts on the first one.
+  // Each field's own problem sits under it; focus starts on the first one on this screen.
   const fieldErrors = options.fieldErrors ?? {};
-  const firstBad = SIGNUP_FIELDS.find((name) => fieldErrors[name]);
+  const screenFields: readonly SignupField[] = verified ? ["businessName", "phone"] : ["email", "password"];
+  const firstBad = screenFields.find((name) => fieldErrors[name]);
   const emailTaken = fieldErrors.email === SIGNUP_EMAIL_TAKEN;
   const takenHtml = `${escapeHtml(SIGNUP_EMAIL_TAKEN)} <a href="/login">Sign in instead</a>`;
   const fieldProps = (name: SignupField): { id: string; name: SignupField; error: string | null; errorHtml?: string; autofocus: boolean } => ({ id: SIGNUP_FIELD_IDS[name], name, error: fieldErrors[name] ?? null, ...(name === "email" && emailTaken ? { errorHtml: takenHtml } : {}), autofocus: firstBad === name });
-  const credentials = verified
-    ? field({ ...fieldProps("email"), label: "Email", attrs: `type="email" value="${escapeHtml(verified.email)}" readonly`, hintHtml: `<span class="verified">${verifiedBy}</span> <a href="/signup?fresh=1">Use a different email</a>` })
-    : `${field({ ...fieldProps("email"), label: "Email", attrs: `${EMAIL_ATTRS} autocomplete="email" value="${value("email")}" required` })}${field({ ...fieldProps("password"), label: "Password", attrs: `type="password" autocomplete="new-password" minlength="12" maxlength="200" required`, hint: "At least 12 characters.", password: true })}`;
   const summary = errorSummary("signup-error", [
-    ...SIGNUP_FIELDS.filter((name) => fieldErrors[name]).map((name) => name === "email" && emailTaken ? { message: `${SIGNUP_EMAIL_TAKEN} Sign in instead.`, href: "/login" } : { message: fieldErrors[name]!, field: SIGNUP_FIELD_IDS[name] }),
+    ...SIGNUP_FIELDS.filter((name) => fieldErrors[name] && (screenFields.includes(name) || (name === "email" && emailTaken))).map((name) => name === "email" && emailTaken ? { message: `${SIGNUP_EMAIL_TAKEN} Sign in instead.`, href: "/login" } : { message: fieldErrors[name]!, field: SIGNUP_FIELD_IDS[name] }),
     ...(error ? [{ message: error }] : []),
   ], !firstBad);
+  const agree = `<p class="agree">By continuing you agree to the <a href="/terms">Terms</a> and <a href="/privacy">Privacy notice</a>.</p>`;
   const linkPicks = new URLSearchParams();
   if (values.plan) linkPicks.set("plan", values.plan);
   if (values.unlimited === "yes") linkPicks.set("unlimited", "1");
-  if (values.trade) linkPicks.set("trade", values.trade);
   const picksField = linkPicks.toString() ? `<input type="hidden" name="picks" value="${escapeHtml(linkPicks.toString())}">` : "";
-  const providers = verified ? "" : providerButtons({ ...options.providers, picks: { plan: values.plan, unlimited: values.unlimited === "yes", trade: values.trade } });
-  // Google, Microsoft and an email link, side by side and equally plain (DESIGN: password stays a fallback). The link
-  // form sits outside the sign-up form (forms can't nest): its link opens this page again with the email verified.
-  const linkStart = !verified && options.emailLink
-    ? `<form class="linkstart" method="post" action="/login/email">${picksField}<div class="field"><label for="signup-link-email">Email</label><input id="signup-link-email" type="email" name="email" autocomplete="email" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="254" required></div><button>Sign up with an email link</button><p class="hint">No password. The link works once, for 15 minutes.</p></form>`
-    : "";
-  const startBlock = providers || linkStart ? `<div class="publicform signupstart">${providers}${providers && linkStart ? `<p class="ordivider">or</p>` : ""}${linkStart}</div><p class="ordivider">or fill this in</p>` : "";
-  // Optional, unchecked, separate from the terms and from paying (10DLC / Telnyx opt-in checklist).
-  const optIn = `<div class="optin"><label class="check"><input name="ownerSmsConsent" type="checkbox" value="yes" ${values.ownerSmsConsent === "yes" ? "checked" : ""}><span>Send me Call Otto account notifications by text (new calls, appointments)—optional</span></label><small>By checking this, you agree to receive SMS account notifications from Call Otto by Dutchworks LLC. Msg frequency varies. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. We won’t share mobile info with third parties for marketing. Not required to sign up. <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></small></div><div class="optin"><label class="check"><input name="ownerCallConsent" type="checkbox" value="yes" ${values.ownerCallConsent === "yes" ? "checked" : ""}><span>${escapeHtml(OWNER_CALL_CONSENT_LABEL)}</span></label><small>${escapeHtml(OWNER_CALL_CONSENT_DETAIL)}</small></div>`;
+
+  if (!verified) {
+    // Screen 1, the account. Two equal choices; email opens its box in place (no script), then the password box once
+    // the email looks complete. The email link is the small second choice under the button.
+    const providers = providerButtons({ ...options.providers, picks: { plan: values.plan, unlimited: values.unlimited === "yes" } });
+    const typed = Boolean(values.email) || Boolean(fieldErrors.email) || Boolean(fieldErrors.password);
+    // Email sent with no password yet (no script to open the box): the password box opens with the cursor in it.
+    const askPassword = Boolean(values.email) && !firstBad && !error;
+    const planFields = `${values.plan ? `<input type="hidden" name="plan" value="${value("plan")}">` : ""}${values.unlimited === "yes" ? `<input type="hidden" name="unlimited" value="yes">` : ""}`;
+    const emailForm = `<form method="post" action="/signup" novalidate${typed ? ` class="pwopen"` : ""}><input type="hidden" name="step" value="account">${planFields}${picksField}${field({ ...fieldProps("email"), label: "Email", attrs: `${EMAIL_ATTRS} autocomplete="email" value="${value("email")}" required${providers && !typed ? " autofocus" : ""}` })}<div class="pwstep">${field({ ...fieldProps("password"), label: "Password", attrs: `type="password" autocomplete="new-password" minlength="${PASSWORD_MIN_LENGTH}" maxlength="200" required${askPassword ? " autofocus" : ""}`, hint: PASSWORD_HINT, password: true })}</div><button>Continue</button>${options.emailLink ? `<div class="pwstep"><button class="linkbtn" formaction="/login/email" formnovalidate>Email me a sign-in link instead</button></div>` : ""}</form>`;
+    const email = providers
+      ? `<details class="emailpath"${typed ? " open" : ""}><summary class="emailbtn">${MAIL_ICON}<span>Continue with email</span></summary>${emailForm}</details>`
+      : `<div class="emailpath">${emailForm}</div>`;
+    return publicLayout("Get started", `${style}${authHeader("login")}<main class="publicmain formpage authpage"><section class="formintro"><h1>Get your calls covered.</h1><p>Start with Google or your email.</p></section>${summary}<div class="publicform signupstart">${providers}${providers ? `<p class="ordivider">or</p>` : ""}${email}</div>${agree}<p class="authnote">Already have an account? <a class="textlink" href="/login">Sign in</a></p></main>`);
+  }
+
+  // Screen 2, the shop: they're in. Shop name and mobile, the text opt-in, the plan, then the card.
+  const steps = `<div class="onboard-steps"><span>Step 1 of 3 · Your shop</span><ol aria-hidden="true"><li class="on">Your shop</li><li>Your card</li><li>Forward your calls</li></ol></div>`;
+  const button = options.chargeNote ? "Continue to card" : "Continue";
+  const verifiedBy = { google: " Verified with Google.", microsoft: " Verified with Microsoft.", email: " Verified by your email link.", password: "" }[verified.provider];
+  const signedIn = `<p class="signedin">Signing up as <b>${escapeHtml(verified.email)}</b>.${verifiedBy} <a href="/signup?fresh=1">Use a different email</a></p>`;
+  const optIn = `<div class="optin"><label class="check"><input name="ownerSmsConsent" type="checkbox" value="yes" ${values.ownerSmsConsent === "yes" ? "checked" : ""}><span>Send me Call Otto account notifications by text (new calls, appointments)—optional</span></label><small>By checking this, you agree to receive SMS account notifications from Call Otto by Dutchworks LLC. Msg frequency varies. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. We won’t share mobile info with third parties for marketing. Not required to sign up. <a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></small></div><div class="optin"><label class="check"><input name="ownerCallConsent" type="checkbox" value="yes" ${values.ownerCallConsent === "yes" ? "checked" : ""}><span>${escapeHtml(OWNER_CALL_CONSENT_SIGNUP_LABEL)}</span></label></div>`;
   // Solo is already picked, so it costs no tap; bigger shops open one compact line to choose Pro, Team or Fleet.
   const radio = (plan: SignupPlan): string => `<input type="radio" name="plan" id="plan-${escapeHtml(plan.id)}" value="${escapeHtml(plan.id)}" ${plan.id === picked ? "checked" : ""}>`;
   const [solo, ...bigger] = plans;
@@ -135,8 +154,8 @@ ${planCss}
   const charges = plans.length > 1
     ? plans.map((plan) => `<p class="charge" data-plan="${escapeHtml(plan.id)}">${escapeHtml(plan.chargeNote)}</p>${plan.unlimited && plan.unlimitedChargeNote ? `<p class="charge" data-plan="${escapeHtml(plan.id)}+unlimited">${escapeHtml(plan.unlimitedChargeNote)}</p>` : ""}`).join("")
     : options.chargeNote ? `<p class="charge always">${escapeHtml(plans[0]?.chargeNote ?? options.chargeNote)}</p>` : "";
-  const shopFields = `${field({ ...fieldProps("businessName"), label: "Shop name", attrs: `autocomplete="organization" maxlength="120" value="${value("businessName")}" required` })}<div class="field"><label for="signup-trade">Your trade</label><span class="selectwrap"><select name="trade" id="signup-trade" required aria-describedby="signup-trade-hint">${tradeOptions}</select></span><span class="hint" id="signup-trade-hint">Sets your services and emergency words.</span></div>${field({ ...fieldProps("phone"), label: "Your mobile number", attrs: `type="tel" autocomplete="tel" inputmode="tel" maxlength="30" data-phone-mask placeholder="e.g. (941) 555-0123" value="${value("phone")}" required`, hint: "Where we reach you about your line." })}`;
-  return publicLayout("Get started", `${style}${authHeader("login")}<main class="publicmain formpage authpage"><section class="formintro">${steps}<h1>Get your calls covered.</h1><p>Five quick answers. Your line turns on right after you add a card.</p></section>${summary}${startBlock}<form class="publicform" method="post" action="/signup" novalidate><input type="hidden" name="timezone" value="${value("timezone")}">${shopFields}${credentials}${optIn}<label class="trap" aria-hidden="true">Fax number<input name="faxNumber" tabindex="-1" autocomplete="off"></label>${planPicker}${plans.length ? `<p class="guarantee"><b>Lead guarantee:</b> no real customer lead in your first 30 days, and we refund your first month.</p>` : ""}<button>${button}</button>${charges}<p class="agree">By continuing you agree to the <a href="/terms">Terms</a> and <a href="/privacy">Privacy notice</a>.</p></form><p class="authnote">Already have an account? <a class="textlink" href="/login">Sign in</a></p></main>`);
+  const shopFields = `${field({ ...fieldProps("businessName"), label: "Shop name", attrs: `autocomplete="organization" maxlength="120" value="${value("businessName")}" required` })}${field({ ...fieldProps("phone"), label: "Your mobile number", attrs: `type="tel" autocomplete="tel" inputmode="tel" maxlength="30" data-phone-mask placeholder="e.g. (941) 555-0123" value="${value("phone")}" required`, hint: "Where we reach you about your line." })}`;
+  return publicLayout("Get started", `${style}${authHeader("login")}<main class="publicmain formpage authpage"><section class="formintro">${steps}<h1>Set up your shop</h1><p>Two quick answers, then your card.</p></section>${summary}<form class="publicform" method="post" action="/signup" novalidate>${signedIn}<input type="hidden" name="timezone" value="${value("timezone")}">${shopFields}${optIn}<label class="trap" aria-hidden="true">Fax number<input name="faxNumber" tabindex="-1" autocomplete="off"></label>${planPicker}${plans.length ? `<p class="guarantee"><b>Lead guarantee:</b> no real customer lead in your first 30 days, and we refund your first month.</p>` : ""}<button>${button}</button>${charges}${agree}</form></main>`);
 }
 
 /** The page behind "Call back" in an owner text: who called, about what, and one big Call button. */
@@ -227,14 +246,21 @@ body:has(.authpage) .publicnav nav a{display:inline-flex;align-items:center;min-
 .authpage .publicform label.plan,.authpage .publicform label.bigplan{border:1px solid #c9c3b0;border-radius:12px;box-shadow:none}
 .authpage .publicform label.plan:has(input:checked),.authpage .publicform label.bigplan:has(input:checked){border:2px solid #0b2545;box-shadow:none}
 .authpage .ordivider{text-transform:none;letter-spacing:0;font:600 15px/1.2 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#5d6676}.authpage .ordivider::before,.authpage .ordivider::after{border-top:1px solid #e6e1d3}.authpage .onboard-steps li.on{background:#0b2545}.authpage .onboard-steps{color:#0b2545}
-.authpage .textlink,.authpage .optin a,.authpage .bigger summary,.authpage .pwd summary{color:#0b2545}
+.authpage .textlink,.authpage .optin a,.authpage .agree a,.authpage .bigger summary,.authpage .pwd summary{color:#0b2545}
 .authpage .pwd{border-top:1px solid #e6e1d3}
 .authpage .publicform input[aria-invalid="true"],.authpage .publicform select[aria-invalid="true"]{border:2px solid #b42318}
 .authpage .selectwrap{position:relative;display:block}
 .authpage .selectwrap select{-webkit-appearance:none;appearance:none;height:52px;padding-right:44px;background:#fff}
 .authpage .selectwrap::after{content:"";position:absolute;right:18px;top:50%;width:9px;height:9px;margin-top:-1px;border-right:2px solid #0b2545;border-bottom:2px solid #0b2545;transform:translateY(-50%) rotate(45deg);pointer-events:none}
-.authpage .linkstart{display:grid;gap:12px;margin:0 0 4px}
-.authpage .linkstart .field{margin:0}
+.authpage .emailbtn{display:flex;align-items:center;justify-content:center;gap:12px;min-height:48px;padding:10px 16px;border:1px solid #747775;border-radius:4px;background:#fff;color:#1f1f1f;cursor:pointer;font:600 16px/1.2 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+.authpage .emailbtn:hover{background:#f6f8fa}.authpage .emailbtn:focus-visible{outline:3px solid var(--field-ink);outline-offset:2px}
+.authpage .emailbtn svg{flex:none;width:20px;height:20px}
+.authpage .emailpath>summary{list-style:none}.authpage .emailpath>summary::-webkit-details-marker{display:none}
+.authpage .emailpath[open]>summary{display:none}
+.authpage .emailpath .pwstep{display:none}
+.authpage .emailpath form:has(input[type=email]:valid) .pwstep,.authpage .emailpath form.pwopen .pwstep{display:block}
+.authpage .publicform .emailpath button.linkbtn.linkbtn{display:flex;align-items:center;justify-content:center;width:auto;min-height:44px;margin:10px auto 0;padding:0 8px;background:none;color:#0b2545;border:0;box-shadow:none;text-decoration:underline;text-underline-offset:4px;font:650 15px/1.3 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+.authpage .publicform .emailpath button.linkbtn.linkbtn:hover{background:none;transform:none;box-shadow:none}
 </style>`;
 
 /** The narrow page every sign-in, sign-up, password and booking screen shares: header, eyebrow, h1, then the card. */
@@ -247,7 +273,7 @@ export function authPage(title: string, input: { header: "signup" | "login"; eye
  * aria-invalid on error. `attrs` goes on the input right after its name (tests read `<input name="…"`).
  */
 function field(input: { id: string; name: string; label: string; attrs: string; hint?: string; hintHtml?: string; error?: string | null; errorHtml?: string; autofocus?: boolean; password?: boolean }): string {
-  // A password's rule ("At least 12 characters.") is what its error repeats, so the error takes its place.
+  // A password's rule ("At least 8 characters.") is what its error repeats, so the error takes its place.
   const hintId = (input.hint || input.hintHtml) && !(input.password && input.error) ? `${input.id}-hint` : null;
   const errorId = input.error ? `${input.id}-error` : null;
   const describedBy = [errorId, hintId].filter(Boolean).join(" ");
@@ -273,17 +299,22 @@ function errorSummary(id: string, items: Array<{ message: string; field?: string
   return `<div class="formerror" role="alert" id="${id}"${focus ? FOCUS_ON_LOAD : ""}>${items.length === 1 ? `<p>${line(items[0]!)}</p>` : `<ul>${items.map((item) => `<li>${line(item)}</li>`).join("")}</ul>`}</div>`;
 }
 
+/**
+ * Sign-in, laid out like sign-up's first screen: "Continue with Google" (and Microsoft), or "Continue with email",
+ * which opens the email and password boxes, with "Email me a sign-in link instead" as the small second choice.
+ */
 export function renderOwnerLogin(error = "", options: LoginPageOptions = {}): string {
   const errorField = error ? options.errorField ?? null : null;
   const email = escapeHtml(options.email ?? "");
   // Focus lands on the field to fix: the password when the email was kept, otherwise the email.
-  const focus = errorField === "link" || errorField === "linkToken" ? "link-email"
-    : errorField === "passwordEmail" ? "password-email"
-    : errorField === "password" ? (options.email ? "password" : "password-email") : null;
+  const focus = errorField === "link" || errorField === "linkToken" || errorField === "passwordEmail" ? "login-email"
+    : errorField === "password" ? (options.email ? "password" : "login-email")
+    // Email sent with no password yet (no script to open the box): the password box opens with the cursor in it.
+    : !error && options.passwordOpen && options.email ? "password" : null;
   // The field that shows the error and that the summary links to; none when the emailed link itself failed.
   const fieldId = errorField === "linkToken" ? null : focus;
   // Fields marked wrong: a wrong email-or-password marks both; a malformed email only the email.
-  const invalidIds = errorField === "link" ? ["link-email"] : errorField === "passwordEmail" ? ["password-email"] : errorField === "password" ? ["password-email", "password"] : [];
+  const invalidIds = errorField === "link" || errorField === "passwordEmail" ? ["login-email"] : errorField === "password" ? ["login-email", "password"] : [];
   const invalid = (id: string): string => {
     if (errorField === "linkToken") return focus === id ? ` aria-describedby="login-error" autofocus` : "";
     return `${invalidIds.includes(id) ? ` aria-invalid="true" aria-describedby="${fieldId === id ? "login-field-error" : "login-error"}"` : ""}${focus === id ? " autofocus" : ""}`;
@@ -292,16 +323,13 @@ export function renderOwnerLogin(error = "", options: LoginPageOptions = {}): st
   const errorBox = error ? `<div class="formerror" role="alert" id="login-error"${focus ? "" : FOCUS_ON_LOAD}><p>${fieldId ? `<a href="#${fieldId}">${escapeHtml(error)}</a>` : escapeHtml(error)}</p></div>` : "";
   const next = options.next ? `<input type="hidden" name="next" value="${escapeHtml(options.next)}">` : "";
   const providers = providerButtons(options);
-  const emailInput = (id: string): string => `<div class="field"><label for="${id}">Email</label><input id="${id}" name="email" type="email" autocomplete="username" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="254" value="${email}" required${invalid(id)}>${inlineError(id)}</div>`;
-  const linkForm = options.emailLink
-    ? `<form method="post" action="/login/email">${next}${emailInput("link-email")}<button>Email me a sign-in link</button><p class="hint">No password needed. Works once, for 15 minutes.</p></form>`
-    : "";
-  const passwordForm = `<form method="post" action="/login">${next}${emailInput("password-email")}<div class="field"><label for="password">Password</label><div class="pwfield"><input id="password" name="password" type="password" autocomplete="current-password" maxlength="200" required${invalid("password")}></div>${inlineError("password")}</div><button>Sign in</button><p class="small"><a href="/forgot">Forgot your password?</a></p></form>`;
-  // Password stays for existing accounts, folded away when there is a quicker way in.
-  const password = providers || linkForm
-    ? `<details class="pwd"${errorField === "password" || errorField === "passwordEmail" || options.passwordOpen ? " open" : ""}><summary>Use a password instead</summary>${passwordForm}</details>`
-    : passwordForm;
-  const card = `${providers}${providers && linkForm ? `<p class="ordivider">or</p>` : ""}${linkForm}${password}`;
+  const typed = Boolean(options.email) || errorField !== null || options.passwordOpen === true;
+  const emailInput = `<div class="field"><label for="login-email">Email</label><input id="login-email" name="email" type="email" autocomplete="username" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="254" value="${email}" required${invalid("login-email")}${providers && !typed ? " autofocus" : ""}>${inlineError("login-email")}</div>`;
+  const linkButton = options.emailLink ? `<button class="linkbtn" formaction="/login/email" formnovalidate>Email me a sign-in link instead</button>` : "";
+  const form = `<form method="post" action="/login" novalidate${typed ? ` class="pwopen"` : ""}>${next}${emailInput}<div class="pwstep"><div class="field"><label for="password">Password</label><div class="pwfield"><input id="password" name="password" type="password" autocomplete="current-password" maxlength="200" required${invalid("password")}></div>${inlineError("password")}</div></div><button>Sign in</button><div class="pwstep">${linkButton}<p class="small"><a href="/forgot">Forgot your password?</a></p></div></form>`;
+  const card = providers
+    ? `${providers}<p class="ordivider">or</p><details class="emailpath"${typed ? " open" : ""}><summary class="emailbtn">${MAIL_ICON}<span>Continue with email</span></summary>${form}</details>`
+    : `<div class="emailpath">${form}</div>`;
   return authPage("Owner sign in", { header: "signup", style: SIGN_IN_STYLE, eyebrow: "Your calls. Your rules.", heading: "Sign in", body: `${errorBox}<div class="publicform signinform">${card}</div><p class="authnote">New to Call Otto? <a class="textlink" href="/signup">Get started</a></p>` });
 }
 
@@ -337,7 +365,7 @@ export function renderResetPassword(token: string, error = "", supportEmail: str
   const fieldId = error && errorField ? `reset-${errorField}` : null;
   const summary = error ? errorSummary("reset-error", [{ message: error, field: fieldId }], !fieldId) : "";
   const fieldError = (name: "password" | "confirm"): string | null => error && errorField === name ? error : null;
-  return authPage("Choose a new password", { header: "login", eyebrow: "Your calls. Your rules.", heading: "Choose a new password", body: `${summary}<form class="publicform" method="post" action="/reset"><input type="hidden" name="token" value="${escapeHtml(token)}">${field({ id: "reset-password", name: "password", label: "New password", attrs: `type="password" autocomplete="new-password" minlength="12" maxlength="200" required`, hint: "At least 12 characters.", error: fieldError("password"), autofocus: errorField === "password", password: true })}${field({ id: "reset-confirm", name: "confirm", label: "Type it again", attrs: `type="password" autocomplete="new-password" minlength="12" maxlength="200" required`, error: fieldError("confirm"), autofocus: errorField === "confirm", password: true })}<button>Save and sign in again</button><p class="hint">This signs you out on every device.</p></form>${help}` });
+  return authPage("Choose a new password", { header: "login", eyebrow: "Your calls. Your rules.", heading: "Choose a new password", body: `${summary}<form class="publicform" method="post" action="/reset"><input type="hidden" name="token" value="${escapeHtml(token)}">${field({ id: "reset-password", name: "password", label: "New password", attrs: `type="password" autocomplete="new-password" minlength="${PASSWORD_MIN_LENGTH}" maxlength="200" required`, hint: PASSWORD_HINT, error: fieldError("password"), autofocus: errorField === "password", password: true })}${field({ id: "reset-confirm", name: "confirm", label: "Type it again", attrs: `type="password" autocomplete="new-password" minlength="${PASSWORD_MIN_LENGTH}" maxlength="200" required`, error: fieldError("confirm"), autofocus: errorField === "confirm", password: true })}<button>Save and sign in again</button><p class="hint">This signs you out on every device.</p></form>${help}` });
 }
 
 export function renderAdminResetLink(email: string, link: string): string {

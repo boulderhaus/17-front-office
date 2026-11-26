@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
 import { ownerAlertClientState, ownerAlertState, TelnyxOwnerCallSender, type OwnerAlertState } from "../src/adapters/telnyx-owner-call.js";
-import { OWNER_CALL_CONSENT_KEY } from "../src/domain/owner-call-consent.js";
+import { OWNER_CALL_CONSENT_KEY, OWNER_CALL_CONSENT_SIGNUP_LABEL, OWNER_CALL_CONSENT_SIGNUP_VERSION } from "../src/domain/owner-call-consent.js";
 import { CallService } from "../src/application/call-service.js";
 import { urgentCallSpeech, urgentOwnerCallNotification } from "../src/application/owner-alerts.js";
 import { loadEnvironment } from "../src/config/environment.js";
@@ -11,6 +11,7 @@ import { createDemoConfig } from "../src/domain/config.js";
 import type { CollectedCallFields } from "../src/domain/models.js";
 import { createRequestHandler } from "../src/http/app.js";
 import { NotificationHeldError } from "../src/ports.js";
+import { shopStepPage } from "./signup-steps.js";
 
 const now = new Date("2026-11-23T15:00:00.000Z");
 const clock = { now: () => now };
@@ -172,16 +173,18 @@ describe("consent to automated emergency calls", () => {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("no address");
     const base = `http://127.0.0.1:${address.port}`;
-    const form = await (await fetch(`${base}/signup`)).text();
+    const form = await shopStepPage(base);
     expect(form).toMatch(/<input name="ownerCallConsent" type="checkbox" value="yes" >/);
-    expect(form).toContain("Press 9 during a call, or turn it off in Settings, to stop.");
+    // One short line at signup (who calls, automated voice, why, optional, how to stop); Settings keeps the full text.
+    expect(form).toContain(`<span>${OWNER_CALL_CONSENT_SIGNUP_LABEL}</span></label></div>`);
+    expect(OWNER_CALL_CONSENT_SIGNUP_LABEL).toMatch(/automated voice.*emergency.*Optional; press 9 to stop\./);
     const signup = async (email: string, extra: Record<string, string>) => {
       const response = await fetch(`${base}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Gulf Air", email, password: "synthetic-password-42", consent: "yes", phone: "9415550199", ...extra }) });
       const account = (await store.getOwnerAccountByEmail(email))!;
       return { cookie: response.headers.get("set-cookie")!.split(";")[0]!, tenantId: account.tenantId };
     };
     const yes = await signup("yes@consent.example", { ownerCallConsent: "yes" });
-    expect(JSON.parse((await store.getIntegrationSecret(yes.tenantId, "notifications", OWNER_CALL_CONSENT_KEY))!)).toMatchObject({ source: "signup", wording: "owner-urgent-calls-2026-11-23b" });
+    expect(JSON.parse((await store.getIntegrationSecret(yes.tenantId, "notifications", OWNER_CALL_CONSENT_KEY))!)).toMatchObject({ source: "signup", wording: OWNER_CALL_CONSENT_SIGNUP_VERSION });
     const no = await signup("no@consent.example", {});
     expect(await store.getIntegrationSecret(no.tenantId, "notifications", OWNER_CALL_CONSENT_KEY)).toBeNull();
     const settings = await (await fetch(`${base}/api/app/settings`, { headers: { cookie: no.cookie } })).json() as { csrf: string; urgentCalls: { available: boolean; on: boolean; disclosure: string } };

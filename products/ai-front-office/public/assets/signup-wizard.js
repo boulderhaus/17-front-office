@@ -49,6 +49,13 @@
   });
   window.addEventListener("pageshow", () => document.querySelectorAll("form[data-busy]").forEach(ready));
 
+  // "Continue with email" opens its box: the cursor goes straight to the email field.
+  document.querySelectorAll("details.emailpath").forEach((details) => {
+    details.addEventListener("toggle", () => {
+      if (details.open) details.querySelector('input[type="email"]')?.focus();
+    });
+  });
+
   // Signup: send the browser's timezone so the shop's hours start out right.
   const timezone = document.querySelector('.publicform input[name="timezone"]');
   if (timezone && !timezone.value) {

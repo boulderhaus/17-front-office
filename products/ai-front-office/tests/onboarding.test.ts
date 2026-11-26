@@ -9,6 +9,7 @@ import { describeHours, hoursFromChoice } from "../src/domain/hours.js";
 import { firstMonthCents, money, planCatalog } from "../src/domain/plans.js";
 import { createRequestHandler } from "../src/http/app.js";
 import { graceStartedAt } from "../src/application/grace-line.js";
+import { shopStepPage } from "./signup-steps.js";
 
 type Call = { url: string; method: string; body: string | null };
 
@@ -150,7 +151,7 @@ describe("three taps to a live line", () => {
 
   it("shows Solo already picked and the bigger plans behind one compact line, and charges the one picked", async () => {
     const { baseUrl, store, providers } = await start({ env: PLANS });
-    const page = await (await fetch(`${baseUrl}/signup`)).text();
+    const page = await shopStepPage(baseUrl);
     expect(page).toMatch(/<input type="radio" name="plan" id="plan-solo" value="solo" checked>/);
     for (const id of ["team", "fleet"]) expect(page).toMatch(new RegExp(`<input type="radio" name="plan" id="plan-${id}" value="${id}" >`));
     // Pro is no longer sold.
@@ -207,7 +208,7 @@ describe("three taps to a live line", () => {
 
   it("switches the limited-time offer off everywhere with FIRST_MONTH_OFFER_ENABLED=false", async () => {
     const { baseUrl, providers } = await start({ env: { ...PLANS, FIRST_MONTH_OFFER_ENABLED: "false" } });
-    const [signup, home] = await Promise.all([fetch(`${baseUrl}/signup`).then((r) => r.text()), fetch(`${baseUrl}/`).then((r) => r.text())]);
+    const [signup, home] = await Promise.all([shopStepPage(baseUrl), fetch(`${baseUrl}/`).then((r) => r.text())]);
     for (const page of [signup, home]) expect(page).not.toMatch(/half off|limited time|First month \$/i);
     expect(signup).toContain("Today: $49.99. Then $49.99/month. Cancel anytime.");
     await signUp(baseUrl);
@@ -218,7 +219,7 @@ describe("three taps to a live line", () => {
 
   it("only sells plans that have a Stripe price, and never Pro", async () => {
     const { baseUrl } = await start({ env: { STRIPE_PRICE_ID_PRO: "price_pro_synthetic", STRIPE_PRICE_ID_TEAM: "price_team_synthetic" } });
-    const page = await (await fetch(`${baseUrl}/signup`)).text();
+    const page = await shopStepPage(baseUrl);
     expect(page).toContain('id="plan-team"');
     expect(page).not.toContain('id="plan-pro"');
     expect(page).not.toContain('id="plan-fleet"');
@@ -253,7 +254,7 @@ describe("three taps to a live line", () => {
     expect(checkout.has("discounts[0][coupon]")).toBe(false);
     expect(checkout.get("payment_method_collection")).toBe("always");
     expect(checkout.get("custom_text[submit][message]")).toBe("Today: $49.99. Then $49.99/month. Cancel anytime.");
-    const page = await (await fetch(`${baseUrl}/signup`)).text();
+    const page = await shopStepPage(baseUrl);
     expect(page).toContain("Today: $49.99. Then $49.99/month. Cancel anytime.");
     expect(page).not.toContain('id="plan-plus"');
   });

@@ -9,6 +9,12 @@ export const OWNER_CALL_CONSENT_VERSION = "owner-urgent-calls-2026-11-23b";
 export const OWNER_CALL_CONSENT_LABEL = "Call my mobile with an automated message when a caller has an emergency (optional)";
 /** Shown in full beside the signup box and the Settings switch, so both record the same wording version. */
 export const OWNER_CALL_CONSENT_DETAIL = "By choosing this, you agree that Call Otto by Dutchworks LLC may call this number with automated, artificial-voice messages about emergency calls to your business. Not required to sign up. Press 9 during a call, or turn it off in Settings, to stop.";
+/**
+ * Sign-up's one-line version of the same consent (who calls, automated voice, why, optional, how to stop). A grant
+ * from sign-up records this version, so the proof always names the words the owner actually saw.
+ */
+export const OWNER_CALL_CONSENT_SIGNUP_VERSION = "owner-urgent-calls-signup-2026-11-26";
+export const OWNER_CALL_CONSENT_SIGNUP_LABEL = "Call Otto may call my mobile with an automated voice message when a caller has an emergency. Optional; press 9 to stop.";
 /** Integration secret (provider "notifications") holding the active consent; absent means no automated calls. */
 export const OWNER_CALL_CONSENT_KEY = "owner_call_consent";
 /** Every grant ever given and how it ended, kept after a stop as proof of the consent behind earlier calls. */
@@ -28,7 +34,7 @@ async function readConsent(store: Store, tenantId: string): Promise<ConsentRecor
 }
 
 export async function grantOwnerCallConsent(store: Store, tenantId: string, input: { at: string; source: "signup" | "settings"; ip: string | null; phone: string }): Promise<void> {
-  const record: ConsentRecord = { at: input.at, source: input.source, wording: OWNER_CALL_CONSENT_VERSION, ip: input.ip, phone: input.phone };
+  const record: ConsentRecord = { at: input.at, source: input.source, wording: input.source === "signup" ? OWNER_CALL_CONSENT_SIGNUP_VERSION : OWNER_CALL_CONSENT_VERSION, ip: input.ip, phone: input.phone };
   await store.withLock(`owner-call-consent:${tenantId}`, async () => {
     // A grant it replaces stays on file as proof for the calls already placed under it.
     const previous = await readConsent(store, tenantId);
