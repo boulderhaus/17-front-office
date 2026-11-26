@@ -30,7 +30,8 @@ function useNav(): NavItem[] {
   return navEntries({ base, preview, member, attention }).map((entry) => ({
     ...entry,
     icon: ICONS[entry.id],
-    ...(entry.id === "settings" ? { children: SETTINGS_PAGES.map((page) => ({ to: `${base}/settings/${page.id}`, label: page.title })) } : {}),
+    // Team is a page of its own (/app/team): the menu goes straight there, not through a settings stub.
+    ...(entry.id === "settings" ? { children: SETTINGS_PAGES.map((page) => ({ to: page.id === "team" ? `${base}/team` : `${base}/settings/${page.id}`, label: page.title })) } : {}),
   }))
 }
 
@@ -191,7 +192,7 @@ function NavRow({ item, active, onNavigate }: { item: NavItem; active: boolean; 
  */
 function NavGroup({ item, pages, onNavigate }: { item: NavItem; pages: NonNullable<NavItem["children"]>; onNavigate?: () => void }) {
   const path = usePath()
-  const inside = path === item.to || path.startsWith(`${item.to}/`)
+  const inside = path === item.to || path.startsWith(`${item.to}/`) || pages.some((page) => path === page.to)
   const [open, setOpen] = useState(inside)
   useEffect(() => { if (inside) setOpen(true) }, [inside])
   return (

@@ -39,6 +39,24 @@ describe("the bell's alerts (APP-04)", () => {
   });
 });
 
+describe("the bell's alerts, timing and limits (APP-04)", () => {
+  it("dates an alert from when it appeared, so a call back that comes due after the bell was read gets the dot", () => {
+    const alerts = buildAlerts({ calls: [call("s", 120)], tasks: [{ callId: "s", status: "snoozed", priority: "normal", dueAt: at(5), updatedAt: at(100) }], nowMs: NOW });
+    expect(alerts[0]!.at).toBe(at(5));
+    expect(unseenAlerts(alerts, at(60))).toBe(1);
+  });
+  it("calls a long failed call a dropped call, not a hang-up", () => {
+    const alerts = buildAlerts({ calls: [call("f", 10, { outcome: "failed", seconds: 240 }), call("h", 20, { outcome: "failed", seconds: 6 })], tasks: [], nowMs: NOW });
+    expect(alerts.map((alert) => alert.title)).toEqual(["Call dropped: Pat Example", "Hung up early: Pat Example"]);
+  });
+  it("never lets newer bookings push an open urgent call off the list", () => {
+    const calls = [call("old", 600, { urgent: true }), ...Array.from({ length: 25 }, (_, index) => call(`b${index}`, index + 1, { outcome: "booked" }))];
+    const alerts = buildAlerts({ calls, tasks: [{ callId: "old", status: "open", priority: "high", dueAt: at(590) }], nowMs: NOW });
+    expect(alerts).toHaveLength(20);
+    expect(alerts[alerts.length - 1]).toMatchObject({ callId: "old", kind: "urgent" });
+  });
+});
+
 describe("the Text button's draft (CALL-10)", () => {
   it("greets the caller by first name, names the shop and the problem", () => {
     expect(smsDraft({ callerName: "Morgan Sample", problem: "Kitchen sink drains slowly.", shop: "Synthetic Plumbing" }))
@@ -48,6 +66,13 @@ describe("the Text button's draft (CALL-10)", () => {
   it("still reads right with no name, no problem or no shop name", () => {
     expect(smsDraft({ callerName: null, problem: "", shop: null })).toBe("Hi. Saw you called. When's a good time for us to come by?");
     expect(smsDraft({ callerName: "  ", problem: null, shop: "Cool Co" })).toBe("Hi, this is Cool Co. Saw you called. When's a good time for us to come by?");
+  });
+  it("keeps a real summary short and sayable: names keep their capital, long ones are cut, third-person ones are left out", () => {
+    expect(smsDraft({ callerName: "Linda", problem: "Linda's AC stopped cooling", shop: "Cool Co" })).toContain("about Linda's AC stopped cooling.")
+    expect(smsDraft({ callerName: "Linda Example", problem: "Linda needs a new filter", shop: null })).toContain("about Linda needs a new filter.")
+    const long = smsDraft({ callerName: "Lee", problem: "Water heater is leaking from the bottom and the pilot light keeps going out every night since Tuesday. Also wants a quote.", shop: "Cool Co" })
+    expect(long).toBe("Hi Lee, this is Cool Co. Saw you called about water heater is leaking from the bottom and the pilot light. When's a good time for us to come by?")
+    expect(smsDraft({ callerName: "Lee", problem: "Caller reports no hot water", shop: "Cool Co" })).toBe("Hi Lee, this is Cool Co. Saw you called. When's a good time for us to come by?")
   });
   it("puts the body where each phone reads it: & on iPhone, ? elsewhere", () => {
     expect(smsHref("+15555550100", "Hi Lee", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) CriOS/131")).toBe("sms:+15555550100&body=Hi%20Lee");
@@ -85,18 +110,27 @@ describe("the third number on Calls (CALL-13)", () => {
 
 
 describe("the Jobs board (APP-08)", () => {
+  const c = (id: string, minutesAgo: number, requested: string | null = null, outcome = "handoff_queued") => ({ id, startedAt: at(minutesAgo), outcome, fields: { requestedStart: requested } });
+  const task = (callId: string, priority = "normal", completedMinutesAgo = 5) => ({ callId, priority, dueAt: at(0), completedAt: at(completedMinutesAgo), updatedAt: at(completedMinutesAgo) });
+  const build = (calls: ReturnType<typeof c>[], tasks: { actionable?: ReturnType<typeof task>[]; snoozed?: ReturnType<typeof task>[]; handled?: ReturnType<typeof task>[] }) =>
+    jobColumns({ callsById: new Map(calls.map((one) => [one.id, one])), actionable: tasks.actionable ?? [], snoozed: tasks.snoozed ?? [], handled: tasks.handled ?? [], nowMs: NOW, due: () => "Due now", date: () => "Nov 27" });
   it("has four columns in the order a job moves, each card with when and one next step", () => {
-    const c = (id: string, requested: string | null = null) => ({ id, startedAt: at(Number(id.length)), fields: { requestedStart: requested } });
-    const callsById = new Map([["a", c("a")], ["b", c("bb", at(-60))], ["s", c("sss")], ["k", c("k", at(-120))], ["d", c("dd")]]);
-    const task = (callId: string, priority = "normal") => ({ callId, priority, dueAt: at(0), completedAt: at(5), updatedAt: at(5) });
-    const columns = jobColumns({ callsById, actionable: [task("a", "high"), task("b")], snoozed: [task("s")], booked: [callsById.get("k")!], handled: [task("d")], due: () => "Due now", date: () => "Nov 27" });
+    const columns = build([c("a", 1), c("b", 2, at(-60)), c("s", 3), c("k", 4, at(-120), "booked"), c("d", 5)], { actionable: [task("a", "high"), task("b")], snoozed: [task("s")], handled: [task("d")] });
     expect(columns.map((column) => [column.title, column.cards.length])).toEqual([["Needs reply", 2], ["Waiting", 1], ["Booked", 1], ["Done", 1]]);
     expect(columns[0]!.cards.map((card) => [card.label, card.when, card.action])).toEqual([["Urgent", "Now", "call"], ["Confirm time", "Now", "call"]]);
     expect(columns[2]!.cards[0]!.action).toBeNull();
   });
+  it("puts every job in exactly one column: far-off visits in Booked, past visits in Done, open follow-ups first", () => {
+    const columns = build([
+      c("far", 10, at(-60 * 24 * 30), "booked"), c("past", 20, at(60 * 24 * 2), "booked"), c("both", 30, at(-60), "booked"), c("old", 40), c("new", 50),
+    ], { actionable: [task("both")], handled: [task("old", "normal", 300), task("new", "normal", 1)] });
+    const ids = columns.map((column) => column.cards.map((card) => card.call.id));
+    expect(ids).toEqual([["both"], [], ["far"], ["new", "old", "past"]]);
+  });
   it("says plainly when a column is empty, and maps old tab links", () => {
-    const columns = jobColumns({ callsById: new Map(), actionable: [], snoozed: [], booked: [], handled: [], due: () => "", date: () => "" });
+    const columns = build([], {});
     expect(columns[0]!.empty).toBe("Nobody is waiting on you.");
+    expect(columns[2]!.empty).toBe("Nothing booked yet.");
     expect([jobTab(null), jobTab("handled"), jobTab("all"), jobTab("booked")]).toEqual(["reply", "done", "reply", "booked"]);
   });
 });

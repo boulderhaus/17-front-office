@@ -17,11 +17,18 @@ interface AlertCall {
   fields: { callerName: string | null; problemDescription: string; requestedStart: string | null }
   emergency: { emergency: boolean } | null
 }
-interface AlertTask { callId: string; status: string; priority: string; dueAt: string }
+interface AlertTask { callId: string; status: string; priority: string; dueAt: string; updatedAt?: string }
 
-/** A call that ended before Otto got the details: under 20 seconds, or one that failed. Spam never counts. */
+/** A call that ended before Otto got the details: under 20 seconds. Spam never counts. */
 const SHORT_SECONDS = 20
 
+const later = (...values: Array<string | null | undefined>) => values.filter((value): value is string => Boolean(value)).sort().reverse()[0]!
+
+/**
+ * at: when the alert appeared (the call ended, the call back came due, the follow-up changed), not when the call
+ * started, so something that turned urgent after the bell was opened still gets the dot and sorts as new.
+ * The list stops at `limit`, but an open urgent call or call back is never pushed off by newer bookings.
+ */
 export function buildAlerts(input: { calls: AlertCall[]; tasks: AlertTask[]; nowMs: number }, limit = 20): AlertItem[] {
   const tasks = new Map(input.tasks.map((task) => [task.callId, task]))
   const items: AlertItem[] = []
@@ -30,18 +37,27 @@ export function buildAlerts(input: { calls: AlertCall[]; tasks: AlertTask[]; now
     const who = call.fields.callerName?.trim() || "Unknown caller"
     const problem = call.fields.problemDescription?.trim()
     const task = tasks.get(call.id)
-    const open = task && (task.status === "open" || (task.status === "snoozed" && Date.parse(task.dueAt) <= input.nowMs))
+    const dueNow = task?.status === "snoozed" && Date.parse(task.dueAt) <= input.nowMs
+    const open = task && (task.status === "open" || dueNow)
+    const ended = call.endedAt ?? call.startedAt
+    const taskAt = task ? later(ended, task.updatedAt, dueNow ? task.dueAt : null) : ended
+    const short = call.endedAt !== null && call.durationSeconds !== null && call.durationSeconds < SHORT_SECONDS
     if (call.outcome === "booked") {
-      items.push({ kind: "booked", callId: call.id, at: call.startedAt, title: `New booking: ${who}`, detail: problem || "Booked on the call" })
+      items.push({ kind: "booked", callId: call.id, at: ended, title: `New booking: ${who}`, detail: problem || "Booked on the call" })
     } else if (open && (task.priority === "high" || call.emergency?.emergency)) {
-      items.push({ kind: "urgent", callId: call.id, at: call.startedAt, title: `Urgent: ${who}`, detail: problem || "Call back now" })
-    } else if (call.outcome === "failed" || (call.endedAt && call.durationSeconds !== null && call.durationSeconds < SHORT_SECONDS)) {
-      items.push({ kind: "short", callId: call.id, at: call.startedAt, title: `Hung up early: ${who}`, detail: "Ended before Otto got the details" })
+      items.push({ kind: "urgent", callId: call.id, at: taskAt, title: `Urgent: ${who}`, detail: problem || "Call back now" })
+    } else if (short) {
+      items.push({ kind: "short", callId: call.id, at: ended, title: `Hung up early: ${who}`, detail: "Ended before Otto got the details" })
+    } else if (call.outcome === "failed") {
+      items.push({ kind: "short", callId: call.id, at: ended, title: `Call dropped: ${who}`, detail: problem || "The call cut off" })
     } else if (open) {
-      items.push({ kind: "callback", callId: call.id, at: call.startedAt, title: `${who} is waiting`, detail: problem || "Wants a call back" })
+      items.push({ kind: "callback", callId: call.id, at: taskAt, title: `${who} is waiting`, detail: problem || "Wants a call back" })
     }
   }
-  return items.sort((left, right) => right.at.localeCompare(left.at)).slice(0, limit)
+  const newest = (list: AlertItem[]) => list.sort((left, right) => right.at.localeCompare(left.at))
+  const waiting = items.filter((item) => item.kind === "urgent" || item.kind === "callback")
+  const rest = newest(items.filter((item) => item.kind !== "urgent" && item.kind !== "callback")).slice(0, Math.max(0, limit - waiting.length))
+  return newest([...waiting, ...rest])
 }
 
 /** New since the bell was last opened: the dot on the bell. */

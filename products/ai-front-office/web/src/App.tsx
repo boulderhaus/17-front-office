@@ -57,8 +57,8 @@ function Workspace({ base }: { base: "/app" | "/demo" }) {
         <Route path="jobs" element={<Screen title="Jobs" subtitle="Every job from your calls, by where it stands.">{ready(<JobsPage />)}</Screen>} />
         <Route path="calendar" element={<Screen title="Calendar" subtitle="Booked visits and times callers asked for." actions={<CalendarHeaderActions />}>{ready(<CalendarPage />)}</Screen>} />
         <Route path="calls/:id" element={<CallScreen base={base} />} />
-        {/* Team: the owner reaches it from Settings › Team (its back goes there); a teammate from the menu. */}
-        {!preview && <Route path="team" element={<Screen title="Team" subtitle="Who works your calls, and who takes booked jobs." callerData={false} back={member ? undefined : { to: `${base}/settings/team`, label: "Settings" }}>{ready(<TeamPage />)}</Screen>} />}
+        {/* Team: the owner reaches it from the Settings group (its back goes to Settings); a teammate from the menu. */}
+        {!preview && <Route path="team" element={<Screen title="Team" subtitle="Who works your calls, and who takes booked jobs." callerData={false} back={member ? undefined : { to: `${base}/settings`, label: "Settings" }}>{ready(<TeamPage />)}</Screen>} />}
         {/* One route for the whole settings area, so an unsaved edit survives moving between its pages. */}
         {/* Team members never see Settings: a typed or old link goes home (the server refuses them too). */}
         {!preview && <Route path="settings/*" element={!dashboard.data ? <Screen title="Settings" callerData={false}>{ready(null)}</Screen> : member ? <Navigate to={base} replace /> : <SettingsArea />} />}
@@ -87,7 +87,8 @@ function Layout() {
         <Route path="*" element={<Navigate to="/app" replace />} />
       </Routes>
       {/* One toast host for the whole app, always at the top. */}
-      <Toaster position={phone ? "top-center" : "top-right"} offset={phone ? { top, left: 12, right: 12 } : { top: 16, right: 24 }} mobileOffset={{ top, left: 8, right: 8 }} richColors closeButton={!phone} />
+      {/* On a phone it sits over the top bar, so it leaves quickly and can be swiped or closed to reach Back. */}
+      <Toaster position={phone ? "top-center" : "top-right"} offset={phone ? { top, left: 12, right: 12 } : { top: 16, right: 24 }} mobileOffset={{ top, left: 8, right: 8 }} duration={phone ? 2500 : 4000} richColors closeButton />
     </TooltipProvider>
   )
 }

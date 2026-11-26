@@ -77,6 +77,13 @@ export async function teamApi(request: IncomingMessage, response: ServerResponse
       if (hours.weekdayStart >= hours.weekdayEnd) throw new HttpError(400, "Pick a start time before the finish time.");
     }
     if (input.data.enabled && !await store.getIntegrationSecret(account.tenantId, "google", calendarKey)) throw new HttpError(409, "Connect your Google Calendar first.");
+    if (!input.data.enabled) {
+      // Otto can't book a job onto nobody's calendar: someone else must still be taking them.
+      const accounts = await store.listTeamAccounts(account.tenantId);
+      const others = (config.schedulingCalendars ?? []).filter((calendar) => calendar.accountId !== account.id && calendar.enabled
+        && accounts.some((person) => person.id === calendar.accountId && person.status !== "suspended"));
+      if (!others.length) throw new HttpError(409, "Someone has to take booked jobs. Invite a teammate first.");
+    }
     await teams.availability(account, input.data.enabled, hours);
     return sendJson(response, 200, { saved: true });
   }
@@ -101,8 +108,7 @@ export async function teamApi(request: IncomingMessage, response: ServerResponse
   }
   /**
    * "Confirm my email": the owner signed up with a password, which proves nothing about the address. The email
-   * carries a one-time link to set the password; using it proves the address and keeps a password sign-in
-   * (an emailed sign-in link would prove it too, but switches the sign-up password off).
+   * carries a one-time link (/app/confirm-email); opening it signed in proves the address and changes nothing else.
    */
   if (url.pathname === "/api/app/team/confirm-email") {
     await readJson(200);
@@ -111,10 +117,10 @@ export async function teamApi(request: IncomingMessage, response: ServerResponse
     const { token, tokenHash } = createPasswordResetToken();
     const now = context.clock.now();
     await store.createPasswordReset(account.id, tokenHash, new Date(now.getTime() + 30 * 60_000).toISOString());
-    const link = `${context.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/reset?token=${encodeURIComponent(token)}`;
+    const link = `${context.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app/confirm-email?token=${encodeURIComponent(token)}`;
     await store.enqueueNotification({
       id: randomUUID(), tenantId: account.tenantId, callId: null, channel: "email", destinationRef: `email:${account.email}`,
-      body: formatEmailBody("Confirm your Call Otto email", `Tap this link within 30 minutes to confirm your email. You'll set your password on the next screen:\n\n${link}\n\nIf you didn't ask for this, ignore this email.`),
+      body: formatEmailBody("Confirm your Call Otto email", `Tap this link within 30 minutes to confirm your email:\n\n${link}\n\nIf you didn't ask for this, ignore this email.`),
       priority: "high", state: "pending", attempts: 0, nextAttemptAt: now.toISOString(),
       idempotencyKey: `email-confirm:${tokenHash}`, providerReceipt: null, lastError: null, createdAt: now.toISOString(), sentAt: null,
     });

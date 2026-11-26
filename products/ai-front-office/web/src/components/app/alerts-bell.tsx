@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useMemo, useSyncExternalStore } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import { Bell, CalendarCheck, PhoneMissed, PhoneIncoming, Settings2, TriangleAlert, type LucideIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -11,13 +11,26 @@ import { cn } from "@/lib/utils"
 
 const ICON: Record<AlertKind, LucideIcon> = { urgent: TriangleAlert, callback: PhoneIncoming, booked: CalendarCheck, short: PhoneMissed }
 const TINT: Record<AlertKind, string> = { urgent: "bg-red-50 text-red-700", callback: "bg-secondary text-brand-ink", booked: "bg-emerald-50 text-emerald-800", short: "bg-amber-50 text-amber-800" }
-const SEEN_KEY = "callotto.alerts.seen"
-
-function readSeen(): string | null {
-  try { return window.localStorage.getItem(SEEN_KEY) } catch { return null }
+/**
+ * When the bell was last opened, per shop (two shops on one browser keep their own dots), shared by every bell on
+ * the page (the phone bar's and the sidebar's), so reading it in one clears the other.
+ */
+const listeners = new Set<() => void>()
+const seenKey = (shop: string) => `callotto.alerts.seen:${shop}`
+/** Private mode (no storage): remembered until the page reloads. */
+const memory = new Map<string, string>()
+function readSeen(shop: string): string | null {
+  try { return window.localStorage.getItem(seenKey(shop)) ?? memory.get(shop) ?? null } catch { return memory.get(shop) ?? null }
 }
-function writeSeen(value: string) {
-  try { window.localStorage.setItem(SEEN_KEY, value) } catch { /* private mode: the dot just stays */ }
+function writeSeen(shop: string, value: string) {
+  memory.set(shop, value)
+  try { window.localStorage.setItem(seenKey(shop), value) } catch { /* private mode: memory holds it */ }
+  listeners.forEach((listener) => listener())
+}
+function subscribe(listener: () => void) {
+  listeners.add(listener)
+  window.addEventListener("storage", listener)
+  return () => { listeners.delete(listener); window.removeEventListener("storage", listener) }
 }
 
 /**
@@ -28,14 +41,14 @@ function writeSeen(value: string) {
 export function AlertsBell({ className }: { className?: string }) {
   const { dashboard, base } = useMode()
   const navigate = useNavigate()
-  const [seen, setSeen] = useState(readSeen)
+  const shop = dashboard?.analytics?.tenantId ?? dashboard?.shop.businessName ?? "shop"
+  const seen = useSyncExternalStore(subscribe, () => readSeen(shop), () => null)
   const alerts = useMemo(() => (dashboard ? buildAlerts({ calls: dashboard.calls, tasks: dashboard.tasks, nowMs: Date.parse(dashboard.now) }) : []), [dashboard])
   const fresh = unseenAlerts(alerts, seen)
   const tz = dashboard?.shop.timezone ?? "America/New_York"
   const onOpenChange = (open: boolean) => {
     if (!open || !alerts[0]) return
-    writeSeen(alerts[0].at)
-    setSeen(alerts[0].at)
+    if (!seen || alerts[0].at > seen) writeSeen(shop, alerts[0].at)
   }
   return (
     <DropdownMenu onOpenChange={onOpenChange}>

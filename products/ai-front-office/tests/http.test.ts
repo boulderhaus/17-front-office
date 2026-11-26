@@ -911,6 +911,10 @@ describe("HTTP boundary", () => {
     const memberView = await (await fetch(`${baseUrl}/api/app/team`, { headers: { cookie: memberCookie } })).json() as { role: string; people: unknown[]; hours: unknown };
     expect(memberView).toMatchObject({ role: "member", people: [] });
     expect(memberView.hours).not.toBeNull();
+    // Nobody left taking booked jobs would stop every booking: the last one on can't switch off.
+    const ownerOff = await api(ownerCookie, "/api/app/team/rotation", { enabled: false });
+    expect(ownerOff.status).toBe(409);
+    expect(await ownerOff.text()).toContain("Someone has to take booked jobs");
     const removed = await api(ownerCookie, "/api/app/team/remove", { accountId: teammate!.id });
     expect(removed.status).toBe(200);
     expect(await store.getIntegrationSecret(account!.tenantId, "google", `refresh_token:${teammate!.id}`)).toBeNull();

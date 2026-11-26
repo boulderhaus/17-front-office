@@ -3,14 +3,31 @@
  * "Hi Linda, this is Suncoast Heating. Saw you called about your AC not cooling. When's a good time for us to come by?"
  */
 
+/** A summary longer than this is cut at a word, so the draft stays a text, not a paragraph. */
+const MAX_PROBLEM = 60
+
+/**
+ * The problem as the caller would hear it, or null when the summary can't be said back to them: one written about
+ * the caller ("Caller reports…", "She says…"). Only a plain lowercase-able opening word is lowercased
+ * ("Kitchen sink…" → "kitchen sink…"); a name ("Linda's AC…") or an acronym (AC, HVAC) keeps its capital.
+ */
+function aboutProblem(raw: string | null, name?: string): string | null {
+  let problem = raw?.trim().replace(/\s+/g, " ").replace(/[.!?\s]+$/, "")
+  if (!problem) return null
+  if (/^(the )?(caller|customer|client|homeowner|he|she|they)\b/i.test(problem)) return null
+  problem = problem.split(/(?<=[.!?])\s/)[0]!.replace(/[.!?]+$/, "")
+  if (problem.length > MAX_PROBLEM) problem = problem.slice(0, MAX_PROBLEM + 1).replace(/\s+\S*$/, "").replace(/[,;:\s]+$/, "")
+  const first = problem.split(" ")[0]!
+  return /^[A-Z][a-z]+$/.test(first) && first !== name ? problem[0]!.toLowerCase() + problem.slice(1) : problem
+}
+
 export function smsDraft(input: { callerName: string | null; problem: string | null; shop: string | null }): string {
   const first = input.callerName?.trim().split(/\s+/)[0]
   const shop = input.shop?.trim()
-  const problem = input.problem?.trim().replace(/[.!?\s]+$/, "")
+  const problem = aboutProblem(input.problem, first)
   const hello = first ? `Hi ${first}` : "Hi"
   const from = shop ? `, this is ${shop}.` : "."
-  // "Kitchen sink drains slowly" reads as "about kitchen sink drains slowly", unless it starts with a name (AC, HVAC).
-  const about = problem ? ` Saw you called about ${/^[A-Z][a-z]/.test(problem) ? problem[0]!.toLowerCase() + problem.slice(1) : problem}.` : " Saw you called."
+  const about = problem ? ` Saw you called about ${problem}.` : " Saw you called."
   return `${hello}${from}${about} When's a good time for us to come by?`
 }
 
