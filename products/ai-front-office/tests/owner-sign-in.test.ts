@@ -937,27 +937,32 @@ describe("reclaiming an account someone else signed up with", () => {
     return { account, squatterCookie, cronyCookie, openInvite };
   }
 
-  it("an owner whose email isn't proved can't invite teammates, and is sent to a password reset, which keeps their password", async () => {
+  it("an owner whose email isn't proved can't invite teammates; Confirm my email sends a set-password link, which proves it and keeps a password", async () => {
     const h = await harness();
-    const { account, squatterCookie } = await squatted(h, "owner@synthetic.example");
-    const team = await (await fetch(`${h.baseUrl}/app/team`, { headers: { cookie: squatterCookie } })).text();
-    // No invite form to fail on; the way out is a reset, not an emailed sign-in link (that switches the password off).
-    expect(team).not.toContain('action="/app/team/invite"');
-    expect(team).toContain('First confirm your email: use <a href="/forgot">Forgot your password?</a>');
-    const csrf = /name="csrf" value="([^"]+)"/.exec(team)![1]!;
-    const invite = await fetch(`${h.baseUrl}/app/team/invite`, { method: "POST", headers: { cookie: squatterCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, email: "helper@synthetic.example" }) });
+    const { squatterCookie } = await squatted(h, "owner@synthetic.example");
+    const team = await (await fetch(`${h.baseUrl}/api/app/team`, { headers: { cookie: squatterCookie } })).json() as { csrf: string; emailConfirmed: boolean; emailEnabled: boolean };
+    expect(team).toMatchObject({ emailConfirmed: false, emailEnabled: true });
+    const post = (path: string, body: unknown) => fetch(`${h.baseUrl}${path}`, { method: "POST", headers: { cookie: squatterCookie, "content-type": "application/json", "x-csrf-token": team.csrf }, body: JSON.stringify(body) });
+    const invite = await post("/api/app/team/invite", { email: "helper@synthetic.example" });
     expect(invite.status).toBe(403);
     const message = await invite.text();
-    expect(message).toContain("Confirm your email before inviting a teammate: use “Forgot your password?”");
-    expect(message).not.toContain("sign in with an emailed link");
+    expect(message).toContain("Confirm your email first");
+    expect(message).not.toContain("Forgot your password");
 
-    const { token, tokenHash } = (await import("../src/security/owner-auth.js")).createPasswordResetToken();
-    await h.store.createPasswordReset(account.id, tokenHash, new Date(h.now() + 30 * 60_000).toISOString());
-    expect((await fetch(`${h.baseUrl}/reset`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token, password: "owner-password-789", confirm: "owner-password-789" }) })).status).toBe(303);
+    // One tap: an email to the account's own address with a one-time link to set the password.
+    const sent: Array<{ destinationRef: string; body: string }> = [];
+    const enqueue = h.store.enqueueNotification.bind(h.store);
+    h.store.enqueueNotification = async (notification) => { sent.push(notification); return enqueue(notification); };
+    expect((await post("/api/app/team/confirm-email", {})).status).toBe(200);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.destinationRef).toBe("email:owner@synthetic.example");
+    expect(sent[0]!.body).toContain("Confirm your Call Otto email");
+    const token = /\/reset\?token=([^\s]+)/.exec(sent[0]!.body)![1]!;
+    expect((await fetch(`${h.baseUrl}/reset`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token: decodeURIComponent(token), password: "owner-password-789", confirm: "owner-password-789" }) })).status).toBe(303);
     const signedIn = await fetch(`${h.baseUrl}/login`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ email: "owner@synthetic.example", password: "owner-password-789" }) });
     const cookie = cookieOf(signedIn, "afo_owner")!;
     expect(cookie).toBeTruthy();
-    expect(await (await fetch(`${h.baseUrl}/app/team`, { headers: { cookie } })).text()).toContain('action="/app/team/invite"');
+    expect((await (await fetch(`${h.baseUrl}/api/app/team`, { headers: { cookie } })).json() as { emailConfirmed: boolean }).emailConfirmed).toBe(true);
   });
 
   it("removes the squatter's teammates and kills their invitations, whether the owner proves it by Google or a reset link", async () => {

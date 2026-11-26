@@ -328,6 +328,20 @@ describe("Owner JSON API and React app serving", () => {
     expect(seen).toHaveLength(3); // no lookup after the 416, and none for the other shop
   });
 
+  it("finds a recording the end-of-call webhook never saved, and offers no player when there is none (CALL-08)", async () => {
+    const owner = await signUp("a@synthetic.example");
+    await seedCall(owner.tenantId, null);
+    let recordings: unknown[] = [];
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      if (String(input).startsWith("https://api.telnyx.com/v2/recordings")) return new Response(JSON.stringify({ data: recordings }), { status: 200, headers: { "content-type": "application/json" } });
+      return realFetch(input, init);
+    }) as typeof fetch;
+    const detail = async () => (await (await realFetch(`${baseUrl}/api/app/calls/${CALL_ID}`, { headers: { cookie: owner.cookie } })).json() as { recordingUrl: string | null }).recordingUrl;
+    expect(await detail()).toBeNull();
+    recordings = [{ download_urls: { mp3: "https://recordings.example/owner-call.mp3?sig=1" } }];
+    expect(await detail()).toBe("/app/provider/telnyx/recordings/v3%3Aowner-call?stream=1");
+  });
+
   it("keeps a team member out of shop settings: no read, no change", async () => {
     const owner = await signUp("a@synthetic.example");
     // Inviting needs a proved email (a password sign-up proves nothing).

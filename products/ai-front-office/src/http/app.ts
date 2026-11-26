@@ -15,7 +15,7 @@ import { buildActivationReport, shopActivationBlockers, type ActivationReport } 
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService, ToolWriteInProgressError } from "../application/call-service.js";
 import { approvedTransferTargets } from "../application/transfer-policy.js";
-import { joinTeam, teamRoutes } from "./team-routes.js";
+import { joinTeam, teamApi } from "./team-routes.js";
 import { CALL_PATH_SCRIPT, renderCallPath, renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
 import { buildCallPath, type CallPath } from "../domain/call-path.js";
 import { chargeSentence, hasPlanAccess, isCompStatus, isPaidStatus } from "../domain/billing.js";
@@ -465,7 +465,7 @@ function publicOwnerDemo(now: Date): {
   };
 }
 
-const OWNER_APP_PATH = /^\/app(?:\/(?:start|jobs|calendar|settings|settings\/[a-z-]{1,40}|calls|calls\/[0-9a-f-]{36}))?\/?$/i;
+const OWNER_APP_PATH = /^\/app(?:\/(?:start|jobs|calendar|team|settings|settings\/[a-z-]{1,40}|calls|calls\/[0-9a-f-]{36}))?\/?$/i;
 const DEMO_APP_PATH = /^\/demo(?:\/(?:jobs|calendar|calls|calls\/[A-Za-z0-9-]{1,64}))?\/?$/;
 function isOwnerAppPath(pathname: string): boolean { return OWNER_APP_PATH.test(pathname); }
 /** Signed out on an owner-app page (say, a phone that scanned the setup QR code): sign in, then land back on it. */
@@ -1339,6 +1339,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const method = request.method ?? "GET";
     const owner = account.role !== "member";
     if (method === "GET" && url.pathname === "/api/app/dashboard") return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    if (url.pathname === "/api/app/team" || url.pathname.startsWith("/api/app/team/")) {
+      if (method === "POST" && url.pathname === "/api/app/team/invite" && !limiter.allow(`invite:${account.id}`, 10, 60 * 60_000)) throw new HttpError(429, "Too many invitations. Please try again later.");
+      if (method === "POST" && url.pathname === "/api/app/team/confirm-email" && !limiter.allow(`email-confirm:${account.id}`, 3, 60 * 60_000)) throw new HttpError(429, "We just sent one. Check your email, or try again in an hour.");
+      return teamApi(request, response, url, dependencies, account, session, (limit) => readApiJson(request, session, limit));
+    }
     // The review account has no line: no number, carrier lookup, test call or setup-helper call, ever.
     if (method === "POST" && /^\/api\/app\/line\/(?:business-number|check|help|go-live)$/.test(url.pathname) && isCompStatus((await dependencies.store.getSubscription(account.tenantId))?.status)) {
       throw new HttpError(409, REVIEW_NO_LINE);
@@ -1818,9 +1823,13 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         dependencies.store.listNotifications(call.id),
         dependencies.store.listToolEvents(call.id),
       ]);
+      // The end-of-call webhook saves the recording link; a call it never reached (or a recording Telnyx finished
+      // later) is looked up once (cached), so a recorded call always has its player and an unrecorded one none.
+      const recorded = call.recordingUrl?.startsWith("https://")
+        || (call.outcome !== "in_progress" && recordingClient !== null && Boolean(await recordingDownloadUrl(call.providerCallId).catch(() => null)));
       const detail: ApiCallDetail = {
         call: apiCall(call),
-        recordingUrl: call.recordingUrl?.startsWith("https://") ? `/app/provider/telnyx/recordings/${encodeURIComponent(call.providerCallId)}?stream=1` : null,
+        recordingUrl: recorded ? `/app/provider/telnyx/recordings/${encodeURIComponent(call.providerCallId)}?stream=1` : null,
         booking: booking ? { status: booking.status, requestedStart: booking.requestedStart } : null,
         task: task && task.tenantId === account.tenantId ? apiTask(task) : null,
         alerts: notifications.filter((item) => item.channel === "sms" && item.tenantId === account.tenantId).map((item) => ({ priority: item.priority, state: item.state })),
@@ -2030,10 +2039,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     }
     if (member && (url.pathname.startsWith("/app/billing") || url.pathname === "/app/config" || /\/delete$/.test(url.pathname))) throw new HttpError(403, "Only the owner can change billing, shop rules, or delete call records");
     if (member && url.pathname === "/app/settings") return redirect(response, "/app/team");
-    if (url.pathname === "/app/team" || url.pathname.startsWith("/app/team/")) {
-      if (method === "POST" && url.pathname === "/app/team/invite" && !limiter.allow(`invite:${account.id}`, 10, 60 * 60_000)) throw new HttpError(429, "Too many invitations. Please try again later.");
-      return teamRoutes(request, response, url, dependencies, account, session);
-    }
+    // /app/team is the owner app's Team screen (below); its data and changes are /api/app/team.
     if (method === "GET" && isOwnerAppPath(url.pathname) && await sendOwnerWeb(response)) return;
     // Setup steps live in the React app; without it, the server-rendered dashboard has the same buttons.
     if (method === "GET" && /^\/app\/start\/?$/.test(url.pathname)) return redirect(response, "/app");

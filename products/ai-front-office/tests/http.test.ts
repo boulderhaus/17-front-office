@@ -884,31 +884,35 @@ describe("HTTP boundary", () => {
     const demoPage = await fetch(`${baseUrl}/demo`, { headers: { authorization: `Bearer ${adminToken}` } });
     expect(demoPage.status).toBe(200);
     expect(await demoPage.text()).not.toContain("Urgent alerts are off.");
-    const teamPage = await (await fetch(`${baseUrl}/app/team`, { headers: { cookie: ownerCookie } })).text();
-    const csrf = /name="csrf" value="([^"]+)"/.exec(teamPage)![1]!;
-    const inviteTeammate = () => fetch(`${baseUrl}/app/team/invite`, { method: "POST", headers: { cookie: ownerCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, email: "teammate@synthetic.example" }) });
+    const team = await (await fetch(`${baseUrl}/api/app/team`, { headers: { cookie: ownerCookie } })).json() as { csrf: string; emailConfirmed: boolean; people: Array<{ name: string }> };
+    expect(team.emailConfirmed).toBe(false);
+    const csrf = team.csrf;
+    const api = (cookie: string, path: string, body: unknown) => fetch(`${baseUrl}${path}`, { method: "POST", headers: { cookie, "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify(body) });
+    const inviteTeammate = () => api(ownerCookie, "/api/app/team/invite", { email: "teammate@synthetic.example" });
     // A password sign-up proves nothing about the email: inviting waits until the owner proves it.
     expect((await inviteTeammate()).status).toBe(403);
     await store.markOwnerEmailVerified(account!.id, new Date().toISOString(), null);
     const invite = await inviteTeammate();
     expect(invite.status).toBe(200);
-    const inviteHtml = await invite.text();
-    const link = /href="([^"]+\/join\?shop=[^"]+)"/.exec(inviteHtml)![1]!.replaceAll("&amp;", "&");
-    const url = new URL(link);
+    const url = new URL((await invite.json() as { inviteUrl: string }).inviteUrl);
     const join = await fetch(`${baseUrl}/join`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ shop: url.searchParams.get("shop")!, token: url.searchParams.get("token")!, name: "Synthetic Teammate", password: "long-password-for-tests", consent: "yes" }) });
     expect(join.status).toBe(303);
     const memberCookie = join.headers.get("set-cookie")!.split(";")[0]!;
     expect((await fetch(`${baseUrl}/app`, { headers: { cookie: memberCookie } })).status).toBe(200);
-    for (const path of ["/app/config", "/app/billing/checkout", "/app/billing/portal", "/app/team/invite", "/app/setup"]) {
+    const memberCsrf = (await (await fetch(`${baseUrl}/api/app/team`, { headers: { cookie: memberCookie } })).json() as { csrf: string }).csrf;
+    expect((await fetch(`${baseUrl}/api/app/team/invite`, { method: "POST", headers: { cookie: memberCookie, "content-type": "application/json", "x-csrf-token": memberCsrf }, body: JSON.stringify({ email: "x@synthetic.example" }) })).status).toBe(403);
+    for (const path of ["/app/config", "/app/billing/checkout", "/app/billing/portal", "/app/setup"]) {
       const denied = await fetch(`${baseUrl}${path}`, { method: "POST", headers: { cookie: memberCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf }) });
       expect(denied.status).toBe(403);
     }
     // Removing a teammate drops their Google grant: a suspended member's calendar is never used again.
     const teammate = await store.getOwnerAccountByEmail("teammate@synthetic.example");
     await store.saveIntegrationSecret(account!.tenantId, "google", `refresh_token:${teammate!.id}`, "synthetic-refresh-token");
-    expect(await (await fetch(`${baseUrl}/app/team`, { headers: { cookie: memberCookie } })).text()).toContain('href="/privacy#google-calendar"');
-    const removed = await fetch(`${baseUrl}/app/team/remove`, { method: "POST", redirect: "manual", headers: { cookie: ownerCookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, accountId: teammate!.id }) });
-    expect(removed.status).toBe(303);
+    const memberView = await (await fetch(`${baseUrl}/api/app/team`, { headers: { cookie: memberCookie } })).json() as { role: string; people: unknown[]; hours: unknown };
+    expect(memberView).toMatchObject({ role: "member", people: [] });
+    expect(memberView.hours).not.toBeNull();
+    const removed = await api(ownerCookie, "/api/app/team/remove", { accountId: teammate!.id });
+    expect(removed.status).toBe(200);
     expect(await store.getIntegrationSecret(account!.tenantId, "google", `refresh_token:${teammate!.id}`)).toBeNull();
     // The old setup page is gone: a bookmark lands in Settings.
     const setup = await fetch(`${baseUrl}/app/setup`, { redirect: "manual", headers: { cookie: ownerCookie } });
