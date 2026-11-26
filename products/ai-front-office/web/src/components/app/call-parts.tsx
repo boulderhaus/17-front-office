@@ -62,7 +62,7 @@ export function CallBackNote({ call }: { call: ApiCall }) {
   if (!call.phone || call.outcome === "ignored_spam") return null
   const name = call.fields.callerName?.trim().split(/\s+/)[0] ?? "The caller"
   return (
-    <p className="ph-no-capture -mt-1 text-sm text-muted-foreground">
+    <p className="ph-no-capture -mt-1 text-sm text-muted-foreground text-pretty">
       <span className="lg:hidden">Calls {formatPhone(call.phone)} from your phone. {name} sees your number.</span>
       <span className="max-lg:hidden">Dials {formatPhone(call.phone)} with your computer’s calling app, or call it from your phone. {name} sees your number.</span>
     </p>
@@ -83,8 +83,8 @@ export interface Action {
 }
 
 /**
- * Every call action, by kind. Top row: reach out (one filled Call Linda, a navy-outline Text) and look up (Map, a
- * beige tonal button). `reachNote` (what Call does) sits right under that row. Status below a divider, "After the
+ * Every call action, by kind. Top row, equal widths: reach out (one filled Call Linda, a navy-outline Text) and look
+ * up (Map, the same outline). `reachNote` (what Call does) sits right under that row. Status below a divider, "After the
  * call": a gray-outline Done (or Reopen) and a quiet Later. Call back, Text and Map never show for likely spam.
  */
 export function ActionBar({ call, extra = [], reachNote }: { call: ApiCall; extra?: Action[]; reachNote?: ReactNode }) {
@@ -95,7 +95,8 @@ export function ActionBar({ call, extra = [], reachNote }: { call: ApiCall; extr
   if (call.phone && !spam) {
     // The demo's numbers are made up: Call and Text say what they'd do instead of dialing a fake number.
     const demo = (what: string) => () => toast(`In your account, this ${what} ${call.fields.callerName?.split(" ")[0] ?? "the caller"} from your phone.`)
-    actions.push({ key: "call", label: callLabel(call), icon: <Phone />, ...(preview ? { onClick: demo("calls") } : { href: `tel:${call.phone}` }), primary: true, group: "reach" })
+    // Three equal buttons in a phone row leave no room for a name: "Call" there, "Call Linda" when it's Call and Text.
+    actions.push({ key: "call", label: address ? "Call" : callLabel(call), icon: <Phone />, ...(preview ? { onClick: demo("calls") } : { href: `tel:${call.phone}` }), primary: true, group: "reach" })
     // A draft written from the call ("Hi Linda, this is ... Saw you called about ..."): the owner only taps Send.
     const draft = smsDraft({ callerName: call.fields.callerName, problem: call.fields.problemDescription, shop: dashboard?.shop.businessName ?? null })
     const touchMac = typeof navigator !== "undefined" && navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1
@@ -115,11 +116,10 @@ export function ActionBar({ call, extra = [], reachNote }: { call: ApiCall; extr
     action.disabled && "pointer-events-none opacity-50",
   ) : cn(
     "flex min-h-14 flex-col items-center justify-center gap-1 rounded-xl px-1 text-[14px] font-semibold transition-colors [&_svg]:size-5",
+    // Walk 11-26 re-walk: one row of equal widths, one filled action and the rest in one outline style.
     action.primary
-      ? "min-h-13 min-w-0 flex-1 flex-row gap-2 bg-primary text-[17px] text-primary-foreground hover:bg-primary/90"
-      : action.group === "look"
-        ? "min-h-13 shrink-0 flex-row gap-2 rounded-xl bg-secondary px-4 text-[15px] font-semibold text-foreground hover:bg-border"
-        : "min-h-13 shrink-0 flex-row gap-2 rounded-xl border-2 border-primary bg-card px-4 text-[15px] font-semibold text-primary hover:bg-primary/5",
+      ? "min-h-13 min-w-0 flex-row gap-1.5 bg-primary px-2 text-[15px] text-primary-foreground hover:bg-primary/90"
+      : "min-h-13 min-w-0 flex-row gap-1.5 rounded-xl border-2 border-primary bg-card px-2 text-[15px] font-semibold text-primary hover:bg-primary/5",
     focus,
     action.disabled && "pointer-events-none opacity-50",
   )
@@ -131,13 +131,13 @@ export function ActionBar({ call, extra = [], reachNote }: { call: ApiCall; extr
       </DropdownMenuContent>
     </DropdownMenu>
   ) : action.href
-    ? <a key={action.key} href={action.href} className={tile(action)} {...(action.external ? { target: "_blank", rel: "noreferrer" } : {})}>{action.icon}{action.label}</a>
-    : <button key={action.key} type="button" className={tile(action)} disabled={action.disabled} aria-busy={action.busy || undefined} onClick={action.onClick}>{action.icon}{action.label}</button>
+    ? <a key={action.key} href={action.href} className={tile(action)} {...(action.external ? { target: "_blank", rel: "noreferrer" } : {})}>{action.icon}<span className="truncate">{action.label}</span></a>
+    : <button key={action.key} type="button" className={tile(action)} disabled={action.disabled} aria-busy={action.busy || undefined} onClick={action.onClick}>{action.icon}<span className="truncate">{action.label}</span></button>
   const top = actions.filter((action) => action.group !== "status").sort((left, right) => Number(Boolean(right.primary)) - Number(Boolean(left.primary)))
   const status = actions.filter((action) => action.group === "status")
   return (
     <div className="ph-no-capture grid gap-3">
-      {top.length > 0 && <div className="flex gap-2">{top.map(render)}</div>}
+      {top.length > 0 && <div className="grid auto-cols-fr grid-flow-col gap-2">{top.map(render)}</div>}
       {reachNote}
       {status.length > 0 && (
         <div className={cn("grid gap-2", top.length > 0 && "border-t pt-3")}>

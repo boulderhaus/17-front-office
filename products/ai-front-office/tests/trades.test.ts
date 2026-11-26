@@ -106,7 +106,9 @@ describe("trades", () => {
     for (const long of ["Contractors &#38; remodelers", "Water damage &#38; mold", "Landscaping &#38; tree", "Appliance repair"]) expect(html).not.toContain(long);
     expect(TRADES.find((trade) => trade.key === "restoration")?.label).toBe("Water damage & mold");
     expect(html).not.toMatch(/fire restoration|Fire and smoke/i);
-    for (const trade of TRADES) expect(html).toContain(`href="/signup?trade=${trade.key}"`);
+    // Sign-up no longer asks for the trade, so every tile links to plain sign-up (leftover f).
+    expect(html).not.toContain("/signup?trade=");
+    expect(html.match(/<a class="trade" href="\/signup">/g)).toHaveLength(TRADES.length);
     expect(html).toContain("Sewage is backing up into the tub.");
     expect(html).toContain("<b>Urgent if they say</b><span>burst pipe</span><span>sewage is backing up</span>");
     expect(html).toContain("<span>won’t close</span>");

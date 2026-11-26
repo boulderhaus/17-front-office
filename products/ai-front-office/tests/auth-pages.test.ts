@@ -64,14 +64,34 @@ describe("public page system", () => {
     expect(page).toContain('<main class="publicmain formpage authpage">');
   });
 
-  it("signup: the guarantee sits with the plan above the button; only the charge and terms lines sit under it", () => {
+  it("signup: the guarantee and one price summary sit above the button; only the terms line sits under it", () => {
     const plan = { id: "solo", label: "Solo", priceCents: 4_999, firstMonthCents: 2_499, includedCalls: 60, blurb: "60 answered calls a month, about 2 a day", who: "Just you", chargeNote: "Today: $24.99." };
     const page = renderOwnerSignup("", {}, { plans: [plan, { ...plan, id: "team", label: "Team" }], chargeNote: plan.chargeNote, verified: { email: "owner@synthetic.example", provider: "google" } });
     const at = (text: string): number => page.indexOf(text);
-    const [guarantee, button, charge, agree] = [at('<p class="guarantee">'), at("<button>Continue to card</button>"), at('<p class="charge"'), at('<p class="agree">')];
+    const [guarantee, summary, button, agree] = [at('<p class="guarantee">'), at('<div class="quotes"'), at("<button>Continue to card</button>"), at('<p class="agree">')];
     expect(guarantee).toBeGreaterThan(at('<fieldset class="plans">'));
-    expect([guarantee < button, button < charge, charge < agree]).toEqual([true, true, true]);
-    expect(page.slice(button, page.indexOf("</form>")).match(/<p class="(?!charge)/g)).toEqual(['<p class="']);
+    // One price summary in one fixed place, right above the button; only the terms line sits under it.
+    expect([guarantee < summary, summary < button, button < agree]).toEqual([true, true, true]);
+    expect(page.slice(button, page.indexOf("</form>")).match(/<p class="/g)).toEqual(['<p class="']);
+  });
+
+  it("signup: Unlimited is a switch in its own add-on box, and the summary has a line for each plan with and without it", () => {
+    const unlimited = (planCents: number, addOnCents: number) => ({ addOnCents, priceCents: planCents + addOnCents, firstMonthCents: Math.round((planCents + addOnCents) / 2), fairUseCalls: 180, priceId: null });
+    const solo = { id: "solo", label: "Solo", priceCents: 4_999, firstMonthCents: 2_499, includedCalls: 60, blurb: "", who: "One person", chargeNote: "", unlimited: unlimited(4_999, 5_000) };
+    const team = { ...solo, id: "team", label: "Team", priceCents: 17_999, firstMonthCents: 8_999, includedCalls: 250, who: "About 5 people", unlimited: unlimited(17_999, 7_500) };
+    const page = renderOwnerSignup("", { unlimited: "yes", plan: "team" }, { plans: [solo, team], verified: { email: "owner@synthetic.example", provider: "google" } });
+    expect(page).toMatch(/<div class="addon"><span class="addonhead">Add-on<\/span><label class="unltoggle" for="unlimited"><input type="checkbox" role="switch" id="unlimited" name="unlimited" value="yes" checked>/);
+    expect(page).toMatch(/<input type="radio" name="plan" id="plan-team" value="team" checked>/);
+    for (const key of ["solo", "solo+unlimited", "team", "team+unlimited"]) expect(page).toContain(`<div class="quote" data-plan="${key}">`);
+    // Team with Unlimited: $254.99 a month, half off today.
+    expect(page).toMatch(/data-plan="team\+unlimited"><span class="qlabel">Today · First month half off<\/span><span class="qbig"><b>\$127\.50<\/b><s>\$254\.99<\/s>/);
+    // CSS picks the one summary that matches the checked plan and switch: no script needed.
+    expect(page).toContain('.publicform:has(#plan-team:checked):has(#unlimited:checked) .quote[data-plan="team+unlimited"]{display:grid}');
+    expect(page).not.toContain("Bigger shop");
+  });
+
+  it("signup and sign-in carry the Call Otto wordmark, not plain text", () => {
+    for (const page of [renderOwnerSignup(), renderOwnerLogin()]) expect(page).toContain('<a class="brand smallbrand" href="/"><b class="mark" aria-hidden="true">CO</b><span>Call <em>Otto</em></span></a>');
   });
 
   it("sign-in, check-email, link, forgot and reset pages share one eyebrow", async () => {

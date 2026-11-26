@@ -161,16 +161,21 @@ describe("three taps to a live line", () => {
     expect(describeHours(config.bookableHours)).toBe("Mon–Fri 9 AM–5 PM");
   });
 
-  it("shows Solo already picked and the bigger plans behind one compact line, and charges the one picked", async () => {
+  it("shows Solo, Team and Fleet in plain view with Solo picked, one price summary, and charges the one picked", async () => {
     const { baseUrl, store, providers } = await start({ env: PLANS });
     const page = await shopStepPage(baseUrl);
     expect(page).toMatch(/<input type="radio" name="plan" id="plan-solo" value="solo" checked>/);
     for (const id of ["team", "fleet"]) expect(page).toMatch(new RegExp(`<input type="radio" name="plan" id="plan-${id}" value="${id}" >`));
     // Pro is no longer sold.
     expect(page).not.toContain('id="plan-pro"');
-    // Bigger plans sit in a closed <details>: no extra tap for Solo.
-    expect(page).toMatch(/<details class="bigger"><summary>Bigger shop\? Team, Fleet<\/summary>/);
-    for (const text of ["Solo", "$49.99", "Limited time: first month half off", "60 answered calls a month, about 2 a day", "Team", "$179.99", "About 5 people", "Fleet", "$349.99", "About 10 people", "Today: $24.99 (limited-time half off). Then $49.99/month. Cancel anytime.", "Today: $89.99 (limited-time half off). Then $179.99/month. Cancel anytime.", "Lead guarantee"]) expect(page).toContain(text);
+    // Walk 11-26 (SIGNUP-04): all three plans in plain view, no "Bigger shop?" link.
+    expect(page).not.toContain("Bigger shop");
+    expect(page).toContain('<div class="plancards">');
+    for (const text of ["Solo", "$49.99", "60 answered calls a month", "One person", "Team", "$179.99", "About 5 people", "Fleet", "$349.99", "About 10 people", "Lead guarantee"]) expect(page).toContain(text);
+    // One summary per choice, from priceQuote: today's price big, the full price struck, then the monthly price and date.
+    expect(page).toContain('<div class="quote" data-plan="solo"><span class="qlabel">Today · First month half off</span><span class="qbig"><b>$24.99</b><s>$49.99</s></span><span class="qline">then $49.99 a month from Dec\u00a023</span></div>');
+    expect(page).toContain('<div class="quote" data-plan="team"><span class="qlabel">Today · First month half off</span><span class="qbig"><b>$89.99</b><s>$179.99</s></span>');
+    expect(page).not.toContain('class="charge');
     expect(page).not.toMatch(/unlimited/i);
     // Terms are one line under the button, never a box to tick.
     expect(page).toContain("By continuing you agree to the");
@@ -222,7 +227,7 @@ describe("three taps to a live line", () => {
     const { baseUrl, providers } = await start({ env: { ...PLANS, FIRST_MONTH_OFFER_ENABLED: "false" } });
     const [signup, home] = await Promise.all([shopStepPage(baseUrl), fetch(`${baseUrl}/`).then((r) => r.text())]);
     for (const page of [signup, home]) expect(page).not.toMatch(/half off|limited time|First month \$/i);
-    expect(signup).toContain("Today: $49.99. Then $49.99/month. Cancel anytime.");
+    expect(signup).toContain('<span class="qlabel">Today</span><span class="qbig"><b>$49.99</b></span><span class="qline">then $49.99 a month from');
     await signUp(baseUrl);
     const checkout = new URLSearchParams(providers.calls.find((call) => call.url.endsWith("/v1/checkout/sessions"))!.body!);
     expect(checkout.has("discounts[0][coupon]")).toBe(false);
@@ -235,7 +240,7 @@ describe("three taps to a live line", () => {
     expect(page).toContain('id="plan-team"');
     expect(page).not.toContain('id="plan-pro"');
     expect(page).not.toContain('id="plan-fleet"');
-    expect(page).toContain("Bigger shop? Team</summary>");
+    expect(page).not.toContain("Bigger shop");
   });
 
   it("keeps a free trial only when STRIPE_TRIAL_DAYS asks for one, and never spends the coupon on it", async () => {
@@ -267,7 +272,7 @@ describe("three taps to a live line", () => {
     expect(checkout.get("payment_method_collection")).toBe("always");
     expect(checkout.get("custom_text[submit][message]")).toBe("Today: $49.99. Then $49.99/month. Cancel anytime.");
     const page = await shopStepPage(baseUrl);
-    expect(page).toContain("Today: $49.99. Then $49.99/month. Cancel anytime.");
+    expect(page).toContain('<span class="qbig"><b>$49.99</b></span>');
     expect(page).not.toContain('id="plan-plus"');
   });
 

@@ -17,3 +17,5 @@ export type SettingsPageId = (typeof SETTINGS_PAGES)[number]["id"]
 export function settingsPage(id: SettingsPageId) {
   return SETTINGS_PAGES.find((page) => page.id === id)!
 }
+
+export { settingsPageHref } from "@/lib/nav"

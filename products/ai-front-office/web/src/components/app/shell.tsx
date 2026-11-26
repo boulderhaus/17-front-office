@@ -8,7 +8,7 @@ import { Sheet, SheetClose, SheetContent, SheetTitle, SheetTrigger } from "@/com
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { AlertsBell } from "./alerts-bell"
 import { BrandMark } from "./bits"
-import { SETTINGS_PAGES } from "./settings-pages"
+import { SETTINGS_PAGES, settingsPageHref } from "./settings-pages"
 import { coverageStatus, derive } from "@/lib/derive"
 import { useMediaQuery, useMode } from "@/lib/mode"
 import { backGoes, JUMP, navActive, navEntries, swipeCloses, type NavEntry, type NavId } from "@/lib/nav"
@@ -31,7 +31,7 @@ function useNav(): NavItem[] {
     ...entry,
     icon: ICONS[entry.id],
     // Team is a page of its own (/app/team): the menu goes straight there, not through a settings stub.
-    ...(entry.id === "settings" ? { children: SETTINGS_PAGES.map((page) => ({ to: page.id === "team" ? `${base}/team` : `${base}/settings/${page.id}`, label: page.title })) } : {}),
+    ...(entry.id === "settings" ? { children: SETTINGS_PAGES.map((page) => ({ to: settingsPageHref(page.id, base), label: page.title })) } : {}),
   }))
 }
 

@@ -86,3 +86,10 @@ export function tradeForShopName(name: string | null | undefined): Trade {
   const best = first("strong") ?? first("weak");
   return findTrade(best?.trade) ?? findTrade("other")!;
 }
+
+/** The trade names the homepage shows (short enough for one line on a phone); Settings uses the same ones. */
+const SHORT_TRADE_LABELS: Record<string, string> = { construction: "Contractors", restoration: "Water damage", landscaping: "Landscaping", appliance: "Appliances" };
+
+export function tradeShortLabel(trade: Pick<Trade, "key" | "label">): string {
+  return SHORT_TRADE_LABELS[trade.key] ?? trade.label;
+}

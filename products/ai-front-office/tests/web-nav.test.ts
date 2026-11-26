@@ -94,3 +94,11 @@ describe("unsaved settings", () => {
     expect(leavesSettings({ pathname: "/app/settingsx" })).toBe(true);
   });
 });
+
+describe("settings rows", () => {
+  it("send Team straight to the Team page on phone and computer, never a stub card (walk 11-26, leftover e)", async () => {
+    const { settingsPageHref } = await import("../web/src/lib/nav.js");
+    expect(settingsPageHref("team")).toBe("/app/team");
+    expect(settingsPageHref("business")).toBe("/app/settings/business");
+  });
+});

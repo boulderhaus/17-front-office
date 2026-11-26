@@ -59,7 +59,8 @@ export function SettingsCard({ title, description, children, danger, id, action 
 
 function Field({ label, hint, children, className, error }: { label: string; hint?: ReactNode; children: ReactNode; className?: string; error?: string | null }) {
   return (
-    <label className={cn("grid min-w-0 gap-1.5", className)}>
+    // content-start: in a two-up row, a field without a hint keeps its box level with the one beside it.
+    <label className={cn("grid min-w-0 content-start gap-1.5", className)}>
       <span className="text-[15px] font-medium">{label}</span>
       {children}
       {error ? <span role="alert" className="text-sm font-medium text-red-700">{error}</span> : hint && <span className="text-sm text-muted-foreground text-pretty">{hint}</span>}
@@ -310,7 +311,7 @@ function EmergenciesSection() {
           <Input className={fieldClass} value={picks.otherText} onChange={(event) => picks.setOther(event.target.value)} placeholder="basement flooding" />
         </Field>
       )}
-      {catalog?.alwaysOnLine && <p className="text-sm text-muted-foreground">{catalog.alwaysOnLine} Otto also flags burst pipes, flooding, sewage and no heat or AC.</p>}
+      {catalog?.alwaysOnLine && <p className="text-sm text-muted-foreground">{catalog.alwaysOnLine}</p>}
       <div className="border-t pt-4"><fieldset className="grid gap-2">
         <legend className="mb-1.5 text-[15px] font-medium">For everything else, flag</legend>
         <RadioGroup value={String(level)} onValueChange={(value) => set("emergencyThreshold", value)} className="gap-1">
@@ -323,7 +324,7 @@ function EmergenciesSection() {
         </RadioGroup>
       </fieldset></div>
       <Link className="group flex min-h-12 items-center justify-between gap-3 border-t pt-3 text-[15px]" to="/app/settings/alerts">
-        <span className="grid"><strong className="font-semibold group-hover:underline">Want a phone call too?</strong><span className="text-sm text-muted-foreground">Turn on emergency calls in Alerts.</span></span>
+        <span className="grid"><strong className="font-semibold group-hover:underline">Want a phone call too?</strong><span className="text-sm text-muted-foreground">{settings.integrations.ownerPhoneConfigured ? "Turn on emergency calls in Alerts." : "Add your mobile in Alerts first."}</span></span>
         <ChevronRight className="size-5 shrink-0 text-muted-foreground" />
       </Link>
     </SettingsCard>
@@ -683,11 +684,9 @@ export function PlanSection() {
   }, [changed, target, proposal.plan, proposalUnlimited])
 
   const revert = () => { quoteGeneration.current++; setProposal({ plan: plan.id, unlimited: plan.unlimited }); setConfirmOpen(false) }
-  const flipUnlimited = (on: boolean) => {
-    setProposal((current) => ({ ...current, unlimited: on }))
-    // A paying shop confirms the exact amount first; before paying, the pick is just remembered (below).
-    if (plan.paid) setConfirmOpen(true)
-  }
+  // Like a plan pick: the switch only proposes. The price bar's one button asks for the exact amount (walk 11-26
+  // re-walk: the switch used to open the question too, so Unlimited was confirmed twice).
+  const flipUnlimited = (on: boolean) => setProposal((current) => ({ ...current, unlimited: on }))
   const apply = async () => {
     if (!target) return
     setBusy(true)

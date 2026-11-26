@@ -6,7 +6,7 @@ import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescript
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { AppShell } from "@/components/app/shell"
-import { settingsPage } from "@/components/app/settings-pages"
+import { settingsPage, settingsPageHref } from "@/components/app/settings-pages"
 import { api, useApi } from "@/lib/api"
 import { useMediaQuery, useMode } from "@/lib/mode"
 import { leavesSettings } from "@/lib/nav"
@@ -139,6 +139,8 @@ export function SettingsArea() {
 
   const dirty = context?.dirty ?? false
 
+  // Team lives on its own page; an old /app/settings/team link lands there too (walk 11-26, leftover e).
+  if (sectionId === "team") return <Navigate to={settingsPageHref("team")} replace />
   if (sectionId && !section) return <Navigate to={ALIASES[sectionId] ? `/app/settings/${ALIASES[sectionId]}` : "/app/settings"} replace />
   // A computer always shows a page next to the menu; a phone shows the list first.
   if (!sectionId && wide) return <Navigate to="/app/settings/business" replace />
@@ -210,7 +212,7 @@ function SettingsIndex() {
       {context.dirty && <UnsavedBar />}
       <div className="divide-y overflow-hidden rounded-xl border bg-card">
         {SECTIONS.map((item) => (
-          <Link key={item.id} to={`/app/settings/${item.id}`} className="flex min-h-15 items-center gap-3 px-4 py-2.5 hover:bg-muted/50">
+          <Link key={item.id} to={settingsPageHref(item.id)} className="flex min-h-15 items-center gap-3 px-4 py-2.5 hover:bg-muted/50">
             <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-secondary text-brand-ink"><item.icon className="size-5" /></span>
             <span className="grid min-w-0 flex-1">
               <span className="text-base font-medium">{item.title}</span>
