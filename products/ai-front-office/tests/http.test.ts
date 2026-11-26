@@ -960,17 +960,16 @@ describe("HTTP boundary", () => {
     expect(confirmations()).toHaveLength(1);
   });
 
-  it("keeps direct booking and warm transfer off for owners until their beta flags are on", async () => {
+  it("books on the calendar by default, keeps an owner's confirm choice, and keeps warm transfer off until its beta flag is on", async () => {
     const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Air", email: "beta@synthetic.example", password: "long-password-for-tests", consent: "yes" }) });
     const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
     const current = await (await fetch(`${baseUrl}/api/app/settings`, { headers: { cookie } })).json() as { csrf: string; values: Record<string, unknown>; integrations: { directBookingAvailable: boolean } };
-    expect(current.integrations.directBookingAvailable).toBe(false);
-    const saved = await fetch(`${baseUrl}/api/app/settings`, { method: "PUT", headers: { cookie, "content-type": "application/json", "x-csrf-token": current.csrf }, body: JSON.stringify({ ...current.values, bookingMode: "direct", warmTransferEnabled: true }) });
+    expect(current.integrations.directBookingAvailable).toBe(true);
+    expect(current.values.bookingMode).toBe("direct");
+    const saved = await fetch(`${baseUrl}/api/app/settings`, { method: "PUT", headers: { cookie, "content-type": "application/json", "x-csrf-token": current.csrf }, body: JSON.stringify({ ...current.values, bookingMode: "confirm", warmTransferEnabled: true }) });
     expect(saved.status).toBe(200);
     const account = await store.getOwnerAccountByEmail("beta@synthetic.example");
     expect(await store.getConfig(account!.tenantId)).toMatchObject({ bookingMode: "confirm", warmTransferEnabled: false });
-    const settings = await (await fetch(`${baseUrl}/app/settings`, { headers: { cookie } })).text();
-    expect(settings).not.toContain("direct booking</option>");
   });
 
   it("lets an owner export their data and delete the whole workspace after billing ends", async () => {
