@@ -21,7 +21,8 @@ describe("public copy only promises what is true today", () => {
     const page = async (path: string) => (await fetch(`http://127.0.0.1:${address.port}${path}`)).text();
     const home = await page("/");
     for (const untrue of ["turns on by itself", "confirm each job by text", "A text for every new lead", "text you the job"]) expect(home).not.toContain(untrue);
-    expect(home).toContain("A phone alert for every new lead; texts coming soon");
+    expect(home).toContain("<li>A phone alert for every new lead</li>");
+    expect(home).not.toMatch(/and a text for each lead/);
     const terms = await page("/terms");
     expect(terms).toContain("Cancel anytime in the app: Settings → Plan and billing, then Manage billing or cancel.");
     expect(terms).toContain("automated call to the owner mobile number");
