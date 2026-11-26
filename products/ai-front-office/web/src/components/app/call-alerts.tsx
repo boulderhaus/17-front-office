@@ -4,7 +4,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { api } from "@/lib/api"
 import { useMode } from "@/lib/mode"
-import { cn, tapWidth } from "@/lib/utils"
+import { cn } from "@/lib/utils"
 
 type State = "checking" | "unsupported" | "iphone-install" | "blocked" | "off" | "on"
 
@@ -16,6 +16,11 @@ function isIphone(): boolean {
 
 function isInstalled(): boolean {
   return window.matchMedia("(display-mode: standalone)").matches || (navigator as Navigator & { standalone?: boolean }).standalone === true
+}
+
+/** A computer or a phone, for the words on the card ("on this computer", "on this phone"). */
+function deviceWord(): "computer" | "phone" {
+  return /iPhone|iPad|iPod|Android|Mobi/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) ? "phone" : "computer"
 }
 
 function supported(): boolean {
@@ -56,6 +61,7 @@ export function CallAlertsCard({ className }: { className?: string }) {
   }, [publicKey, preview])
 
   if (!publicKey || preview) return null
+  const device = deviceWord()
 
   const turnOn = async () => {
     setBusy(true)
@@ -71,7 +77,7 @@ export function CallAlertsCard({ className }: { className?: string }) {
         ?? await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationServerKey(publicKey) })
       await api("/api/app/push/subscribe", { method: "POST", body: subscription.toJSON() })
       setState("on")
-      toast.success("Call alerts are on for this phone.")
+      toast.success(`Call alerts are on for this ${deviceWord()}.`)
     } catch (error) {
       toast.error(error instanceof Error && error.message ? error.message : "Call alerts didn’t turn on. Please try again.")
     } finally {
@@ -89,7 +95,7 @@ export function CallAlertsCard({ className }: { className?: string }) {
         await subscription.unsubscribe()
       }
       setState("off")
-      toast.success("Call alerts are off for this phone.")
+      toast.success(`Call alerts are off for this ${deviceWord()}.`)
     } catch {
       toast.error("That didn’t work. Please try again.")
     } finally {
@@ -102,15 +108,21 @@ export function CallAlertsCard({ className }: { className?: string }) {
       <div className="flex items-start gap-3">
         <BellRing className="mt-0.5 size-5 shrink-0 text-brand-ink" />
         <div className="grid gap-1">
-          <strong className="text-[15px] font-semibold">Call alerts on this phone</strong>
-          <span className="text-[14px] text-muted-foreground">Your phone buzzes the moment Call Otto takes a call. Tap the alert to see who called.</span>
+          <strong className="text-[15px] font-semibold">Call alerts on this {device}</strong>
+          <span className="text-[14px] text-muted-foreground">{device === "phone" ? "Your phone buzzes the moment Call Otto takes a call. Tap the alert to see who called." : "An alert pops up the moment Call Otto takes a call. Click it to see who called."}</span>
         </div>
       </div>
       {state === "checking" && <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Checking this phone…</p>}
-      {state === "off" && <Button type="button" size="tap" variant="outline" className={cn(tapWidth, "bg-card")} disabled={busy} onClick={() => void turnOn()}>{busy ? <Loader2 className="animate-spin" /> : <BellRing />}Turn on call alerts on this phone</Button>}
+      {state === "off" && (
+        <>
+          {/* The browser asks right after the tap; say so first, so its box isn't a surprise. */}
+          <p className="text-[14px]">Your browser will ask to show notifications. {device === "phone" ? "Tap" : "Click"} <strong className="font-semibold">Allow</strong>.</p>
+          <Button type="button" size="tap" variant="outline" className="h-12 w-full bg-card text-base" disabled={busy} onClick={() => void turnOn()}>{busy ? <Loader2 className="animate-spin" /> : <BellRing />}Turn on call alerts on this {device}</Button>
+        </>
+      )}
       {state === "on" && (
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="flex items-center gap-2 text-[15px] font-semibold text-emerald-800"><CheckCircle2 className="size-5" />Call alerts are on for this phone</p>
+          <p className="flex items-center gap-2 text-[15px] font-semibold text-emerald-800"><CheckCircle2 className="size-5" />Call alerts are on for this {device}</p>
           <Button type="button" variant="link" className="h-11 px-0" disabled={busy} onClick={() => void turnOff()}>Turn off</Button>
         </div>
       )}
