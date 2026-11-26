@@ -3,6 +3,7 @@ import { TelnyxCallHistoryClient, TelnyxProviderCallHistory, TelnyxRecordingClie
 import { backfillBlindClosures, CallRecovery, RECOVERY_CERTAIN_END_MS, recoveryRetryMs } from "../src/application/call-recovery.js";
 import { BLIND_CLOSURE_FLAG, PROVIDER_HISTORY_FLAG } from "../src/application/call-service.js";
 import { buildCallPath } from "../src/domain/call-path.js";
+import { parseBackfillArgs } from "../scripts/backfill-call-history.js";
 import { acConversation, BASE, callbackMessages, CALLER, fakeTelnyx, liveShop, type LiveShop } from "./support/live-shop.js";
 
 /**
@@ -380,6 +381,17 @@ describe("a call that was already closed blind", () => {
     expect(repaired.qualityFlags).not.toContain(BLIND_CLOSURE_FLAG);
     expect((await shop.store.listNotifications(call.id)).map((item) => item.idempotencyKey).sort()).toEqual(notifications);
     expect((await shop.dashboard()).usage.countedCalls).toBe(1);
+  });
+});
+
+describe("backfill script arguments", () => {
+  it("repairs three days by default, takes --dry-run and --days, and refuses anything else", () => {
+    expect(parseBackfillArgs([])).toEqual({ days: 3, dryRun: false });
+    expect(parseBackfillArgs(["--dry-run", "--days", "7"])).toEqual({ days: 7, dryRun: true });
+    expect(parseBackfillArgs(["--days=1"])).toEqual({ days: 1, dryRun: false });
+    expect(() => parseBackfillArgs(["--days", "0"])).toThrow("whole number");
+    expect(() => parseBackfillArgs(["--days"])).toThrow("whole number");
+    expect(() => parseBackfillArgs(["--apply"])).toThrow("Unknown argument");
   });
 });
 

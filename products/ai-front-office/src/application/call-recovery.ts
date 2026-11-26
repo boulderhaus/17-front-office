@@ -210,8 +210,8 @@ export async function backfillBlindClosures(input: {
         const durationSeconds = Math.max(call.durationSeconds ?? 0, summary.durationSeconds ?? 0) || null;
         const changes: NonNullable<BackfillChange["changes"]> = {
           transcript: Boolean(summary.transcript?.trim()),
-          callerName: Boolean(summary.fields.callerName?.trim() ?? call.fields.callerName?.trim()),
-          address: Boolean(summary.fields.address?.trim() ?? call.fields.address?.trim()),
+          callerName: Boolean(summary.fields.callerName?.trim() || call.fields.callerName?.trim()),
+          address: Boolean(summary.fields.address?.trim() || call.fields.address?.trim()),
           problem: Boolean(summary.fields.problemDescription.trim() || call.fields.problemDescription.trim()),
           durationSeconds,
           // Counts against the plan once repaired: answered, not spam, 15 seconds or longer.
