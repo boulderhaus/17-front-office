@@ -9,7 +9,8 @@ import type { BookingRecord, CallbackTask, CallRecord, OutboxNotification, ToolE
 export type CallPathStepKey = "greeting" | "service_check" | "problem" | "safety" | "caller" | "address" | "times" | "booking" | "wrap_up";
 export type CallPathExtraKey = "price_question" | "owner_request";
 /** waiting: reached, but the owner still has to act (a booking to OK). flagged: reached, needs attention. */
-export type CallPathState = "done" | "waiting" | "flagged" | "current" | "todo" | "skipped";
+/** partial: Otto got some of the step (a name but no number), so it is neither done nor untouched. */
+export type CallPathState = "done" | "waiting" | "flagged" | "partial" | "current" | "todo" | "skipped";
 
 export interface CallPathStep<K extends string = CallPathStepKey> {
   key: K;
@@ -23,7 +24,10 @@ export interface CallPath {
   steps: CallPathStep[];
   /** Things that can come up at any point in a call, listed only once they did. */
   extras: Array<CallPathStep<CallPathExtraKey>>;
+  /** Still being watched: the call is up, or it just ended and the record is settling. */
   live: boolean;
+  /** The call is over (hung up, or the provider says so), even while the record settles. Never shown as live. */
+  ended: boolean;
   /** Checkpoints reached (done, waiting or flagged). */
   done: number;
   startedAt: string;
@@ -98,14 +102,23 @@ export function buildCallPath(input: {
   // Not the outcome (a request for the owner changes it mid-call): the call's end, plus a short settle so the
   // page never freezes on a half-written finish.
   const sinceEnd = call.endedAt === null ? 0 : input.now.getTime() - Date.parse(call.endedAt);
+  // The provider said the call is over before its final payload arrived (call recovery): `ended` keeps it from
+  // looking live, while `live` keeps the page polling until the record (transcript, callback task) lands.
+  const providerEnded = events.some((event) => event.tool === "call.end");
   const live = withinWindow && (call.endedAt === null || sinceEnd < CALL_PATH_SETTLE_MS || (booking?.status === "checking" && sinceEnd < CALL_PATH_BOOKING_SETTLE_MS));
+  // What the call record holds counts too: the end-of-call payload fills in details whose tool write failed or
+  // never ran mid-call, and a step the record proves is never shown as skipped. No time: nothing stamped it.
+  const hasProblem = problemCaptured(call);
+  const hasName = Boolean(call.fields.callerName?.trim());
+  const hasNumber = reachableNumber(call) !== null;
+  const hasAddress = Boolean(call.fields.address?.trim());
   const spam = call.billingDisposition === "spam_excluded" || call.outcome === "ignored_spam";
   const emergency = call.emergency?.emergency === true;
   const handedOff = call.outcome === "handoff_queued" || call.fields.humanRequested || emergency;
   const taskHandled = input.callbackTask?.status === "completed";
   const liveAlert = ownerAlertStatus(input.notifications, LIVE_ALERT_KEYS);
   const summary = ownerAlertStatus(input.notifications, SUMMARY_ALERT_KEYS);
-  type Found = { state: "done" | "waiting" | "flagged" | "skipped"; at: string | null; note: string | null } | null;
+  type Found = { state: "done" | "waiting" | "flagged" | "partial" | "skipped"; at: string | null; note: string | null } | null;
   const found: Found[] = [];
 
   // 1. Greeting: the line answered.
@@ -114,16 +127,22 @@ export function buildCallPath(input: {
   // 2. Service check: a vendor, robocall or wrong number ends the path here.
   const spamEvent = first((event) => event.tool === "call.mark_spam" && ok(event));
   const customer = first((event) => CUSTOMER_TOOLS.has(event.tool) && ok(event));
+  // Once the call is over, a caller whose problem, name or address is on the record was a customer.
+  const customerOnRecord = !live && (hasProblem || hasName || hasAddress);
   found.push(spam
     ? { state: "flagged", at: spamEvent?.completedAt ?? null, note: "Not a service call, so Otto ended it" }
-    : customer ? { state: "done", at: customer.completedAt, note: null } : null);
+    : customer ? { state: "done", at: customer.completedAt, note: null }
+      : customerOnRecord ? { state: "done", at: null, note: null } : null);
 
-  // 3. The problem, once Otto saved it (the transcript alone isn't proof).
+  // 3. The problem, once it is on the record (saved mid-call, or from the end-of-call payload).
   const problem = first((event) => (event.tool === "call.intake" && meta(event, "problem") === true) || event.tool === "call.triage");
-  found.push(problem ? { state: "done", at: problem.completedAt, note: null } : null);
+  found.push(problem ? { state: "done", at: problem.completedAt, note: null }
+    : !live && hasProblem ? { state: "done", at: null, note: null } : null);
 
-  // 4. Safety check: the server's triage rules run on every intake and on triage_call; emergencies flagged.
+  // 4. Safety check: the server's triage rules run on every intake, on triage_call and when the call ends; emergencies flagged.
   const triage = first((event) => event.tool === "call.triage") ?? (call.emergency ? intake("problem") : undefined);
+  // The end-of-call triage ran on the captured problem: it counts when there was one to check.
+  const checkedAtEnd = !live && call.emergency !== null && hasProblem;
   const caughtLive = first((event) => (event.tool === "call.triage" && meta(event, "emergency") === true) || (event.tool === "call.handoff" && meta(event, "reason") === "emergency"));
   if (emergency) {
     const kind = call.emergency?.severity === "life_safety" ? "Emergency" : "Urgent";
@@ -132,25 +151,33 @@ export function buildCallPath(input: {
       ? { state: "flagged", at: caughtLive.completedAt, note: `${kind}, ${alertWords(alert, "alert")}` }
       : { state: "flagged", at: call.endedAt, note: `${kind} found after the call, ${alertWords(alert, "alert")}` });
   } else {
-    found.push(triage ? { state: "done", at: triage.completedAt, note: "No emergency" } : null);
+    found.push(triage ? { state: "done", at: triage.completedAt, note: "No emergency" }
+      : checkedAtEnd ? { state: "done", at: null, note: "No emergency" } : null);
   }
 
-  // 5. Name and callback number (the caller ID counts once the caller says it's the best number).
+  // 5. Name and callback number (the caller ID counts once the caller says it's the best number, and once the
+  // call is over: it is the number on the record).
   const caller = first((event) => event.tool === "call.intake" && meta(event, "name") === true && meta(event, "callback") === true);
-  const named = intake("name");
-  const numbered = intake("callback");
+  const named = intake("name") !== undefined || hasName;
+  const numbered = intake("callback") !== undefined || hasNumber;
   found.push(caller ? { state: "done", at: caller.completedAt, note: null }
     : live ? null
-      : named || numbered ? { state: "skipped", at: null, note: named ? "Got the name, no callback number" : "Got the number, no name" } : null);
+      : named && numbered ? { state: "done", at: null, note: null }
+        : named || numbered ? { state: "partial", at: null, note: named ? "Got the name, no callback number" : "Got the number, no name" } : null);
 
   // 6. Address, checked against the service area. The note follows the latest check (a corrected address).
   const coverage = (event: ToolEvent): boolean => event.tool === "coverage.check" && ok(event) && meta(event, "status") !== "incomplete";
   const firstCoverage = first(coverage);
   const lastCoverage = last(coverage);
   const addressTaken = intake("address");
-  found.push(firstCoverage && lastCoverage
+  // Once the call is over, an area check with no address on the record is not a captured address.
+  const areaOnly = !live && call.endedAt !== null && !hasAddress && !addressTaken;
+  found.push(firstCoverage && lastCoverage && areaOnly
+    ? { state: "skipped", at: null, note: "Area checked, no address saved" }
+    : firstCoverage && lastCoverage
     ? { state: "done", at: firstCoverage.completedAt, note: coverageWords(meta(lastCoverage, "status")) }
-    : addressTaken ? { state: "done", at: addressTaken.completedAt, note: "Address taken" } : null);
+    : addressTaken ? { state: "done", at: addressTaken.completedAt, note: "Address taken" }
+      : !live && hasAddress ? { state: "done", at: null, note: "Address taken" } : null);
 
   // 7 and 8. Open times and the booking, unless the call went to the owner instead.
   const availability = (event: ToolEvent): boolean => event.tool === "calendar.availability" && ok(event);
@@ -169,7 +196,7 @@ export function buildCallPath(input: {
 
   // 9. Recap and the owner's summary: a recap only when Otto captured something, a text only once it was sent.
   const recovered = call.qualityFlags.includes("call_ended_without_final_provider_payload");
-  const captured = events.some((event) => event.tool === "call.intake");
+  const captured = events.some((event) => event.tool === "call.intake") || hasProblem || hasName || hasAddress;
   found.push(call.endedAt === null || live ? null
     : recovered ? { state: "flagged", at: call.endedAt, note: `Call dropped, ${summaryWords(summary)}` }
       : !captured ? { state: "skipped", at: null, note: summary === "none" ? null : `Nothing to recap, ${summaryWords(summary)}` }
@@ -177,7 +204,8 @@ export function buildCallPath(input: {
 
   const keys = Object.keys(CALL_PATH_LABELS) as CallPathStepKey[];
   // While the call is live, the first open checkpoint is where Otto is now.
-  const currentIndex = live && !spam ? found.findIndex((item) => item === null) : -1;
+  const ended = call.endedAt !== null || providerEnded;
+  const currentIndex = live && !ended && !spam ? found.findIndex((item) => item === null) : -1;
   const steps: CallPathStep[] = keys.map((key, index) => {
     // A spam call ends at the service check: nothing after it happened.
     const item = spam && index > 1 ? null : found[index] ?? null;
@@ -191,7 +219,26 @@ export function buildCallPath(input: {
   const extras: Array<CallPathStep<CallPathExtraKey>> = [];
   if (price) extras.push({ key: "price_question", label: "Price question", state: "done", at: price.completedAt, note: meta(price, "approved") === true ? "Gave your approved price" : "No approved price, took a message" });
   if (ownerAsk) extras.push({ key: "owner_request", label: "Asked for you", state: liveAlert === "failed" ? "flagged" : "done", at: ownerAsk.completedAt, note: alertWords(liveAlert, "callback alert") });
-  return { steps, extras, live, done: steps.filter((step) => step.state === "done" || step.state === "waiting" || step.state === "flagged").length, startedAt: call.startedAt };
+  return { steps, extras, live, ended, done: steps.filter((step) => step.state === "done" || step.state === "waiting" || step.state === "flagged" || step.state === "partial").length, startedAt: call.startedAt };
+}
+
+/**
+ * A problem Otto captured. When none was saved, the end-of-call payload fills the field with everything the
+ * caller said: that is the transcript (a "Hello?" on a hang-up), not a captured problem.
+ */
+function problemCaptured(call: Pick<CallRecord, "fields" | "transcript">): boolean {
+  const squash = (value: string): string => value.replace(/\s+/g, " ").trim();
+  const problem = squash(call.fields.problemDescription);
+  if (!problem) return false;
+  const transcript = call.transcript ?? "";
+  let callerTurn = false;
+  const said: string[] = [];
+  for (const line of transcript.split("\n")) {
+    const speaker = /^(Caller|Otto|AI assistant):/.exec(line);
+    if (speaker) callerTurn = speaker[1] === "Caller";
+    if (callerTurn) said.push(speaker ? line.slice(speaker[0].length) : line);
+  }
+  return problem !== squash(said.join(" ")) && problem !== squash(transcript);
 }
 
 function coverageWords(status: unknown): string {
@@ -222,4 +269,12 @@ function recapLead(call: CallRecord, booking: BookingRecord | null, taskHandled:
   if (call.outcome === "pending_confirmation") return taskHandled ? "Handled" : "Needs your OK";
   if (call.outcome === "failed") return "Call dropped";
   return "Done";
+}
+
+/**
+ * The number to reach the caller on: the callback number when it is a real number, else the number that called.
+ * An old record's callback number written in words ("same number") never hides the caller ID.
+ */
+export function reachableNumber(call: { fields: { callbackNumber: string | null }; fromNumber: string }): string | null {
+  return [call.fields.callbackNumber, call.fromNumber].find((value) => value && /^\+[1-9]\d{7,14}$/.test(value)) ?? null;
 }

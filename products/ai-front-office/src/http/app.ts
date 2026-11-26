@@ -22,7 +22,7 @@ import { chargeSentence, hasPlanAccess, isCompStatus, isPaidStatus } from "../do
 import { currentPlan, hasUnlimitedPrice, introCouponId, knownPlans, legacyPlanPriceIds, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, unlimitedPriceIds, type Plan, type PlanId } from "../domain/plans.js";
 import { GuaranteeError, LeadGuaranteeService, recordFirstPaid, recordUnlimitedObservation, type UnlimitedItem } from "../application/billing-jobs.js";
 import { callbackLinkMatches, OWNER_SMS_OPT_IN_CONFIRMATION, readCallbackLinkToken } from "../domain/owner-sms.js";
-import { callsCsv } from "./calls-csv.js";
+import { callsCsv, callsCsvFileName } from "./calls-csv.js";
 import { hoursFromChoice } from "../domain/hours.js";
 import { SMS_CONSENT_VERSION } from "../admin/footer.js";
 import { renderDialHandoff, renderErrorPage } from "../admin/error-page.js";
@@ -50,7 +50,7 @@ import { clearOwnerSessionCookie, createPasswordResetToken, hasUsablePassword, h
 import { createOwnerSignIn, GOOGLE_SIGN_IN_CALLBACK, isSignInState, safeNext, verifiedSignupEmail, type VerifiedIdentity } from "./owner-sign-in.js";
 import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
 import { MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_ROUTES, toolFailure, toolLimitReached, withinToolBudget, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
-import { callScreeningSetting, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
+import { callScreeningSetting, ensureCallEndCallback, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import { AMD_ENDED_EVENT, FORWARDING_CHECK_SPEECH, forwardingCheckState, GREETING_ENDED_EVENT, SCREENING_DETECTED_EVENT, TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
 import { setupHelpState, setupSorrySpeech, TelnyxSetupCaller, type SetupCallFacts } from "../adapters/telnyx-setup-call.js";
 import { FOUNDER_GOOGLE_SCOPES, FounderCalendarReadError, FounderCalendars, FounderConnectError } from "../adapters/founder-calendar.js";
@@ -1644,10 +1644,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         dependencies.store.getConfig(account.tenantId),
         dependencies.store.listCalls(account.tenantId, 100_000),
       ]);
-      const body = callsCsv(calls, config.timezone);
+      const body = callsCsv(calls, config.timezone, dependencies.clock.now());
       response.writeHead(200, {
         "content-type": "text/csv; charset=utf-8",
-        "content-disposition": `attachment; filename="front-office-calls-${dependencies.clock.now().toISOString().slice(0, 10)}.csv"`,
+        "content-disposition": `attachment; filename="${callsCsvFileName(dependencies.clock.now())}"`,
         "cache-control": "no-store",
         "content-length": Buffer.byteLength(body),
       });
@@ -2478,6 +2478,14 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         throw new HttpError(409, ASSISTANT_TAKEN);
       }
       const liveRoute = voiceRouting(inboundNumber, assistantId);
+      // The assistant's own TeXML app must post its end-of-call callback here, or this shop's calls never get a
+      // transcript, summary, usage count or callback task. Idempotent on every activation; a line never goes live without it.
+      await ensureCallEndCallback({ apiKey: dependencies.env.TELNYX_API_KEY!, assistantId, publicBaseUrl: dependencies.env.PUBLIC_BASE_URL, apply: true, fetcher: dependencies.fetcher })
+        .then((result) => { if (result.action === "set") log({ level: "info", event: "call_end_callback_set", tenantId: account.tenantId }); })
+        .catch((error) => {
+          log({ level: "error", event: "go_live_call_end_callback_failed", tenantId: account.tenantId, error: safeError(error) });
+          throw new HttpError(502, "We couldn’t connect your Call Otto number just now. Try again in a minute.");
+        });
       // Carrier spam screening: flag by default (the assistant checks intent sooner), reject only with
       // CALL_SCREENING_MODE=reject. Idempotent on every activation; a failure is logged and never blocks
       // the line (scripts/enable-call-screening.ts backfills).

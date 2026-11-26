@@ -6,7 +6,9 @@ import { DataDeletionService } from "./application/data-deletion.js";
 import { GraceLineService } from "./application/grace-line.js";
 import { OwnerSummaryService } from "./application/owner-summary-service.js";
 import { CallLengthGuard } from "./application/call-length.js";
-import { TelnyxAssistantMessenger, TelnyxRecordingClient } from "./adapters/telnyx.js";
+import { CallRecovery } from "./application/call-recovery.js";
+import { LineHealthCheck } from "./application/line-health.js";
+import { TelnyxAssistantMessenger, TelnyxProviderCallHistory, TelnyxRecordingClient } from "./adapters/telnyx.js";
 import { loadEnvironment } from "./config/environment.js";
 import { createRequestHandler, createStripeClient } from "./http/app.js";
 import { OverageBillingService } from "./application/billing-jobs.js";
@@ -33,6 +35,28 @@ const deletion = new DataDeletionService(
   runtime.store,
   env.TELNYX_API_KEY ? new TelnyxRecordingClient(env.TELNYX_API_KEY) : null,
 );
+// A call whose end-of-call callback never arrives is finished from Telnyx's own conversation history, so its
+// transcript, summary, usage count and callback task are kept. Claimed per call in the shared ledger and
+// finalized under the call's lock, so every replica may run it.
+const callRecovery = env.TELNYX_API_KEY && !env.DEMO_MODE
+  ? new CallRecovery(runtime.store, recovery, new TelnyxProviderCallHistory(env.TELNYX_API_KEY), systemClock, {
+      publicBaseUrl: env.PUBLIC_BASE_URL,
+      recordings: new TelnyxRecordingClient(env.TELNYX_API_KEY),
+      log: logger,
+      // Outcome only, like the webhook path: never the caller's name, number, address or transcript.
+      onRecovered: (call) => telemetry.capture("call_finalized", call.tenantId, call.tenantId, {
+        channel: "provider_history", outcome: call.outcome, emergency: call.emergency?.emergency === true,
+        duration_seconds: call.durationSeconds, consent_state: call.consentState, billing_disposition: call.billingDisposition,
+      }),
+    })
+  : null;
+// Every live line must post its end-of-call callback here (go-live sets it). Read-only; an error names the shop.
+const lineHealth = env.TELNYX_API_KEY && !env.DEMO_MODE
+  ? new LineHealthCheck(runtime.store, {
+      apiKey: env.TELNYX_API_KEY, publicBaseUrl: env.PUBLIC_BASE_URL, log: logger,
+      onMissing: (tenantId) => telemetry.captureException(new Error("A live line is missing its end-of-call callback"), { route: "job:line_health", tenantId }),
+    })
+  : null;
 const summaries = new OwnerSummaryService(runtime.store, systemClock, env.PUBLIC_BASE_URL);
 const graceLine = new GraceLineService({ store: runtime.store, env, clock: systemClock, log: logger });
 // Period-end overage: extra answered calls in a closed billing period, billed once as a Stripe invoice.
@@ -52,6 +76,7 @@ let nextGraceAt = 0;
 let nextOverageAt = 0;
 let nextActivationAt = 0;
 let nextFounderAt = 0;
+let nextLineHealthAt = 0;
 const runWorker = async (): Promise<void> => {
   if (workerActive) return;
   workerActive = true;
@@ -62,7 +87,8 @@ const runWorker = async (): Promise<void> => {
       nextRecoveryAt = Date.now() + 30_000;
       for (const tenantId of await runtime.store.listTenantIds()) {
         try {
-          const recovered = await recovery.recoverStaleCalls(tenantId);
+          // The blind closure is the last resort: a call Telnyx still has the conversation for is finished from it.
+          const recovered = await recovery.recoverStaleCalls(tenantId, undefined, callRecovery ? (call) => callRecovery.lastChance(call) : undefined);
           if (recovered > 0) logger({ level: "warn", event: "stale_calls_recovered", tenantId, recovered });
         } catch (error) {
           logger({ level: "error", event: "stale_call_recovery_failed", tenantId, error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });
@@ -112,6 +138,12 @@ const runWorker = async (): Promise<void> => {
       const founder = await handler.runFounderFollowups();
       if (founder.queued > 0) logger({ level: "info", event: "founder_followup_cycle", ...founder });
     }
+    if (lineHealth && Date.now() >= nextLineHealthAt) {
+      // At startup and every six hours: two reads per shop.
+      nextLineHealthAt = Date.now() + 6 * 60 * 60_000;
+      const health = await lineHealth.runOnce();
+      logger({ level: health.missing + health.failed > 0 ? "error" : "info", event: "line_health_cycle", ...health });
+    }
     if (Date.now() >= nextOverageAt) {
       // Hourly: a period closes at most once a month per shop; locked and idempotent across replicas.
       nextOverageAt = Date.now() + 60 * 60_000;
@@ -149,6 +181,24 @@ const runCallLength = async (): Promise<void> => {
 const callLengthInterval = setInterval(() => void runCallLength(), 5_000);
 callLengthInterval.unref();
 
+// Call recovery: its own loop, so a slow job above never delays a call's record.
+let callRecoveryActive = false;
+const runCallRecovery = async (): Promise<void> => {
+  if (!callRecovery || callRecoveryActive) return;
+  callRecoveryActive = true;
+  try {
+    const result = await callRecovery.runOnce();
+    if (result.recovered + result.failed > 0) logger({ level: result.failed > 0 ? "warn" : "info", event: "call_recovery_cycle", ...result });
+  } catch (error) {
+    logger({ level: "error", event: "call_recovery_cycle_failed", error: error instanceof Error ? error.message.slice(0, 300) : "Unknown error" });
+    telemetry.captureException(error, { route: "job:call_recovery" });
+  } finally {
+    callRecoveryActive = false;
+  }
+};
+const callRecoveryInterval = setInterval(() => void runCallRecovery(), 15_000);
+callRecoveryInterval.unref();
+
 await new Promise<void>((resolve, reject) => {
   server.once("error", reject);
   server.listen(env.PORT, env.HOST, () => resolve());
@@ -160,6 +210,7 @@ const shutdown = async (signal: string): Promise<void> => {
   logger({ level: "info", event: "shutdown_started", signal });
   clearInterval(interval);
   clearInterval(callLengthInterval);
+  clearInterval(callRecoveryInterval);
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await runtime.close();
   // Deliver queued analytics and errors before the container stops.

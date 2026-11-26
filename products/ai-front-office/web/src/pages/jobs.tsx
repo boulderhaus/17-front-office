@@ -3,7 +3,7 @@ import { ChevronRight } from "lucide-react"
 import { CallLink, ListBox, Muted, ToneBadge, usePage } from "@/components/app/bits"
 import { CallPanel } from "./today"
 import { derive, type Tone } from "@/lib/derive"
-import { compactDate } from "@/lib/format"
+import { callerLabel, compactDate } from "@/lib/format"
 import { useMediaQuery, useMode } from "@/lib/mode"
 import type { ApiCall } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -72,7 +72,7 @@ function JobList({ tab, selectedId }: { tab: { empty: string; whenLabel: string;
         {page.map((row) => (
           <CallLink key={row.call.id} callId={row.call.id} aria-current={selectedId === row.call.id}
             className={cn("grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-0.5 px-4 py-3 hover:bg-muted/50 @[40rem]:grid-cols-[minmax(0,10rem)_minmax(0,1fr)_7.5rem_8.5rem] @[40rem]:gap-4", selectedId === row.call.id && "bg-accent hover:bg-accent")}>
-            <strong className="truncate text-base font-semibold">{row.call.fields.callerName ?? "Unknown caller"}</strong>
+            <strong className="truncate text-base font-semibold">{callerLabel(row.call)}</strong>
             <span className="order-3 truncate text-[15px] text-muted-foreground @[40rem]:order-none">{row.call.fields.problemDescription || "No summary"}</span>
             <span className="order-2 justify-self-end @[40rem]:order-none @[40rem]:justify-self-start"><ToneBadge tone={row.tone}>{row.label}</ToneBadge></span>
             <span className="order-4 flex items-center justify-end gap-1 text-right text-sm text-muted-foreground @[40rem]:order-none">

@@ -155,14 +155,15 @@ export interface ApiCallDetail {
 }
 
 export function apiCall(call: CallRecord): ApiCall {
-  const raw = call.fields.callbackNumber ?? call.fromNumber;
+  // The number the caller gave, else the number that called: a callback number that isn't a number never hides it.
+  const phone = [call.fields.callbackNumber, call.fromNumber].find((value) => value && /^\+[1-9]\d{7,14}$/.test(value)) ?? null;
   return {
     id: call.id,
     startedAt: call.startedAt,
     endedAt: call.endedAt,
     durationSeconds: call.durationSeconds,
     outcome: call.outcome,
-    phone: raw && /^\+[1-9]\d{7,14}$/.test(raw) ? raw : null,
+    phone,
     fields: {
       callerName: call.fields.callerName,
       problemDescription: call.fields.problemDescription,

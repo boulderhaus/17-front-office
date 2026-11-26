@@ -1,4 +1,5 @@
 import { pathToFileURL } from "node:url";
+import { ensureCallEndCallback } from "../src/adapters/telnyx-provisioning.js";
 import { withTimeout } from "../src/application/retry.js";
 import { loadEnvironment } from "../src/config/environment.js";
 import type { Store } from "../src/ports.js";
@@ -30,6 +31,31 @@ export async function planAssistantPushes(input: { store: Store; defaultTenantId
   return pushes;
 }
 
+export interface CallEndCallbackOutcome {
+  tenantId: string;
+  assistantId: string;
+  action: "already_set" | "set" | "would_set" | "failed";
+  error?: string;
+}
+
+/**
+ * The repair path for end-of-call callbacks: every assistant we push to (the demo assistant and each shop's own)
+ * gets status_callback, POST and call cost on its own TeXML app. Without apply it only reads and reports.
+ * One assistant failing never stops the rest.
+ */
+export async function syncCallEndCallbacks(input: { pushes: AssistantPush[]; apiKey: string; publicBaseUrl: string; apply: boolean; fetcher?: typeof fetch | undefined; sleep?: ((ms: number) => Promise<void>) | undefined }): Promise<CallEndCallbackOutcome[]> {
+  const outcomes: CallEndCallbackOutcome[] = [];
+  for (const push of input.pushes) {
+    try {
+      const result = await ensureCallEndCallback({ apiKey: input.apiKey, assistantId: push.assistantId, publicBaseUrl: input.publicBaseUrl, apply: input.apply, fetcher: input.fetcher, sleep: input.sleep });
+      outcomes.push({ tenantId: push.tenantId, assistantId: push.assistantId, action: result.action });
+    } catch (error) {
+      outcomes.push({ tenantId: push.tenantId, assistantId: push.assistantId, action: "failed", error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return outcomes;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const apply = process.argv.includes("--apply");
   const env = loadEnvironment(process.env);
@@ -43,6 +69,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         mode: "dry_run",
         assistants: pushes.map((push) => ({ tenantId: push.tenantId, assistantId: push.assistantId, voice_settings: push.update.voice_settings, telephony_settings: push.update.telephony_settings })),
         demoUpdate: pushes.find((push) => push.assistantId === env.TELNYX_ASSISTANT_ID)?.update ?? null,
+        // Read-only: which assistants' TeXML apps still lack the end-of-call callback ("would_set").
+        callEndCallbacks: env.TELNYX_API_KEY ? await syncCallEndCallbacks({ pushes, apiKey: env.TELNYX_API_KEY, publicBaseUrl: env.PUBLIC_BASE_URL, apply: false }) : "TELNYX_API_KEY not set",
       }, null, 2));
     } else {
       if (!env.TELNYX_API_KEY || !env.TELNYX_ASSISTANT_ID || !env.TELNYX_MESSAGING_PROFILE_ID) {
@@ -60,16 +88,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
           failed.push({ tenantId: push.tenantId, assistantId: push.assistantId, error: error instanceof Error ? error.message : String(error) });
         }
       }
+      const assistantUpdateFailures = failed.length;
       const texmlAppId = readTexmlAppId(updated) ?? readTexmlAppId(current);
       if (!texmlAppId) throw new Error("Telnyx assistant did not expose telephony_settings.default_texml_app_id");
-      await telnyxRequest(apiKey, `/texml_applications/${encodeURIComponent(texmlAppId)}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          status_callback: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx`,
-          status_callback_method: "post",
-          call_cost_in_webhooks: true,
-        }),
-      });
+      // Every assistant has its own TeXML app: the demo assistant's and each shop's must all post the
+      // end-of-call callback here, or that line's calls are never finalized.
+      const callEndCallbacks = await syncCallEndCallbacks({ pushes, apiKey, publicBaseUrl: env.PUBLIC_BASE_URL, apply: true });
+      for (const outcome of callEndCallbacks) {
+        if (outcome.action === "failed") failed.push({ tenantId: outcome.tenantId, assistantId: outcome.assistantId, error: `call-end callback: ${outcome.error ?? "failed"}` });
+      }
       await telnyxRequest(apiKey, `/messaging_profiles/${encodeURIComponent(env.TELNYX_MESSAGING_PROFILE_ID)}`, {
         method: "PATCH",
         body: JSON.stringify({
@@ -80,8 +107,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       console.log(JSON.stringify({
         mode: "applied",
         assistantId: env.TELNYX_ASSISTANT_ID,
-        assistantsUpdated: pushes.length - failed.length,
+        assistantsUpdated: pushes.length - assistantUpdateFailures,
         failed,
+        callEndCallbacks: callEndCallbacks.map(({ tenantId, assistantId, action }) => ({ tenantId, assistantId, action })),
         texmlAppId,
         messagingProfileId: env.TELNYX_MESSAGING_PROFILE_ID,
         webhookUrl: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx`,

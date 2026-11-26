@@ -90,10 +90,7 @@ export function renderOwnerApp(input: {
     const query = params.toString();
     return `${base}${query ? `?${query}` : ""}`;
   };
-  const phoneFor = (call: CallRecord | undefined): string | null => {
-    const phone = call ? call.fields.callbackNumber ?? call.fromNumber : null;
-    return phone && /^\+[1-9]\d{7,14}$/.test(phone) ? phone : null;
-  };
+  const phoneFor = (call: CallRecord | undefined): string | null => callPhone(call);
   const csrfField = `<input type="hidden" name="csrf" value="${e(input.csrf)}">`;
   const upcoming = input.calls
     .filter((call) => call.fields.requestedStart && Date.parse(call.fields.requestedStart) >= nowMs && Date.parse(call.fields.requestedStart) < nowMs + 7 * 86_400_000)
@@ -148,7 +145,7 @@ export function renderOwnerApp(input: {
     const actions = preview
       ? `${phone ? `<a class="fo-btn" href="tel:${e(phone)}">${ownerIcon("phone")}Call back</a>` : ""}<a class="fo-ghost" href="${link(view, task.callId)}#detail">Details</a>`
       : `${phone ? `<a class="fo-btn" href="tel:${e(phone)}">${ownerIcon("phone")}Call back</a>` : `<a class="fo-btn" href="${link(view, task.callId)}#detail">Open</a>`}<form method="post" action="/app/calls/${encodeURIComponent(task.callId)}/task/complete">${csrfField}<button class="fo-ghost" aria-label="Mark ${e(call?.fields.callerName ?? "call")} handled">${ownerIcon("check")}Done</button></form><details class="fo-later"><summary class="fo-ghost">Later</summary><form method="post" action="/app/calls/${encodeURIComponent(task.callId)}/task/snooze">${csrfField}<button name="minutes" value="60">In 1 hour</button><button name="minutes" value="240">In 4 hours</button><button name="minutes" value="1440">Tomorrow</button></form></details>`;
-    return `<article class="fo-job ${badge.cls}"><a class="fo-job-main" href="${link(view, task.callId)}#detail"><span class="fo-job-top"><strong>${e(call?.fields.callerName ?? "Unknown caller")}</strong><span class="fo-pill ${badge.cls}">${badge.label}</span></span><span class="fo-job-problem">${e(call?.fields.problemDescription || ownerTaskReason(task.reason))}</span><span class="fo-job-meta">${e(ownerTaskReason(task.reason))}${meta ? ` · ${e(meta)}` : ""}</span></a><div class="fo-job-actions">${actions}</div></article>`;
+    return `<article class="fo-job ${badge.cls}"><a class="fo-job-main" href="${link(view, task.callId)}#detail"><span class="fo-job-top"><strong>${e(callerLabel(call))}</strong><span class="fo-pill ${badge.cls}">${badge.label}</span></span><span class="fo-job-problem">${e(call?.fields.problemDescription || ownerTaskReason(task.reason))}</span><span class="fo-job-meta">${e(ownerTaskReason(task.reason))}${meta ? ` · ${e(meta)}` : ""}</span></a><div class="fo-job-actions">${actions}</div></article>`;
   };
   const selected = callsById.get(input.selectedCallId ?? "") ?? null;
   const detailCall = selected ?? callsById.get(actionable[0]?.callId ?? "") ?? input.calls[0] ?? null;
@@ -166,13 +163,13 @@ export function renderOwnerApp(input: {
       ...(call.fields.equipmentDetails ? [["Equipment", call.fields.equipmentDetails] as [string, string]] : []),
       ...(call.fields.accessNotes ? [["Access", call.fields.accessNotes] as [string, string]] : []),
     ];
-    return `<section id="detail" class="fo-card fo-detail ${standalone ? "standalone" : ""}">${standalone ? `<a class="fo-back" href="${link(view)}">${ownerIcon("back")}Back</a>` : ""}<div class="fo-detail-head"><div><h2>${e(call.fields.callerName ?? "Unknown caller")}</h2><p>${e(call.fields.problemDescription || "No problem summary captured")}</p></div><span class="fo-pill ${badge.cls}">${badge.label}</span></div>${call.emergency?.immediateInstruction ? `<p class="fo-safety">${ownerIcon("alert")}${e(call.emergency.immediateInstruction)}</p>` : ""}<div class="fo-detail-actions">${phone ? `<a class="fo-btn" href="tel:${e(phone)}">${ownerIcon("phone")}Call back</a><a class="fo-ghost" href="sms:${e(phone)}">Text</a>` : ""}${address ? `<a class="fo-ghost" href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(address)}" target="_blank" rel="noreferrer">${ownerIcon("map")}Map</a>` : ""}</div><dl class="fo-facts">${facts.map(([key, value]) => `<div><dt>${e(key)}</dt><dd>${e(value)}</dd></div>`).join("")}</dl><details class="fo-transcript"><summary>Read the call</summary><p>${e(call.transcript ?? "Transcript unavailable")}</p></details>${preview ? "" : `<a class="fo-link" href="/app/calls/${encodeURIComponent(call.id)}">Full record, recording &amp; delete</a>`}</section>`;
+    return `<section id="detail" class="fo-card fo-detail ${standalone ? "standalone" : ""}">${standalone ? `<a class="fo-back" href="${link(view)}">${ownerIcon("back")}Back</a>` : ""}<div class="fo-detail-head"><div><h2>${e(callerLabel(call))}</h2><p>${e(call.fields.problemDescription || "No problem summary captured")}</p></div><span class="fo-pill ${badge.cls}">${badge.label}</span></div>${call.emergency?.immediateInstruction ? `<p class="fo-safety">${ownerIcon("alert")}${e(call.emergency.immediateInstruction)}</p>` : ""}<div class="fo-detail-actions">${phone ? `<a class="fo-btn" href="tel:${e(phone)}">${ownerIcon("phone")}Call back</a><a class="fo-ghost" href="sms:${e(phone)}">Text</a>` : ""}${address ? `<a class="fo-ghost" href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(address)}" target="_blank" rel="noreferrer">${ownerIcon("map")}Map</a>` : ""}</div><dl class="fo-facts">${facts.map(([key, value]) => `<div><dt>${e(key)}</dt><dd>${e(value)}</dd></div>`).join("")}</dl><details class="fo-transcript"><summary>Read the call</summary><p>${e(call.transcript ?? "Transcript unavailable")}</p></details>${preview ? "" : `<a class="fo-link" href="/app/calls/${encodeURIComponent(call.id)}">Full record, recording &amp; delete</a>`}</section>`;
   };
   const callRow = (call: CallRecord): string => {
     const badge = urgency(input.tasks.find((task) => task.callId === call.id), call);
-    return `<a class="fo-row ${detailCall?.id === call.id ? "selected" : ""}" href="${link(view, call.id)}#detail"><span><strong>${e(call.fields.callerName ?? "Unknown caller")}</strong><small>${e(call.fields.problemDescription || "No summary")}</small></span><span class="fo-row-end"><time>${e(compactDate(call.startedAt, tz))}</time><span class="fo-dot ${badge.cls}" aria-label="${badge.label}"></span></span></a>`;
+    return `<a class="fo-row ${detailCall?.id === call.id ? "selected" : ""}" href="${link(view, call.id)}#detail"><span><strong>${e(callerLabel(call))}</strong><small>${e(call.fields.problemDescription || "No summary")}</small></span><span class="fo-row-end"><time>${e(compactDate(call.startedAt, tz))}</time><span class="fo-dot ${badge.cls}" aria-label="${badge.label}"></span></span></a>`;
   };
-  const appointmentRow = (call: CallRecord): string => `<a class="fo-row" href="${link("calendar", call.id)}#detail"><span><strong>${e(timeOnly(call.fields.requestedStart!, tz))} · ${e(dayLabel(call.fields.requestedStart!, tz, nowMs))}</strong><small>${e(call.fields.callerName ?? "Unknown caller")} · ${e(call.fields.problemDescription || "Service visit")}</small></span><span class="fo-pill ${call.outcome === "booked" ? "good" : "warn"}">${call.outcome === "booked" ? "Booked" : "Confirm"}</span></a>`;
+  const appointmentRow = (call: CallRecord): string => `<a class="fo-row" href="${link("calendar", call.id)}#detail"><span><strong>${e(timeOnly(call.fields.requestedStart!, tz))} · ${e(dayLabel(call.fields.requestedStart!, tz, nowMs))}</strong><small>${e(callerLabel(call))} · ${e(call.fields.problemDescription || "Service visit")}</small></span><span class="fo-pill ${call.outcome === "booked" ? "good" : "warn"}">${call.outcome === "booked" ? "Booked" : "Confirm"}</span></a>`;
   const usage = `<section class="fo-card fo-usage"><div class="fo-usage-head"><h2>Calls left</h2><strong>${remaining}</strong></div><div class="fo-meter" role="img" aria-label="${used} of ${included} included calls answered"><span style="width:${Math.min(100, Math.round((used / Math.max(1, included)) * 100))}%"></span></div><p>${used} of ${included} calls answered this period</p>${extra ? `<p><strong>Extra calls this month: ${extra} × ${perCall(input.config.overageCentsPerCall)}</strong>, billed after the month ends.</p>` : ""}<p>${USAGE_EXCLUSION_NOTE}</p>${!preview && owner && paid && !isCompStatus(input.subscription?.status) ? `<form method="post" action="/app/billing/portal">${csrfField}<button class="fo-link">Manage billing or cancel</button></form>` : ""}</section>`;
   const stats = `<div class="fo-stats" aria-label="Shop overview"><div class="fo-stat ${urgentCount ? "hot" : ""}"><span>To call back</span><strong>${actionable.length}</strong>${urgentCount ? `<em class="fo-badge danger">${urgentCount} urgent</em>` : ""}<small>${actionable.length ? "Callers waiting on you" : "You’re all caught up"}</small></div><div class="fo-stat"><span>Booked</span><strong>${booked.length}</strong><small>Next 7 days</small></div><div class="fo-stat"><span>Calls left</span><strong>${remaining}</strong><small>${used} of ${included} answered</small></div></div>`;
 
@@ -185,7 +182,7 @@ export function renderOwnerApp(input: {
   const todayMain = `${setup}${forwarding}${stats}<section id="inbox" class="fo-section"><header><h2>Needs your attention</h2><span class="fo-count">${actionable.length}</span></header>${queue}</section><section class="fo-section"><header><h2>Coming up</h2><a href="${link("calendar")}">Calendar</a></header><div class="fo-card fo-list">${coming}</div></section><section id="recent-calls" class="fo-section"><header><h2>Recent calls</h2><a href="${link("pipeline")}">All jobs</a></header><div class="fo-card fo-list">${recent}</div></section><section class="fo-section"><header><h2>Recent activity</h2></header><div class="fo-card fo-list">${activity(input.calls, completed, callsById, tz)}</div></section>${usage}`;
 
   const column = (title: string, items: string, empty: string, count: number): string => `<section class="fo-col"><header><h2>${e(title)}</h2><span class="fo-count">${count}</span></header>${items || `<p class="fo-muted">${e(empty)}</p>`}</section>`;
-  const jobCard = (call: CallRecord | undefined, label: string, cls: string, meta: string): string => call ? `<a class="fo-mini ${cls}" href="${link("pipeline", call.id)}#detail"><span><strong>${e(call.fields.callerName ?? "Unknown caller")}</strong><span class="fo-pill ${cls}">${e(label)}</span></span><small>${e(call.fields.problemDescription || "No summary")}</small><time>${e(meta)}</time></a>` : "";
+  const jobCard = (call: CallRecord | undefined, label: string, cls: string, meta: string): string => call ? `<a class="fo-mini ${cls}" href="${link("pipeline", call.id)}#detail"><span><strong>${e(callerLabel(call))}</strong><span class="fo-pill ${cls}">${e(label)}</span></span><small>${e(call.fields.problemDescription || "No summary")}</small><time>${e(meta)}</time></a>` : "";
   const handled = completed.filter((task) => callsById.get(task.callId)?.outcome !== "booked").slice(0, 10);
   const pipelineMain = `<section class="fo-section"><header><h2>Every job at a glance</h2></header><div class="fo-board">${column("Needs reply", actionable.map((task) => jobCard(callsById.get(task.callId), task.priority === "high" ? "Urgent" : "Call back", task.priority === "high" ? "danger" : "", ownerTaskReason(task.reason))).join(""), "Nothing needs a reply.", actionable.length)}${column("Waiting", snoozed.map((task) => jobCard(callsById.get(task.callId), "Later", "", `Back ${compactDate(task.dueAt, tz)}`)).join(""), "Nothing snoozed.", snoozed.length)}${column("Booked", booked.map((call) => jobCard(call, "Booked", "good", compactDate(call.fields.requestedStart!, tz))).join(""), "No upcoming bookings.", booked.length)}${column("Handled", handled.map((task) => jobCard(callsById.get(task.callId), "Handled", "", compactDate(task.completedAt ?? task.updatedAt, tz))).join(""), "Nothing handled yet.", handled.length)}</div></section>`;
 
@@ -193,7 +190,7 @@ export function renderOwnerApp(input: {
     const day = new Date(nowMs + index * 86_400_000);
     const key = dateKey(day, tz);
     const items = upcoming.filter((call) => dateKey(new Date(call.fields.requestedStart!), tz) === key);
-    return `<section class="fo-day ${index === 0 ? "today" : ""}"><header><strong>${e(index === 0 ? "Today" : new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" }).format(day))}</strong><span>${e(new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "short", day: "numeric" }).format(day))}</span></header>${items.map((call) => `<a class="fo-event ${call.outcome === "booked" ? "good" : "warn"}" href="${link("calendar", call.id)}#detail"><strong>${e(timeOnly(call.fields.requestedStart!, tz))}</strong><span>${e(call.fields.callerName ?? "Unknown caller")}</span><small>${call.outcome === "booked" ? "Booked" : "Awaiting your confirmation"}</small></a>`).join("") || `<span class="fo-muted">Open</span>`}</section>`;
+    return `<section class="fo-day ${index === 0 ? "today" : ""}"><header><strong>${e(index === 0 ? "Today" : new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" }).format(day))}</strong><span>${e(new Intl.DateTimeFormat("en-US", { timeZone: tz, month: "short", day: "numeric" }).format(day))}</span></header>${items.map((call) => `<a class="fo-event ${call.outcome === "booked" ? "good" : "warn"}" href="${link("calendar", call.id)}#detail"><strong>${e(timeOnly(call.fields.requestedStart!, tz))}</strong><span>${e(callerLabel(call))}</span><small>${call.outcome === "booked" ? "Booked" : "Awaiting your confirmation"}</small></a>`).join("") || `<span class="fo-muted">Open</span>`}</section>`;
   }).join("");
   const calendarMain = `<section class="fo-section"><header><h2>Next seven days</h2></header><div class="fo-week">${days}</div></section>`;
 
@@ -232,8 +229,7 @@ export function renderOwnerCallRecord(input: {
 }): string {
   const call = input.call;
   const tz = input.config.timezone;
-  const phoneRaw = call.fields.callbackNumber ?? call.fromNumber;
-  const phone = /^\+[1-9]\d{7,14}$/.test(phoneRaw) ? phoneRaw : null;
+  const phone = callPhone(call);
   const address = call.fields.address?.trim() || null;
   const csrfField = `<input type="hidden" name="csrf" value="${e(input.csrf)}">`;
   const task = input.callbackTask;
@@ -253,7 +249,7 @@ export function renderOwnerCallRecord(input: {
     ...(task ? [["Follow-up", `${e(ownerTaskReason(task.reason))} · ${task.status === "completed" ? "handled" : `due ${compactDate(task.dueAt, tz)}`}`] as [string, string]] : []),
   ];
   const alerts = input.notifications.filter((item) => item.channel === "sms").map((item) => `<li><span>${item.priority === "high" ? "Urgent text" : "Text"}</span><span>${e(notificationWords(item.state))}</span></li>`).join("");
-  const body = `<section class="fo-card fo-detail standalone"><a class="fo-back" href="/app">${ownerIcon("back")}Back</a><div class="fo-detail-head"><div><h2>${e(call.fields.callerName ?? "Unknown caller")}</h2><p>${e(call.fields.problemDescription || "No problem summary captured")}</p></div><span class="fo-pill ${call.emergency?.emergency ? "danger" : call.outcome === "booked" ? "good" : ""}">${e(call.emergency?.severity === "life_safety" ? "Emergency" : call.emergency?.emergency ? "Urgent" : outcomeWords(call.outcome))}</span></div>${call.emergency?.immediateInstruction ? `<p class="fo-safety">${ownerIcon("alert")}${e(call.emergency.immediateInstruction)}</p>` : ""}<div class="fo-detail-actions">${phone ? `<a class="fo-btn" href="tel:${e(phone)}">${ownerIcon("phone")}Call back</a><a class="fo-ghost" href="sms:${e(phone)}">Text</a>` : ""}${address ? `<a class="fo-ghost" href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(address)}" target="_blank" rel="noreferrer">${ownerIcon("map")}Map</a>` : ""}${taskActions}</div>${input.path ? renderCallPath(call.id, input.path) : ""}<dl class="fo-facts">${facts.map(([key, value]) => `<div><dt>${e(key)}</dt><dd>${e(value)}</dd></div>`).join("")}</dl>${input.recordingUrl ? `<a class="fo-ghost wide" href="${e(input.recordingUrl)}" rel="noreferrer">${ownerIcon("play")}Play recording</a>` : ""}<details class="fo-transcript" open><summary>Read the call</summary><p>${e(call.transcript ?? "Transcript unavailable")}</p></details>${alerts ? `<h3>Alerts sent</h3><ul class="fo-alerts">${alerts}</ul>` : ""}</section>${input.canDelete ? `<details class="fo-card fo-danger-zone"><summary>Delete this call record</summary><form method="post" action="/app/calls/${encodeURIComponent(call.id)}/delete">${csrfField}<p>This permanently removes the call record, transcript, recording, callback, tool events, notifications, and any customer record whose latest call is this one. Appointments already on your calendar stay on your calendar.</p><label class="fo-check"><input name="confirm" type="checkbox" value="delete" required> I understand this can’t be undone.</label><button class="fo-btn danger">Delete permanently</button></form></details>` : ""}`;
+  const body = `<section class="fo-card fo-detail standalone"><a class="fo-back" href="/app">${ownerIcon("back")}Back</a><div class="fo-detail-head"><div><h2>${e(callerLabel(call))}</h2><p>${e(call.fields.problemDescription || "No problem summary captured")}</p></div><span class="fo-pill ${call.emergency?.emergency ? "danger" : call.outcome === "booked" ? "good" : ""}">${e(call.emergency?.severity === "life_safety" ? "Emergency" : call.emergency?.emergency ? "Urgent" : outcomeWords(call.outcome))}</span></div>${call.emergency?.immediateInstruction ? `<p class="fo-safety">${ownerIcon("alert")}${e(call.emergency.immediateInstruction)}</p>` : ""}<div class="fo-detail-actions">${phone ? `<a class="fo-btn" href="tel:${e(phone)}">${ownerIcon("phone")}Call back</a><a class="fo-ghost" href="sms:${e(phone)}">Text</a>` : ""}${address ? `<a class="fo-ghost" href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(address)}" target="_blank" rel="noreferrer">${ownerIcon("map")}Map</a>` : ""}${taskActions}</div>${input.path ? renderCallPath(call.id, input.path) : ""}<dl class="fo-facts">${facts.map(([key, value]) => `<div><dt>${e(key)}</dt><dd>${e(value)}</dd></div>`).join("")}</dl>${input.recordingUrl ? `<a class="fo-ghost wide" href="${e(input.recordingUrl)}" rel="noreferrer">${ownerIcon("play")}Play recording</a>` : ""}<details class="fo-transcript" open><summary>Read the call</summary><p>${e(call.transcript ?? "Transcript unavailable")}</p></details>${alerts ? `<h3>Alerts sent</h3><ul class="fo-alerts">${alerts}</ul>` : ""}</section>${input.canDelete ? `<details class="fo-card fo-danger-zone"><summary>Delete this call record</summary><form method="post" action="/app/calls/${encodeURIComponent(call.id)}/delete">${csrfField}<p>This permanently removes the call record, transcript, recording, callback, tool events, notifications, and any customer record whose latest call is this one. Appointments already on your calendar stay on your calendar.</p><label class="fo-check"><input name="confirm" type="checkbox" value="delete" required> I understand this can’t be undone.</label><button class="fo-btn danger">Delete permanently</button></form></details>` : ""}`;
   return ownerShell({
     title: "Call",
     view: "call",
@@ -274,12 +270,12 @@ export function renderCallPath(callId: string, path: CallPath): string {
     const seconds = Math.max(0, Math.round((Date.parse(at) - Date.parse(path.startedAt)) / 1000));
     return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
   };
-  const mark: Record<CallPathStep["state"], string> = { done: ownerIcon("check"), waiting: ownerIcon("clock"), flagged: ownerIcon("alert"), current: "<i></i>", todo: "", skipped: "" };
-  const words: Record<CallPathStep["state"], string> = { done: "done", waiting: "waiting on you", flagged: "needs attention", current: "happening now", todo: "not yet", skipped: "skipped" };
+  const mark: Record<CallPathStep["state"], string> = { done: ownerIcon("check"), waiting: ownerIcon("clock"), flagged: ownerIcon("alert"), partial: ownerIcon("minus"), current: "<i></i>", todo: "", skipped: "" };
+  const words: Record<CallPathStep["state"], string> = { done: "done", waiting: "waiting on you", flagged: "needs attention", partial: "partly done", current: "happening now", todo: "not yet", skipped: "skipped" };
   const item = (step: CallPathStep<string>, index: number | null): string =>
     `<li class="${step.state}"><span class="fo-path-mark" aria-hidden="true">${mark[step.state] || (index === null ? "" : String(index + 1))}</span><span class="fo-path-text"><strong>${e(step.label)}</strong>${step.note ? `<small>${e(step.note)}</small>` : ""}</span><span class="fo-path-time">${step.at && (step.state === "done" || step.state === "waiting" || step.state === "flagged") ? `<time datetime="${e(step.at)}">${clock(step.at)}</time>` : `<span class="fo-sr">${words[step.state]}</span>`}</span></li>`;
   const live = path.live ? ` data-live-path="/app/calls/${encodeURIComponent(callId)}/path"` : "";
-  return `<section class="fo-path${path.live ? " live" : ""}"${live} aria-label="Otto's path through this call"><div class="fo-path-head"><h3>Otto’s path</h3><span>${path.live ? '<i></i>Live · ' : ""}${path.done} of ${path.steps.length}</span></div><ol>${path.steps.map((step, index) => item(step, index)).join("")}</ol>${path.extras.length ? `<p class="fo-path-any">Also came up</p><ul>${path.extras.map((step) => item(step, null)).join("")}</ul>` : ""}${path.live ? '<script src="/app/call-path.js" defer></script>' : ""}</section>`;
+  return `<section class="fo-path${path.live && !path.ended ? " live" : ""}"${live} aria-label="Otto's path through this call"><div class="fo-path-head"><h3>Otto’s path</h3><span>${path.live && !path.ended ? '<i></i>Live · ' : "Ended · "}${path.done} of ${path.steps.length}</span></div><ol>${path.steps.map((step, index) => item(step, index)).join("")}</ol>${path.extras.length ? `<p class="fo-path-any">Also came up</p><ul>${path.extras.map((step) => item(step, null)).join("")}</ul>` : ""}${path.live ? '<script src="/app/call-path.js" defer></script>' : ""}</section>`;
 }
 
 /** Polls the live path while the call is on; reloads once when it ends so the full record shows. */
@@ -416,6 +412,19 @@ function notificationWords(state: OutboxNotification["state"]): string {
   return ({ pending: "Queued", sending: "Sending", sent: "Sent", delivered: "Delivered", delivery_failed: "Not delivered", delivery_unconfirmed: "Sent, not confirmed", retry: "Retrying", dead: "Failed" } as Record<string, string>)[state] ?? state;
 }
 
+/** Who called: the name they gave, else the number they called from; "Unknown caller" only with no number either. */
+function callerLabel(call: CallRecord | undefined): string {
+  const name = call?.fields.callerName?.trim();
+  if (name) return name;
+  const phone = callPhone(call);
+  return phone ? formatPhone(phone) : "Unknown caller";
+}
+
+/** The number the caller gave, else the number that called: a callback number that isn't a number never hides it. */
+function callPhone(call: CallRecord | undefined): string | null {
+  return [call?.fields.callbackNumber, call?.fromNumber].find((value) => value && /^\+[1-9]\d{7,14}$/.test(value)) ?? null;
+}
+
 function formatPhone(phone: string): string {
   const match = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(phone);
   return match ? `(${match[1]}) ${match[2]}-${match[3]}` : phone;
@@ -448,6 +457,7 @@ export function ownerIcon(name: string): string {
     settings: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
     phone: '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/>',
     check: '<path d="M20 6L9 17l-5-5"/>',
+    minus: '<path d="M5 12h14"/>',
     back: '<path d="M15 18l-6-6 6-6"/>',
     map: '<path d="M12 21s-7-6.3-7-11a7 7 0 0 1 14 0c0 4.7-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/>',
     clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
@@ -555,6 +565,7 @@ button{font:inherit;cursor:pointer}svg{width:20px;height:20px;flex:none}
 .fo-path li.done .fo-path-mark{background:var(--green);border-color:var(--green);color:#fff}
 .fo-path li.flagged .fo-path-mark{background:var(--red);border-color:var(--red);color:#fff}
 .fo-path li.waiting .fo-path-mark{background:var(--amber);border-color:var(--amber);color:#fff}
+.fo-path li.partial .fo-path-mark{border-color:var(--amber);color:var(--amber)}
 .fo-path li.current{background:#f1f4e0}.fo-path li.current .fo-path-mark{border-color:var(--ink)}
 .fo-path:not(.live) li.current{background:none}.fo-path:not(.live) li.current .fo-path-mark i{animation:none;background:var(--muted)}
 .fo-path li.skipped .fo-path-text,.fo-path li.todo .fo-path-text{color:var(--muted)}.fo-path li.skipped strong{font-weight:600}

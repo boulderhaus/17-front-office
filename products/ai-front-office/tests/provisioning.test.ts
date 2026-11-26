@@ -11,10 +11,13 @@ import { dialsBackToOtto } from "../src/application/forwarding-loop.js";
 type Call = { url: string; method: string; body: Record<string, unknown> | null; key: string | undefined };
 
 /** A fake Telnyx that sells numbers, creates assistants and routes numbers, recording every request. */
-function fakeTelnyx(options: { available?: Record<string, string[]>; orderStatuses?: string[]; failAssistantCreate?: boolean | undefined; failConnect?: boolean | undefined; carriers?: Record<string, { name: string; type: string }> | undefined } = {}) {
+function fakeTelnyx(options: { available?: Record<string, string[]>; orderStatuses?: string[]; failAssistantCreate?: boolean | undefined; failConnect?: boolean | undefined; carriers?: Record<string, { name: string; type: string }> | undefined; failTexmlApp?: "always" | "once" | "ignored" | undefined } = {}) {
   const calls: Call[] = [];
   const orders = [...(options.orderStatuses ?? ["pending", "success"])];
   const owned = new Map<string, { id: string; connection_id: string | null; screening?: string }>();
+  /** Each assistant's own TeXML app, as Telnyx creates it: no status callback until someone sets one. */
+  const texmlApps = new Map<string, Record<string, unknown>>();
+  let texmlFailures = 0;
   let assistants = 0;
   const fetcher = (async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
@@ -31,6 +34,18 @@ function fakeTelnyx(options: { available?: Record<string, string[]>; orderStatus
     const assistant = /\/ai\/assistants\/(assistant-\d+)$/.exec(url);
     if (assistant && method === "GET") return json({ data: { id: assistant[1], telephony_settings: { default_texml_app_id: `texml-${assistant[1]}` } } });
     if (assistant && method === "POST") return json({ data: { id: assistant[1] } });
+    const texml = /\/texml_applications\/(texml-assistant-\d+)$/.exec(url);
+    if (texml) {
+      const app = texmlApps.get(texml[1]!) ?? { id: texml[1], friendly_name: `ai-assistant-${texml[1]}`, voice_url: "https://api.telnyx.com/v2/texml/ai_assistant", status_callback: null, status_callback_method: "post", call_cost_in_webhooks: false };
+      texmlApps.set(texml[1]!, app);
+      if (method === "PATCH") {
+        texmlFailures += 1;
+        if (options.failTexmlApp === "always" || (options.failTexmlApp === "once" && texmlFailures === 1)) return json({ errors: [{ detail: "Telnyx internal TeXML detail" }] }, 503);
+        // "ignored": Telnyx answers 200 but keeps the old settings.
+        if (options.failTexmlApp !== "ignored") Object.assign(app, body);
+      }
+      return json({ data: app });
+    }
     if (url.includes("/available_phone_numbers?")) {
       const params = new URL(url).searchParams;
       const key = params.get("filter[national_destination_code]") ?? params.get("filter[administrative_area]") ?? "any";
@@ -71,7 +86,7 @@ function fakeTelnyx(options: { available?: Record<string, string[]>; orderStatus
     if (url.endsWith("/10dlc/phone_number_campaigns")) return json({ phoneNumber: body?.phoneNumber, campaignId: body?.campaignId });
     throw new Error(`Unexpected outbound request in test: ${method} ${url}`);
   }) as typeof fetch;
-  return { calls, fetcher, owned };
+  return { calls, fetcher, owned, texmlApps };
 }
 
 const noSleep = async () => undefined;
@@ -130,8 +145,9 @@ describe("owner one-tap go-live", () => {
   let server: Server | null = null;
   afterEach(async () => { if (server) await new Promise<void>((resolve) => server!.close(() => resolve())); server = null; });
 
-  async function shop(options: { live?: boolean; failAssistantCreate?: boolean | undefined; failConnect?: boolean | undefined; env?: Record<string, string>; carriers?: Record<string, { name: string; type: string }> | undefined } = {}) {
-    const telnyx = fakeTelnyx({ available: { "941": ["+19415550123", "+19415550124"] }, failAssistantCreate: options.failAssistantCreate, failConnect: options.failConnect, carriers: options.carriers });
+  async function shop(options: { live?: boolean; failAssistantCreate?: boolean | undefined; failConnect?: boolean | undefined; failTexmlApp?: "always" | "once" | "ignored" | undefined; env?: Record<string, string>; carriers?: Record<string, { name: string; type: string }> | undefined } = {}) {
+    const telnyx = fakeTelnyx({ available: { "941": ["+19415550123", "+19415550124"] }, failAssistantCreate: options.failAssistantCreate, failConnect: options.failConnect, failTexmlApp: options.failTexmlApp, carriers: options.carriers });
+    const logs: Array<Record<string, unknown>> = [];
     const store = new InMemoryStore();
     await store.saveConfig(createDemoConfig());
     const clock = { at: new Date("2026-11-23T15:00:00Z"), now() { return this.at; } };
@@ -150,7 +166,7 @@ describe("owner one-tap go-live", () => {
       OWNER_DESTINATIONS_JSON: "{\"owner-primary\":\"+15555550100\"}",
       ...options.env,
     });
-    const handler = createRequestHandler({ env, store, calendar: new InMemoryCalendar(), clock, integrations: {}, logger: () => undefined, fetcher: telnyx.fetcher });
+    const handler = createRequestHandler({ env, store, calendar: new InMemoryCalendar(), clock, integrations: {}, logger: (entry) => { logs.push(entry); }, fetcher: telnyx.fetcher });
     server = createServer(handler);
     await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
     const address = server.address();
@@ -167,8 +183,51 @@ describe("owner one-tap go-live", () => {
     const page = await (await fetch(`${baseUrl}/app`, { headers: { cookie } })).text();
     const csrf = /action="\/app\/line\/go-live"><input type="hidden" name="csrf" value="([^"]+)"/.exec(page)?.[1];
     const goLive = () => fetch(`${baseUrl}/app/line/go-live`, { method: "POST", redirect: "manual", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf: csrf ?? "" }) });
-    return { baseUrl, cookie, csrf, goLive, store, account, telnyx, privateKey: keys.privateKey, clock, handler, env };
+    return { baseUrl, cookie, csrf, goLive, store, account, telnyx, privateKey: keys.privateKey, clock, handler, env, logs };
   }
+
+  // Walk 3 (2026-11-26): every real shop call ended with no transcript, summary, usage or callback task, because
+  // only the demo assistant's TeXML app was ever told where to post the end-of-call callback.
+  it("points the shop assistant's own TeXML app at our end-of-call webhook before the number is connected", async () => {
+    const { goLive, telnyx } = await shop();
+    expect((await goLive()).headers.get("location")).toBe("/app?line=live");
+    expect(telnyx.texmlApps.get("texml-assistant-1")).toMatchObject({
+      status_callback: "https://front-office.example/webhooks/telnyx", status_callback_method: "post", call_cost_in_webhooks: true,
+      // Telnyx requires these on update: the app keeps its own.
+      friendly_name: "ai-assistant-texml-assistant-1", voice_url: "https://api.telnyx.com/v2/texml/ai_assistant",
+    });
+    const order = telnyx.calls.map((call) => `${call.method} ${new URL(call.url).pathname}`);
+    const callbackSet = order.indexOf("PATCH /v2/texml_applications/texml-assistant-1");
+    const connected = telnyx.calls.findIndex((call) => call.method === "PATCH" && /\/phone_numbers\/num-1$/.test(call.url) && call.body?.connection_id === "texml-assistant-1");
+    expect(callbackSet).toBeGreaterThan(-1);
+    expect(connected).toBeGreaterThan(callbackSet);
+
+    // A second go-live reads the app and writes nothing.
+    const writes = () => telnyx.calls.filter((call) => call.method === "PATCH" && call.url.includes("/texml_applications/")).length;
+    const before = writes();
+    await goLive();
+    expect(writes()).toBe(before);
+  });
+
+  it("retries a Telnyx hiccup while setting the end-of-call callback", async () => {
+    const { goLive, telnyx } = await shop({ failTexmlApp: "once" });
+    expect((await goLive()).headers.get("location")).toBe("/app?line=live");
+    expect(telnyx.texmlApps.get("texml-assistant-1")!.status_callback).toBe("https://front-office.example/webhooks/telnyx");
+  });
+
+  it.each(["always", "ignored"] as const)("never turns a line on when the end-of-call callback can't be set (Telnyx %s)", async (failTexmlApp) => {
+    const { goLive, store, account, telnyx, logs, baseUrl, cookie } = await shop({ failTexmlApp });
+    const response = await goLive();
+    expect(response.headers.get("location")).not.toBe("/app?line=live");
+    expect((await store.getOwnerAccountById(account.id))!.status).toBe("pending_activation");
+    expect((await store.getConfig(account.tenantId)).paused).toBe(true);
+    // The number was bought but never connected to the assistant: no caller reaches an Otto that can save nothing.
+    expect(telnyx.owned.get("+19415550123")!.connection_id).toBeNull();
+    expect(logs.find((entry) => entry.event === "go_live_call_end_callback_failed")).toMatchObject({ level: "error", tenantId: account.tenantId });
+    // The owner sees a plain retry line, never Telnyx's own error text.
+    const page = await (await fetch(`${baseUrl}/app`, { headers: { cookie } })).text();
+    expect(page).not.toContain("Telnyx internal TeXML detail");
+  });
 
   it("buys a local number, creates and routes the shop's assistant, and shows forwarding codes", async () => {
     const { baseUrl, cookie, csrf, goLive, store, account, telnyx } = await shop();

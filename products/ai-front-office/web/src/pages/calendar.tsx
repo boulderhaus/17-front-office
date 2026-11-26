@@ -4,7 +4,7 @@ import { ChevronLeft, ChevronRight, Settings2, X } from "lucide-react"
 import { CallLink } from "@/components/app/bits"
 import { CallPanel } from "./today"
 import { derive } from "@/lib/derive"
-import { dateKey, timeOnly } from "@/lib/format"
+import { callerLabel, dateKey, timeOnly } from "@/lib/format"
 import { useMediaQuery, useMode } from "@/lib/mode"
 import { JUMP } from "@/lib/nav"
 import { layoutVisits, VISIT_MIN_SPAN } from "@/lib/calendar-layout"
@@ -195,13 +195,13 @@ function TimeGrid({ days, today, visits, tz, nowMs, detailed, selectedId, onDay 
             {/* auto-rows-max: each line keeps its height and a short block clips at its foot, instead of the lines squeezing into each other. */}
             {placed(day).filter(({ slot }) => detailed || slot.lanes === 1).map(({ visit, slot }) => (
               <CallLink key={visit.call.id} callId={visit.call.id} aria-current={selectedId === visit.call.id}
-                aria-label={`${visit.call.fields.callerName ?? "Unknown caller"}, ${timeOnly(visit.call.fields.requestedStart!, tz)}, ${STATE_WORD[visit.state]}`}
+                aria-label={`${callerLabel(visit.call)}, ${timeOnly(visit.call.fields.requestedStart!, tz)}, ${STATE_WORD[visit.state]}`}
                 className={cn("absolute z-20 grid auto-rows-max content-start overflow-hidden rounded-md border-l-[3px] px-1.5 py-1 text-left leading-tight", BLOCK[visit.state], selectedId === visit.call.id && "ring-2 ring-brand-ink")}
                 style={{ top: ((slot.start - first * 60) / 60) * HOUR + 1, height: ((slot.end - slot.start) / 60) * HOUR - 3, left: `calc(${(slot.lane / slot.lanes) * 100}% + 2px)`, width: `calc(${100 / slot.lanes}% - 4px)` }}>
                 <span className="tabular truncate text-[12px] font-semibold">{detailed && <span aria-hidden>{MARK[visit.state]} </span>}{detailed ? timeOnly(visit.call.fields.requestedStart!, tz) : shortTime(visit.minutes)}</span>
                 {detailed ? (
                   <>
-                    <strong className="truncate text-[13px] font-semibold">{visit.call.fields.callerName ?? "Unknown caller"}</strong>
+                    <strong className="truncate text-[13px] font-semibold">{callerLabel(visit.call)}</strong>
                     {single && slot.end - slot.start >= THREE_LINES && <span className="truncate text-[13px]">{visit.call.fields.problemDescription}</span>}
                   </>
                 ) : <span className="truncate text-[11px]">{(visit.call.fields.callerName ?? "Caller").split(" ")[0]}</span>}

@@ -24,6 +24,92 @@ export interface TelnyxProvisionerOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
+/** Where every assistant's TeXML app posts its end-of-call callback (the same URL as the signed webhooks). */
+export function callEndCallbackUrl(publicBaseUrl: string): string {
+  return `${publicBaseUrl.replace(/\/$/, "")}/webhooks/telnyx`;
+}
+
+export interface CallEndCallbackResult {
+  assistantId: string;
+  texmlAppId: string;
+  action: "already_set" | "set" | "would_set";
+  /** The callback URL is set and posted, so calls finalize (call cost in webhooks may still be off). */
+  delivers: boolean;
+}
+
+/** The assistant has no TeXML app to configure, or Telnyx refused the change: never activate a line on it. */
+export class CallEndCallbackError extends Error {}
+
+/**
+ * Every Telnyx assistant answers through its own default TeXML app, and that app only tells us a call ended
+ * (CallStatus=conversation_ended, with the whole conversation) when its status_callback points here. Without
+ * it a shop's calls are never finalized: no transcript, summary, usage count or callback task.
+ *
+ * Idempotent: reads the app and writes only when apply is true and a setting differs. Transient failures
+ * (network, 408, 429, 5xx) are retried; anything else throws CallEndCallbackError.
+ */
+export async function ensureCallEndCallback(input: {
+  apiKey: string;
+  assistantId: string;
+  publicBaseUrl: string;
+  apply: boolean;
+  fetcher?: typeof fetch | undefined;
+  attempts?: number | undefined;
+  sleep?: ((ms: number) => Promise<void>) | undefined;
+}): Promise<CallEndCallbackResult> {
+  const want = callEndCallbackUrl(input.publicBaseUrl);
+  const attempts = Math.max(1, input.attempts ?? 3);
+  const request = async (path: string, init?: RequestInit): Promise<Record<string, unknown>> => {
+    let last: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      let retry = true;
+      try {
+        const response = await withTimeout((input.fetcher ?? fetch)(`https://api.telnyx.com/v2${path}`, {
+          ...init,
+          headers: { authorization: `Bearer ${input.apiKey}`, "content-type": "application/json", ...init?.headers },
+        }), 8_000);
+        const payload = await response.json().catch(() => ({})) as Record<string, unknown> & { errors?: Array<{ detail?: string }> };
+        if (response.ok) return payload;
+        retry = response.status === 408 || response.status === 429 || response.status >= 500;
+        throw new CallEndCallbackError(`Telnyx call-end callback request failed with HTTP ${response.status}${payload.errors?.[0]?.detail ? `: ${payload.errors[0].detail}` : ""}`);
+      } catch (error) {
+        last = error;
+        if (!retry || attempt === attempts) break;
+        await (input.sleep ?? delay)(250 * 3 ** (attempt - 1));
+      }
+    }
+    throw last instanceof CallEndCallbackError ? last : new CallEndCallbackError(last instanceof Error ? last.message : "Telnyx call-end callback request failed");
+  };
+  const assistant = objectData(await request(`/ai/assistants/${encodeURIComponent(input.assistantId)}`));
+  const telephony = objectData(assistant.telephony_settings);
+  const texmlAppId = typeof telephony.default_texml_app_id === "string" && telephony.default_texml_app_id ? telephony.default_texml_app_id : null;
+  if (!texmlAppId) throw new CallEndCallbackError("Telnyx assistant has no default TeXML application");
+  const app = objectData(await request(`/texml_applications/${encodeURIComponent(texmlAppId)}`));
+  const delivers = callEndCallbackDelivers(app, want);
+  if (delivers && app.call_cost_in_webhooks === true) return { assistantId: input.assistantId, texmlAppId, action: "already_set", delivers };
+  if (!input.apply) return { assistantId: input.assistantId, texmlAppId, action: "would_set", delivers };
+  const updated = objectData(await request(`/texml_applications/${encodeURIComponent(texmlAppId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      // Telnyx documents friendly_name and voice_url as required on update: send back what the app already has.
+      ...(typeof app.friendly_name === "string" && app.friendly_name ? { friendly_name: app.friendly_name } : {}),
+      ...(typeof app.voice_url === "string" && app.voice_url ? { voice_url: app.voice_url } : {}),
+      status_callback: want,
+      status_callback_method: "post",
+      call_cost_in_webhooks: true,
+    }),
+  }));
+  // Trust only what Telnyx says it stored; an update that doesn't echo the app is read back.
+  const stored = updated.status_callback === undefined ? objectData(await request(`/texml_applications/${encodeURIComponent(texmlAppId)}`)) : updated;
+  if (!callEndCallbackDelivers(stored, want)) throw new CallEndCallbackError("Telnyx did not persist the call-end callback");
+  return { assistantId: input.assistantId, texmlAppId, action: "set", delivers: true };
+}
+
+/** The part a call record depends on: the callback URL, posted. (Call cost in webhooks is wanted, not required.) */
+function callEndCallbackDelivers(app: Record<string, unknown>, want: string): boolean {
+  return app.status_callback === want && String(app.status_callback_method ?? "post").toLowerCase() === "post";
+}
+
 export class TelnyxProvisioner {
   constructor(private readonly options: TelnyxProvisionerOptions) {}
 
