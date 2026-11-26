@@ -95,7 +95,7 @@ export function renderOwnerSignup(error = "", values: Record<string, string> = {
 .agree{margin:8px 0 0;text-align:center;text-wrap:balance;font:600 14px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif}
 .verified{font-weight:700}
 .signedin{margin:0 0 10px;font:600 15px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif;overflow-wrap:anywhere}.signedin b{font-weight:700}.signedin a{display:inline-flex;align-items:center;min-height:44px;color:#0b2545}
-.optin label.check span{text-wrap:pretty}
+.optin label.check span{text-wrap:balance}
 ${planCss}
 </style>`;
   const verified = options.verified ?? null;
@@ -155,7 +155,7 @@ ${planCss}
     ? plans.map((plan) => `<p class="charge" data-plan="${escapeHtml(plan.id)}">${escapeHtml(plan.chargeNote)}</p>${plan.unlimited && plan.unlimitedChargeNote ? `<p class="charge" data-plan="${escapeHtml(plan.id)}+unlimited">${escapeHtml(plan.unlimitedChargeNote)}</p>` : ""}`).join("")
     : options.chargeNote ? `<p class="charge always">${escapeHtml(plans[0]?.chargeNote ?? options.chargeNote)}</p>` : "";
   const shopFields = `${field({ ...fieldProps("businessName"), label: "Shop name", attrs: `autocomplete="organization" maxlength="120" value="${value("businessName")}" required` })}${field({ ...fieldProps("phone"), label: "Your mobile number", attrs: `type="tel" autocomplete="tel" inputmode="tel" maxlength="30" data-phone-mask placeholder="e.g. (941) 555-0123" value="${value("phone")}" required`, hint: "Where we reach you about your line." })}`;
-  return publicLayout("Get started", `${style}${authHeader("login")}<main class="publicmain formpage authpage"><section class="formintro">${steps}<h1>Set up your shop</h1><p>Two quick answers, then your card.</p></section>${summary}<form class="publicform" method="post" action="/signup" novalidate>${signedIn}<input type="hidden" name="timezone" value="${value("timezone")}">${shopFields}${optIn}<label class="trap" aria-hidden="true">Fax number<input name="faxNumber" tabindex="-1" autocomplete="off"></label>${planPicker}${plans.length ? `<p class="guarantee"><b>Lead guarantee:</b> no real customer lead in your first 30 days, and we refund your first month.</p>` : ""}<button>${button}</button>${charges}${agree}</form></main>`);
+  return publicLayout("Get started", `${style}${authHeader("login")}<main class="publicmain formpage authpage"><section class="formintro">${steps}<h1>Set up your shop</h1>${plans.length ? `<p>Name your shop, then add your card.</p>` : ""}</section>${summary}<form class="publicform" method="post" action="/signup" novalidate>${signedIn}<input type="hidden" name="timezone" value="${value("timezone")}">${shopFields}${optIn}<label class="trap" aria-hidden="true">Fax number<input name="faxNumber" tabindex="-1" autocomplete="off"></label>${planPicker}${plans.length ? `<p class="guarantee"><b>Lead guarantee:</b> no real customer lead in your first 30 days, and we refund your first month.</p>` : ""}<button>${button}</button>${charges}${agree}</form></main>`);
 }
 
 /** The page behind "Call back" in an owner text: who called, about what, and one big Call button. */

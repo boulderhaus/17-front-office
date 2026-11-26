@@ -48,21 +48,24 @@ export function findTrade(key: string | null | undefined): Trade | null {
 
 /**
  * Words in a shop name that say its trade, matched as whole words (prefixes where a word grows: "Plumbing", "Plumbers").
- * Checked in the order they appear in the name, so "Gulf Plumbing & Heating" is plumbing.
+ * Strong words name the trade outright and always beat weak ones, wherever each sits in the name, so
+ * "Sun Air Plumbing" is plumbing and "Key West Electric" is electrical. Weak words only decide when no strong word is
+ * there ("Gulf Air"). Words common in place names (key, lock, tree, garden, yard) are left out: "Florida Keys Plumbing"
+ * must never start a plumber with locksmith urgent words. Within a tier, the first word in the name wins.
  */
-const NAME_WORDS: ReadonlyArray<{ trade: string; pattern: RegExp }> = [
-  { trade: "hvac", pattern: /\b(?:hvac|heating|heat|air|a\/c|ac|cooling|furnaces?|climate|mechanical|refrigeration)\b/ },
-  { trade: "plumbing", pattern: /\b(?:plumb\w*|drains?|rooter|sewers?|pipes?|water heaters?)\b/ },
-  { trade: "electrical", pattern: /\b(?:electric\w*|wiring|volts?)\b/ },
-  { trade: "roofing", pattern: /\b(?:roof\w*|gutters?)\b/ },
-  { trade: "restoration", pattern: /\b(?:restoration|restore|mold|water damage|dry ?out)\b/ },
-  { trade: "garage", pattern: /\b(?:garage\w*|overhead doors?)\b/ },
-  { trade: "construction", pattern: /\b(?:construction|contract\w*|remodel\w*|renovat\w*|builders?)\b/ },
-  { trade: "handyman", pattern: /\b(?:handy\w*|odd jobs?)\b/ },
-  { trade: "landscaping", pattern: /\b(?:landscap\w*|lawns?|trees?|yards?|irrigation|gardens?|turf|mowing)\b/ },
-  { trade: "pest", pattern: /\b(?:pests?|termites?|extermin\w*|bugs?|wildlife)\b/ },
-  { trade: "locksmith", pattern: /\b(?:locks?|locksmiths?|keys?)\b/ },
-  { trade: "appliance", pattern: /\b(?:appliances?)\b/ },
+const NAME_WORDS: ReadonlyArray<{ trade: string; strong: RegExp; weak?: RegExp }> = [
+  { trade: "hvac", strong: /\b(?:hvac|heating|a\/c|ac|cooling|air condition\w*|furnaces?|refrigeration|heat pumps?)\b/, weak: /\b(?:heat|air|climate|mechanical|comfort)\b/ },
+  { trade: "plumbing", strong: /\b(?:plumb\w*|drains?|rooter|sewers?|septic)\b/, weak: /\b(?:pipes?|water heaters?)\b/ },
+  { trade: "electrical", strong: /\b(?:electric\w*)\b/, weak: /\b(?:wiring|volts?)\b/ },
+  { trade: "roofing", strong: /\b(?:roof\w*)\b/, weak: /\b(?:gutters?)\b/ },
+  { trade: "restoration", strong: /\b(?:restoration|water damage|mold)\b/, weak: /\b(?:restore|dry ?out)\b/ },
+  { trade: "garage", strong: /\b(?:garage doors?|overhead doors?)\b/, weak: /\b(?:garage\w*)\b/ },
+  { trade: "construction", strong: /\b(?:construction|remodel\w*|renovat\w*|builders?)\b/, weak: /\b(?:contract\w*)\b/ },
+  { trade: "handyman", strong: /\b(?:handy\w*)\b/, weak: /\b(?:odd jobs?)\b/ },
+  { trade: "landscaping", strong: /\b(?:landscap\w*|lawns?|irrigation|mowing|tree (?:service|care|removal|trimming)|arborists?)\b/, weak: /\b(?:turf)\b/ },
+  { trade: "pest", strong: /\b(?:pests?|termites?|extermin\w*)\b/, weak: /\b(?:bugs?|wildlife)\b/ },
+  { trade: "locksmith", strong: /\b(?:locksmith\w*)\b/ },
+  { trade: "appliance", strong: /\b(?:appliances?)\b/ },
 ];
 
 /**
@@ -71,10 +74,15 @@ const NAME_WORDS: ReadonlyArray<{ trade: string; pattern: RegExp }> = [
  */
 export function tradeForShopName(name: string | null | undefined): Trade {
   const text = (name ?? "").toLowerCase().replace(/[’']/g, "").replace(/&/g, " ");
-  let best: { trade: string; at: number } | null = null;
-  for (const word of NAME_WORDS) {
-    const at = text.search(word.pattern);
-    if (at >= 0 && (!best || at < best.at)) best = { trade: word.trade, at };
-  }
+  const first = (tier: "strong" | "weak") => {
+    let best: { trade: string; at: number } | null = null;
+    for (const word of NAME_WORDS) {
+      const pattern = word[tier];
+      const at = pattern ? text.search(pattern) : -1;
+      if (at >= 0 && (!best || at < best.at)) best = { trade: word.trade, at };
+    }
+    return best;
+  };
+  const best = first("strong") ?? first("weak");
   return findTrade(best?.trade) ?? findTrade("other")!;
 }

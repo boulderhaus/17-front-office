@@ -286,6 +286,22 @@ describe("two-screen sign-up (walk 11-26: account first, then the shop)", () => 
     expect(await late.text()).toContain("That email already has an account.");
   });
 
+  it("another site can't start a sign-up in this browser", async () => {
+    const response = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", origin: "https://attacker.example" }, body: new URLSearchParams({ step: "account", email: "planted@synthetic.example", password: "synthetic-pass-1" }) });
+    expect(response.status).toBe(403);
+    expect(response.headers.getSetCookie().some((value) => value.startsWith("afo_pending_identity="))).toBe(false);
+  });
+
+  it("a shop screen sent after the pending sign-up ran out says so once, with no errors for unseen fields", async () => {
+    const response = await post(shop);
+    expect(response.status).toBe(400);
+    const page = await response.text();
+    expect(page).toContain("Your sign-up timed out. Start again with Google or your email.");
+    expect(page).not.toContain("Enter an email like");
+    expect(page).not.toContain("Make your password at least");
+    expect(store.ownerAccounts.size).toBe(0);
+  });
+
   it("an email with no password yet opens the password box instead of an error (no-script path)", async () => {
     const response = await post({ step: "account", email: "owner@synthetic.example" });
     expect(response.status).toBe(200);

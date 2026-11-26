@@ -118,6 +118,18 @@ describe("three taps to a live line", () => {
   // Legacy Pro on the old STRIPE_PRICE_ID_PLUS name (recognized, never sold), Team and Fleet on their own.
   const PLANS = { STRIPE_PRICE_ID_PLUS: "price_plus_synthetic", STRIPE_PRICE_ID_TEAM: "price_team_synthetic", STRIPE_PRICE_ID_FLEET: "price_fleet_synthetic", STRIPE_FIRST_MONTH_COUPON_ID: "first_month_half_off" };
 
+  it("a double tap on the shop screen's last button lands both taps on the card page, with one workspace", async () => {
+    const { baseUrl, store } = await start({ env: PLANS });
+    const account = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ step: "account", email: "double@example.test", password: "synthetic-password-42" }) });
+    const cookie = account.headers.getSetCookie().find((value) => value.startsWith("afo_pending_identity="))!.split(";")[0]!;
+    const shop = () => fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", cookie }, body: new URLSearchParams({ businessName: "Gulf Air", phone: "(941) 555-0199", timezone: "America/New_York" }) });
+    const first = await shop();
+    const second = await shop();
+    expect(first.headers.get("location")).toMatch(/^https:\/\/checkout\.stripe\.com\//);
+    expect(second.headers.get("location")).toMatch(/^https:\/\/checkout\.stripe\.com\//);
+    expect([...store.ownerAccounts.values()].filter((owner) => owner.email === "double@example.test")).toHaveLength(1);
+  });
+
   it("goes from the signup form straight to Stripe: no trial, Solo, limited-time first month half off", async () => {
     const { baseUrl, store, providers } = await start({ env: PLANS });
     const { response } = await signUp(baseUrl);

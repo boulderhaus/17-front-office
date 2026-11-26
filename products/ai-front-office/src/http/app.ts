@@ -823,6 +823,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       return sendHtml(response, 200, analyticsPage(signupPage(request, "", preset, signIn.pendingIdentity(request))));
     }
     if (method === "POST" && url.pathname === "/signup") {
+      // Another site must not be able to start a sign-up in this browser (a planted pending account would collect the
+      // owner's shop, mobile and consent under someone else's email and password).
+      if (isCrossSiteFormPost(request, dependencies.env.PUBLIC_BASE_URL)) throw new HttpError(403, "Forbidden");
       const form = parseForm(await readBody(request, 48_000));
       // The account screen and the shop screen are counted apart, so a normal two-screen sign-up uses one of each.
       if (!limiter.allow(`${ip}:owner-signup${form.get("step") === "account" ? "-account" : ""}`, 5, 60 * 60_000)) throw new HttpError(429, "Too many signup attempts from this connection");
@@ -849,6 +852,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (identity) {
         values.email = identity.email;
         delete values.password;
+      } else if (!values.email && !values.password && (values.businessName || values.phone)) {
+        // The shop screen sent after the pending sign-up ran out: say so once, without errors for fields they never saw.
+        return sendHtml(response, 400, signupPage(request, SIGNUP_TIMED_OUT, keepPicks(), null));
       }
       const parsed = ownerSignupSchema.safeParse(values);
       // Every problem at once, each under its own field and naming the fix.
@@ -948,6 +954,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         if (existing && sameSignup) {
           const again = mintOwnerSession(existing, dependencies.env.SESSION_SIGNING_KEY!, dependencies.clock.now().getTime());
           response.setHeader("set-cookie", [ownerSessionCookie(again, dependencies.env.NODE_ENV === "production"), signIn.clearPendingIdentity()]);
+          // A double tap on the last button: land where the first tap did (the card), not past it.
+          if (stripeClient && existing.status === "pending_activation") {
+            const target = await startCheckout(existing, "start", plan.id).catch(() => null);
+            if (target) return redirect(response, target);
+          }
           return redirect(response, "/app/start");
         }
         if (identity) response.setHeader("set-cookie", signIn.clearPendingIdentity());
@@ -4281,6 +4292,8 @@ function timingSafeEqualBuffers(left: Buffer, right: Buffer): boolean {
 const RECORDING_NOTICE = TRANSFER_RECORDING_NOTICE;
 
 /** Sign-up problems by field, each naming the fix. The schema's issues plus the checks it can't make (phone, password). */
+const SIGNUP_TIMED_OUT = "Your sign-up timed out. Start again with Google or your email.";
+
 function signupFieldErrors(issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey> }>, values: Record<string, string>, verified: boolean, only?: ReadonlyArray<keyof SignupFieldErrors>): SignupFieldErrors {
   const errors: SignupFieldErrors = {};
   const bad = new Set(issues.map((issue) => issue.path[0]));

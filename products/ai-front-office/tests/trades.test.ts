@@ -174,13 +174,17 @@ describe("signup by trade", () => {
 });
 
 describe("trade from the shop name", () => {
-  it("reads the obvious trade words, first one in the name wins, and never guesses from parts of words", () => {
+  it("reads the obvious trade words, a word that names the trade beats a loose one, and never guesses from parts of words", () => {
     const cases: Array<[string, string]> = [
       ["Gulf Air", "hvac"], ["Sunshine A/C & Heating", "hvac"], ["Comfort HVAC", "hvac"],
       ["ABC Plumbing & Heating", "plumbing"], ["Rapid Rooter", "plumbing"],
       ["Bright Electric LLC", "electrical"], ["Top Notch Roofing", "roofing"], ["Smith Remodeling", "construction"],
       ["Coastal Restoration", "restoration"], ["Pro Garage Doors", "garage"], ["Mike’s Handyman Service", "handyman"],
       ["Green Lawns", "landscaping"], ["Bug Busters", "pest"], ["Key Locksmith", "locksmith"], ["Acme Appliance Repair", "appliance"],
+      // A word that names the trade beats a place-name or loose word anywhere in the name.
+      ["Florida Keys Plumbing", "plumbing"], ["Key West Electric", "electrical"], ["Oak Tree Electric", "electrical"],
+      ["Palm Gardens Air Conditioning", "hvac"], ["Yard Bros Electric", "electrical"], ["Lock City Roofing", "roofing"],
+      ["Mechanical Plumbing Services", "plumbing"], ["Sun Air Plumbing", "plumbing"], ["Gulf Coast Contracting", "construction"],
       // Nothing to go on, or a trade word only inside another word: general home services.
       ["Synthetic Brothers", "other"], ["Blockbuster Repair", "other"], ["Airtight Sealing", "other"], ["Power Washing Pros", "other"], ["", "other"],
     ];
