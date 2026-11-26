@@ -19,7 +19,8 @@
     "configure:telnyx": "node --import tsx scripts/configure-telnyx.ts",
     "configure:voicemail": "node --import tsx scripts/configure-voicemail-app.ts",
     "enable:call-screening": "node --import tsx scripts/enable-call-screening.ts",
-    "backfill:calls": "node --import tsx scripts/backfill-call-history.ts"
+    "backfill:calls": "node --import tsx scripts/backfill-call-history.ts",
+    "selftest:call": "node --import tsx scripts/selftest-call.ts"
   },
   "dependencies": {
     "pg": "8.23.1",
