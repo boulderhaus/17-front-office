@@ -18,6 +18,7 @@ import { useMediaQuery, useMode } from "@/lib/mode"
 import type { ApiCall, ApiDashboard, ApiTask } from "@/lib/types"
 import { cn, tapWidth } from "@/lib/utils"
 import { callOrigin, JUMP } from "@/lib/nav"
+import { usageTile } from "@/lib/usage-tile"
 
 // One gate for every Done, Later and Undo on the page: one save at a time, and a double-click never reaches the next caller.
 const taskGate = createTaskGate()
@@ -85,8 +86,10 @@ export function TodayPage() {
   const from = params.get("from")
   const waiting = new Set(d.actionable.map((task) => task.callId))
   const owner = !preview && dashboard.viewer.role === "owner"
+  // No calls yet: one column. A side panel saying "No calls yet" only repeated the page beside it.
+  const panel = dashboard.calls.length > 0
   return (
-    <div className={cn("grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_400px] lg:items-start xl:grid-cols-[minmax(0,1fr)_440px]", selected && "max-lg:block")}>
+    <div className={cn("grid grid-cols-1 gap-6", !panel && "max-w-[860px]", panel && "lg:grid-cols-[minmax(0,1fr)_400px] lg:items-start xl:grid-cols-[minmax(0,1fr)_440px]", selected && "max-lg:block")}>
       {/* On a phone, a selected call replaces the list (legacy ?call links). */}
       <div className={cn("grid min-w-0 gap-6", selected && "max-lg:hidden")}>
         {preview && (
@@ -122,10 +125,10 @@ export function TodayPage() {
         <AllCalls dashboard={dashboard} panelId={wide ? panelCall?.id ?? null : null} from={from} waiting={waiting} />
         {owner && dashboard.onboarding.completed && <CalendarCard dashboard={dashboard} />}
       </div>
-      <aside className={cn("lg:sticky lg:top-8", !selected && "max-lg:hidden")}>
+      {panel && <aside className={cn("lg:sticky lg:top-8", !selected && "max-lg:hidden")}>
         <CallPanel call={panelCall} task={panelCall ? d.taskFor(panelCall.id) : undefined} tz={d.tz} standalone={Boolean(selected)} linked caughtUp={caughtUp}
           next={(doneId) => nextOpenCall(d.actionable.map((task) => task.callId), stillOpenCalls(dashboard.calls, (callId) => d.taskFor(callId)?.status), doneId)} />
-      </aside>
+      </aside>}
     </div>
   )
 }
@@ -135,7 +138,8 @@ function Summary({ dashboard }: { dashboard: ApiDashboard }) {
   const { base, preview, member } = useMode()
   const d = derive(dashboard)
   const usage = dashboard.usage
-  const cell = "grid min-h-[84px] content-center gap-1 px-3.5 py-3 hover:bg-muted/60 md:px-5"
+  const answered = usageTile(usage)
+  const cell = "grid min-h-[84px] content-start gap-1 px-3.5 py-3 hover:bg-muted/60 md:px-5"
   const label = "text-[13px] font-medium text-muted-foreground md:text-sm"
   const number = "tabular text-[30px] leading-none font-semibold tracking-tight md:text-4xl"
   return (
@@ -152,14 +156,15 @@ function Summary({ dashboard }: { dashboard: ApiDashboard }) {
         {/* Nowhere to go in the demo or for a teammate (Plan is the owner's): plain text, saying out of how many. */}
         {preview || member ? (
           <div className={cn(cell, "hover:bg-transparent")}>
-            <span className={label}>{usage.unlimited ? "Answered" : "Calls left"}</span>
-            <strong className={number}>{usage.unlimited ? d.used : d.remaining}</strong>
-            {!usage.unlimited && <span className="text-[13px] text-muted-foreground">of {d.included}</span>}
+            <span className={label}>{answered.label}</span>
+            <strong className={number}>{answered.value}</strong>
+            <span className="text-[13px] text-muted-foreground">{answered.note}</span>
           </div>
         ) : (
           <Link to={`${base}/settings/plan`} state={JUMP} className={cell}>
-            <span className={label}>{usage.unlimited ? "Answered" : "Calls left"}</span>
-            <strong className={number}>{usage.unlimited ? d.used : d.remaining}</strong>
+            <span className={label}>{answered.label}</span>
+            <strong className={number}>{answered.value}</strong>
+            <span className="text-[13px] text-muted-foreground">{answered.note}</span>
           </Link>
         )}
       </nav>
@@ -435,7 +440,7 @@ function revealLitRow() {
  * `linked` (Calls only) ties the panel to the lit row: the matching ink left edge and the yellow header band.
  */
 export function CallPanel({ call, task, tz, standalone, next, linked = false, caughtUp = false, hasCalls = false }: { call: ApiCall | null; task: ApiTask | undefined; tz: string; standalone: boolean; next?: (doneId: string) => string | null; linked?: boolean; caughtUp?: boolean; hasCalls?: boolean }) {
-  const { base, preview } = useMode()
+  const { base } = useMode()
   const tiles = useTaskTiles()
   const wide = useMediaQuery("(min-width: 1024px)")
   const navigate = useNavigate()
@@ -519,7 +524,7 @@ export function CallPanel({ call, task, tz, standalone, next, linked = false, ca
         <Transcript call={call} />
       </div>
       <Link className="inline-flex min-h-11 items-center gap-0.5 text-[15px] font-semibold text-brand-ink" to={`${base}/calls/${encodeURIComponent(call.id)}`} state={{ origin: callOrigin({ base, pathname, search }) }}>
-        {preview ? "Open the full call" : "Recording and full record"}<ChevronRight className="size-4" />
+        Open the full call<ChevronRight className="size-4" />
       </Link>
     </section>
   )

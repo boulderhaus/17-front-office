@@ -11,8 +11,8 @@ describe("owner app menu", () => {
     expect(entries.find((entry) => entry.id === "settings")?.to).toBe("/app/settings");
   });
 
-  it("never shows Settings to a team member", () => {
-    expect(labels({ base: "/app", preview: false, member: true, attention: 0 })).toEqual(["Calls", "Jobs", "Calendar"]);
+  it("never shows Settings to a team member, who gets Team (their calendar and hours) instead", () => {
+    expect(labels({ base: "/app", preview: false, member: true, attention: 0 })).toEqual(["Calls", "Jobs", "Calendar", "Team"]);
   });
 
   it("shows Start (the sign-up page, a full page load) in the demo instead of Settings", () => {

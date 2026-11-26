@@ -1,17 +1,38 @@
 import { useEffect, useState } from "react"
-import { BellRing, CheckCircle2, Loader2, Share } from "lucide-react"
+import { BellRing, CheckCircle2, Download, Loader2, Share } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { api } from "@/lib/api"
 import { useMode } from "@/lib/mode"
-import { cn } from "@/lib/utils"
+import { installHelp } from "@/lib/install"
+import { cn, tapWidth } from "@/lib/utils"
+
+/**
+ * Android's Chrome offers its install sheet once (beforeinstallprompt). Caught as the app loads, before this card
+ * is on screen, and kept for the "Add to Home Screen" button. iPhone never fires it: Apple allows no install button.
+ */
+interface InstallPrompt extends Event { prompt: () => Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> }
+let deferredInstall: InstallPrompt | null = null
+const installListeners = new Set<() => void>()
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeinstallprompt", (event) => {
+    event.preventDefault()
+    deferredInstall = event as InstallPrompt
+    installListeners.forEach((listener) => listener())
+  })
+  window.addEventListener("appinstalled", () => { deferredInstall = null; installListeners.forEach((listener) => listener()) })
+}
 
 type State = "checking" | "unsupported" | "iphone-install" | "blocked" | "off" | "on"
 
 const SCOPE = "/app"
 
+function touchMac(): boolean {
+  return navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1
+}
+
 function isIphone(): boolean {
-  return /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+  return /iPhone|iPad|iPod/.test(navigator.userAgent) || touchMac()
 }
 
 function isInstalled(): boolean {
@@ -44,6 +65,12 @@ export function CallAlertsCard({ className }: { className?: string }) {
   const publicKey = dashboard?.push?.publicKey ?? null
   const [state, setState] = useState<State>("checking")
   const [busy, setBusy] = useState(false)
+  const [canPrompt, setCanPrompt] = useState(() => deferredInstall !== null)
+  useEffect(() => {
+    const update = () => setCanPrompt(deferredInstall !== null)
+    installListeners.add(update)
+    return () => { installListeners.delete(update) }
+  }, [])
 
   useEffect(() => {
     if (!publicKey || preview) return
@@ -83,6 +110,17 @@ export function CallAlertsCard({ className }: { className?: string }) {
     } finally {
       setBusy(false)
     }
+  }
+
+  // Android's Chrome: its own install sheet, one tap.
+  const install = async () => {
+    const prompt = deferredInstall
+    if (!prompt) return
+    deferredInstall = null
+    setCanPrompt(false)
+    await prompt.prompt().catch(() => undefined)
+    const choice = await prompt.userChoice.catch(() => null)
+    if (choice?.outcome === "accepted") toast.success("Call Otto is on your home screen.")
   }
 
   const turnOff = async () => {
@@ -126,19 +164,38 @@ export function CallAlertsCard({ className }: { className?: string }) {
           <Button type="button" variant="link" className="h-11 px-0" disabled={busy} onClick={() => void turnOff()}>Turn off</Button>
         </div>
       )}
-      {state === "iphone-install" && (
-        <div className="grid gap-2 rounded-lg bg-brand-paper px-3 py-3 text-[15px]">
-          <strong className="font-semibold">On iPhone, add Call Otto to your Home Screen first:</strong>
-          <ol className="grid list-decimal gap-1.5 pl-5">
-            <li>In Safari, tap the Share button <Share className="inline size-4 align-[-2px]" aria-label="Share" /> at the bottom of the screen.</li>
-            <li>Tap <strong className="font-semibold">Add to Home Screen</strong>, then <strong className="font-semibold">Add</strong>.</li>
-            <li>Open Call Otto from your Home Screen and tap <strong className="font-semibold">Turn on call alerts</strong> here.</li>
-          </ol>
-          <span className="text-[13px] text-muted-foreground">Needs iPhone software 16.4 or newer.</span>
-        </div>
+      {state === "iphone-install" && <IphoneSteps />}
+      {canPrompt && state !== "iphone-install" && (
+        <Button type="button" size="tap" variant="outline" className={cn(tapWidth, "bg-card")} onClick={() => void install()}><Download />Add Call Otto to your home screen</Button>
       )}
       {state === "blocked" && <p className="rounded-lg bg-amber-50 px-3 py-2.5 text-[14px] text-amber-950">Alerts are blocked for Call Otto on this phone. Turn on notifications for it in your phone’s Settings, then come back here.</p>}
-      {state === "unsupported" && <p className="text-[14px] text-muted-foreground">This browser can’t show call alerts. On Android, use Chrome. On iPhone, use Safari and add Call Otto to your Home Screen.</p>}
+      {state === "unsupported" && <p className="text-[14px] text-muted-foreground">This browser can’t show call alerts. On Android, use Chrome. On iPhone, add Call Otto to your Home Screen first.</p>}
+    </div>
+  )
+}
+
+/**
+ * iPhone: Apple allows no one-tap install, so it is two taps, in the words of the browser the owner is in
+ * (Chrome has Add to Home Screen in its Share menu, top right; Safari in its Share menu, under ··· on newer iPhones).
+ */
+function IphoneSteps() {
+  const help = installHelp({ userAgent: navigator.userAgent, touchMac: touchMac(), standalone: isInstalled(), canPrompt: false })
+  const share = <Share className="inline size-4 align-[-2px]" aria-label="Share" />
+  return (
+    <div className="grid gap-2 rounded-lg bg-brand-paper px-3 py-3 text-[15px]">
+      <strong className="font-semibold">First, add Call Otto to your Home Screen</strong>
+      {help === "iphone-other" ? (
+        <p>Open this page in Safari or Chrome, then add it to your Home Screen from the Share menu.</p>
+      ) : (
+        <ol className="grid list-decimal gap-1.5 pl-5">
+          {help === "iphone-chrome"
+            ? <li>Tap Share {share} at the top right, next to the address.</li>
+            : <li>Tap Share {share}. On newer iPhones it’s in the <strong className="font-semibold">···</strong> menu.</li>}
+          <li>Tap <strong className="font-semibold">Add to Home Screen</strong>, then <strong className="font-semibold">Add</strong>.</li>
+          <li>Open Call Otto from your Home Screen and turn on alerts here.</li>
+        </ol>
+      )}
+      <span className="text-[13px] text-muted-foreground">iPhones don’t allow a one-tap install. Needs iOS 16.4 or newer.</span>
     </div>
   )
 }

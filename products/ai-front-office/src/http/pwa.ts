@@ -42,6 +42,7 @@ self.addEventListener("notificationclick", (event) => {
 export const WEB_MANIFEST = JSON.stringify({
   name: "Call Otto",
   short_name: "Call Otto",
+  description: "Who called, and who's waiting on you.",
   id: "/app",
   start_url: "/app",
   scope: "/app",

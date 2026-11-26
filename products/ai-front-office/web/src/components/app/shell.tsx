@@ -1,16 +1,18 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
-import { Link, useLocation, useNavigate } from "react-router-dom"
-import { ArrowLeft, Bell, BellOff, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, CircleUser, Columns3, LogOut, Menu, PhoneCall, Settings2, X, type LucideIcon } from "lucide-react"
+import { Link, useLocation, useNavigate, useNavigationType } from "react-router-dom"
+import { ArrowLeft, BellOff, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, CircleUser, Columns3, LogOut, Menu, PhoneCall, Settings2, Users, X, type LucideIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Sheet, SheetClose, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { AlertsBell } from "./alerts-bell"
 import { BrandMark } from "./bits"
 import { SETTINGS_PAGES } from "./settings-pages"
 import { coverageStatus, derive } from "@/lib/derive"
 import { useMediaQuery, useMode } from "@/lib/mode"
 import { backGoes, JUMP, navActive, navEntries, swipeCloses, type NavEntry, type NavId } from "@/lib/nav"
+import { opensAtTop } from "@/lib/scroll"
 import { revealDelta } from "@/lib/selection"
 import { cn } from "@/lib/utils"
 
@@ -20,7 +22,7 @@ interface NavItem extends NavEntry {
   children?: Array<{ to: string; label: string }>
 }
 
-const ICONS: Record<NavId, LucideIcon> = { calls: PhoneCall, jobs: Columns3, calendar: CalendarDays, settings: Settings2, start: Settings2 }
+const ICONS: Record<NavId, LucideIcon> = { calls: PhoneCall, jobs: Columns3, calendar: CalendarDays, settings: Settings2, start: Settings2, team: Users }
 
 function useNav(): NavItem[] {
   const { base, preview, member, dashboard } = useMode()
@@ -28,7 +30,8 @@ function useNav(): NavItem[] {
   return navEntries({ base, preview, member, attention }).map((entry) => ({
     ...entry,
     icon: ICONS[entry.id],
-    ...(entry.id === "settings" ? { children: SETTINGS_PAGES.map((page) => ({ to: `${base}/settings/${page.id}`, label: page.title })) } : {}),
+    // Team is a page of its own (/app/team): the menu goes straight there, not through a settings stub.
+    ...(entry.id === "settings" ? { children: SETTINGS_PAGES.map((page) => ({ to: page.id === "team" ? `${base}/team` : `${base}/settings/${page.id}`, label: page.title })) } : {}),
   }))
 }
 
@@ -128,6 +131,8 @@ function NavPanel({ drawer, onNavigate }: { drawer?: boolean; onNavigate?: () =>
             {dashboard?.shop.businessName && <span className="truncate text-[13px] text-muted-foreground">{dashboard.shop.businessName}</span>}
           </span>
         </Link>
+        {/* A computer has no top bar: the bell sits by the name, where the phone's sits in the top bar. */}
+        {!drawer && !preview && dashboard?.viewer.role === "owner" && <AlertsBell className="-mr-2" />}
         {drawer && (
           <SheetClose asChild>
             <Button variant="ghost" size="icon" className={cn("-mr-2 size-11 shrink-0", FOCUS_BUTTON, "focus-visible:-outline-offset-2")} aria-label="Close menu"><X className="size-5" /></Button>
@@ -135,7 +140,7 @@ function NavPanel({ drawer, onNavigate }: { drawer?: boolean; onNavigate?: () =>
         )}
       </div>
       <nav ref={list} aria-label="Main" className="flex-none px-3 pb-3">
-        <ul className="grid gap-0.5">
+        <ul className="grid grid-cols-[minmax(0,1fr)] gap-0.5">
           {nav.map((item) => (item.children
             ? <NavGroup key={item.label} item={item} pages={item.children} onNavigate={onNavigate} />
             : <NavRow key={item.label} item={item} active={navActive(path, item)} onNavigate={onNavigate} />))}
@@ -173,7 +178,7 @@ function NavRow({ item, active, onNavigate }: { item: NavItem; active: boolean; 
     </>
   )
   return (
-    <li>
+    <li className="min-w-0">
       {item.external
         ? <a href={item.to} className={ROW}>{body}</a>
         : <Link to={item.to} aria-current={active ? "page" : undefined} onClick={onNavigate} className={cn(ROW, active && ROW_ON)}>{body}</Link>}
@@ -182,36 +187,31 @@ function NavRow({ item, active, onNavigate }: { item: NavItem; active: boolean; 
 }
 
 /**
- * Settings: the row opens the settings list; the chevron shows or hides its pages. Open by itself inside Settings.
- * The hover pill covers the whole row (link and chevron); the chevron darkens on its own to show it is a second target.
+ * Settings: the whole row (icon, word and chevron) opens and closes its pages, like every collapsible menu group.
+ * Each page is one tap below it. Open by itself while you're inside Settings.
  */
 function NavGroup({ item, pages, onNavigate }: { item: NavItem; pages: NonNullable<NavItem["children"]>; onNavigate?: () => void }) {
   const path = usePath()
-  const inside = path === item.to || path.startsWith(`${item.to}/`)
-  const onList = path === item.to
+  const inside = path === item.to || path.startsWith(`${item.to}/`) || pages.some((page) => path === page.to)
   const [open, setOpen] = useState(inside)
   useEffect(() => { if (inside) setOpen(true) }, [inside])
   return (
-    <li>
+    <li className="min-w-0">
       <Collapsible open={open} onOpenChange={setOpen}>
-        <div className={cn("flex items-center gap-0.5 rounded-lg transition-colors motion-reduce:transition-none", onList ? "bg-sidebar-accent" : "hover:bg-sidebar-accent/60")}>
-          <Link to={item.to} aria-current={onList ? "page" : undefined} onClick={onNavigate} className={cn(ROW, "flex-1 hover:bg-transparent", inside && "font-semibold text-sidebar-foreground")}>
+        <CollapsibleTrigger asChild>
+          <button type="button" className={cn(ROW, "w-full text-left", inside && "font-semibold text-sidebar-foreground")}>
             <item.icon className="size-[18px] shrink-0" strokeWidth={inside ? 2.25 : 1.75} />
             <span className="flex-1 truncate">{item.label}</span>
-          </Link>
-          <CollapsibleTrigger asChild>
-            <button type="button" aria-label={`${item.label} pages`} className={cn("grid size-11 shrink-0 place-items-center rounded-lg text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground", FOCUS_IN)}>
-              <ChevronDown className={cn("size-4 transition-transform duration-200 motion-reduce:transition-none", !open && "-rotate-90")} />
-            </button>
-          </CollapsibleTrigger>
-        </div>
+            <ChevronDown className={cn("size-4 shrink-0 text-sidebar-foreground/70 transition-transform duration-200 motion-reduce:transition-none", !open && "-rotate-90")} />
+          </button>
+        </CollapsibleTrigger>
         <CollapsibleContent>
           {/* The guide line sits under the icon's centre: 12px row padding + half the 18px icon. */}
-          <ul aria-label={`${item.label} pages`} className="mt-0.5 ml-[21px] grid gap-0.5 border-l border-sidebar-border pl-2">
+          <ul aria-label={`${item.label} pages`} className="mt-0.5 ml-[21px] grid grid-cols-[minmax(0,1fr)] gap-0.5 border-l border-sidebar-border pl-2">
             {pages.map((page) => {
               const on = path === page.to
               return (
-                <li key={page.to}>
+                <li key={page.to} className="min-w-0">
                   {/* A jump straight into a settings page: its "‹ Settings" goes to Settings, not back to where this started. */}
                   <Link to={page.to} state={JUMP} aria-current={on ? "page" : undefined} onClick={onNavigate} className={cn(ROW, on && ROW_ON)}>
                     <span className="truncate">{page.label}</span>
@@ -238,16 +238,6 @@ function Tip({ label, children, open, onOpenChange }: { label: string; children:
       <TooltipTrigger asChild>{children}</TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
-  )
-}
-
-function IconLink({ to, label, icon: Icon }: { to: string; label: string; icon: LucideIcon }) {
-  return (
-    <Tip label={label}>
-      <Button variant="ghost" size="icon" className={cn("size-11", FOCUS_BUTTON)} asChild>
-        <Link to={to} state={JUMP} aria-label={label}><Icon className="size-[22px]" strokeWidth={1.75} /></Link>
-      </Button>
-    </Tip>
   )
 }
 
@@ -340,8 +330,10 @@ function TopBar({ back }: { back?: BackLink }) {
           </SheetContent>
         </Sheet>
         {back ? (
-          <button type="button" onClick={goBack} className={cn("inline-flex min-h-11 min-w-0 items-center gap-0.5 rounded-lg pr-2 text-[17px] font-semibold text-brand-ink hover:bg-muted", FOCUS)}>
-            <ChevronLeft className="size-6 shrink-0" /><span className="truncate">{back.label}</span>
+          // One button, the arrow and the page it goes back to: a 44px arrow with room on both sides, clear of the menu.
+          <button type="button" onClick={goBack} aria-label={`Back to ${back.label}`} className={cn("ml-2 inline-flex min-h-11 min-w-0 items-center rounded-lg pr-3 text-[17px] font-semibold text-brand-ink hover:bg-muted", FOCUS)}>
+            <span aria-hidden className="grid size-11 shrink-0 place-items-center"><ChevronLeft className="size-6" strokeWidth={2.25} /></span>
+            <span className="-ml-1 truncate">{back.label}</span>
           </button>
         ) : (
           <Link to={base} className={cn("flex min-h-11 min-w-0 items-center gap-2 rounded-lg pr-2", FOCUS)}>
@@ -349,7 +341,7 @@ function TopBar({ back }: { back?: BackLink }) {
           </Link>
         )}
         <div className="ml-auto flex shrink-0 items-center">
-          {owner && <IconLink to="/app/settings/alerts" label="Alerts" icon={Bell} />}
+          {owner && <AlertsBell />}
           {preview
             ? <Button variant="brand" size="lg" className={cn("mr-1.5 h-11 px-3.5 text-[15px]", FOCUS_BUTTON)} asChild><a href="/signup">Get started</a></Button>
             : <AccountMenu />}
@@ -358,6 +350,9 @@ function TopBar({ back }: { back?: BackLink }) {
     </header>
   )
 }
+
+/** The page the shell last showed, so a new page can open at its top. */
+let shownPath: string | null = null
 
 /** A sub-page's "‹ Calls". `history`: whether it steps back in history; left out, the generic rule (backGoes) decides. */
 export interface BackLink { to: string; label: string; history?: boolean }
@@ -382,6 +377,13 @@ function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: st
 export function AppShell({ title, subtitle, actions, back, hideTitle, children }: { title: string; subtitle?: string; actions?: ReactNode; back?: BackLink; hideTitle?: boolean; children: ReactNode }) {
   useEffect(() => { document.title = `${title} · Call Otto` }, [title])
   const location = useLocation()
+  const navigationType = useNavigationType()
+  // A new page opens at its top (Calendar from the bottom of Settings used to open scrolled past its title).
+  // Module-level: every route renders its own shell, so a ref would start empty on each page.
+  useLayoutEffect(() => {
+    if (opensAtTop({ from: shownPath, to: location.pathname, type: navigationType })) window.scrollTo(0, 0)
+    shownPath = location.pathname
+  }, [location.pathname, navigationType])
   // A new page whose link went away with the old one (Settings from the menu, a call from the list) leaves focus
   // nowhere; put it at the top of the new page's content so the next Tab, and a screen reader, start there.
   useEffect(() => {
@@ -392,7 +394,7 @@ export function AppShell({ title, subtitle, actions, back, hideTitle, children }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname])
   return (
-    <div className="min-h-dvh lg:grid lg:grid-cols-[248px_minmax(0,1fr)]">
+    <div className="min-h-dvh lg:grid lg:grid-cols-[280px_minmax(0,1fr)]">
       {/* Moves focus without touching the URL, so Back never lands on the same page. */}
       <a href="#main" onClick={(event) => { event.preventDefault(); document.getElementById("main")?.focus() }}
         className="sr-only rounded-lg bg-card text-[15px] font-semibold text-foreground ring-2 ring-brand-ink focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:px-4 focus:py-3 focus:shadow-lg">

@@ -56,4 +56,27 @@ describe("team invitations and calendar rotation", () => {
     await expect(team.verifyEvent({ tenantId: other, providerEventId: first.providerEventId!, slot: attempt.slot })).rejects.toThrow("another shop");
     await expect(team.verifyEvent({ tenantId, providerEventId: "fo-team:not-json", slot: attempt.slot })).rejects.toThrow("Invalid team calendar event reference");
   });
+
+  it("books the owner inside the shop's current hours, never a copy frozen when the team was set up (APP-21)", async () => {
+    const store = new InMemoryStore();
+    const tenantId = `shop_${randomUUID()}`;
+    const account = owner(tenantId);
+    const config = createDemoConfig(tenantId);
+    await store.createOwnerWorkspace({ account, config, ownerPhone: null });
+    const member = { ...account, id: randomUUID(), email: "member@synthetic.example", role: "member" as const };
+    await store.createTeamAccount(member);
+    const frozen = { ...config.bookableHours, weekdayStart: "08:00", weekdayEnd: "17:00" };
+    const memberHours = { ...config.bookableHours, weekdayStart: "10:00", weekdayEnd: "14:00" };
+    await store.saveConfig({ ...config, schedulingCalendars: [{ accountId: account.id, enabled: true, hours: frozen }, { accountId: member.id, enabled: true, hours: memberHours }] });
+    // Settings › Hours changes the shop's hours later.
+    await store.saveConfig({ ...(await store.getConfig(tenantId)), bookableHours: { ...frozen, weekdayEnd: "12:00" } });
+    const asked = new Map<string, string>();
+    const spy = (id: string) => Object.assign(new InMemoryCalendar(), {
+      listAvailableSlots: async (input: { bookableHours: { weekdayEnd: string } }) => { asked.set(id, input.bookableHours.weekdayEnd); return [] },
+    }) as unknown as InMemoryCalendar;
+    const team = new TeamCalendar(store, new InMemoryCalendar(), spy);
+    await team.listAvailableSlots({ tenantId, windowStart: now, windowEnd: "2026-01-16T08:00:00.000Z", durationMinutes: 60, timezone: config.timezone, bookableHours: config.bookableHours, minimumLeadTimeMinutes: 0, now });
+    expect(asked.get(account.id)).toBe("12:00");
+    expect(asked.get(member.id)).toBe("14:00");
+  });
 });

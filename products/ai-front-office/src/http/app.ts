@@ -15,7 +15,7 @@ import { buildActivationReport, shopActivationBlockers, type ActivationReport } 
 import { runAllSimulations, runSimulation, SIMULATION_SCENARIOS, type SimulationScenarioId } from "../application/simulator.js";
 import { CallService, ToolWriteInProgressError } from "../application/call-service.js";
 import { approvedTransferTargets } from "../application/transfer-policy.js";
-import { joinTeam, teamRoutes } from "./team-routes.js";
+import { joinTeam, teamApi } from "./team-routes.js";
 import { CALL_PATH_SCRIPT, renderCallPath, renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
 import { buildCallPath, type CallPath } from "../domain/call-path.js";
 import { chargeSentence, hasPlanAccess, isCompStatus, isPaidStatus } from "../domain/billing.js";
@@ -465,12 +465,12 @@ function publicOwnerDemo(now: Date): {
   };
 }
 
-const OWNER_APP_PATH = /^\/app(?:\/(?:start|jobs|calendar|settings|settings\/[a-z-]{1,40}|calls|calls\/[0-9a-f-]{36}))?\/?$/i;
+const OWNER_APP_PATH = /^\/app(?:\/(?:start|jobs|calendar|team|settings|settings\/[a-z-]{1,40}|calls|calls\/[0-9a-f-]{36}))?\/?$/i;
 const DEMO_APP_PATH = /^\/demo(?:\/(?:jobs|calendar|calls|calls\/[A-Za-z0-9-]{1,64}))?\/?$/;
 function isOwnerAppPath(pathname: string): boolean { return OWNER_APP_PATH.test(pathname); }
 /** Signed out on an owner-app page (say, a phone that scanned the setup QR code): sign in, then land back on it. */
 function loginReturningTo(url: URL): string {
-  const next = isOwnerAppPath(url.pathname) ? safeNext(`${url.pathname}${url.search}`) : null;
+  const next = isOwnerAppPath(url.pathname) || url.pathname === "/app/confirm-email" ? safeNext(`${url.pathname}${url.search}`) : null;
   return next && next !== "/app" ? `/login?next=${encodeURIComponent(next)}` : "/login";
 }
 function isDemoAppPath(pathname: string): boolean { return DEMO_APP_PATH.test(pathname); }
@@ -540,7 +540,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   const analyticsPage = (html: string, loader = true): string => injectAnalytics(html, { key: dependencies.env.POSTHOG_KEY, ingestionHost: dependencies.env.POSTHOG_HOST, loader });
   let ownerWebIndex: Promise<string | null> | null = null;
   const WEB_TYPES: Record<string, string> = { js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", woff2: "font/woff2", woff: "font/woff", svg: "image/svg+xml", png: "image/png" };
-  const recordingUrls = new Map<string, { url: string; expiresAt: number }>();
+  const recordingUrls = new Map<string, { url: string | null; expiresAt: number }>();
   const trialDays = dependencies.env.STRIPE_TRIAL_DAYS;
   /** The plans for sale, Solo first; prices, labels and included calls come from config so they can change without a deploy. */
   const plans = planCatalog(dependencies.env);
@@ -1239,10 +1239,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const cached = recordingUrls.get(providerCallId);
     if (cached && cached.expiresAt > now) return cached.url;
     const url = await recordingClient!.getDownloadUrl(providerCallId);
-    if (url) {
-      if (recordingUrls.size > 500) recordingUrls.delete(recordingUrls.keys().next().value!);
-      recordingUrls.set(providerCallId, { url, expiresAt: now + 4 * 60_000 });
-    }
+    // A miss is remembered too (5 minutes), so a call with no recording never waits on Telnyx at every view.
+    if (recordingUrls.size > 500) recordingUrls.delete(recordingUrls.keys().next().value!);
+    recordingUrls.set(providerCallId, { url, expiresAt: now + (url ? 4 : 5) * 60_000 });
     return url;
   }
   async function streamRecording(request: IncomingMessage, response: ServerResponse, providerCallId: string, downloadUrl: string): Promise<void> {
@@ -1339,6 +1338,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const method = request.method ?? "GET";
     const owner = account.role !== "member";
     if (method === "GET" && url.pathname === "/api/app/dashboard") return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
+    if (url.pathname === "/api/app/team" || url.pathname.startsWith("/api/app/team/")) {
+      if (method === "POST" && url.pathname === "/api/app/team/invite" && !limiter.allow(`invite:${account.id}`, 10, 60 * 60_000)) throw new HttpError(429, "Too many invitations. Please try again later.");
+      if (method === "POST" && url.pathname === "/api/app/team/confirm-email" && !limiter.allow(`email-confirm:${account.id}`, 3, 60 * 60_000)) throw new HttpError(429, "We just sent one. Check your email, or try again in an hour.");
+      return teamApi(request, response, url, dependencies, account, session, (limit) => readApiJson(request, session, limit));
+    }
     // The review account has no line: no number, carrier lookup, test call or setup-helper call, ever.
     if (method === "POST" && /^\/api\/app\/line\/(?:business-number|check|help|go-live)$/.test(url.pathname) && isCompStatus((await dependencies.store.getSubscription(account.tenantId))?.status)) {
       throw new HttpError(409, REVIEW_NO_LINE);
@@ -1818,9 +1822,14 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         dependencies.store.listNotifications(call.id),
         dependencies.store.listToolEvents(call.id),
       ]);
+      // The end-of-call webhook saves the recording link; a call it never reached (or a recording Telnyx finished
+      // later) is looked up once (cached), so a recorded call always has its player and an unrecorded one none.
+      // A caller who said no to recording never gets a player, even if deleting the audio failed.
+      const recorded = call.consentState !== "declined" && (call.recordingUrl?.startsWith("https://")
+        || (call.outcome !== "in_progress" && recordingClient !== null && Boolean(await recordingDownloadUrl(call.providerCallId).catch(() => null))));
       const detail: ApiCallDetail = {
         call: apiCall(call),
-        recordingUrl: call.recordingUrl?.startsWith("https://") ? `/app/provider/telnyx/recordings/${encodeURIComponent(call.providerCallId)}?stream=1` : null,
+        recordingUrl: recorded ? `/app/provider/telnyx/recordings/${encodeURIComponent(call.providerCallId)}?stream=1` : null,
         booking: booking ? { status: booking.status, requestedStart: booking.requestedStart } : null,
         task: task && task.tenantId === account.tenantId ? apiTask(task) : null,
         alerts: notifications.filter((item) => item.channel === "sms" && item.tenantId === account.tenantId).map((item) => ({ priority: item.priority, state: item.state })),
@@ -2030,10 +2039,21 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     }
     if (member && (url.pathname.startsWith("/app/billing") || url.pathname === "/app/config" || /\/delete$/.test(url.pathname))) throw new HttpError(403, "Only the owner can change billing, shop rules, or delete call records");
     if (member && url.pathname === "/app/settings") return redirect(response, "/app/team");
-    if (url.pathname === "/app/team" || url.pathname.startsWith("/app/team/")) {
-      if (method === "POST" && url.pathname === "/app/team/invite" && !limiter.allow(`invite:${account.id}`, 10, 60 * 60_000)) throw new HttpError(429, "Too many invitations. Please try again later.");
-      return teamRoutes(request, response, url, dependencies, account, session);
+    // The Team page's "Confirm my email" link. It counts only when it is opened signed in as that same account,
+    // so having the inbox and the account are both proved; it changes nothing else (no new password).
+    if (method === "GET" && url.pathname === "/app/confirm-email") {
+      const token = url.searchParams.get("token") ?? "";
+      const accountId = token ? await dependencies.store.consumePasswordReset(hashPasswordResetToken(token), dependencies.clock.now().toISOString()) : null;
+      if (accountId !== account.id) return redirect(response, "/app/team?confirm=expired");
+      // Same first proof as a reset link: teammates and invitations made before the email was proved are revoked.
+      if (!account.emailVerifiedAt && !member) {
+        log({ level: "info", event: "owner_unproven_team_revoked", method: "confirm_email", accountId, removed: await new TeamService(dependencies.store, dependencies.clock).reclaim(account.tenantId) });
+      }
+      await dependencies.store.markOwnerEmailVerified(account.id, dependencies.clock.now().toISOString(), null);
+      log({ level: "info", event: "owner_email_confirmed", accountId });
+      return redirect(response, "/app/team?confirm=done");
     }
+    // /app/team is the owner app's Team screen (below); its data and changes are /api/app/team.
     if (method === "GET" && isOwnerAppPath(url.pathname) && await sendOwnerWeb(response)) return;
     // Setup steps live in the React app; without it, the server-rendered dashboard has the same buttons.
     if (method === "GET" && /^\/app\/start\/?$/.test(url.pathname)) return redirect(response, "/app");
@@ -2273,7 +2293,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         throw new HttpError(400, "Invalid recording identifier");
       }
       const call = await dependencies.store.getCallByProviderId(providerCallId);
-      if (!call || call.tenantId !== account.tenantId) throw new HttpError(404, "Recording not found");
+      if (!call || call.tenantId !== account.tenantId || call.consentState === "declined") throw new HttpError(404, "Recording not found");
+      // The webhook saved a recording after a remembered miss: look again.
+      if (call.recordingUrl && recordingUrls.get(providerCallId)?.url === null) recordingUrls.delete(providerCallId);
       const downloadUrl = await recordingDownloadUrl(providerCallId);
       if (!downloadUrl) throw new HttpError(404, "Recording is not available yet");
       if (url.searchParams.get("stream") === "1") return streamRecording(request, response, providerCallId, downloadUrl);

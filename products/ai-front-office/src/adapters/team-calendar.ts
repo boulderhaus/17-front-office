@@ -10,7 +10,11 @@ export class TeamCalendar implements CalendarPort {
     const config = await this.store.getConfig(tenantId);
     const accounts = await this.store.listTeamAccounts(tenantId);
     return (config.schedulingCalendars ?? []).filter((member) => member.enabled && accounts.some((account) => account.id === member.accountId && account.status !== "suspended"))
-      .map((member) => ({ ...member, calendar: this.forAccount(member.accountId, accounts.find((account) => account.id === member.accountId)?.role !== "member") }));
+      .map((member) => {
+        const owner = accounts.find((account) => account.id === member.accountId)?.role !== "member";
+        // The owner's hours are the shop's (Settings › Hours), never a copy frozen when the team was set up.
+        return { ...member, hours: owner ? config.bookableHours : member.hours, calendar: this.forAccount(member.accountId, owner) };
+      });
   }
 
   async listAvailableSlots(input: Parameters<CalendarPort["listAvailableSlots"]>[0], options?: CallOptions): Promise<AvailabilitySlot[]> {

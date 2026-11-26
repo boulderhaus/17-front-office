@@ -10,6 +10,12 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Call Otto" />
+    <!-- Home Screen app: dark clock and battery on the app's own paper color, never white text on cream. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <style>
+      /* Home Screen app: no rubber-band pull that shows a gap above the top bar, and text never resized on rotate. */
+      @media (display-mode: standalone) { html, body { overscroll-behavior-y: none; } html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; } }
+    </style>
     <title>Call Otto</title>
   </head>
   <body>

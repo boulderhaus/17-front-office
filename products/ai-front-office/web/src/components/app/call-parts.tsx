@@ -6,6 +6,7 @@ import { ToneBadge } from "./bits"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import type { Tone } from "@/lib/derive"
 import { callerLabel, formatPhone, mapsUrl } from "@/lib/format"
+import { smsDraft, smsHref } from "@/lib/sms-draft"
 import type { ApiCall } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -87,7 +88,7 @@ export interface Action {
  * call": a gray-outline Done (or Reopen) and a quiet Later. Call back, Text and Map never show for likely spam.
  */
 export function ActionBar({ call, extra = [], reachNote }: { call: ApiCall; extra?: Action[]; reachNote?: ReactNode }) {
-  const { preview } = useMode()
+  const { preview, dashboard } = useMode()
   const address = call.fields.address?.trim() || null
   const spam = call.outcome === "ignored_spam"
   const actions: Action[] = []
@@ -95,7 +96,10 @@ export function ActionBar({ call, extra = [], reachNote }: { call: ApiCall; extr
     // The demo's numbers are made up: Call and Text say what they'd do instead of dialing a fake number.
     const demo = (what: string) => () => toast(`In your account, this ${what} ${call.fields.callerName?.split(" ")[0] ?? "the caller"} from your phone.`)
     actions.push({ key: "call", label: callLabel(call), icon: <Phone />, ...(preview ? { onClick: demo("calls") } : { href: `tel:${call.phone}` }), primary: true, group: "reach" })
-    actions.push({ key: "text", label: "Text", icon: <MessageSquare />, ...(preview ? { onClick: demo("texts") } : { href: `sms:${call.phone}` }), group: "reach" })
+    // A draft written from the call ("Hi Linda, this is ... Saw you called about ..."): the owner only taps Send.
+    const draft = smsDraft({ callerName: call.fields.callerName, problem: call.fields.problemDescription, shop: dashboard?.shop.businessName ?? null })
+    const touchMac = typeof navigator !== "undefined" && navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1
+    actions.push({ key: "text", label: "Text", icon: <MessageSquare />, ...(preview ? { onClick: demo("texts") } : { href: smsHref(call.phone, draft, typeof navigator === "undefined" ? "" : navigator.userAgent, touchMac) }), group: "reach" })
   }
   if (address && !spam) actions.push({ key: "map", label: "Map", icon: <MapPin />, href: mapsUrl(address), external: true, group: "look" })
   actions.push(...extra)

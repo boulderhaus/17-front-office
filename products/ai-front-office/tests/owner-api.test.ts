@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
 import { TeamService } from "../src/application/team-service.js";
 import { demoEnvironment } from "../src/config/environment.js";
@@ -326,6 +326,37 @@ describe("Owner JSON API and React app serving", () => {
     const crossShop = await realFetch(`${baseUrl}${detail.recordingUrl}`, { headers: { cookie: other.cookie } });
     expect(crossShop.status).toBe(404);
     expect(seen).toHaveLength(3); // no lookup after the 416, and none for the other shop
+  });
+
+  it("finds a recording the end-of-call webhook never saved, and offers no player when there is none (CALL-08)", async () => {
+    const owner = await signUp("a@synthetic.example");
+    await seedCall(owner.tenantId, null);
+    let recordings: unknown[] = [];
+    let lookups = 0;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      if (String(input).startsWith("https://api.telnyx.com/v2/recordings")) {
+        lookups += 1;
+        return new Response(JSON.stringify({ data: recordings }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+    const detail = async () => (await (await realFetch(`${baseUrl}/api/app/calls/${CALL_ID}`, { headers: { cookie: owner.cookie } })).json() as { recordingUrl: string | null }).recordingUrl;
+    expect(await detail()).toBeNull();
+    recordings = [{ download_urls: { mp3: "https://recordings.example/owner-call.mp3?sig=1" } }];
+    // A miss is remembered for a few minutes: viewing the call again doesn't wait on Telnyx.
+    expect(await detail()).toBeNull();
+    expect(lookups).toBe(1);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 6 * 60_000);
+      expect(await detail()).toBe("/app/provider/telnyx/recordings/v3%3Aowner-call?stream=1");
+    } finally {
+      vi.useRealTimers();
+    }
+    // A caller who said no to recording: no player and no audio, even if the recording was never deleted.
+    await store.saveCall({ ...(await store.getCall(CALL_ID))!, consentState: "declined" });
+    expect(await detail()).toBeNull();
+    expect((await realFetch(`${baseUrl}/app/provider/telnyx/recordings/v3%3Aowner-call?stream=1`, { headers: { cookie: owner.cookie } })).status).toBe(404);
   });
 
   it("keeps a team member out of shop settings: no read, no change", async () => {

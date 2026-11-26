@@ -3,7 +3,7 @@
  * "‹ Settings" / "‹ Calls" goes. Pure functions, so the rules are tested without a browser.
  */
 
-export type NavId = "calls" | "jobs" | "calendar" | "settings" | "start"
+export type NavId = "calls" | "jobs" | "calendar" | "settings" | "start" | "team"
 
 export interface NavEntry {
   id: NavId
@@ -15,7 +15,10 @@ export interface NavEntry {
   external?: boolean
 }
 
-/** Calls, Jobs, Calendar, then Settings (Start in the demo). Team members never see Settings: it is the owner's alone. */
+/**
+ * Calls, Jobs, Calendar, then Settings (Start in the demo). Team members never see Settings: it is the owner's alone;
+ * they get Team (their calendar and hours) in its place.
+ */
 export function navEntries(input: { base: string; preview: boolean; member: boolean; attention: number }): NavEntry[] {
   const { base, preview, member, attention } = input
   const entries: NavEntry[] = [
@@ -26,7 +29,8 @@ export function navEntries(input: { base: string; preview: boolean; member: bool
       ? { id: "start", to: "/signup", label: "Set up yours", end: false, badge: 0, external: true }
       : { id: "settings", to: `${base}/settings`, label: "Settings", end: false, badge: 0 },
   ]
-  return entries.filter((entry) => !(member && entry.id === "settings"))
+  if (!member) return entries
+  return [...entries.filter((entry) => entry.id !== "settings"), { id: "team", to: `${base}/team`, label: "Team", end: false, badge: 0 }]
 }
 
 /** The lit menu row for a path (no trailing slash). */

@@ -9,6 +9,7 @@ import { CallPage } from "@/pages/call"
 import { JobsPage } from "@/pages/jobs"
 import { SettingsArea } from "@/pages/settings"
 import { StartPage } from "@/pages/start"
+import { TeamPage } from "@/pages/team"
 import { TodayPage } from "@/pages/today"
 import { useApi } from "@/lib/api"
 import { identifyOwner } from "@/lib/analytics"
@@ -56,6 +57,8 @@ function Workspace({ base }: { base: "/app" | "/demo" }) {
         <Route path="jobs" element={<Screen title="Jobs" subtitle="Every job from your calls, by where it stands.">{ready(<JobsPage />)}</Screen>} />
         <Route path="calendar" element={<Screen title="Calendar" subtitle="Booked visits and times callers asked for." actions={<CalendarHeaderActions />}>{ready(<CalendarPage />)}</Screen>} />
         <Route path="calls/:id" element={<CallScreen base={base} />} />
+        {/* Team: the owner reaches it from the Settings group (its back goes to Settings); a teammate from the menu. */}
+        {!preview && <Route path="team" element={<Screen title="Team" subtitle="Who works your calls, and who takes booked jobs." callerData={false} back={member ? undefined : { to: `${base}/settings`, label: "Settings" }}>{ready(<TeamPage />)}</Screen>} />}
         {/* One route for the whole settings area, so an unsaved edit survives moving between its pages. */}
         {/* Team members never see Settings: a typed or old link goes home (the server refuses them too). */}
         {!preview && <Route path="settings/*" element={!dashboard.data ? <Screen title="Settings" callerData={false}>{ready(null)}</Screen> : member ? <Navigate to={base} replace /> : <SettingsArea />} />}
@@ -72,8 +75,10 @@ function Root() {
 }
 
 function Layout() {
+  // Phones and tablets: the top bar (56px) carries no page title, so a toast laid over it is where eyes are and
+  // never covers the page's name. Computers: top right, clear of the title on the left.
   const phone = useMediaQuery("(max-width: 1023px)")
-  const toastPosition = phone ? "bottom-center" : "top-center"
+  const top = "calc(env(safe-area-inset-top) + 4px)"
   return (
     <TooltipProvider delayDuration={200}>
       <Routes>
@@ -81,8 +86,9 @@ function Layout() {
         <Route path="/app/*" element={<Root />} />
         <Route path="*" element={<Navigate to="/app" replace />} />
       </Routes>
-      {/* Phones: at the bottom, clear of the header and the menu button. Computers: top centre. */}
-      <Toaster position={toastPosition} richColors closeButton />
+      {/* One toast host for the whole app, always at the top. */}
+      {/* On a phone it sits over the top bar, so it leaves quickly and can be swiped or closed to reach Back. */}
+      <Toaster position={phone ? "top-center" : "top-right"} offset={phone ? { top, left: 12, right: 12 } : { top: 16, right: 24 }} mobileOffset={{ top, left: 8, right: 8 }} duration={phone ? 2500 : 4000} richColors closeButton />
     </TooltipProvider>
   )
 }
