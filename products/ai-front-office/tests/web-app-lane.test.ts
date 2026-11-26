@@ -152,8 +152,10 @@ describe("the Jobs board (APP-08)", () => {
     expect(cappedCards(columns[0]!.cards.slice(0, 3), PHONE_CAP, false)).toMatchObject({ hidden: 0 });
   });
   it("says how long ago in the fewest words", () => {
-    expect([0, 0.5, 12, 59, 60, 23 * 60, 30 * 60, 72 * 60].map((minutes) => agoLabel(at(minutes), NOW))).toEqual(["Just now", "Just now", "12m ago", "59m ago", "1h ago", "23h ago", "Yesterday", "3d ago"]);
+    expect([0, 0.5, 12, 59, 60, 23 * 60, 30 * 60, 72 * 60].map((minutes) => agoLabel(at(minutes), NOW))).toEqual(["Just now", "Just now", "12m ago", "59m ago", "1h ago", "23h ago", "1d ago", "3d ago"]);
     expect(agoLabel(at(-5), NOW)).toBe("Just now");
+    expect(agoLabel(at(25 * 60), NOW)).toBe("1d ago");
+    expect(agoLabel(at(47 * 60), NOW)).toBe("1d ago");
   });
   it("says plainly when a column is empty, and maps old tab links", () => {
     const columns = build([], {});

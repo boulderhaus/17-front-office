@@ -15,14 +15,14 @@ export interface JobCard<C> { call: C; label: string; tone: JobTone; when: strin
 export const PHONE_CAP = 5
 export const BOARD_CAP = 25
 
-/** How long ago, in the fewest words: Just now, 12m ago, 3h ago, Yesterday, 4d ago. */
+/** How long ago, in the fewest words: Just now, 12m ago, 3h ago, 1d ago (elapsed time, so 25 hours is never "Yesterday" two days back). */
 export function agoLabel(iso: string, nowMs: number): string {
   const minutes = Math.max(0, Math.floor((nowMs - Date.parse(iso)) / 60_000))
   if (minutes < 1) return "Just now"
   if (minutes < 60) return `${minutes}m ago`
   const hours = Math.floor(minutes / 60)
   if (hours < 24) return `${hours}h ago`
-  return hours < 48 ? "Yesterday" : `${Math.floor(hours / 24)}d ago`
+  return `${Math.floor(hours / 24)}d ago`
 }
 
 /** The first `cap` cards, unless the owner asked for all; `hidden` is what "Show all" would add. */

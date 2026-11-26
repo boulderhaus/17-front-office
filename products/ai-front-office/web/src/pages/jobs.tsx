@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Link, useLocation, useSearchParams } from "react-router-dom"
 import { Clock, Phone } from "lucide-react"
 import { ToneBadge } from "@/components/app/bits"
@@ -26,7 +26,8 @@ export function JobsPage() {
   const columns = jobColumns({ callsById: d.callsById, actionable: d.actionable, snoozed: d.snoozed, handled: d.handled, nowMs: d.nowMs, due: d.due, date: (iso) => compactDate(iso, d.tz) })
   if (board) {
     return (
-      <div className="grid grid-cols-4 items-start gap-3 lg:h-[calc(100dvh-13rem)] lg:min-h-96">
+      // One row as tall as the board (minmax(0,1fr)), so each column's max-h-full is a real height and its list scrolls on its own.
+      <div className="grid grid-cols-4 grid-rows-[minmax(0,1fr)] items-start gap-3 lg:h-[calc(100dvh-13rem)] lg:min-h-96">
         {columns.map((column) => <BoardColumn key={column.id} column={column} />)}
       </div>
     )
@@ -80,30 +81,43 @@ function Dot({ id }: { id: JobColumnId }) {
 
 /** Computer: a column of compact cards. */
 function Cards({ column }: { column: JobColumn<ApiCall> }) {
-  const [all, setAll] = useState(false)
+  const { all, list, showAll } = useShowAll<HTMLUListElement>(BOARD_CAP)
   if (!column.cards.length) return <Empty column={column} />
   const { shown, hidden } = cappedCards(column.cards, BOARD_CAP, all)
   return (
-    <ul className="grid grid-cols-[minmax(0,1fr)] gap-1.5">
+    <ul ref={list} className="grid grid-cols-[minmax(0,1fr)] gap-1.5">
       {shown.map((card) => <li key={card.call.id} className="min-w-0"><Card card={card} status={column.id === "reply"} /></li>)}
-      {hidden > 0 && <li><ShowAll count={column.cards.length} onClick={() => setAll(true)} /></li>}
+      {hidden > 0 && <li><ShowAll count={column.cards.length} onClick={showAll} /></li>}
     </ul>
   )
 }
 
 /** Phone: one column as a list of compact rows, the first few, the rest behind "Show all". */
 function Rows({ column }: { column: JobColumn<ApiCall> }) {
-  const [all, setAll] = useState(false)
+  const { all, list, showAll } = useShowAll<HTMLUListElement>(PHONE_CAP)
   if (!column.cards.length) return <Empty column={column} />
   const { shown, hidden } = cappedCards(column.cards, PHONE_CAP, all)
   return (
     <div className="grid gap-2">
-      <ul className="grid grid-cols-[minmax(0,1fr)] divide-y overflow-hidden rounded-xl border bg-card shadow-xs">
+      <ul ref={list} className="grid grid-cols-[minmax(0,1fr)] divide-y overflow-hidden rounded-xl border bg-card shadow-xs">
         {shown.map((card) => <li key={card.call.id} className="min-w-0"><Row card={card} status={column.id === "reply"} /></li>)}
       </ul>
-      {hidden > 0 && <ShowAll count={column.cards.length} onClick={() => setAll(true)} />}
+      {hidden > 0 && <ShowAll count={column.cards.length} onClick={showAll} />}
     </div>
   )
+}
+
+/** "Show all" unmounts itself, so focus moves to the first job it revealed instead of dropping to the top of the page. */
+function useShowAll<E extends HTMLElement>(cap: number) {
+  const [all, setAll] = useState(false)
+  const list = useRef<E>(null)
+  const moveFocus = useRef(false)
+  useEffect(() => {
+    if (!all || !moveFocus.current) return
+    moveFocus.current = false
+    list.current?.querySelectorAll<HTMLAnchorElement>("a[data-open]")[cap]?.focus()
+  }, [all, cap])
+  return { all, list, showAll: () => { moveFocus.current = true; setAll(true) } }
 }
 
 function Empty({ column }: { column: JobColumn<ApiCall> }) {
@@ -143,7 +157,7 @@ function Card({ card, status }: { card: JobCard<ApiCall>; status: boolean }) {
   return (
     <article className="ph-no-capture relative grid grid-cols-[minmax(0,1fr)] gap-1 rounded-lg border bg-card px-3 py-2.5 shadow-xs transition-colors hover:border-foreground/25">
       <div className="flex min-w-0 items-center gap-2">
-        <Link to={job.to} state={job.state} className={cn(OPEN, "flex-1 text-[15px] after:rounded-lg")}>{callerLabel(call)}</Link>
+        <Link data-open to={job.to} state={job.state} className={cn(OPEN, "flex-1 text-[15px] after:rounded-lg")}>{callerLabel(call)}</Link>
         {job.badge}
       </div>
       <p className="truncate text-sm text-foreground/80">{call.fields.problemDescription || "No summary"}</p>
@@ -162,8 +176,9 @@ function Row({ card, status }: { card: JobCard<ApiCall>; status: boolean }) {
   return (
     <article className="ph-no-capture relative flex min-h-16 items-center gap-3 py-2.5 pr-2.5 pl-4 transition-colors active:bg-secondary/60">
       <div className="grid min-w-0 flex-1 gap-0.5">
-        <div className="flex min-w-0 items-center gap-2">
-          <Link to={job.to} state={job.state} className={cn(OPEN, "text-base")}>{callerLabel(call)}</Link>
+        {/* Wraps the time under the name only when name, status and time can't share the line (320px, long due time). */}
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2">
+          <Link data-open to={job.to} state={job.state} className={cn(OPEN, "text-base")}>{callerLabel(call)}</Link>
           {job.badge}
           <span className="ml-auto flex shrink-0 pl-1"><When card={card} /></span>
         </div>
