@@ -46,7 +46,7 @@ import { anyGoogleClient, clientForAttempt, clientForNewConnections, encodeGoogl
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
-import { TRADES, tradeForShopName } from "../domain/trades.js";
+import { TRADES, tradeForShopName, tradeShortLabel } from "../domain/trades.js";
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import type { OwnerSession } from "../security/owner-auth.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hasUsablePassword, hashOwnerPassword, isPasswordless, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, ownerSessionIssuedAt, PASSWORDLESS_HASH, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
@@ -1737,7 +1737,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         values: apiSettings(config),
         // The tick boxes for "What you fix" and "What counts as an emergency" (the stored lists stay plain words).
         catalog: {
-          trades: TRADES.filter((trade) => trade.key !== "other").map((trade) => ({ key: trade.key, label: trade.label, services: trade.services })),
+          // Walk 11-26 (SET-04): the same trade names as the website.
+          trades: TRADES.filter((trade) => trade.key !== "other").map((trade) => ({ key: trade.key, label: tradeShortLabel(trade), services: trade.services })),
           emergencies: EMERGENCY_CHOICES.map((choice) => ({ key: choice.key, label: choice.label, trades: choice.trades, words: choice.words })),
           alwaysOnWords: ALWAYS_ON_WORDS,
           alwaysOnLine: ALWAYS_ON_LINE,

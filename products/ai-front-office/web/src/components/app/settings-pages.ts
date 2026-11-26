@@ -17,3 +17,8 @@ export type SettingsPageId = (typeof SETTINGS_PAGES)[number]["id"]
 export function settingsPage(id: SettingsPageId) {
   return SETTINGS_PAGES.find((page) => page.id === id)!
 }
+
+/** Where a settings row goes. Team is a page of its own (/app/team): every menu and list goes straight there, never through a stub. */
+export function settingsPageHref(id: SettingsPageId, base = "/app"): string {
+  return id === "team" ? `${base}/team` : `${base}/settings/${id}`
+}

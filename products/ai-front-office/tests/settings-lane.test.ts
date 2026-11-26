@@ -72,6 +72,20 @@ describe("Triage with the owner's ticks", () => {
   });
 });
 
+describe("Emergency boxes for words typed before the boxes", () => {
+  it("tick the box a word names (flooding, no water) and keep the word, never leaving it in Other (walk 11-26, SET-07)", () => {
+    const picks = splitEmergencies("burst pipe, flooding, no water", EMERGENCY_CHOICES as never, [...ALWAYS_ON_WORDS]);
+    expect(picks.picked).toEqual(["burst_pipe", "flooding", "no_water"]);
+    expect(picks.other).toBe("");
+    // Saved again unchanged, the owner's words stay; unticking Flooding drops its words and its name.
+    expect(joinEmergencies(picks, EMERGENCY_CHOICES as never).split(", ")).toEqual(expect.arrayContaining(["flooding", "no water", "burst pipe", "water everywhere"]));
+    const off = joinEmergencies({ ...picks, picked: picks.picked.filter((key) => key !== "flooding") }, EMERGENCY_CHOICES as never).split(", ");
+    expect(off).not.toContain("flooding");
+    expect(off).not.toContain("water everywhere");
+    expect(off).toContain("no water");
+  });
+});
+
 describe("What you fix", () => {
   it("ticks a trade only when all its services are in the list, and keeps the rest in Other", () => {
     const trades = TRADES.filter((trade) => trade.key !== "other");
@@ -82,6 +96,20 @@ describe("What you fix", () => {
     // Handyman and remodelers share "Repairs": ticking one never ticks the other.
     const handyman = joinServices({ picked: ["handyman"], other: "", hidden: [] }, trades);
     expect(splitServices(handyman, trades).picked).toEqual(["handyman"]);
+  });
+
+  it("opens a shop set up before the boxes on its own trade: its first service is enough (walk 11-26, SET-04)", () => {
+    const trades = TRADES.filter((trade) => trade.key !== "other");
+    const picks = splitServices("plumbing repair, drain cleaning, water heater, other", trades);
+    expect(picks.picked).toEqual(["plumbing"]);
+    expect(picks.other).toBe("drain cleaning, water heater");
+    // A first service two trades share ("Repairs") ticks neither on its own.
+    expect(splitServices("Repairs", trades).picked).toEqual([]);
+  });
+
+  it("names the trades the way the website does", async () => {
+    const { tradeShortLabel } = await import("../src/domain/trades.js");
+    expect(TRADES.filter((trade) => trade.key !== "other").map(tradeShortLabel)).toEqual(["Heating & air", "Plumbing", "Electrical", "Roofing", "Contractors", "Water damage", "Garage doors", "Handyman", "Landscaping", "Pest control", "Locksmith", "Appliances"]);
   });
 
   it("rejects junk in Other the same way in the app and on the server", () => {

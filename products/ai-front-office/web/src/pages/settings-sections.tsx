@@ -310,7 +310,7 @@ function EmergenciesSection() {
           <Input className={fieldClass} value={picks.otherText} onChange={(event) => picks.setOther(event.target.value)} placeholder="basement flooding" />
         </Field>
       )}
-      {catalog?.alwaysOnLine && <p className="text-sm text-muted-foreground">{catalog.alwaysOnLine} Otto also flags burst pipes, flooding, sewage and no heat or AC.</p>}
+      {catalog?.alwaysOnLine && <p className="text-sm text-muted-foreground">{catalog.alwaysOnLine}</p>}
       <div className="border-t pt-4"><fieldset className="grid gap-2">
         <legend className="mb-1.5 text-[15px] font-medium">For everything else, flag</legend>
         <RadioGroup value={String(level)} onValueChange={(value) => set("emergencyThreshold", value)} className="gap-1">
@@ -323,7 +323,7 @@ function EmergenciesSection() {
         </RadioGroup>
       </fieldset></div>
       <Link className="group flex min-h-12 items-center justify-between gap-3 border-t pt-3 text-[15px]" to="/app/settings/alerts">
-        <span className="grid"><strong className="font-semibold group-hover:underline">Want a phone call too?</strong><span className="text-sm text-muted-foreground">Turn on emergency calls in Alerts.</span></span>
+        <span className="grid"><strong className="font-semibold group-hover:underline">Want a phone call too?</strong><span className="text-sm text-muted-foreground">{settings.integrations.ownerPhoneConfigured ? "Turn on emergency calls in Alerts." : "Add your mobile in Alerts, then turn on emergency calls."}</span></span>
         <ChevronRight className="size-5 shrink-0 text-muted-foreground" />
       </Link>
     </SettingsCard>

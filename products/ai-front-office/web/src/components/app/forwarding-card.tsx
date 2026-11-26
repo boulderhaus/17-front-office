@@ -386,9 +386,8 @@ function ModeChoice({ choice, busy, locked, family, ringFirstSeconds, onPick }: 
 function IphoneSettings() {
   return (
     <div className="grid gap-2 rounded-lg border border-brand-ink/15 bg-muted/40 px-3 py-3 text-sm">
-      <p className="font-semibold">On iPhone, change two settings:</p>
+      <p className="font-semibold">On iPhone, open <strong className="font-semibold">Settings › Apps › Phone</strong> and change two settings:</p>
       <ol className="grid list-decimal gap-1.5 pl-5">
-        <li>Open <strong className="font-semibold">Settings › Apps › Phone</strong>.</li>
         <li>Turn <strong className="font-semibold">Live Voicemail</strong> off.</li>
         <li>Set <strong className="font-semibold">Screen Unknown Callers</strong> to <strong className="font-semibold">Never</strong>.</li>
       </ol>

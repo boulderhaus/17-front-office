@@ -16,7 +16,13 @@ export interface Picks { picked: string[]; other: string; hidden: string[] }
  */
 export function splitServices(value: string, trades: Array<{ key: string; services: string[] }>): Picks {
   const list = items(value)
-  const picked = trades.filter((trade) => trade.services.every((service) => has(list, service))).map((trade) => trade.key)
+  // A trade's first service, when no other trade offers it ("Plumbing repair"), is enough to tick it: a shop set up
+  // before the boxes existed opens on its own trade, not on Other (walk 11-26, SET-04).
+  const ownFirst = (trade: { key: string; services: string[] }): boolean => {
+    const first = trade.services[0]
+    return Boolean(first) && has(list, first!) && !trades.some((other) => other.key !== trade.key && has(other.services, first!))
+  }
+  const picked = trades.filter((trade) => ownFirst(trade) || trade.services.every((service) => has(list, service))).map((trade) => trade.key)
   const covered = trades.filter((trade) => picked.includes(trade.key)).flatMap((trade) => trade.services)
   const hidden = list.filter((item) => item.toLowerCase() === "other")
   const other = list.filter((item) => !has(covered, item) && !has(hidden, item))
@@ -32,18 +38,24 @@ export function joinServices(picks: Picks, trades: Array<{ key: string; services
  * "What counts as an emergency": a box is ticked when any of its words is in the list (no word is in two boxes).
  * The always-on words (gas, carbon monoxide, burning smell) are kept, never shown; the rest go in the Other box.
  */
-export function splitEmergencies(value: string, choices: Array<{ key: string; words: string[] }>, alwaysOn: string[]): Picks {
+export function splitEmergencies(value: string, choices: Array<{ key: string; words: string[]; label?: string }>, alwaysOn: string[]): Picks {
   const list = items(value)
-  const picked = choices.filter((choice) => choice.words.some((word) => has(list, word))).map((choice) => choice.key)
-  const hidden = list.filter((item) => has(alwaysOn, item))
+  // A word that is a box's own name ("flooding", "no water", typed before the boxes existed) ticks that box and is
+  // kept as typed, never left in Other (walk 11-26, SET-07).
+  const named = (choice: { label?: string }): boolean => Boolean(choice.label) && has(list, choice.label!)
+  const picked = choices.filter((choice) => named(choice) || choice.words.some((word) => has(list, word))).map((choice) => choice.key)
+  const labels = choices.filter(named).map((choice) => choice.label!)
+  const hidden = list.filter((item) => has(alwaysOn, item) || has(labels, item))
   const covered = choices.filter((choice) => picked.includes(choice.key)).flatMap((choice) => choice.words)
   const other = list.filter((item) => !has(covered, item) && !has(hidden, item))
   return { picked, other: other.join(", "), hidden }
 }
 
-export function joinEmergencies(picks: Picks, choices: Array<{ key: string; words: string[] }>): string {
+export function joinEmergencies(picks: Picks, choices: Array<{ key: string; words: string[]; label?: string }>): string {
   const words = choices.filter((choice) => picks.picked.includes(choice.key)).flatMap((choice) => choice.words)
-  return unique([...words, ...picks.hidden, ...items(picks.other)]).join(", ")
+  // A box's own name goes when its box is unticked.
+  const unticked = choices.filter((choice) => choice.label && !picks.picked.includes(choice.key)).map((choice) => choice.label!)
+  return unique([...words, ...picks.hidden.filter((item) => !has(unticked, item)), ...items(picks.other)]).join(", ")
 }
 
 /** The boxes to show: the ones for the shop's trades, plus any already ticked; every box when no trade is picked. */

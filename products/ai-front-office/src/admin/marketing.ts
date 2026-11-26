@@ -1,7 +1,7 @@
 import type { BusinessConfig } from "../domain/models.js";
 import { REVIEWS, renderReviews, reviewStyles, type Review } from "./reviews.js";
 import { FAIR_USE_LINE, money, offerWords, perCall, type Plan } from "../domain/plans.js";
-import { TRADES } from "../domain/trades.js";
+import { TRADES, tradeShortLabel } from "../domain/trades.js";
 
 /** The site's top bar. On the homepage its links jump within the page; elsewhere (Privacy, Terms) they lead back to it. */
 export function siteHeader(home = ""): string {
@@ -123,13 +123,12 @@ const RIBBON_PHRASE = "YOUR NUMBER. YOUR HOURS. YOUR RULES.";
 const RIBBON = `<div class="ribbon" aria-label="Keep your number. Your hours, service area, and rules."><div class="ribbon-track"><span>${RIBBON_PHRASE}</span>${`<span aria-hidden="true">${RIBBON_PHRASE}</span>`.repeat(15)}</div></div>`;
 
 /** Trade names as the homepage shows them: one line each on a phone. Signup and Settings keep the full names. */
-const HOME_TRADE_LABELS: Record<string, string> = { construction: "Contractors", restoration: "Water damage", landscaping: "Landscaping", appliance: "Appliances" };
 
 /** Every trade Call Otto starts a shop with; each tile opens signup with that trade picked. */
 function renderTrades(): string {
   const escape = (value: string): string => value.replace(/[&<>"']/g, (character) => `&#${character.charCodeAt(0)};`);
   const icon = (key: string): string => `<svg class="trade-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TRADE_ICONS[key] ?? TRADE_ICONS.other}</svg>`;
-  const tiles = TRADES.filter((trade) => trade.key !== "other").map((trade) => `<li><a class="trade" href="/signup">${icon(trade.key)}<strong>${escape(HOME_TRADE_LABELS[trade.key] ?? trade.label)}</strong><q>${escape(trade.call)}</q><small class="flags"><b>Urgent if they say</b>${trade.urgentWords.slice(0, 2).map((word) => `<span>${escape(word.replace(/'/g, "’"))}</span>`).join("")}</small></a></li>`).join("");
+  const tiles = TRADES.filter((trade) => trade.key !== "other").map((trade) => `<li><a class="trade" href="/signup">${icon(trade.key)}<strong>${escape(tradeShortLabel(trade))}</strong><q>${escape(trade.call)}</q><small class="flags"><b>Urgent if they say</b>${trade.urgentWords.slice(0, 2).map((word) => `<span>${escape(word.replace(/'/g, "’"))}</span>`).join("")}</small></a></li>`).join("");
   const other = `<li class="trade-other"><a class="trade" href="/signup">${icon("other")}<span><strong>Something else?</strong><span>Concrete, fencing, painting, septic, solar, pools, cleaning. If customers call you, Otto can answer.</span></span><b aria-hidden="true">&rarr;</b></a></li>`;
   return `<section class="wrap section trades" id="trades"><div class="trades-head"><p class="eyebrow">Built for the trades</p><h2>Whatever you fix,<br><em>Otto gets the phone.</em></h2><p>Otto listens for your trade’s emergency words. Change them anytime in Settings.</p></div><ul class="trade-grid" aria-label="Trades">${tiles}${other}</ul></section>`;
 }
