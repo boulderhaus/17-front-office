@@ -6,6 +6,7 @@ import { DataDeletionService } from "./application/data-deletion.js";
 import { GraceLineService } from "./application/grace-line.js";
 import { OwnerSummaryService } from "./application/owner-summary-service.js";
 import { CallLengthGuard } from "./application/call-length.js";
+import { LineHealthCheck } from "./application/line-health.js";
 import { TelnyxAssistantMessenger, TelnyxRecordingClient } from "./adapters/telnyx.js";
 import { loadEnvironment } from "./config/environment.js";
 import { createRequestHandler, createStripeClient } from "./http/app.js";
@@ -33,6 +34,13 @@ const deletion = new DataDeletionService(
   runtime.store,
   env.TELNYX_API_KEY ? new TelnyxRecordingClient(env.TELNYX_API_KEY) : null,
 );
+// Every live line must post its end-of-call callback here (go-live sets it). Read-only; an error names the shop.
+const lineHealth = env.TELNYX_API_KEY && !env.DEMO_MODE
+  ? new LineHealthCheck(runtime.store, {
+      apiKey: env.TELNYX_API_KEY, publicBaseUrl: env.PUBLIC_BASE_URL, log: logger,
+      onMissing: (tenantId) => telemetry.captureException(new Error("A live line is missing its end-of-call callback"), { route: "job:line_health", tenantId }),
+    })
+  : null;
 const summaries = new OwnerSummaryService(runtime.store, systemClock, env.PUBLIC_BASE_URL);
 const graceLine = new GraceLineService({ store: runtime.store, env, clock: systemClock, log: logger });
 // Period-end overage: extra answered calls in a closed billing period, billed once as a Stripe invoice.
@@ -52,6 +60,7 @@ let nextGraceAt = 0;
 let nextOverageAt = 0;
 let nextActivationAt = 0;
 let nextFounderAt = 0;
+let nextLineHealthAt = 0;
 const runWorker = async (): Promise<void> => {
   if (workerActive) return;
   workerActive = true;
@@ -111,6 +120,12 @@ const runWorker = async (): Promise<void> => {
       nextFounderAt = Date.now() + 60_000;
       const founder = await handler.runFounderFollowups();
       if (founder.queued > 0) logger({ level: "info", event: "founder_followup_cycle", ...founder });
+    }
+    if (lineHealth && Date.now() >= nextLineHealthAt) {
+      // At startup and every six hours: two reads per shop.
+      nextLineHealthAt = Date.now() + 6 * 60 * 60_000;
+      const health = await lineHealth.runOnce();
+      logger({ level: health.missing + health.failed > 0 ? "error" : "info", event: "line_health_cycle", ...health });
     }
     if (Date.now() >= nextOverageAt) {
       // Hourly: a period closes at most once a month per shop; locked and idempotent across replicas.

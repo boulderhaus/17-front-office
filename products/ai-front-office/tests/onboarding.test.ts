@@ -18,6 +18,7 @@ function fakeProviders(options: { subscriptionStatus?: string; subscriptionPrice
   const owned = new Map<string, { id: string; connection_id: string | null }>();
   let sessions = 0;
   const sessionTenants = new Map<string, string>();
+  const texmlApp: Record<string, unknown> = { id: "texml-assistant-1", friendly_name: "ai-assistant-1", voice_url: "https://api.telnyx.com/v2/texml/ai_assistant", status_callback: null, status_callback_method: "post", call_cost_in_webhooks: false };
   const fetcher = (async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -39,6 +40,10 @@ function fakeProviders(options: { subscriptionStatus?: string; subscriptionPrice
     if (url.endsWith("/ai/assistants/template-assistant") && method === "GET") return json({ data: { id: "template-assistant", model: "synthetic/model", voice_settings: { voice: "synthetic-voice" } } });
     if (url.endsWith("/ai/assistants") && method === "POST") return json({ data: { id: "assistant-1" } });
     if (/\/ai\/assistants\/assistant-1$/.test(url)) return method === "GET" ? json({ data: { id: "assistant-1", telephony_settings: { default_texml_app_id: "texml-assistant-1" } } }) : json({ data: { id: "assistant-1" } });
+    if (url.endsWith("/texml_applications/texml-assistant-1")) {
+      if (method === "PATCH") Object.assign(texmlApp, JSON.parse(raw ?? "{}") as Record<string, unknown>);
+      return json({ data: texmlApp });
+    }
     if (url.includes("/available_phone_numbers?")) return json({ data: [{ phone_number: "+19415550123" }] });
     if (url.endsWith("/number_orders") && method === "POST") {
       const number = (JSON.parse(raw ?? "{}") as { phone_numbers: Array<{ phone_number: string }> }).phone_numbers[0]!.phone_number;
