@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
-import { afterDialLine, codeChunks, copyText, dialHref, dialPlatform, forwardingSteps, forwardToDigits, NO_SWITCH_LINK, NO_SWITCH_LINK_DESKTOP, OLDER_IPHONE_LINE, pasteLine, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, spokenCode, VERIZON_RING_LINE } from "@/lib/dial"
+import { afterDialLine, codeChunks, copyText, dialHref, dialPlatform, forwardingSteps, ringFirstNext, forwardToDigits, NO_SWITCH_LINK, NO_SWITCH_LINK_DESKTOP, OLDER_IPHONE_LINE, pasteLine, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, spokenCode, VERIZON_RING_LINE } from "@/lib/dial"
 import { formatPhone } from "@/lib/format"
 import { checkStatus } from "@/lib/line-status"
 import { useMode } from "@/lib/mode"
@@ -116,12 +116,18 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
   // Settings switch or code, for this device, carrier and choice (one tested decision: forwardingSteps).
   const steps = plan ? forwardingSteps({ device: platform, family: plan.family, everyCall: plan.forwardsAll, leavingEveryCall: Boolean(business.update?.leavingEveryCall) }) : null
   const ottoDigits = line.number ? forwardToDigits(line.number) : null
+  // Ring first, and the latest test never rang: the next step of ringFirstTry (clear, clear again, another code
+  // instead, or help). "instead" and "help" clear nothing.
+  const next = ringFirstNext({ retry: plan?.retry, neverRang: forwardsAll, everyCall: Boolean(plan?.forwardsAll) })
+  const retry = next.retry
+  const noCodes = next.noCodes
   // The clear code (or switch) until it's done, then the shop's own code again. Never both on one screen.
-  const clearing = (forwardsAll || Boolean(steps?.clearFirst)) && Boolean(plan?.off) && cleared !== plan?.off
+  const clearing = (forwardsAll || Boolean(steps?.clearFirst)) && Boolean(plan?.off) && cleared !== plan?.off && next.mayClear
   const dialCode = clearing ? plan!.off! : plan?.on ?? null
   const dialLink = clearing ? plan!.offDialLink : plan?.dialLink ?? null
   // This step can be the iPhone's Call Forwarding switch; the code stays behind "Don't see Call Forwarding?".
-  const hasSwitch = Boolean(ottoDigits) && (clearing ? steps?.clear : steps?.on) === "settings"
+  // Clearing again is the all-forwarding code: the switch was the first clear.
+  const hasSwitch = Boolean(ottoDigits) && !(clearing && next.clearByCode) && (clearing ? steps?.clear : steps?.on) === "settings"
   const viaSettings = hasSwitch && !codeWay
   const onViaSettings = Boolean(ottoDigits) && steps?.on === "settings" && !codeWay
   const offViaSettings = steps?.off === "settings" && !codeWay
@@ -240,15 +246,20 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
                   {ringFirst && !isAndroid && family !== "office" && <IphoneSettings />}
                 </Step>
 
-                <Step n={2} done={dialed && !clearing} title={<>{clearing ? "Clear the old forwarding on " : viaSettings ? "Forward calls on " : plan.on ? "Dial this on " : "Set it up for "}<span className="tabular whitespace-nowrap">{formatPhone(business.number!)}</span> · {change}</>}>
+                <Step n={2} done={dialed && !clearing && !noCodes} title={<>{noCodes ? "Let’s set up " : clearing ? "Clear the old forwarding on " : retry === "instead" ? "Try this code instead on " : viaSettings ? "Forward calls on " : plan.on ? "Dial this on " : "Set it up for "}<span className="tabular whitespace-nowrap">{formatPhone(business.number!)}</span> · {change}</>}>
                   {forwardsAll && (
                     <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">
-                      <strong className="font-semibold">Your phone never rang.</strong> Otto answered {line.check.forwardedAfterSec != null ? `in ${Math.max(1, line.check.forwardedAfterSec)} seconds` : "right away"}, so every call is still being forwarded.{" "}
-                      {plan.off ? (clearing ? (viaSettings ? "Turn off Call Forwarding to clear it." : "Dial this code to clear it.") : "Now dial your code again.") : "Turn off forward all calls in your phone company’s website."}
+                      <strong className="font-semibold">{retry && retry !== "clear" ? "Your phone still never rang." : "Your phone never rang."}</strong> Otto answered {line.check.forwardedAfterSec != null ? `in ${Math.max(1, line.check.forwardedAfterSec)} seconds` : "right away"}{retry === "instead" || noCodes ? "." : ", so every call is still being forwarded."}{" "}
+                      {noCodes ? "Ring first didn’t work on this phone. Our team can set it up with you."
+                        : retry === "instead" ? "This phone may not take that code. Dial this one instead."
+                          : retry === "clear_again" && clearing ? "Dial this code to clear all forwarding."
+                            : plan.off ? (clearing ? (viaSettings ? "Turn off Call Forwarding to clear it." : "Dial this code to clear it.") : "Now dial your code again.") : "Turn off forward all calls in your phone company’s website."}
                       {!isAndroid && family !== "office" ? <span className="mt-1.5 block">Declined the test, or your iPhone silences unknown callers? Fix that and test again instead.</span> : null}
                     </p>
                   )}
-                  {viaSettings && ottoDigits
+                  {noCodes
+                    ? <NoMoreCodes busy={busy === "mode"} bookLink={bookLink} onEveryCall={() => void switchToEveryCall()} />
+                    : viaSettings && ottoDigits
                     ? (clearing ? <SwitchOff before={!forwardsAll} /> : <SettingsSwitch number={line.number!} digits={ottoDigits} codeRef={codeRef} copied={copied === ottoDigits} onCopied={() => setCopied(ottoDigits)} />)
                     : dialCode
                       ? <DialCode key={dialCode} code={dialCode} dialLink={dialLink} family={family} codeRef={codeRef} copied={copied === dialCode} onCopied={() => setCopied(dialCode)} />
@@ -283,7 +294,7 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
                         </Button>
                       )}
                       <p className="text-[15px] font-semibold">{clearing ? (viaSettings ? "After both steps, test again." : "After both codes, test again.") : plan.forwardsAll ? `${tapWord} ${testLabel}. Your phone won’t ring.` : `${tapWord} ${testLabel}. Your phone will ring. Don’t answer or decline it.`}</p>
-                      <Button ref={testRef} size="tap" variant={fixOffer || clearing ? "outline" : "brand"} className={cn(fullButton, (fixOffer || clearing) && outlineButton)} disabled={busy === "check"} onClick={startTest}>
+                      <Button ref={testRef} size="tap" variant={fixOffer || clearing || noCodes ? "outline" : "brand"} className={cn(fullButton, (fixOffer || clearing || noCodes) && outlineButton)} disabled={busy === "check"} onClick={startTest}>
                         {busy === "check" ? <><Loader2 className="motion-safe:animate-spin" />Starting…</> : testLabel}
                       </Button>
                       {callerId && <span className="text-center text-[13px] text-muted-foreground">Our test call comes from <span className="tabular whitespace-nowrap">{callerId}</span></span>}
@@ -322,6 +333,7 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
                     </div>
                   </details>
                 )}
+                {plan?.extras && plan.extras.length > 0 && business.lastTest?.mode === "ring-first" && business.lastTest.timed && !plan.forwardsAll && <ExtraCodes codes={plan.extras} family={family} />}
                 <Button type="button" variant="link" className={linkButton} disabled={busy === "check"} onClick={startTest}>Test it again</Button>
               </div>
             )}
@@ -555,7 +567,7 @@ function SwitchOff({ before }: { before: boolean }) {
  * The code to dial, the way this device can dial it: the big code, one button, and two short lines (where to paste
  * it, and what the carrier shows). A computer also gets the QR and "Email me these steps".
  */
-function DialCode({ code, dialLink, family, codeRef, copied, onCopied }: { code: string; dialLink: string | null; family: CarrierFamily | null; codeRef?: Ref<HTMLDivElement>; copied: boolean; onCopied: () => void }) {
+function DialCode({ code, dialLink, family, codeRef, copied, onCopied, handoff = true }: { code: string; dialLink: string | null; family: CarrierFamily | null; codeRef?: Ref<HTMLDivElement>; copied: boolean; onCopied: () => void; handoff?: boolean }) {
   const href = dialHref(platform, dialLink)
   const [failed, setFailed] = useState(false)
   const copy = () => void copyNow(code).then((ok) => { if (ok) { setFailed(false); onCopied() } else setFailed(true) })
@@ -583,7 +595,7 @@ function DialCode({ code, dialLink, family, codeRef, copied, onCopied }: { code:
         <p className="text-sm font-medium">{href ? "Then tap Call." : pasteLine(platform)}</p>
       )}
       <p className="text-sm text-muted-foreground">{afterDialLine(family, platform)}</p>
-      {platform === "desktop" && <PhoneHandoff />}
+      {platform === "desktop" && handoff && <PhoneHandoff />}
     </div>
   )
 }
@@ -643,6 +655,59 @@ function PhoneHandoff() {
       {mail.state === "failed" && <p className="text-sm" role="alert">{mail.text}</p>}
     </div>
   )
+}
+
+/**
+ * Ring first still never rang after the clear step and the other code: no more codes. The help that exists: Call me
+ * now (below the card), a time with our team, or every call (the Settings switch on most iPhones).
+ */
+function NoMoreCodes({ busy, bookLink, onEveryCall }: { busy: boolean; bookLink: string | null; onEveryCall: () => void }) {
+  return (
+    <div className="grid gap-2.5">
+      <p className="text-[15px]">Tap <strong className="font-semibold">Call me now</strong> below, or:</p>
+      {bookLink && (
+        <Button size="tap" variant="outline" className={cn(fullButton, outlineButton)} asChild>
+          <a href={bookLink}><CalendarClock aria-hidden />Book a time with our team</a>
+        </Button>
+      )}
+      <Button type="button" size="tap" variant="outline" className={cn(fullButton, outlineButton)} disabled={busy} onClick={onEveryCall}>
+        {busy ? <Loader2 className="motion-safe:animate-spin" /> : null}Switch to Otto answers every call
+      </Button>
+    </div>
+  )
+}
+
+/**
+ * T-Mobile family, after a timed test proved ring first: an optional extra step that also sends declined calls and
+ * no-signal calls to Otto. Closed by default; one code at a time.
+ */
+function ExtraCodes({ codes, family }: { codes: string[]; family: CarrierFamily | null }) {
+  const [index, setIndex] = useState(0)
+  const [copied, setCopied] = useState<string | null>(null)
+  const code = codes[index]
+  const last = index >= codes.length - 1
+  return (
+    <details className="group">
+      <summary className="cursor-pointer py-2.5 font-semibold underline underline-offset-4">Also send calls to Otto when you decline or have no signal</summary>
+      <div className="mt-2 grid gap-2.5">
+        <p className="text-muted-foreground">Optional. {codes.length} codes, one at a time.</p>
+        {index < codes.length && code ? (
+          <>
+            <p className="text-[15px] font-semibold">Code {index + 1} of {codes.length}</p>
+            <DialCode key={code} code={code} dialLink={extraDialLink(code)} family={family} copied={copied === code} onCopied={() => setCopied(code)} handoff={false} />
+            <Button type="button" size="tap" variant="outline" className={cn(fullButton, outlineButton)} onClick={() => setIndex(index + 1)}>{last ? "I dialed it. Done" : "I dialed it. Next code"}</Button>
+          </>
+        ) : (
+          <p className="flex items-start gap-2" role="status"><Check className="mt-0.5 size-4 shrink-0 text-emerald-700" />Done. Calls you decline, and calls when you have no signal, go to Otto too.</p>
+        )}
+      </div>
+    </details>
+  )
+}
+
+/** Android-safe tel: link for an extra code (same encoding as the server's dial links). */
+function extraDialLink(code: string): string {
+  return `tel:${code.replace(/\*/g, "%2A").replace(/#/g, "%23")}`
 }
 
 /** What happened to the last test call, in a line or two, with the one fix that matches it. */

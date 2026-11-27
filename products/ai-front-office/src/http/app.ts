@@ -64,9 +64,9 @@ import { renderFounderBooking, renderFounderCalendars } from "../admin/founder.j
 import { ensureReviewAccount, isLinkPreview, REVIEW_NO_LINE, ReviewAccountError, reviewAccountTokenValid } from "../application/review-account.js";
 import { renderReviewAccount } from "../admin/review-account.js";
 import { dialsBackToOtto } from "../application/forwarding-loop.js";
-import { carrierFamily, forwardingChoice, forwardingOffInstruction, forwardsBackToOtto, parseTestedFor, everyCallVerdict, rangSeconds, ringFirstVerdict, SETUP_CALL_STALE_MS, type CarrierFamily, type CarrierInfo, forwardingPlan, type ForwardingMode, type TestedFor } from "../domain/forwarding.js";
-import { forwardingSteps, forwardToDigits, settingsStepsText } from "../domain/forwarding-steps.js";
-import { FORWARDING_CHECK_WINDOW_MS, forwardingCheckStatus, forwardingUpdate, type ForwardingCheckRecord, type ForwardingState } from "./owner-api-model.js";
+import { carrierFamily, forwardingChoice, forwardingOffInstruction, forwardsBackToOtto, parseTestedFor, everyCallVerdict, rangSeconds, ringFirstVerdict, SETUP_CALL_STALE_MS, type CarrierFamily, type CarrierInfo, forwardingPlan, gsmNetwork, parseRingFirstMisses, ringFirstMissesKept, type ForwardingMode, type TestedFor } from "../domain/forwarding.js";
+import { forwardingSteps, forwardToDigits, ringFirstNext, settingsStepsText } from "../domain/forwarding-steps.js";
+import { FORWARDING_CHECK_WINDOW_MS, forwardingCheckStatus, forwardingUpdate, shopForwardingPlan, type ForwardingCheckRecord, type ForwardingState } from "./owner-api-model.js";
 import {
   clearGrace,
   describeCaller,
@@ -1584,6 +1584,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         await hangUpLiveCheck(account.tenantId);
         for (const key of ["confirmed_at", "check", "previous_check", "tested_for"]) await dependencies.store.deleteIntegrationSecret(account.tenantId, "forwarding", key);
       }
+      // Another phone or another carrier: the ring-first codes start over from the first one.
+      if (previous.businessNumber !== number || previous.carrier?.family !== carrier.family || previous.carrier?.name !== carrier.name) {
+        await dependencies.store.deleteIntegrationSecret(account.tenantId, "forwarding", "ring_first_misses");
+      }
       await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "business_number", number);
       await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify(carrier));
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
@@ -1648,6 +1652,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           throw new HttpError(502, "We couldn’t change that just now. Nothing was changed. Try again in a minute.");
         });
         await rememberLegacyTestedFor(account.tenantId, current, next);
+        await keepRingFirstMisses(account.tenantId);
         if (mode === "always") await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "mode_before_every_call", current.operationMode);
         return next;
       });
@@ -2047,12 +2052,16 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const update = forwardingUpdate(plan, config.operationMode, state.testedFor ?? null);
     const forwardsAll = forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "forwards_all";
     const steps = forwardingSteps({ device: device === "other" ? "phone" : device, family: plan.family, everyCall: plan.forwardsAll, leavingEveryCall: Boolean(update?.leavingEveryCall) });
-    const clearFirst = (forwardsAll || steps.clearFirst) && plan.off && url.searchParams.get("step") !== "code" ? { code: plan.off, dialLink: plan.offDialLink } : null;
-    const settings = (clearFirst ? steps.clear : steps.on) === "settings" ? { ottoNumber: prettyPhone(lineNumber) ?? lineNumber, digits: forwardToDigits(lineNumber) } : null;
+    // Ring first that never rang: the next step from ringFirstTry. "instead" and "help" clear nothing; "clear_again" is
+    // the all-forwarding code (the iPhone switch was the first clear).
+    const next = ringFirstNext({ retry: plan.retry, neverRang: forwardsAll, everyCall: plan.forwardsAll });
+    const retry = next.retry;
+    const clearFirst = (forwardsAll || steps.clearFirst) && plan.off && next.mayClear && url.searchParams.get("step") !== "code" ? { code: plan.off, dialLink: plan.offDialLink } : null;
+    const settings = (clearFirst ? (next.clearByCode ? "code" : steps.clear) : steps.on) === "settings" ? { ottoNumber: prettyPhone(lineNumber) ?? lineNumber, digits: forwardToDigits(lineNumber) } : null;
     const what = (forwardsAll || update?.leavingEveryCall) && !plan.on && plan.family === "office"
       ? `In your phone company’s website or app, turn off forward all calls. Then forward calls you don’t answer to ${prettyPhone(lineNumber) ?? lineNumber}.`
       : plan.what;
-    return sendHtml(response, 200, renderDialHandoff({ businessNumber: prettyPhone(state.businessNumber) ?? state.businessNumber, code: plan.on, what, dialLink: plan.dialLink, device, family: plan.family, clearFirst, nextHref: clearFirst ? `${url.pathname}?step=code` : null, settings }));
+    return sendHtml(response, 200, renderDialHandoff({ businessNumber: prettyPhone(state.businessNumber) ?? state.businessNumber, code: plan.on, what, dialLink: plan.dialLink, device, family: plan.family, clearFirst, nextHref: clearFirst ? `${url.pathname}?step=code` : null, settings, retry }));
   }
 
   /** This shop's forwarding plan for the phone page and the emailed steps (null until the carrier is known). */
@@ -2062,7 +2071,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       readForwarding(tenantId),
       dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
     ]);
-    const plan = lineNumber && state.businessNumber && state.carrier && state.carrier.family !== "unknown" ? forwardingPlan(state.carrier.family, lineNumber, config.operationMode, config.answerAfterRings) : null;
+    const plan = lineNumber && state.businessNumber && state.carrier && state.carrier.family !== "unknown" ? shopForwardingPlan(state.carrier, lineNumber, config.operationMode, config.answerAfterRings, state.ringFirstMisses) : null;
     return { config, state, lineNumber, plan };
   }
 
@@ -3116,7 +3125,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   }
 
   async function readForwarding(tenantId: string): Promise<ForwardingState> {
-    const [businessNumber, carrierJson, confirmedAt, checkJson, helpRequestedAt, setupCallJson, testedForJson, founderEmail] = await Promise.all([
+    const [businessNumber, carrierJson, confirmedAt, checkJson, helpRequestedAt, setupCallJson, testedForJson, missesValue, founderEmail] = await Promise.all([
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "business_number"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "carrier"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "confirmed_at"),
@@ -3124,12 +3133,17 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "help_requested_at"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"),
       dependencies.store.getIntegrationSecret(tenantId, "forwarding", "tested_for"),
+      dependencies.store.getIntegrationSecret(tenantId, "forwarding", "ring_first_misses"),
       founder.lastEmail(tenantId),
     ]);
     const parse = <T>(value: string | null): T | null => { try { return value ? JSON.parse(value) as T : null; } catch { return null; } };
     const check = parse<ForwardingCheckRecord>(checkJson);
+    // A lookup-derived carrier is placed again with today's names (a legacy name stored as unknown becomes GSM);
+    // a carrier the owner picked stays as picked.
+    const stored = parse<CarrierInfo>(carrierJson);
+    const carrier = stored && !stored.chosen ? { ...stored, family: carrierFamily(stored.name, stored.lineType) } : stored;
     return {
-      businessNumber, carrier: parse<CarrierInfo>(carrierJson), confirmedAt, testedFor: parseTestedFor(testedForJson),
+      businessNumber, carrier, confirmedAt, testedFor: parseTestedFor(testedForJson), ringFirstMisses: parseRingFirstMisses(missesValue),
       check: check ? { startedAt: check.startedAt, method: check.method, answeredAt: check.answeredAt ?? null, endedAt: check.endedAt ?? null, hangupCause: check.hangupCause ?? null, screenedAt: check.screenedAt ?? null, amdResult: check.amdResult ?? null, code: check.code ?? null, choice: check.choice ?? null, autoFailed: check.autoFailed === true, forwardedAfterMs: typeof check.forwardedAfterMs === "number" ? check.forwardedAfterMs : null, atOnce: check.atOnce === true, rangFirst: check.rangFirst === true } : null,
       helpRequestedAt,
       helpCall: ((call) => call?.to && call.startedAt ? { to: call.to, startedAt: call.startedAt, answeredAt: call.answeredAt ?? null, endedAt: call.endedAt ?? null, outcome: call.outcome ?? null, booked: Boolean(call.bookedAt) } : null)(readSetupCall(setupCallJson)),
@@ -3176,7 +3190,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (!limiter.allow(`forwarding-check:${tenantId}`, 6, 60 * 60_000)) throw new HttpError(429, "That’s a lot of checks. Please wait a few minutes and try again.");
     // What the owner is set up for right now (their choice and the code on screen): a pass records it.
     const config = await dependencies.store.getConfig(tenantId);
-    const code = state.carrier ? forwardingPlan(state.carrier.family, lineNumber, config.operationMode, config.answerAfterRings).on : null;
+    const code = state.carrier ? shopForwardingPlan(state.carrier, lineNumber, config.operationMode, config.answerAfterRings, state.ringFirstMisses).on : null;
     const choice = forwardingChoice(config.operationMode);
     await hangUpLiveCheck(tenantId);
     const startedAt = dependencies.clock.now().toISOString();
@@ -3234,9 +3248,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     ]);
     if (!lineNumber) return null;
     const family = state.carrier?.family ?? null;
-    const plan = family ? forwardingPlan(family, lineNumber, config.operationMode, config.answerAfterRings) : null;
-    const everyCall = family ? forwardingPlan(family, lineNumber, "always") : null;
-    const ringFirst = family ? forwardingPlan(family, lineNumber, "overflow", config.answerAfterRings) : null;
+    const carrier = state.carrier;
+    const plan = carrier ? shopForwardingPlan(carrier, lineNumber, config.operationMode, config.answerAfterRings, state.ringFirstMisses) : null;
+    const everyCall = carrier ? shopForwardingPlan(carrier, lineNumber, "always", null) : null;
+    const ringFirst = carrier ? shopForwardingPlan(carrier, lineNumber, "overflow", config.answerAfterRings, state.ringFirstMisses) : null;
     const facts: SetupCallFacts = {
       businessName: config.businessName,
       businessNumber: state.businessNumber,
@@ -3256,6 +3271,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       phoneAnswersTest: !plan?.forwardsAll && forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "phone_answers",
       // Leaving every call: the off code first, then the ring-first code (forward-all wins over it otherwise).
       everyCallOn: state.testedFor?.mode === "every-call",
+      // The same next step the screen shows after a ring-first test that never rang (ringFirstTry).
+      ringFirstRetry: !plan?.forwardsAll && forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "forwards_all" ? plan?.retry ?? null : null,
+      ringFirstExtras: ringFirst?.extras ?? [],
     };
     return { facts, state };
   }
@@ -3524,7 +3542,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number"),
     ]);
     const family = state.carrier?.family ?? null;
-    const plan = family && lineNumber ? forwardingPlan(family, lineNumber, config.operationMode, config.answerAfterRings) : null;
+    const plan = family && lineNumber && state.carrier ? shopForwardingPlan(state.carrier, lineNumber, config.operationMode, config.answerAfterRings, state.ringFirstMisses) : null;
     return {
       ownerName: ownerFirstName(account.displayName) ? account.displayName : null,
       email: account.email,
@@ -3857,6 +3875,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         if (timed) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "check", JSON.stringify({ ...latest, forwardedAfterMs: afterMs, ...(atOnce ? { atOnce: true } : {}), ...(rangFirst ? { rangFirst: true } : {}) }));
         if (atOnce) await saveTestedFor(tenantId, { mode: "every-call", code: null, at: now.toISOString() });
         else if (proves) await saveTestedFor(tenantId, { mode: choice, code: check!.code ?? null, at: now.toISOString(), rangSeconds: choice === "ring-first" ? rangSeconds(afterMs) : null, ...(timed ? { timed: true } : {}) });
+        // Ring first that never rang moves the codes one step on (ringFirstTry); one that rang starts them over.
+        if (atOnce) {
+          const misses = parseRingFirstMisses(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "ring_first_misses"));
+          await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "ring_first_misses", String(misses + 1));
+        } else if (proves && choice === "ring-first") await keepRingFirstMisses(tenantId);
       });
       if (timed) log({ level: "info", event: atOnce ? "forwarding_check_forwards_all" : rangFirst ? "forwarding_check_rang_first" : "forwarding_check_timed", tenantId, afterMs, choice });
     }
@@ -3868,6 +3891,22 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     }
     log({ level: "info", event: "forwarding_check_passed", tenantId });
     return "check";
+  }
+
+  /** After a ring-first pass or a change of choice: the ring-first codes start over (see ringFirstMissesKept). */
+  async function keepRingFirstMisses(tenantId: string): Promise<void> {
+    const [missesValue, carrierJson] = await Promise.all([
+      dependencies.store.getIntegrationSecret(tenantId, "forwarding", "ring_first_misses"),
+      dependencies.store.getIntegrationSecret(tenantId, "forwarding", "carrier"),
+    ]);
+    const misses = parseRingFirstMisses(missesValue);
+    if (!misses) return;
+    let name: string | null = null;
+    try { name = carrierJson ? (JSON.parse(carrierJson) as CarrierInfo).name ?? null : null; } catch { name = null; }
+    const kept = ringFirstMissesKept(gsmNetwork(name), misses);
+    if (kept === misses) return;
+    if (kept) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "ring_first_misses", String(kept));
+    else await dependencies.store.deleteIntegrationSecret(tenantId, "forwarding", "ring_first_misses");
   }
 
   async function saveTestedFor(tenantId: string, record: TestedFor): Promise<void> {
@@ -3925,7 +3964,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       readForwarding(tenantId),
       dependencies.store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
     ]);
-    const plan = lineNumber && state.businessNumber && state.carrier ? forwardingPlan(state.carrier.family, lineNumber, config.operationMode, config.answerAfterRings) : null;
+    const plan = lineNumber && state.businessNumber && state.carrier ? shopForwardingPlan(state.carrier, lineNumber, config.operationMode, config.answerAfterRings, state.ringFirstMisses) : null;
     const leavingEveryCall = config.operationMode === "always" && nextMode !== "always" && plan !== null && plan.family !== "unknown";
     if (leavingEveryCall) {
       if (state.testedFor?.mode === "every-call") return;

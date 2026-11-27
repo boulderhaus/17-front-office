@@ -179,7 +179,7 @@ describe("owner app fixes (walk 70039f169)", () => {
     expect(page).toContain("*723125550149");
     expect(page).not.toContain("Call Forwarding");
     // Ring first on a GSM iPhone: still the code, with the heads-up about the gray box.
-    await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "T-Mobile USA", lineType: "mobile", family: "gsm", chosen: false }));
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "AT&T Mobility", lineType: "mobile", family: "gsm", chosen: false }));
     await store.saveConfig({ ...await store.getConfig(account.tenantId), operationMode: "overflow" });
     const ring = await (await fetch(`${baseUrl}${link}`, { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148" } })).text();
     expect(ring).toContain("Dial this on (941) 555-0182");
@@ -192,7 +192,7 @@ describe("owner app fixes (walk 70039f169)", () => {
     const { account, post } = await signUp("qr-clear@synthetic.example", "(941) 555-0146");
     await store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", "+13125550146");
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "business_number", "+19415550179");
-    await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "T-Mobile USA", lineType: "mobile", family: "gsm", chosen: false }));
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "AT&T Mobility", lineType: "mobile", family: "gsm", chosen: false }));
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "confirmed_at", now.toISOString());
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "tested_for", JSON.stringify({ mode: "every-call", code: "**21*13125550146#", at: now.toISOString() }));
     await store.saveConfig({ ...await store.getConfig(account.tenantId), operationMode: "overflow" });
@@ -233,7 +233,7 @@ describe("owner app fixes (walk 70039f169)", () => {
     const { account, post } = await signUp("qr-leave@synthetic.example", "(941) 555-0150");
     await store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", "+13125550150");
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "business_number", "+19415550183");
-    await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "T-Mobile USA", lineType: "mobile", family: "gsm", chosen: false }));
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "AT&T Mobility", lineType: "mobile", family: "gsm", chosen: false }));
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "confirmed_at", now.toISOString());
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "tested_for", JSON.stringify({ mode: "every-call", code: "**21*13125550150#", at: now.toISOString() }));
     await store.saveConfig({ ...await store.getConfig(account.tenantId), operationMode: "overflow" });

@@ -53,6 +53,12 @@ export interface ForwardingPlan {
   what: string
   tips: string[]
   confirm: string | null
+  /** GSM only: T-Mobile family, AT&T family, or another GSM carrier. */
+  network?: "tmobile" | "att" | "gsm" | null
+  /** Ring first after tests where the phone never rang: clear, clear again, another code instead, or help. */
+  retry?: "clear" | "clear_again" | "instead" | "help" | null
+  /** T-Mobile family ring first: optional decline and no-signal codes, one at a time, after a ring-first pass. */
+  extras?: string[]
 }
 
 export interface ApiDashboard {

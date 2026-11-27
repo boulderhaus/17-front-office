@@ -322,6 +322,11 @@ export interface ForwardingCheckRecord {
   rangFirst?: boolean | null;
 }
 
+/** This shop's forwarding plan: its carrier (family and name) and how many ring-first tests in a row missed. */
+export function shopForwardingPlan(carrier: CarrierInfo, lineNumber: string, mode: ForwardingMode, answerAfterRings: number | null | undefined, misses?: number | null): ForwardingPlan {
+  return forwardingPlan(carrier.family, lineNumber, mode, answerAfterRings, { carrierName: carrier.name, misses: misses ?? 0 });
+}
+
 export interface ForwardingState {
   businessNumber: string | null;
   carrier: CarrierInfo | null;
@@ -331,6 +336,8 @@ export interface ForwardingState {
   helpCall?: { to: string; startedAt: string; answeredAt: string | null; endedAt: string | null; outcome: "done" | "missed" | "voicemail" | "looped" | "failed" | null; booked: boolean } | null;
   /** What the owner was set up for when a test last passed (see TestedFor). */
   testedFor?: TestedFor | null;
+  /** Timed ring-first tests in a row that found the phone never rang (see ringFirstTry). */
+  ringFirstMisses?: number;
   founderEmail?: { sentAt: string; link: boolean } | null;
 }
 
@@ -387,7 +394,7 @@ function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "oper
   const confirmedAt = state?.confirmedAt ?? null;
   const status = forwardingCheckStatus(check, confirmedAt, now);
   const answeredAfterSec = check?.answeredAt ? Math.max(0, Math.round((Date.parse(check.answeredAt) - Date.parse(check.startedAt)) / 1_000)) : null;
-  const plan = lineNumber && state?.carrier ? forwardingPlan(state.carrier.family, lineNumber, mode, config.answerAfterRings) : null;
+  const plan = lineNumber && state?.carrier ? shopForwardingPlan(state.carrier, lineNumber, mode, config.answerAfterRings, state.ringFirstMisses) : null;
   const testedFor = state?.testedFor ?? null;
   const update = forwardingUpdate(plan, mode, testedFor);
   return {

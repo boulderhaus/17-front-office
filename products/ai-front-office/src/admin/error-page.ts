@@ -27,8 +27,10 @@ a:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
  * `settings` (every call, or clearing it, on a GSM-family iPhone): the iPhone's Call Forwarding switch instead, with
  * the code flow unchanged behind "Don't see Call Forwarding?" (forwardingSteps decides).
  */
-export function renderDialHandoff(input: { businessNumber: string; code: string | null; what: string; dialLink: string | null; device: "iphone" | "android" | "other"; family?: string | null; clearFirst?: { code: string; dialLink: string | null } | null; nextHref?: string | null; settings?: { ottoNumber: string; digits: string } | null }): string {
+export function renderDialHandoff(input: { businessNumber: string; code: string | null; what: string; dialLink: string | null; device: "iphone" | "android" | "other"; family?: string | null; clearFirst?: { code: string; dialLink: string | null } | null; nextHref?: string | null; settings?: { ottoNumber: string; digits: string } | null; retry?: "clear" | "clear_again" | "instead" | "help" | null }): string {
   const clearing = Boolean(input.clearFirst);
+  // Ring first that never rang, tried again: the all-forwarding clear code, another code, or no more codes.
+  const retry = input.retry ?? null;
   const code = clearing ? input.clearFirst!.code : input.code;
   const link = clearing ? input.clearFirst!.dialLink : input.dialLink;
   // What the carrier shows once a code goes through, said before they dial it.
@@ -37,8 +39,12 @@ export function renderDialHandoff(input: { businessNumber: string; code: string 
     : input.device === "iphone" ? `<ol><li>Press and hold the code, tap Copy.</li><li>Open Phone, tap Keypad.</li><li>Press and hold the number line, tap Paste, then Call.</li></ol>`
       : `<p class="next">Dial it in your Phone app’s keypad and tap Call.</p>`;
   const next = clearing && input.nextHref ? `<a class="back alt" href="${e(input.nextHref)}">Next: your code</a>` : "";
-  const codeFlow = !code ? `<p>${e(input.what)}</p>`
-    : `${clearing ? `<p class="next">Every call is still being forwarded. Dial this first to clear it.</p>` : ""}<div class="code">${e(code)}</div>${how}<p class="muted">${e(after)}</p>${next}`;
+  const lead = clearing
+    ? (retry === "clear_again" ? "Your phone still never rang. Dial this first to clear all forwarding." : "Every call is still being forwarded. Dial this first to clear it.")
+    : retry === "instead" ? "That code didn’t work on this phone. Try this code instead." : "";
+  const codeFlow = retry === "help" && !clearing ? `<p class="next">Ring first didn’t work on this phone.</p><p>On the setup page, tap Call me now and our team helps you set it up. Or pick Otto answers every call.</p>`
+    : !code ? `<p>${e(input.what)}</p>`
+    : `${lead ? `<p class="next">${e(lead)}</p>` : ""}<div class="code">${e(code)}</div>${how}<p class="muted">${e(after)}</p>${next}`;
   const settings = input.settings && code ? input.settings : null;
   const body = !settings ? codeFlow
     : clearing
@@ -62,5 +68,5 @@ details summary{display:flex;align-items:center;min-height:44px;cursor:pointer;f
 details .alt-flow{display:grid;gap:14px;padding-top:6px}
 summary:focus-visible,button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
 a:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
-</style></head><body><header><span class="brand">Call&nbsp;<em>Otto</em></span></header><main><h1>${clearing ? "Clear the old forwarding on" : settings ? "Forward calls on" : "Dial this on"} ${e(input.businessNumber)}</h1>${body}<p class="muted">This link stops working soon. Get a new one on your computer.</p></main></body></html>`;
+</style></head><body><header><span class="brand">Call&nbsp;<em>Otto</em></span></header><main><h1>${retry === "help" && !clearing ? "Let’s set up" : clearing ? "Clear the old forwarding on" : retry === "instead" ? "Try this code on" : settings ? "Forward calls on" : "Dial this on"} ${e(input.businessNumber)}</h1>${body}<p class="muted">This link stops working soon. Get a new one on your computer.</p></main></body></html>`;
 }
