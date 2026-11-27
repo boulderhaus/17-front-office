@@ -77,7 +77,8 @@ describe("voice lab prompt rules", () => {
     expect(prompt).toContain("Most turns are one short sentence plus at most one question, under about 20 words.");
     expect(prompt).toContain("Open most replies with a quick, varied acknowledgement");
     expect(prompt).toContain('never say "Great question" or "Absolutely"');
-    expect(prompt).toContain("Ask for one detail at a time.");
+    expect(prompt).toContain("Ask exactly one question at a time, then wait.");
+    expect(prompt).toContain("Never read lists aloud.");
     expect(prompt).toContain("If the caller cuts you off, drop what you were saying.");
   });
 

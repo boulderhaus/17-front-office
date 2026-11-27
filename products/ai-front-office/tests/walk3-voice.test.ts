@@ -48,8 +48,23 @@ describe("Otto never leaves dead air and re-asks what it missed", () => {
   // Measured on the 144 s walk call: Otto twice re-asked what the caller had just said over a check-in,
   // and sat silent ~14 s after a short answer it never transcribed, until the caller spoke again.
   it("uses an answer given over a check-in and treats a caller's 'Hello?' as a missed answer", () => {
-    expect(prompt).toContain("If the caller cuts you off, drop what you were saying. Use their answer; never re-ask it.");
-    expect(prompt).toContain('Missed an answer? Say so and re-ask it once. Never guess. "Hello?" means you missed one.');
+    expect(prompt).toContain("If the caller cuts you off, drop what you were saying. Answer them first. If they answered, use it; never re-ask.");
+    expect(prompt).toContain('Missed an answer? Say so and re-ask it once. Never guess. "Hello?" after an unanswered question means you missed it.');
+  });
+
+  // Review of the change above: a caller who cuts in with a question or an emergency must be answered, not
+  // pushed into the pending field; a "Hello?" during a lookup, after the answer was heard, must not re-ask it.
+  it("still answers an interruption first and re-asks only an unanswered question", () => {
+    const style = prompt.slice(prompt.indexOf("HOW YOU SOUND"), prompt.indexOf("TOOL RESULTS"));
+    expect(style).toContain("Answer them first.");
+    expect(style).not.toContain('"Hello?" means you missed one');
+    expect(style).not.toMatch(/Use their answer; never re-ask it\./);
+    expect(prompt).toContain("Before that, reconfirm only a correction or a safety-critical fact.");
+  });
+
+  it("keeps the no-lists rule and one question at a time", () => {
+    expect(prompt).toContain("- Never read lists aloud.");
+    expect(prompt).toContain("Ask exactly one question at a time, then wait.");
   });
 
   it("checks in once on silence, then saves and hangs up, inside the 10 s idle cap", () => {
