@@ -12,7 +12,7 @@ export type DialPlatform = "iphone" | "android" | "phone" | "desktop"
 
 // The code by default, the iPhone switch only behind a quiet link: one decision and one set of words, shared with the
 // phone page, the emailed steps and the setup helper (src/domain/forwarding-steps.ts).
-export { forwardingSteps, forwardToDigits, ringFirstNext, BACK_TO_CODE_LINK, CODE_FAILED_LINK, CODE_FAILED_LINK_DESKTOP, OLDER_IPHONE_LINE, RETRY_CODE_LINE, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, SWITCH_INSTEAD_LINE, type ForwardingSteps, type RingFirstNext } from "../../../src/domain/forwarding-steps.js"
+export { forwardingClear, forwardingSteps, forwardToDigits, ringFirstNext, BACK_TO_CODE_LINK, CODE_FAILED_LINK, CODE_FAILED_LINK_DESKTOP, OLDER_IPHONE_LINE, RETRY_CODE_LINE, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, SWITCH_INSTEAD_LINE, type ForwardingSteps, type RingFirstNext } from "../../../src/domain/forwarding-steps.js"
 
 export function dialPlatform(userAgent: string): DialPlatform {
   if (/iPhone|iPad|iPod/i.test(userAgent)) return "iphone"

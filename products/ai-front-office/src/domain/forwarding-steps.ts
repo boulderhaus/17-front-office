@@ -74,6 +74,33 @@ export function ringFirstNext(input: { retry: RingFirstRetry | null | undefined;
   return { retry, mayClear: retry !== "instead" && retry !== "help", clearByCode: retry === "clear_again", noCodes: retry === "help" };
 }
 
+/** The codes a clear step picks from: a plan's own (see ForwardingPlan in forwarding.ts). */
+export interface ClearCodes {
+  /** Today's off code. For ring first: its own clear code for this try (ringFirstTry). */
+  off: string | null;
+  offDialLink?: string | null;
+  /** The code that turns every call off, whatever today's choice. */
+  everyCallOff?: string | null;
+  everyCallOffDialLink?: string | null;
+}
+
+/**
+ * The one code that clears forwarding before the ring-first code, the same on the owner app, the phone page and for
+ * the setup helper. Which step shows, and when, is forwardingSteps.clearFirst and ringFirstNext; this is only the code.
+ * - Before any ring-first test (leaving an every call a test proved on): the code that turns every call off.
+ * - After a test found every call still forwarded, while the owner is leaving every call: that same code. Forward-all
+ *   is what's on (a code or the iPhone's switch set it), and ring first's own clear code can leave it on: T-Mobile's
+ *   ##004# only resets the missed-call rules.
+ * - Otherwise: ring first's own clear code for this try.
+ */
+export function forwardingClear(input: { neverRang: boolean; leavingEveryCall: boolean; plan: ClearCodes | null | undefined }): { code: string; dialLink: string | null } | null {
+  const plan = input.plan;
+  if (!plan) return null;
+  const everyCall = !input.neverRang || input.leavingEveryCall;
+  if (everyCall && plan.everyCallOff && plan.everyCallOff !== plan.off) return { code: plan.everyCallOff, dialLink: plan.everyCallOffDialLink ?? null };
+  return plan.off ? { code: plan.off, dialLink: plan.offDialLink ?? null } : null;
+}
+
 /** Otto's number as the Forward To field takes it: 10 digits, no +1, no punctuation. */
 export function forwardToDigits(number: string): string {
   const digits = number.replace(/\D/g, "");

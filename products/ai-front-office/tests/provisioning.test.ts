@@ -636,7 +636,7 @@ describe("owner one-tap go-live", () => {
             const init = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id, occurred_at: made.clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: "+15555550199", call_control_id: `v3:${id}`, assistant_id: "assistant-1" } } });
             return fetch(`${made.baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, made.privateKey, made.clock.now()), body: init });
           };
-          type Line = { check: { status: string; forwardedAfterSec: number | null; code?: string | null }; business: { update: { clearFirst: string | null } | null; lastTest: { mode: string; rangSeconds: number | null } | null; mayForwardAll: boolean; plan: { on: string | null; off: string | null; retry?: string | null; extras?: string[] } | null } };
+          type Line = { check: { status: string; forwardedAfterSec: number | null; code?: string | null }; business: { update: { clearFirst: string | null; leavingEveryCall?: boolean } | null; lastTest: { mode: string; rangSeconds: number | null } | null; mayForwardAll: boolean; plan: { on: string | null; off: string | null; everyCallOff?: string | null; everyCallOffDialLink?: string | null; retry?: string | null; extras?: string[] } | null } };
           const line = async () => ((await made.dashboard()) as unknown as { line: Line }).line;
           return { ...made, arrives, line };
         }
@@ -646,8 +646,9 @@ describe("owner one-tap go-live", () => {
           expect((await made.arrives(2, "fast")).status).toBe(200);
           const line = await made.line();
           expect(line.check).toMatchObject({ status: "forwards_all", forwardedAfterSec: 2 });
-          // T-Mobile family: its own clear code, ##004#.
-          expect(line.business).toMatchObject({ update: { clearFirst: "##004#" }, lastTest: null, mayForwardAll: true });
+          // What clears it is the code that turns every call off (forward-all is what's on), never T-Mobile's
+          // ##004#: that only resets the missed-call rules. Ring first's own off code stays ##004#.
+          expect(line.business).toMatchObject({ update: { clearFirst: "##002#", leavingEveryCall: true }, plan: { off: "##004#", everyCallOff: "##002#", everyCallOffDialLink: "tel:%23%23002%23", retry: "clear" }, lastTest: null, mayForwardAll: true });
           // Then they clear it, redial the ring-first code and test again: Otto answers 12 s after our call went out,
           // about 10 s of ringing once call setup is left out.
           made.clock.at = new Date(made.clock.at.getTime() + 60_000);
@@ -666,16 +667,20 @@ describe("owner one-tap go-live", () => {
           return made.line();
         }
 
-        it("T-Mobile family: **61 first, then clear with ##004#, then ##002#, then help; a pass starts over and offers the extra codes", async () => {
+        it("T-Mobile family: **61 first, then clear (##002#, since a miss means every call is on), then clear again, then help; a pass starts over and offers the extra codes", async () => {
           const made = await ringFirstTest("Aerial Communications");
           const first = await made.line();
           expect(first.business.plan).toMatchObject({ off: "##004#", retry: null });
           expect(first.business.plan!.on).toMatch(/^\*\*61\*1\d{10}\*\*10#$/);
           await made.arrives(2, "miss-1");
-          expect((await made.line()).business.plan).toMatchObject({ off: "##004#", retry: "clear" });
+          // ringFirstTry is unchanged (ring first's own off code is still ##004#), but the clear step the screen shows
+          // for a line that forwards every call is the every-call off code.
+          expect((await made.line()).business.plan).toMatchObject({ off: "##004#", everyCallOff: "##002#", retry: "clear" });
+          expect((await made.line()).business.update).toMatchObject({ clearFirst: "##002#", leavingEveryCall: true });
           const second = await testAgain(made, 2, "miss-2");
           expect(second.check.status).toBe("forwards_all");
           expect(second.business.plan).toMatchObject({ off: "##002#", retry: "clear_again" });
+          expect(second.business.update).toMatchObject({ clearFirst: "##002#", leavingEveryCall: true });
           expect(second.business.plan!.on).toMatch(/^\*\*61\*/);
           const third = await testAgain(made, 2, "miss-3");
           expect(third.business.plan).toMatchObject({ retry: "help" });

@@ -248,6 +248,54 @@ describe("owner app fixes (walk 70039f169)", () => {
     expect(ringCode).not.toContain("Call Forwarding");
   });
 
+  it("T-Mobile family, a ring-first test found every call still forwarded: the clear code is ##002#, never ##004#, on every phone", async () => {
+    const { account, cookie, post } = await signUp("qr-clear-tmobile@synthetic.example", "(941) 555-0152");
+    await store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", "+13125550152");
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "business_number", "+19415550185");
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "T-Mobile USA", lineType: "mobile", family: "gsm", chosen: false }));
+    await store.saveConfig({ ...await store.getConfig(account.tenantId), operationMode: "overflow" });
+    // What a timed ring-first test that reached Otto with no ring leaves behind: one miss, and every call on record.
+    // Forward-all is on (dialed **21 or the iPhone's switch, never proven by a passed every-call test).
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "ring_first_misses", "1");
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "check", JSON.stringify({ startedAt: now.toISOString(), method: "auto", choice: "ring-first", code: "**61*13125550152**10#", forwardedAfterMs: 2_000, atOnce: true }));
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "confirmed_at", now.toISOString());
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "tested_for", JSON.stringify({ mode: "every-call", code: null, at: now.toISOString() }));
+    const { url } = await (await post("/api/app/line/handoff")).json() as { url: string };
+    const path = new URL(url).pathname;
+    const iphone = { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148" } };
+    const android = { headers: { "user-agent": "Mozilla/5.0 (Linux; Android 14) Chrome/130 Mobile" } };
+    // iPhone: ##004# only resets the missed-call rules, so it can't clear forward-all. One code, no Settings.
+    const clear = await (await fetch(`${baseUrl}${path}`, iphone)).text();
+    const [clearCode, clearSwitch] = clear.split("<details><summary>Code didn’t work?</summary>");
+    expect(clearCode).toContain("Clear the old forwarding on (941) 555-0185");
+    expect(clearCode).toContain("Every call is still being forwarded. Dial this first to clear it.");
+    expect(clearCode).toContain('<div class="code">##002#</div>');
+    expect(clear).not.toContain("##004#");
+    expect(clear).not.toContain("**61*");
+    expect(clear.match(/class="code"/g)).toHaveLength(1);
+    expect(clearCode!.slice(clearCode!.indexOf("<main>"))).not.toMatch(/Settings|Call Forwarding/);
+    expect(clearSwitch).toContain("Open Settings › Apps › Phone. Tap Call Forwarding and turn it off.");
+    // Then the ring-first code, alone.
+    const ringCode = await (await fetch(`${baseUrl}${path}?step=code`, iphone)).text();
+    expect(ringCode).toMatch(/<div class="code">\*\*61\*13125550152\*\*10#<\/div>/);
+    expect(ringCode).not.toContain("##002#");
+    // Android gets the same code, and its Tap to dial link dials it.
+    const droid = await (await fetch(`${baseUrl}${path}`, android)).text();
+    expect(droid).toContain('<div class="code">##002#</div>');
+    expect(droid).toContain('href="tel:%23%23002%23"');
+    expect(droid).not.toContain("##004#");
+    // The owner app's data names the same code, and keeps ring first's own off code for "How to turn forwarding off".
+    const line = (await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie } })).json() as { line: { check: { status: string }; business: unknown } }).line;
+    expect(line.check.status).toBe("forwards_all");
+    expect(line.business).toMatchObject({ update: { clearFirst: "##002#", leavingEveryCall: true }, plan: { off: "##004#", everyCallOff: "##002#", retry: "clear" } });
+    // Missed again: clearing again is still ##002# (the all-forwarding code), with no switch behind a link.
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "ring_first_misses", "2");
+    const again = await (await fetch(`${baseUrl}${path}`, iphone)).text();
+    expect(again).toContain("Your phone still never rang. Dial this first to clear all forwarding.");
+    expect(again).toContain('<div class="code">##002#</div>');
+    expect(again).not.toContain("<details");
+  });
+
   it("an iPhone leaving an every call that a test proved clears it first by code, before any ring-first test", async () => {
     const { account, post } = await signUp("qr-leave@synthetic.example", "(941) 555-0150");
     await store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", "+13125550150");

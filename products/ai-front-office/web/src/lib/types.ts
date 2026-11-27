@@ -44,8 +44,13 @@ export interface ForwardingPlan {
   family: CarrierFamily
   on: string | null
   off: string | null
-  /** The code that turns every call off, whatever today's choice: dialed first when leaving a proven every call. */
+  /**
+   * The code that turns every call off, whatever today's choice: what clears it when leaving every call (before any
+   * ring-first test once a test proved it on, or after a test found every call still forwarded).
+   */
   everyCallOff?: string | null
+  /** Android-safe tel: link for everyCallOff. */
+  everyCallOffDialLink?: string | null
   dialLink: string | null
   offDialLink: string | null
   /** Every call goes to Call Otto; the owner's phone never rings for this number. */

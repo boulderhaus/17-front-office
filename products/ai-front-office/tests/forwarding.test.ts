@@ -10,8 +10,8 @@ import { createDemoConfig } from "../src/domain/config.js";
 import { carrierFamily, everyCallProven, forwardingChoice, forwardingOffInstruction, forwardingPlan, forwardsBackToOtto, isForwardAllCode, mayForwardAll, parseTestedFor, RING_CHOICES, ringChoicesWith, ringSeconds, type TestedFor } from "../src/domain/forwarding.js";
 import { forwardingCheckStatus, forwardingUpdate } from "../src/http/owner-api-model.js";
 import { NotificationHeldError } from "../src/ports.js";
-import { afterDialLine, CODE_FAILED_LINK as WEB_CODE_FAILED_LINK, codeChunks, copyText, dialHref, dialPlatform, EVERY_CALL_FIX_LINE, forwardingSteps as webForwardingSteps, IPHONE_PHONE_SETTINGS, keepRingFirstLine, pasteLine, RING_CHOICES as WEB_RING_CHOICES, ringChoicesWith as webRingChoicesWith, ringSeconds as webRingSeconds, spokenCode, VERIZON_RING_LINE } from "../web/src/lib/dial.js";
-import { BACK_TO_CODE_LINK, CODE_FAILED_LINK, CODE_FAILED_LINK_DESKTOP, forwardingSteps, forwardToDigits, RETRY_CODE_LINE, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, SWITCH_INSTEAD_LINE, type SetupDevice } from "../src/domain/forwarding-steps.js";
+import { afterDialLine, CODE_FAILED_LINK as WEB_CODE_FAILED_LINK, codeChunks, copyText, dialHref, dialPlatform, EVERY_CALL_FIX_LINE, forwardingClear as webForwardingClear, forwardingSteps as webForwardingSteps, IPHONE_PHONE_SETTINGS, keepRingFirstLine, pasteLine, RING_CHOICES as WEB_RING_CHOICES, ringChoicesWith as webRingChoicesWith, ringSeconds as webRingSeconds, spokenCode, VERIZON_RING_LINE } from "../web/src/lib/dial.js";
+import { BACK_TO_CODE_LINK, CODE_FAILED_LINK, CODE_FAILED_LINK_DESKTOP, forwardingClear, forwardingSteps, forwardToDigits, RETRY_CODE_LINE, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, SWITCH_INSTEAD_LINE, type SetupDevice } from "../src/domain/forwarding-steps.js";
 import { pauseHint } from "../web/src/lib/pause-hint.js";
 import { loginReturningHere } from "../web/src/lib/login-next.js";
 import { safeNext } from "../src/http/owner-sign-in.js";
@@ -524,6 +524,43 @@ describe("the code by default, the iPhone switch only behind a link (forwardingS
     expect(forwardingPlan("office", "+19415550123", "overflow").everyCallOff ?? null).toBeNull();
   });
 
+  it("one clear code everywhere (forwardingClear): leaving every call, the code that turns every call off", () => {
+    const tmobile = forwardingPlan("gsm", "+19415550123", "overflow", 2, { carrierName: "T-Mobile USA", misses: 1 });
+    expect(tmobile).toMatchObject({ off: "##004#", everyCallOff: "##002#", everyCallOffDialLink: "tel:%23%23002%23", retry: "clear" });
+    // Before any ring-first test (a test proved every call on): ##002#.
+    expect(forwardingClear({ neverRang: false, leavingEveryCall: true, plan: tmobile })).toEqual({ code: "##002#", dialLink: "tel:%23%23002%23" });
+    // A ring-first test found every call still forwarded, and the owner is leaving every call (a code or the iPhone's
+    // switch set forward-all): ##002# again, never T-Mobile's ##004#, which only resets the missed-call rules.
+    expect(forwardingClear({ neverRang: true, leavingEveryCall: true, plan: tmobile })).toEqual({ code: "##002#", dialLink: "tel:%23%23002%23" });
+    // Not leaving every call: ring first's own clear code for this try, as before.
+    expect(forwardingClear({ neverRang: true, leavingEveryCall: false, plan: tmobile })).toEqual({ code: "##004#", dialLink: "tel:%23%23004%23" });
+    // Clearing again is ##002# either way (ringFirstTry's second clear).
+    const again = forwardingPlan("gsm", "+19415550123", "overflow", 2, { carrierName: "T-Mobile USA", misses: 2 });
+    expect(again).toMatchObject({ off: "##002#", retry: "clear_again" });
+    for (const leavingEveryCall of [true, false]) expect(forwardingClear({ neverRang: true, leavingEveryCall, plan: again })).toEqual({ code: "##002#", dialLink: "tel:%23%23002%23" });
+    // AT&T family and Verizon: one off code, so nothing changes.
+    const att = forwardingPlan("gsm", "+19415550123", "overflow", 2, { carrierName: "AT&T Mobility", misses: 1 });
+    const verizon = forwardingPlan("verizon", "+19415550123", "overflow");
+    for (const neverRang of [true, false]) for (const leavingEveryCall of [true, false]) {
+      expect(forwardingClear({ neverRang, leavingEveryCall, plan: att })).toEqual({ code: "##002#", dialLink: "tel:%23%23002%23" });
+      expect(forwardingClear({ neverRang, leavingEveryCall, plan: verizon })).toEqual({ code: "*73", dialLink: "tel:%2A73" });
+    }
+    // Office lines have no code; no plan, nothing.
+    expect(forwardingClear({ neverRang: true, leavingEveryCall: true, plan: forwardingPlan("office", "+19415550123", "overflow") })).toBeNull();
+    expect(forwardingClear({ neverRang: true, leavingEveryCall: true, plan: null })).toBeNull();
+    // An older server that sends no everyCallOff: the off code, as before.
+    expect(forwardingClear({ neverRang: true, leavingEveryCall: true, plan: { off: "##004#", offDialLink: "tel:%23%23004%23" } })).toEqual({ code: "##004#", dialLink: "tel:%23%23004%23" });
+    // The owner app uses the very same decision.
+    expect(webForwardingClear).toBe(forwardingClear);
+  });
+
+  it("the API names the same clear code the screen shows when leaving every call", () => {
+    const tested: TestedFor = { mode: "every-call", code: null, at: "2026-11-27T15:00:00.000Z" };
+    const tmobile = forwardingPlan("gsm", "+19415550123", "overflow", 2, { carrierName: "T-Mobile USA", misses: 1 });
+    expect(forwardingUpdate(tmobile, "overflow", tested)).toEqual({ clearFirst: "##002#", leavingEveryCall: true });
+    expect(forwardingClear({ neverRang: true, leavingEveryCall: true, plan: tmobile })?.code).toBe(forwardingUpdate(tmobile, "overflow", tested)!.clearFirst);
+  });
+
   it("keeps the gray-box heads-up for every code dialed on an iPhone (iOS draws the box; nothing hides it)", () => {
     expect(afterDialLine("gsm", "iphone")).toBe("Your carrier shows a gray box that says Succeeded. Tap Dismiss and come back.");
   });
@@ -586,6 +623,13 @@ describe("after a test the phone took itself: every call first, the phone's sett
     }
     // Leaving a proven every call: the code that turns every call off, before any ring-first test.
     expect(card).toContain("leavingProvenEveryCall: Boolean(business.update?.leavingEveryCall) && business.everyCallProven === true");
-    expect(card).toContain("const clearCode = forwardsAll ? plan?.off ?? null : plan?.everyCallOff ?? plan?.off ?? null");
+    // The clear code is the one shared decision, and "I dialed it" counts once per clear step, so clearing again
+    // still shows when it's the same code as the first clear (T-Mobile family leaving every call: ##002# both times).
+    expect(card).toContain("const clear = forwardingClear({ neverRang: forwardsAll, leavingEveryCall: Boolean(business.update?.leavingEveryCall), plan })");
+    expect(card).toContain('const clearStep = clearCode ? `${next.clearByCode ? "again" : "first"}:${clearCode}` : null');
+    expect(card).toContain("cleared !== clearStep && next.mayClear");
+    expect(card).toContain("onClick={() => setCleared(clearStep)}");
+    expect(card).toContain("const dialLink = clearing ? clear?.dialLink ?? null : plan?.dialLink ?? null");
+    expect(card).not.toContain("forwardsAll ? plan?.off");
   });
 });

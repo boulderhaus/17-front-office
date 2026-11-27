@@ -230,6 +230,18 @@ describe("the setup helper says the same steps", () => {
     expect(setupSteps({ ...facts, everyCallOn: true }).join("\n")).toContain("turn forwarding off: dial ##004#");
   });
 
+  it("after a test found every call still forwarded, the voice names the clear code the screen shows", () => {
+    // Leaving every call on the T-Mobile family: ##002# (forward-all is what's on), not ring first's ##004#.
+    const clear = setupSteps({ ...facts, everyCallOn: true, everyCallOffCode: "##002#", ringFirstRetry: "clear" }).join("\n");
+    expect(clear).toContain("First they dial ##002# (say it as: pound pound 0 0 2 pound) and press Call, then the ring-first code again, **61*13125550100**10#");
+    expect(clear).not.toContain("First they dial ##004#");
+    // And no second clear sentence in the codes step.
+    expect(clear).not.toContain("so they first turn forwarding off");
+    expect(clear).not.toContain("Only if a test then says");
+    // Clearing again: the all-forwarding code.
+    expect(setupSteps({ ...facts, offCode: "##002#", everyCallOn: true, everyCallOffCode: "##002#", ringFirstRetry: "clear_again" }).join("\n")).toContain("First they dial ##002#");
+  });
+
   it("offers the extras only as optional, one at a time", () => {
     const text = setupSteps({ ...facts, ringFirstExtras: ["**67*13125550100#", "**62*13125550100#"] }).join("\n");
     expect(text).toContain("it's optional. They dial **67*13125550100# (say it as:");

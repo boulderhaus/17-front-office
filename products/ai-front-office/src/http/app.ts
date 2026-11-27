@@ -67,7 +67,7 @@ import { ensureReviewAccount, isLinkPreview, REVIEW_NO_LINE, ReviewAccountError,
 import { renderReviewAccount } from "../admin/review-account.js";
 import { dialsBackToOtto } from "../application/forwarding-loop.js";
 import { carrierFamily, everyCallProven, forwardingChoice, forwardingOffInstruction, forwardsBackToOtto, parseTestedFor, everyCallVerdict, rangSeconds, ringFirstVerdict, SETUP_CALL_STALE_MS, type CarrierFamily, type CarrierInfo, forwardingPlan, gsmNetwork, parseRingFirstMisses, ringFirstMissesKept, type ForwardingMode, type TestedFor } from "../domain/forwarding.js";
-import { forwardingSteps, forwardToDigits, ringFirstNext } from "../domain/forwarding-steps.js";
+import { forwardingClear, forwardingSteps, forwardToDigits, ringFirstNext } from "../domain/forwarding-steps.js";
 import { FORWARDING_CHECK_WINDOW_MS, forwardingCheckStatus, forwardingUpdate, shopForwardingPlan, type ForwardingCheckRecord, type ForwardingState } from "./owner-api-model.js";
 import {
   clearGrace,
@@ -2061,10 +2061,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     // the all-forwarding code alone (no switch behind a link).
     const next = ringFirstNext({ retry: plan.retry, neverRang: forwardsAll, everyCall: plan.forwardsAll });
     const retry = next.retry;
-    // After a test found every call still forwarded: ring first's clear code for this try. Before any ring-first test
-    // (leaving an every call a test proved on): the code that turns every call off.
-    const clearCode = forwardsAll ? plan.off : plan.everyCallOff ?? plan.off;
-    const clearFirst = (forwardsAll || steps.clearFirst) && clearCode && next.mayClear && url.searchParams.get("step") !== "code" ? { code: clearCode, dialLink: clearCode === plan.off ? plan.offDialLink : null } : null;
+    // What clears it, the same code the computer shows (forwardingClear): leaving every call, the code that turns every
+    // call off, before any ring-first test once a test proved it on and after a test found every call still forwarded.
+    // Otherwise ring first's own clear code for this try.
+    const clear = forwardingClear({ neverRang: forwardsAll, leavingEveryCall: Boolean(update?.leavingEveryCall), plan });
+    const clearFirst = (forwardsAll || steps.clearFirst) && clear && next.mayClear && url.searchParams.get("step") !== "code" ? clear : null;
     const settings = (clearFirst ? !next.clearByCode && steps.iphoneSwitch.clear : steps.iphoneSwitch.on) ? { ottoNumber: prettyPhone(lineNumber) ?? lineNumber, digits: forwardToDigits(lineNumber) } : null;
     const what = (forwardsAll || update?.leavingEveryCall) && !plan.on && plan.family === "office"
       ? `In your phone company’s website or app, turn off forward all calls. Then forward calls you don’t answer to ${prettyPhone(lineNumber) ?? lineNumber}.`

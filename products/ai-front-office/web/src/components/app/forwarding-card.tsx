@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
-import { afterDialLine, BACK_TO_CODE_LINK, CODE_FAILED_LINK, CODE_FAILED_LINK_DESKTOP, codeChunks, copyText, dialHref, dialPlatform, EVERY_CALL_FIX_LINE, forwardingSteps, keepRingFirstLine, ringFirstNext, forwardToDigits, OLDER_IPHONE_LINE, pasteLine, RETRY_CODE_LINE, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, spokenCode, SWITCH_INSTEAD_LINE, VERIZON_RING_LINE } from "@/lib/dial"
+import { afterDialLine, BACK_TO_CODE_LINK, CODE_FAILED_LINK, CODE_FAILED_LINK_DESKTOP, codeChunks, copyText, dialHref, dialPlatform, EVERY_CALL_FIX_LINE, forwardingClear, forwardingSteps, keepRingFirstLine, ringFirstNext, forwardToDigits, OLDER_IPHONE_LINE, pasteLine, RETRY_CODE_LINE, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, spokenCode, SWITCH_INSTEAD_LINE, VERIZON_RING_LINE } from "@/lib/dial"
 import { formatPhone } from "@/lib/format"
 import { checkStatus } from "@/lib/line-status"
 import { useMode } from "@/lib/mode"
@@ -123,13 +123,17 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
   const next = ringFirstNext({ retry: plan?.retry, neverRang: forwardsAll, everyCall: Boolean(plan?.forwardsAll) })
   const retry = next.retry
   const noCodes = next.noCodes
-  // What clears it: after a test found every call still forwarded, ring first's clear code for this try; before any
-  // ring-first test (leaving an every call a test proved on), the code that turns every call off.
-  const clearCode = forwardsAll ? plan?.off ?? null : plan?.everyCallOff ?? plan?.off ?? null
+  // What clears it (one tested decision: forwardingClear): leaving every call, the code that turns every call off,
+  // before any ring-first test once a test proved it on and after a test found every call still forwarded. Otherwise
+  // ring first's own clear code for this try.
+  const clear = forwardingClear({ neverRang: forwardsAll, leavingEveryCall: Boolean(business.update?.leavingEveryCall), plan })
+  const clearCode = clear?.code ?? null
+  // One "I dialed it" per clear step: clearing again still shows when it's the same code as the first clear.
+  const clearStep = clearCode ? `${next.clearByCode ? "again" : "first"}:${clearCode}` : null
   // The clear code until it's done, then the shop's own code again. Never both on one screen.
-  const clearing = (forwardsAll || Boolean(steps?.clearFirst)) && Boolean(clearCode) && cleared !== clearCode && next.mayClear
+  const clearing = (forwardsAll || Boolean(steps?.clearFirst)) && Boolean(clearCode) && cleared !== clearStep && next.mayClear
   const dialCode = clearing ? clearCode : plan?.on ?? null
-  const dialLink = clearing ? (clearCode === plan?.off ? plan!.offDialLink : null) : plan?.dialLink ?? null
+  const dialLink = clearing ? clear?.dialLink ?? null : plan?.dialLink ?? null
   // The iPhone's Call Forwarding switch can do this step too. Never the default: it shows only once the owner taps
   // the quiet link under the code. Clearing again is the all-forwarding code alone.
   const hasSwitch = Boolean(ottoDigits) && !(clearing && next.clearByCode) && Boolean(clearing ? steps?.iphoneSwitch.clear : steps?.iphoneSwitch.on)
@@ -275,7 +279,7 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
                       : <p className="text-sm">{what}</p>}
                   {/* Always there while clearing: the code may be dialed from the QR page, typed by hand, or after a reload. */}
                   {clearing && (
-                    <Button type="button" size="tap" variant="outline" className={cn(fullButton, outlineButton)} onClick={() => setCleared(dialCode)}>{viaSettings ? "I turned it off. Next: your code" : "I dialed it. Next: your code"}</Button>
+                    <Button type="button" size="tap" variant="outline" className={cn(fullButton, outlineButton)} onClick={() => setCleared(clearStep)}>{viaSettings ? "I turned it off. Next: your code" : "I dialed it. Next: your code"}</Button>
                   )}
                   {/* The only way to the iPhone's switch: a quiet link under the code, and the same link back. */}
                   {hasSwitch && (
