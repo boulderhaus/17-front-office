@@ -145,6 +145,21 @@ describe("save_intake names the next tool", () => {
     // Times were checked: nothing more to push.
     expect((await save("next", { callerName: "Sam Carter", address: covered, accessNotes: "side door, dog" })).next_step).toBeUndefined();
 
+    // A corrected address must be checked again before any time is offered.
+    await service.recordStarted({ eventId: "start:moved", tenantId: "demo", providerCallId: "moved", fromNumber: "+15555550103", startedAt: now.toISOString() });
+    await save("moved", { callerName: "Sam Carter", address: covered });
+    await service.checkServiceArea({ tenantId: "demo", providerCallId: "moved", address: covered });
+    expect((await save("moved", { callerName: "Sam Carter", address: "9 Elm Road, Faraway City" })).next_step).toBe(NEXT_STEP_CHECK_AREA);
+    // A retry of the same save works the step out again instead of dropping it.
+    expect((await save("moved", { callerName: "Sam Carter", address: "9 Elm Road, Faraway City" })).next_step).toBe(NEXT_STEP_CHECK_AREA);
+
+    // After the caller asks for a person, a covered address no longer points at open times.
+    await service.recordStarted({ eventId: "start:person", tenantId: "demo", providerCallId: "person", fromNumber: "+15555550104", startedAt: now.toISOString() });
+    await save("person", { callerName: "Sam Carter", address: covered });
+    await service.queueHumanHandoff({ tenantId: "demo", providerCallId: "person", fromNumber: "+15555550104", reason: "explicit_request" });
+    expect((await service.checkServiceArea({ tenantId: "demo", providerCallId: "person", address: covered })).message).not.toContain("check_availability");
+    expect((await save("person", { callerName: "Sam Carter", address: covered, accessNotes: "gate" })).next_step).toBeUndefined();
+
     // An emergency never gets a booking step.
     await service.recordStarted({ eventId: "start:gas", tenantId: "demo", providerCallId: "gas", fromNumber: "+15555550101", startedAt: now.toISOString() });
     const gas = await service.saveIntake({ tenantId: "demo", providerCallId: "gas", fromNumber: "+15555550101", fields: { problemDescription: "I smell gas in the kitchen.", callerName: "Dana Miller", address: covered } });
@@ -156,5 +171,17 @@ describe("save_intake names the next tool", () => {
     await service.recordStarted({ eventId: "start:off", tenantId: "demo", providerCallId: "off", fromNumber: "+15555550102", startedAt: now.toISOString() });
     await service.checkServiceArea({ tenantId: "demo", providerCallId: "off", address: covered });
     expect((await service.saveIntake({ tenantId: "demo", providerCallId: "off", fromNumber: "+15555550102", fields: { problemDescription: "Drip.", callerName: "Sam Carter", address: covered } })).next_step).toBeUndefined();
+  });
+});
+
+describe("bookingMayContinue", () => {
+  it("stops pushing once the availability tool ran, failed or was refused on the call", async () => {
+    const { bookingMayContinue } = await import("../src/application/call-service.js");
+    const base = { steps: { offerTimes: true }, emergency: false, humanRequested: false, booked: false };
+    expect(bookingMayContinue({ ...base, toolEvents: [] })).toBe(true);
+    expect(bookingMayContinue({ ...base, toolEvents: [{ tool: "calendar.availability", result: "failed", metadata: {} }] })).toBe(false);
+    expect(bookingMayContinue({ ...base, toolEvents: [{ tool: "tool.failed", result: "failed", metadata: { tool: "check_availability", reason: "limit_budget" } }] })).toBe(false);
+    expect(bookingMayContinue({ ...base, toolEvents: [{ tool: "tool.failed", result: "failed", metadata: { tool: "get_approved_answer" } }] })).toBe(true);
+    expect(bookingMayContinue({ ...base, booked: true, toolEvents: [] })).toBe(false);
   });
 });

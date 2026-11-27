@@ -102,6 +102,16 @@ const EMPTY_FIELDS: CollectedCallFields = {
 /** save_intake's answer when the server's own triage finds an emergency (the owner alert is already queued). */
 export const INTAKE_EMERGENCY_INSTRUCTION = "This is an emergency and the owner has been alerted. Stop booking. Tell the caller the owner will call back as soon as possible; never promise a time.";
 
+/**
+ * May the call still be pushed toward open times? Never in an emergency, after the caller asked for a person, once a
+ * booking exists, for a shop that offers no times, after times were already checked, or after the availability tool
+ * was refused or failed on this call (pushing it again would only hit the per-call limit).
+ */
+export function bookingMayContinue(input: { steps: { offerTimes: boolean }; emergency: boolean; humanRequested: boolean; booked: boolean; toolEvents: ReadonlyArray<Pick<ToolEvent, "tool" | "result" | "metadata">> }): boolean {
+  if (input.emergency || input.humanRequested || input.booked || !input.steps.offerTimes) return false;
+  return !input.toolEvents.some((event) => event.tool === "calendar.availability" || (event.tool === "tool.failed" && event.metadata?.tool === "check_availability"));
+}
+
 /** save_intake's next_step lines: the tool to call now, in the same turn (never a promise to check later). */
 export const NEXT_STEP_CHECK_AREA = "Everything the caller must give is saved. Call check_service_area with the address now, in this same turn.";
 export const NEXT_STEP_CHECK_TIMES = "Everything the caller must give is saved. Call check_availability now, in this same turn, then offer the times it returns. Never tell the caller you will check: check first, then speak.";
@@ -174,9 +184,10 @@ export class CallService {
     await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
     const key = toolResultKey("save_intake", input.providerCallId, { fields: input.fields, declined: input.recordingDisclosureDeclined ?? null, ...(input.extraAnswerSlots ? { extraAnswerSlots: input.extraAnswerSlots.map((slot) => slot ?? null) } : {}) });
     return this.store.withLock(`call:${input.providerCallId}`, async () => {
-      const prior = await this.claimToolWrite<{ status: "saved"; missing: string[]; emergency?: true; instruction?: string }>(input.providerCallId, key, input.signal);
+      const prior = await this.claimToolWrite<{ status: "saved"; missing: string[]; emergency?: true; instruction?: string; next_step?: string }>(input.providerCallId, key, input.signal);
       if (prior) {
         const call = await this.store.getCallByProviderId(input.providerCallId);
+        // A retry of the same save gets the same answer, next step included.
         return { ...prior.result, wrap_up: call ? this.wrapUpFor(call) : false };
       }
       let result: { status: "saved"; missing: string[]; wrap_up: boolean; emergency?: true; instruction?: string; next_step?: string };
@@ -187,7 +198,7 @@ export class CallService {
         throw error;
       }
       // A retry after a lost answer replays the emergency fields too: the caller must still hear the safety words.
-      await this.store.completeToolResult(input.providerCallId, key, { status: result.status, missing: result.missing, ...(result.emergency ? { emergency: result.emergency, instruction: result.instruction } : {}) }, this.clock.now().toISOString());
+      await this.store.completeToolResult(input.providerCallId, key, { status: result.status, missing: result.missing, ...(result.emergency ? { emergency: result.emergency, instruction: result.instruction } : {}), ...(result.next_step ? { next_step: result.next_step } : {}) }, this.clock.now().toISOString());
       return result;
     });
   }
@@ -329,7 +340,8 @@ export class CallService {
     ].filter((value): value is string => value !== null);
     // The next tool, said outright. A speech-to-speech line told a caller "let me check our times" and then never
     // checked (the backend's turn had ended); the answer to this save now names the step that comes next.
-    const nextStep = this.nextStepAfterIntake({ steps, missing, emergency: emergency.emergency, humanRequested: fields.humanRequested === true, toolEvents, booked: Boolean(await this.store.getBookingForCall(call.id)) });
+    const addressChanged = Boolean(existing.fields.address?.trim()) && (fields.address ?? "").trim().toLowerCase() !== (existing.fields.address ?? "").trim().toLowerCase();
+    const nextStep = this.nextStepAfterIntake({ steps, missing, emergency: emergency.emergency, humanRequested: fields.humanRequested === true, toolEvents, booked: Boolean(await this.store.getBookingForCall(call.id)), addressChanged });
     // The model has no clock; the soft five-minute limit rides on tool results.
     return {
       status: "saved",
@@ -342,17 +354,18 @@ export class CallService {
   }
 
   /** What save_intake's answer tells the model to do next, or null when the call should just carry on. */
-  private nextStepAfterIntake(input: { steps: ReturnType<typeof callSteps>; missing: string[]; emergency: boolean; humanRequested: boolean; toolEvents: ToolEvent[]; booked: boolean }): string | null {
-    if (input.emergency || input.humanRequested || input.booked || !input.steps.offerTimes) return null;
+  private nextStepAfterIntake(input: { steps: ReturnType<typeof callSteps>; missing: string[]; emergency: boolean; humanRequested: boolean; toolEvents: ToolEvent[]; booked: boolean; addressChanged: boolean }): string | null {
+    if (!bookingMayContinue(input)) return null;
     // The category never holds up a booking; everything else the caller must give does.
     if (input.missing.some((item) => item !== "service_category")) return null;
     const ran = (tool: string) => input.toolEvents.filter((event) => event.tool === tool && event.result === "success");
     if (input.steps.askAddress && input.steps.checkServiceArea) {
       const coverage = ran("coverage.check");
-      if (coverage.length === 0) return NEXT_STEP_CHECK_AREA;
+      // A corrected address was never checked: the earlier result was for another place.
+      if (coverage.length === 0 || input.addressChanged) return NEXT_STEP_CHECK_AREA;
       if (coverage[coverage.length - 1]!.metadata?.status !== "covered") return null;
     }
-    return ran("calendar.availability").length === 0 ? NEXT_STEP_CHECK_TIMES : null;
+    return NEXT_STEP_CHECK_TIMES;
   }
 
   async checkAvailability(input: {
@@ -425,9 +438,13 @@ export class CallService {
     const call = await this.ensureCall(input.tenantId, input.providerCallId, "unknown", this.clock.now().toISOString());
     const started = this.clock.now();
     const result = evaluateServiceArea(input.address, config);
+    const pushTimes = result.status === "covered" && Boolean(call.fields.callerName?.trim()) && bookingMayContinue({
+      steps: callSteps(config), emergency: call.emergency?.emergency === true, humanRequested: call.fields.humanRequested === true,
+      booked: Boolean(await this.store.getBookingForCall(call.id)), toolEvents: await this.store.listToolEvents(call.id).catch(() => []),
+    });
     await this.audit(call, "coverage.check", started, "success", { status: result.status, matched: Boolean(result.matchedTerm) }, null);
     const message = result.status === "covered"
-      ? `The address is inside the owner-configured service area. Continue intake.${callSteps(config).offerTimes && call.fields.callerName?.trim() && !call.emergency?.emergency ? " Once the name and callback number are saved, call check_availability in the same turn; never say you will check without calling it." : ""}`
+      ? `The address is inside the owner-configured service area. Continue intake.${pushTimes ? " Once the name and callback number are saved, call check_availability in the same turn; never say you will check without calling it." : ""}`
       : result.status === "unconfigured"
         ? "The owner has not configured a service area. Do not promise service or book; queue owner confirmation."
         : result.status === "incomplete"
