@@ -2,7 +2,7 @@ import { pathToFileURL } from "node:url";
 import { BLIND_CLOSURE_FLAG, PROVIDER_HISTORY_FLAG } from "../src/application/call-service.js";
 import { loadEnvironment } from "../src/config/environment.js";
 import type { CallRecord, ToolEvent } from "../src/domain/models.js";
-import { FAILED_TOOL_STATUSES } from "../src/voice/tool-results.js";
+import { FAILED_TOOL_STATUSES, SWITCHED_OFF_STATUS } from "../src/voice/tool-results.js";
 import { currentTextModel, isSpeechToSpeechAssistant } from "../src/voice/voice-mode.js";
 
 /**
@@ -67,7 +67,9 @@ export function toolResults(messages: HistoryLike[]): ToolResult[] {
     let body: Record<string, unknown> = {};
     try { body = JSON.parse(message.text ?? "{}") as Record<string, unknown>; } catch { body = { status: "unreadable" }; }
     const status = typeof body.status === "string" ? body.status : body.ok === false ? "not_ok" : "ok";
-    const ok = body.ok !== false && !FAILED_STATUSES.has(status) && status !== "unreadable" && !("error" in body);
+    // "switched_off" answers ok=false too, but nothing failed: the shop turned that step off in "What Otto does on a
+    // call" and the server said so (toolSwitchedOff). It is not a failed tool.
+    const ok = (body.ok !== false || status === SWITCHED_OFF_STATUS) && !FAILED_STATUSES.has(status) && status !== "unreadable" && !("error" in body);
     results.push({ name: names.get(message.tool_call_id ?? "") ?? "unknown", status, ok });
   }
   return results;

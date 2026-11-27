@@ -88,6 +88,8 @@ export function buildCallPath(input: {
   callbackTask?: CallbackTask | null;
   notifications: OutboxNotification[];
   now: Date;
+  /** Steps the shop switched off ("What Otto does on a call"): left out unless this call recorded something for them. */
+  off?: readonly CallPathStepKey[];
 }): CallPath | null {
   const { call, booking } = input;
   // Calls from before checkpoints were recorded have no path: showing every step skipped would be untrue.
@@ -205,13 +207,18 @@ export function buildCallPath(input: {
   const keys = Object.keys(CALL_PATH_LABELS) as CallPathStepKey[];
   // While the call is live, the first open checkpoint is where Otto is now.
   const ended = call.endedAt !== null || providerEnded;
-  const currentIndex = live && !ended && !spam ? found.findIndex((item) => item === null) : -1;
-  const steps: CallPathStep[] = keys.map((key, index) => {
+  // A step the shop switched off is not part of its call: it shows only when this call recorded it anyway (a spam
+  // mark, an address, a booking from before the switch). The service check then shows only a call Otto ended.
+  const hidden = (index: number): boolean => Boolean(input.off?.includes(keys[index]!))
+    && (keys[index] === "service_check" ? found[index]?.state !== "flagged" : !found[index] || found[index]!.state === "skipped");
+  const currentIndex = live && !ended && !spam ? found.findIndex((item, index) => item === null && !hidden(index)) : -1;
+  const steps: CallPathStep[] = keys.flatMap((key, index): CallPathStep[] => {
+    if (hidden(index)) return [];
     // A spam call ends at the service check: nothing after it happened.
     const item = spam && index > 1 ? null : found[index] ?? null;
-    if (item) return { key, label: CALL_PATH_LABELS[key], ...item };
+    if (item) return [{ key, label: CALL_PATH_LABELS[key], ...item }];
     const state: CallPathState = spam && index > 1 ? "skipped" : index === currentIndex ? "current" : live ? "todo" : "skipped";
-    return { key, label: CALL_PATH_LABELS[key], state, at: null, note: null };
+    return [{ key, label: CALL_PATH_LABELS[key], state, at: null, note: null }];
   });
 
   const price = first((event) => event.tool === "answer.lookup" && meta(event, "kind") === "price");

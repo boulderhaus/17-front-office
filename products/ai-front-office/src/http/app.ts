@@ -36,10 +36,10 @@ import { MAX_USAGE_ALERT_PERCENT, MIN_USAGE_ALERT_PERCENT, currentBillingPeriod,
 
 export { currentBillingPeriod };
 import { localDate, parseDaysOff } from "../domain/days-off.js";
-import { apiCall, apiDashboard, apiSettings, apiTask, maskedPhone, settingsForm, textsOn, type ApiCallDetail, type ApiPlan } from "./owner-api-model.js";
+import { apiCall, apiDashboard, apiSettings, apiTask, CALL_STEP_FIELDS, maskedPhone, settingsForm, textsOn, type ApiCallDetail, type ApiPlan } from "./owner-api-model.js";
 import { approvedAnswer } from "../domain/approved-answer.js";
 import { isExplicitHumanRequest } from "../domain/human-request.js";
-import { saveAssistantConfig } from "../adapters/assistant-config.js";
+import { resolvesToSpeechToSpeech, saveAssistantConfig } from "../adapters/assistant-config.js";
 import { DataDeletionService } from "../application/data-deletion.js";
 import { TeamService } from "../application/team-service.js";
 import { formatEmailBody } from "../adapters/resend.js";
@@ -47,15 +47,16 @@ import { anyGoogleClient, clientForAttempt, clientForNewConnections, encodeGoogl
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
+import { CALL_STEP_KEYS, callSteps, hiddenCallPathSteps, MAX_CUSTOM_QUESTION_LENGTH, MAX_CUSTOM_QUESTIONS, normalizeCallSteps, normalizeCustomQuestions, parseCustomQuestions, switchedOffStep, type CallSteps } from "../domain/call-steps.js";
 import { TRADES, tradeForShopName, tradeShortLabel } from "../domain/trades.js";
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import type { OwnerSession } from "../security/owner-auth.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hasUsablePassword, hashOwnerPassword, isPasswordless, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, ownerSessionIssuedAt, PASSWORDLESS_HASH, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
 import { createOwnerSignIn, GOOGLE_SIGN_IN_CALLBACK, isSignInState, safeNext, verifiedSignupEmail, type PendingSignup } from "./owner-sign-in.js";
-import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
-import { speechToSpeechSettings } from "../voice/voice-mode.js";
+import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, buildVoiceSystemPrompt, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
+import { speechToSpeechInstructionsFit, speechToSpeechSettings } from "../voice/voice-mode.js";
 import { isVoiceLabTenant } from "../application/voice-lab.js";
-import { FAILED_TOOL_STATUSES, MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_FAILED_EVENT, TOOL_ROUTES, toolFailure, toolLimitReached, withinToolBudget, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
+import { FAILED_TOOL_STATUSES, MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_FAILED_EVENT, TOOL_ROUTES, toolFailure, toolLimitReached, toolSwitchedOff, withinToolBudget, type ToolFailure, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
 import { callScreeningSetting, ensureCallEndCallback, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import { AMD_ENDED_EVENT, FORWARDING_CHECK_SPEECH, forwardingCheckState, GREETING_ENDED_EVENT, SCREENING_DETECTED_EVENT, TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
 import { SETUP_CALL_TIME_LIMIT_SECS, SETUP_CALLS_PER_DAY, SETUP_HELP_TOOL_NAMES, SETUP_HELP_TOOL_PREFIX, setupHelpState, setupSorrySpeech, TelnyxSetupCaller, type SetupCallFacts, type SetupHelpToolName, type SetupTestSummary } from "../adapters/telnyx-setup-call.js";
@@ -302,7 +303,8 @@ const bookingSchema = baseToolSchema.extend({
   slot_start: dateTime,
   caller_name: z.string().min(1).max(120),
   callback_number: z.string().min(3).max(40),
-  address: z.string().min(3).max(500),
+  // Required for every shop that takes an address (handleBooking); a shop that switched the address off sends none.
+  address: z.string().min(3).max(500).optional(),
   service_category: z.string().min(1).max(120),
   problem_description: z.string().min(1).max(2_000),
   explicit_confirmation: z.boolean(),
@@ -331,6 +333,10 @@ const intakeSchema = baseToolSchema.extend({
   confidence: lenient(z.number().min(0).max(1)),
   recording_disclosure_given: lenient(z.boolean()),
   recording_disclosure_declined: flag,
+  // "Ask every caller": the answer to the shop's first, second and third question (clipped when kept).
+  extra_answer_1: lenient(z.string().max(2_000)),
+  extra_answer_2: lenient(z.string().max(2_000)),
+  extra_answer_3: lenient(z.string().max(2_000)),
 });
 const pilotSignupSchema = z.object({
   ownerName: z.string().trim().min(2).max(120),
@@ -1328,6 +1334,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       requireToolCallId(tool, input.provider_call_id);
       const tenantId = await tenantForCall(input.provider_call_id);
       await requireOperational(tenantId);
+      const off = await switchedOff(tenantId, tool.name, input.provider_call_id, input.kind);
+      if (off) return off;
       const answer = approvedAnswer(await dependencies.store.getConfig(tenantId), input.kind, input.key);
       await service.recordAnswerLookup({ tenantId, providerCallId: input.provider_call_id, kind: input.kind, approved: answer.status === "approved" });
       return { ...answer, wrap_up: await service.wrapUp(input.provider_call_id) };
@@ -1342,9 +1350,23 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       requireToolCallId(tool, input.provider_call_id);
       const tenantId = await tenantForCall(input.provider_call_id);
       await requireOperational(tenantId);
+      const off = await switchedOff(tenantId, tool.name, input.provider_call_id);
+      if (off) return off;
       return service.markSpam({ tenantId, providerCallId: input.provider_call_id, fromNumber: await callerNumber(input.provider_call_id, input.from_number), category: input.category, callerQuote: input.caller_quote });
     }
     throw new HttpError(404, "Not found");
+  }
+
+  /**
+   * "What Otto does on a call": a tool whose step this shop switched off is not in its assistant's tool list. If it
+   * is called anyway (a call that started before the save, a model that makes one up), it does nothing and answers
+   * the usual ok=false result with a line to say. Logged, never recorded as a failed tool: nothing broke.
+   */
+  async function switchedOff(tenantId: string, tool: VoiceToolName, providerCallId: string, kind?: "price" | "answer"): Promise<(ToolFailure & { wrap_up: boolean }) | null> {
+    const step = switchedOffStep(await dependencies.store.getConfig(tenantId), tool, kind);
+    if (!step) return null;
+    log({ level: "warn", event: "tool_switched_off", tenantId, tool, step });
+    return { ...toolSwitchedOff(step), wrap_up: await service.wrapUp(providerCallId) };
   }
 
   /**
@@ -2034,7 +2056,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           ownerPhoneMasked: ownerPhone ? maskedPhone(ownerPhone) : null,
           weeklyEmailAvailable: Boolean(dependencies.env.RESEND_API_KEY && dependencies.env.RESEND_FROM_EMAIL),
           directBookingAvailable: dependencies.env.DIRECT_BOOKING_BETA,
+          // "Put the caller through to me" shows only where live transfer is turned on for this deployment.
+          warmTransferAvailable: dependencies.env.WARM_TRANSFER_BETA,
         },
+        // "What Otto does on a call": the limits the card shows next to "Ask every caller".
+        callSteps: { maxQuestions: MAX_CUSTOM_QUESTIONS, maxQuestionLength: MAX_CUSTOM_QUESTION_LENGTH },
       });
     }
     const exportMatch = /^\/api\/app\/shops\/([A-Za-z0-9_-]{1,80})\/calls\.csv$/.exec(url.pathname);
@@ -2095,7 +2121,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         task: task && task.tenantId === account.tenantId ? apiTask(task) : null,
         alerts: notifications.filter((item) => item.channel === "sms" && item.tenantId === account.tenantId).map((item) => ({ priority: item.priority, state: item.state })),
         canDelete: owner,
-        path: buildCallPath({ call, events, booking, callbackTask: task?.tenantId === account.tenantId ? task : null, notifications: notifications.filter((item) => item.tenantId === account.tenantId), now: dependencies.clock.now() }),
+        path: buildCallPath({ call, events, booking, callbackTask: task?.tenantId === account.tenantId ? task : null, notifications: notifications.filter((item) => item.tenantId === account.tenantId), now: dependencies.clock.now(), off: hiddenCallPathSteps(await dependencies.store.getConfig(account.tenantId)) }),
       };
       return sendJson(response, 200, detail);
     }
@@ -2191,6 +2217,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       callbackTask: callbackTask?.tenantId === call.tenantId ? callbackTask : null,
       notifications: notifications.filter((item) => item.tenantId === call.tenantId),
       now: dependencies.clock.now(),
+      off: hiddenCallPathSteps(await dependencies.store.getConfig(call.tenantId)),
     });
   }
   async function handleDemoApi(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
@@ -2217,11 +2244,26 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
     const current = await dependencies.store.getConfig(account.tenantId);
     const updated = configFromForm(current, form, "owner", dependencies.clock.now());
+    if (!dependencies.env.DIRECT_BOOKING_BETA) updated.bookingMode = "confirm";
+    if (!dependencies.env.WARM_TRANSFER_BETA) updated.warmTransferEnabled = false;
+    // Before anything is written. The speaking voice reads about 10,000 characters of instructions
+    // (S2S_INSTRUCTION_LIMIT_CHARS). Only a save that changes "What Otto does on a call" (a switch or a question)
+    // is ever refused for that, and only when all of this holds: the shop really is on the speaking voice, its
+    // instructions fit today, and they would not fit after. The refusal names what to shorten. Every other save
+    // goes as it always has (past the limit, the shop falls back to the standard voice by itself).
+    const savedSteps = normalizeCallSteps(current.callSteps);
+    const newSteps = normalizeCallSteps(updated.callSteps);
+    const newQuestions = normalizeCustomQuestions(updated.customQuestions);
+    const callStepsChanged = CALL_STEP_KEYS.some((key) => savedSteps[key] !== newSteps[key])
+      || normalizeCustomQuestions(current.customQuestions).join("\n") !== newQuestions.join("\n");
+    if (callStepsChanged
+      && speechToSpeechInstructionsFit(buildVoiceSystemPrompt(current)) && !speechToSpeechInstructionsFit(buildVoiceSystemPrompt(updated))
+      && await resolvesToSpeechToSpeech(dependencies.store, dependencies.env, account.tenantId, dependencies.fetcher)) {
+      throw new HttpError(400, newQuestions.length > 0 ? TOO_MUCH_FOR_A_CALL : TOO_MUCH_WITHOUT_QUESTIONS);
+    }
     if (updated.operationMode !== current.operationMode || updated.answerAfterRings !== current.answerAfterRings) await rememberLegacyTestedFor(account.tenantId, current, updated.operationMode);
     // So "Keep my phone ringing first" can put back what they had (after hours stays after hours).
     if (updated.operationMode === "always" && current.operationMode !== "always") await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "mode_before_every_call", current.operationMode);
-    if (!dependencies.env.DIRECT_BOOKING_BETA) updated.bookingMode = "confirm";
-    if (!dependencies.env.WARM_TRANSFER_BETA) updated.warmTransferEnabled = false;
     updated.flatMonthlyPriceCents = current.flatMonthlyPriceCents;
     updated.planId = current.planId ?? "solo";
     updated.includedCalls = current.includedCalls;
@@ -2625,7 +2667,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         dependencies.store.listNotifications(call.id),
       ]);
       const recordingUrl = call.recordingUrl?.startsWith("https://") ? call.recordingUrl.replace("/admin/provider/", "/app/provider/") : null;
-      const path = buildCallPath({ call, events, booking, callbackTask, notifications, now: dependencies.clock.now() });
+      const path = buildCallPath({ call, events, booking, callbackTask, notifications, now: dependencies.clock.now(), off: hiddenCallPathSteps(config) });
       return sendHtml(response, 200, renderOwnerCallRecord({ account, config, call, booking, callbackTask, notifications, recordingUrl, csrf: session.csrf, canDelete: !member, path }));
     }
     const callPathMatch = /^\/app\/calls\/([0-9a-f-]+)\/path$/i.exec(url.pathname);
@@ -3008,7 +3050,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         ownerPhoneConfigured: Boolean(ownerPhone),
         googleConnected,
         bookingMode: config.bookingMode,
-        serviceAreaConfigured: config.serviceAreaTerms.length > 0,
+        // A shop that switched the service-area check off needs no cities to go live.
+        serviceAreaConfigured: config.serviceAreaTerms.length > 0 || !callSteps(config).checkServiceArea,
       });
       if (shopBlockers.length > 0) throw new HttpError(409, `This shop is missing: ${shopBlockers.join(", ")}`);
       if (!stripeClient || !isPaidStatus(subscription?.status)) throw new HttpError(409, "An active paid subscription is required before activation");
@@ -4509,6 +4552,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
+    // The shop's own questions, by position. The service pairs them with the questions this call started with.
+    const extraAnswerSlots = [input.extra_answer_1, input.extra_answer_2, input.extra_answer_3];
     const result = await service.saveIntake({
       tenantId,
       providerCallId: input.provider_call_id,
@@ -4527,6 +4572,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         ...(input.human_requested === undefined ? {} : { humanRequested: input.human_requested }),
         ...(input.confidence === undefined ? {} : { confidence: input.confidence }),
       },
+      ...(extraAnswerSlots.some((slot) => typeof slot === "string" && slot.trim()) ? { extraAnswerSlots } : {}),
       ...(input.recording_disclosure_declined === undefined ? {} : { recordingDisclosureDeclined: input.recording_disclosure_declined }),
       signal: tool.signal,
     });
@@ -4538,6 +4584,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
+    const off = await switchedOff(tenantId, tool.name, input.provider_call_id);
+    if (off) return off;
     const result = await service.checkAvailability({
       tenantId,
       providerCallId: input.provider_call_id,
@@ -4553,6 +4601,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
+    const off = await switchedOff(tenantId, tool.name, input.provider_call_id);
+    if (off) return off;
     const result = await service.checkServiceArea({
       tenantId,
       providerCallId: input.provider_call_id,
@@ -4583,6 +4633,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
+    const off = await switchedOff(tenantId, tool.name, input.provider_call_id);
+    if (off) return off;
+    // The address is a required argument for every shop that takes one, as it always was.
+    if (input.address === undefined && callSteps(await dependencies.store.getConfig(tenantId)).askAddress) throw new HttpError(400, "book_slot requires the service address");
     const result = await service.bookConfirmedSlot({
       tenantId,
       providerCallId: input.provider_call_id,
@@ -5226,6 +5280,11 @@ function serviceAreaMessage(errors: string[]): string {
     : "Add at least one city and state or 5-digit ZIP.";
 }
 
+/** Settings save: a change to "What Otto does on a call" would make Otto's instructions longer than the speaking voice reads. */
+export const TOO_MUCH_FOR_A_CALL = "That’s more than Otto can keep in mind on a call. Shorten your questions, then save again.";
+/** The same, for a shop with no questions of its own: a step switched back on brought back long prices or answers. */
+export const TOO_MUCH_WITHOUT_QUESTIONS = "That’s more than Otto can keep in mind on a call. Shorten your prices or answers, then save again.";
+
 function configFromForm(current: BusinessConfig, form: URLSearchParams, surface: "owner" | "platform", now: Date = new Date()): BusinessConfig {
   const required = (name: string): string => {
     const value = form.get(name)?.trim();
@@ -5282,8 +5341,18 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams, surface:
   const daysOff = form.has("daysOff") ? (() => {
     try { return parseDaysOff(form.get("daysOff") ?? "", localDate(now, timezone)); } catch (error) { throw new HttpError(400, error instanceof Error ? error.message : "Check your days off"); }
   })() : current.daysOff ?? [];
+  // "What Otto does on a call": each switch arrives as on or off. A form that doesn't show the card (the platform
+  // admin page, an app tab opened before the card existed) sends neither, and the saved choice stays.
+  const tri = (name: string, saved: boolean): boolean => (form.get(name) === "on" ? true : form.get(name) === "off" ? false : saved);
+  const savedSteps = normalizeCallSteps(current.callSteps);
+  const steps = Object.fromEntries(CALL_STEP_KEYS.map((key) => [key, tri(CALL_STEP_FIELDS[key], savedSteps[key])])) as unknown as CallSteps;
+  const customQuestions = form.has("customQuestions") ? (() => {
+    try { return parseCustomQuestions(form.get("customQuestions") ?? ""); } catch (error) { throw new HttpError(400, error instanceof Error ? error.message : "Check your questions"); }
+  })() : normalizeCustomQuestions(current.customQuestions);
   return {
     ...current,
+    callSteps: steps,
+    customQuestions,
     paused: serviceState === "paused",
     businessName: required("businessName").slice(0, 120),
     greeting: required("greeting").slice(0, 1_000),
@@ -5291,7 +5360,8 @@ function configFromForm(current: BusinessConfig, form: URLSearchParams, surface:
     operationMode: operationMode as BusinessConfig["operationMode"],
     answerAfterRings,
     bookingMode,
-    warmTransferEnabled: form.get("warmTransferEnabled") === "on",
+    // The owner app sends on or off; the platform form is a tick box (absent means off).
+    warmTransferEnabled: surface === "owner" ? tri("warmTransferEnabled", current.warmTransferEnabled === true) : form.get("warmTransferEnabled") === "on",
     serviceAreaTerms: (() => { const area = normalizeServiceAreaInput(form.get("serviceAreaTerms") ?? ""); if (area.errors.length > 0) throw new HttpError(400, serviceAreaMessage(area.errors)); return area.terms; })(),
     emergencyKeywords: (() => {
       // Every box ticked is about 100 phrases; Other adds a few. Refuse a list too long instead of dropping words.

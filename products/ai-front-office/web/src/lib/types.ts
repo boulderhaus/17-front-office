@@ -16,6 +16,8 @@ export interface ApiCall {
     equipmentDetails: string | null
     accessNotes: string | null
     requestedStart: string | null
+    /** The caller's answers to the shop's own questions (Settings > "Ask every caller"). */
+    extraAnswers?: Array<{ question: string; answer: string }>
   }
   emergency: { emergency: boolean; severity: "routine" | "urgent" | "life_safety"; immediateInstruction: string | null } | null
   transcript: string | null
@@ -142,6 +144,8 @@ export interface ApiDashboard {
     alertsOn: boolean
     /** Texts can be sent at all (carrier approval recorded). */
     textsLive?: boolean
+    /** False when the shop switched "Ask for the address" off: a call with no address is complete. */
+    asksAddress?: boolean
     rulesSaved: boolean
     greeting: string
     hours: string
@@ -282,7 +286,11 @@ export interface ApiSettings {
     ownerPhoneMasked?: string | null
     weeklyEmailAvailable: boolean
     directBookingAvailable: boolean
+    /** Live transfer to the owner is turned on for this account, so its switch shows in "What Otto does on a call". */
+    warmTransferAvailable?: boolean
   }
+  /** "Ask every caller": how many questions, and how long each may be. */
+  callSteps?: { maxQuestions: number; maxQuestionLength: number }
 }
 
 /** The card on file and past bills (GET /api/app/billing/details). cardChange: how "Change card" opens. */

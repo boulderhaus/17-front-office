@@ -10,17 +10,26 @@ import { pushBody, type PushMessage } from "../adapters/web-push.js";
  * yet, or never opted in) still hears about every lead. Subject is the text's first line:
  * "Otto: URGENT: no AC" or "Otto: New call: Maria".
  */
-export function ownerCallEmail(smsBody: string, settingsUrl: string): string {
+export function ownerCallEmail(smsBody: string, settingsUrl: string, extraAnswers: ReadonlyArray<{ question: string; answer: string }> = []): string {
   const lines = smsBody.replace(new RegExp(`^${OWNER_SMS_PREFIX}`), "").split("\n");
-  return formatEmailBody(`${OWNER_SMS_PREFIX}${lines[0] ?? "New call"}`, `${lines.join("\n")}\n\nChange your call alerts in Settings: ${settingsUrl}`);
+  // The caller's answers to the shop's own questions ("Ask every caller") sit with the other details, before the
+  // blank line and the link. Email only: the text stays short.
+  const blank = lines.indexOf("");
+  const answers = extraAnswers.map((item) => `- ${oneLine(item.question)}${/[?.!:]$/.test(oneLine(item.question)) ? "" : ":"} ${oneLine(item.answer)}`);
+  const body = blank === -1 ? [...lines, ...answers] : [...lines.slice(0, blank), ...answers, ...lines.slice(blank)];
+  return formatEmailBody(`${OWNER_SMS_PREFIX}${lines[0] ?? "New call"}`, `${body.join("\n")}\n\nChange your call alerts in Settings: ${settingsUrl}`);
+}
+
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 /** One owner email for a call, unique per call and kind (keyBase), so a retry never sends it twice. */
-export function ownerCallEmailNotification(input: { tenantId: string; callId: string; email: string; smsBody: string; settingsUrl: string; high: boolean; keyBase: string; now: string }): OutboxNotification {
+export function ownerCallEmailNotification(input: { tenantId: string; callId: string; email: string; smsBody: string; settingsUrl: string; high: boolean; keyBase: string; now: string; extraAnswers?: ReadonlyArray<{ question: string; answer: string }> | undefined }): OutboxNotification {
   return {
     id: randomUUID(), tenantId: input.tenantId, callId: input.callId, channel: "email",
     destinationRef: `email:${input.email}`,
-    body: ownerCallEmail(input.smsBody, input.settingsUrl),
+    body: ownerCallEmail(input.smsBody, input.settingsUrl, input.extraAnswers ?? []),
     priority: input.high ? "high" : "normal", state: "pending", attempts: 0, nextAttemptAt: input.now,
     idempotencyKey: `${input.keyBase}:email`,
     providerReceipt: null, lastError: null, createdAt: input.now, sentAt: null,

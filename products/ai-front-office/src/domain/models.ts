@@ -1,4 +1,5 @@
 import type { PlanId } from "./plans.js";
+import type { CallSteps } from "./call-steps.js";
 
 export type CallOutcome =
   | "in_progress"
@@ -38,6 +39,14 @@ export interface CollectedCallFields {
   diagnosticFeeAccepted: boolean;
   humanRequested: boolean;
   confidence: number;
+  /** The caller's answers to the shop's own questions ("Ask every caller"), each with the question as it was asked. */
+  extraAnswers?: Array<{ question: string; answer: string }>;
+  /**
+   * The shop's questions, in order, as they were when this call started. Answers arrive by position
+   * (extra_answer_1..3) and are paired against this list, so an owner editing questions mid-call never mispairs
+   * one. Absent on a call from before the snapshot existed, or for a shop with no questions then.
+   */
+  askedQuestions?: string[];
 }
 
 export interface EmergencyDecision {
@@ -156,6 +165,10 @@ export interface BusinessConfig {
   ownerNotificationRefs: string[];
   ownerTransferNumberRef: string | null;
   warmTransferEnabled?: boolean;
+  /** "What Otto does on a call": the steps the owner switched on or off (domain/call-steps.ts). Absent or partial: on. */
+  callSteps?: Partial<CallSteps>;
+  /** "Ask every caller": up to 3 short questions Otto asks on every call, after the address and before booking. */
+  customQuestions?: string[];
   /** True only when billing (not the owner) paused coverage, so payment can restore it. */
   pausedForBilling?: boolean;
   schedulingCalendars?: Array<{ accountId: string; enabled: boolean; hours: BusinessConfig["bookableHours"] }>;
@@ -320,6 +333,8 @@ export interface CallSummaryInput {
   llmEmergencyScore?: number;
   llmEmergencyReason?: string;
   isSpam?: boolean;
+  /** save_intake's extra_answer_1..3 as the provider's history shows them, by position; paired with the shop's questions at finalize. */
+  extraAnswerSlots?: Array<string | null>;
 }
 
 export interface AvailabilitySlot {

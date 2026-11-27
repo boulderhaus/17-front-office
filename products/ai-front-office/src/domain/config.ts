@@ -4,6 +4,7 @@ import { stateCode } from "./area-codes.js";
 import { DEFAULT_ANSWER_AFTER_RINGS } from "./forwarding.js";
 import { DEFAULT_OVERAGE_CENTS_PER_CALL, DEFAULT_PLANS, normalizePlanId } from "./plans.js";
 import { isCivilDate } from "./days-off.js";
+import { DEFAULT_CALL_STEPS, normalizeCallSteps, normalizeCustomQuestions } from "./call-steps.js";
 
 export function createDemoConfig(tenantId = "demo"): BusinessConfig {
   return {
@@ -19,6 +20,9 @@ export function createDemoConfig(tenantId = "demo"): BusinessConfig {
     ownerNotificationRefs: ["owner-primary"],
     ownerTransferNumberRef: "owner-primary",
     warmTransferEnabled: false,
+    // "What Otto does on a call": every step on is the call Otto has always run.
+    callSteps: { ...DEFAULT_CALL_STEPS },
+    customQuestions: [],
     calendarConnectionRef: "google-primary",
     // Book open times when a calendar is connected; with none, check_availability fails and Otto takes a message.
     bookingMode: "direct",
@@ -80,6 +84,9 @@ export function normalizeBusinessConfig(value: Partial<BusinessConfig> & Pick<Bu
     includedCalls,
     overageCentsPerCall,
     unlimitedCalls: value.unlimitedCalls === true,
+    // Shops saved before the switches existed have none: every step on, no questions. Nothing is rewritten.
+    callSteps: normalizeCallSteps(value.callSteps),
+    customQuestions: normalizeCustomQuestions(value.customQuestions),
     afterHours: { ...defaults.afterHours, ...value.afterHours },
     bookableHours: { ...defaults.bookableHours, ...value.bookableHours },
     daysOff: Array.isArray(value.daysOff) ? value.daysOff.filter((entry) => typeof entry?.start === "string" && typeof entry?.end === "string" && isCivilDate(entry.start) && isCivilDate(entry.end) && entry.start <= entry.end).map(({ start, end }) => ({ start, end })) : [],

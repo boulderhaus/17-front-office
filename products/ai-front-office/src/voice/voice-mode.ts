@@ -216,6 +216,14 @@ function fitInstructions(text: string): { instructions: string; cut: string[]; f
 }
 
 /**
+ * True when these instructions fit what the speaking model reads (after the same folding and the one allowed cut).
+ * A settings save asks this before it lets a change push a speech-to-speech shop back onto the standard voice.
+ */
+export function speechToSpeechInstructionsFit(instructions: string): boolean {
+  return fitInstructions(instructions).fits;
+}
+
+/**
  * Today's payload with the speaking model, its paired voice and delegation to the backend text model. Instructions,
  * greeting, tools, webhooks, dynamic variables, telephony (recording, idle and time limits) and speech settings are
  * the same. Only if the instructions pass the documented limit is the "HOW YOU SOUND" style section cut (the

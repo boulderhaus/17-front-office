@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { CallLink, Empty, ListBox, MoreLink, Muted, SectionTitle, ToneBadge, usePage } from "@/components/app/bits"
-import { ActionBar, CallBackNote, CallHeader, callLabel, Facts, phoneFact, SafetyNote, SpamNote, Transcript, type Action } from "@/components/app/call-parts"
+import { ActionBar, addressFact, CallBackNote, CallHeader, callLabel, ExtraAnswers, Facts, phoneFact, SafetyNote, SpamNote, Transcript, type Action } from "@/components/app/call-parts"
 import { AlertsOffNotice, LineStatus } from "@/components/app/shell"
 import { api } from "@/lib/api"
 import { derive, forwardingOn, shortAddress, urgency } from "@/lib/derive"
@@ -446,7 +446,8 @@ function revealLitRow() {
  * `linked` (Calls only) ties the panel to the lit row: the matching ink left edge and the yellow header band.
  */
 export function CallPanel({ call, task, tz, standalone, next, linked = false, caughtUp = false, hasCalls = false }: { call: ApiCall | null; task: ApiTask | undefined; tz: string; standalone: boolean; next?: (doneId: string) => string | null; linked?: boolean; caughtUp?: boolean; hasCalls?: boolean }) {
-  const { base } = useMode()
+  const { base, dashboard } = useMode()
+  const asksAddress = dashboard?.shop.asksAddress
   const tiles = useTaskTiles()
   const wide = useMediaQuery("(min-width: 1024px)")
   const navigate = useNavigate()
@@ -496,7 +497,7 @@ export function CallPanel({ call, task, tz, standalone, next, linked = false, ca
   const spam = call.outcome === "ignored_spam"
   const facts: Array<[string, string]> = [
     phoneFact(call),
-    ["Address", call.fields.address?.trim() || "Not confirmed"],
+    ...addressFact(call, asksAddress),
     ["Called", compactDate(call.startedAt, tz)],
     ...(call.fields.requestedStart ? [[call.outcome === "booked" ? "Booked for" : "Asked for", compactDate(call.fields.requestedStart, tz)] as [string, string]] : []),
     ...(call.fields.equipmentDetails ? [["Equipment", call.fields.equipmentDetails] as [string, string]] : []),
@@ -525,6 +526,7 @@ export function CallPanel({ call, task, tz, standalone, next, linked = false, ca
       {spam && <SpamNote />}
       <ActionBar call={call} extra={spam ? [] : tiles(task, undefined, moves)} reachNote={<CallBackNote call={call} />} />
       <Facts rows={facts} />
+      <ExtraAnswers call={call} />
       <div className="grid gap-3">
         <h3 className="text-[17px] font-semibold">Call transcript</h3>
         <Transcript call={call} />

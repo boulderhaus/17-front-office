@@ -40,9 +40,27 @@ function outcome(call: CallRecord, now: Date | undefined): string {
   return OUTCOME_WORDS[call.outcome] ?? call.outcome;
 }
 
-/** The shop's calls as a spreadsheet: date, caller name, callback number, address, problem, outcome. Newest first. */
+/** The column for the callers' answers to the shop's own questions (Settings > "Ask every caller"). */
+export const ANSWERS_COLUMN = "Your questions";
+
+/**
+ * A call's answers in one cell: "question: answer" pairs joined with " | ". Each part is kept to one line, and a
+ * " | " inside one becomes " / " so the pairs stay apart. The cell is quoted and guarded like every other (cell).
+ */
+function answers(call: CallRecord): string | null {
+  const part = (text: string): string => text.replace(/\s+/g, " ").trim().replace(/ \| /g, " / ");
+  const pairs = (call.fields.extraAnswers ?? []).map((item) => `${part(item.question)}: ${part(item.answer)}`);
+  return pairs.length > 0 ? pairs.join(" | ") : null;
+}
+
+/**
+ * The shop's calls as a spreadsheet: date, caller name, callback number, address, problem, outcome. Newest first.
+ * One more column, the answers to the shop's own questions, only when a call in the export has any (a shop that
+ * never asked one gets the spreadsheet it always got).
+ */
 export function callsCsv(calls: CallRecord[], timeZone: string, now?: Date): string {
   const date = new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "numeric", minute: "2-digit" });
+  const withAnswers = calls.some((call) => (call.fields.extraAnswers ?? []).length > 0);
   const rows = [...calls]
     .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
     .map((call) => [
@@ -52,7 +70,8 @@ export function callsCsv(calls: CallRecord[], timeZone: string, now?: Date): str
       call.fields.address?.trim() || null,
       call.fields.problemDescription.trim() || null,
       outcome(call, now),
+      ...(withAnswers ? [answers(call)] : []),
     ].map(cell).join(","));
   // A byte-order mark so Excel opens the accents and dashes in callers' words correctly.
-  return `﻿${["Date", "Caller name", "Callback number", "Address", "Problem", "Outcome"].map(cell).join(",")}\r\n${rows.map((row) => `${row}\r\n`).join("")}`;
+  return `﻿${["Date", "Caller name", "Callback number", "Address", "Problem", "Outcome", ...(withAnswers ? [ANSWERS_COLUMN] : [])].map(cell).join(",")}\r\n${rows.map((row) => `${row}\r\n`).join("")}`;
 }

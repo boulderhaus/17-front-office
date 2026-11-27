@@ -1,4 +1,5 @@
 import type { Environment } from "../config/environment.js";
+import { callSteps } from "../domain/call-steps.js";
 import type { BusinessConfig } from "../domain/models.js";
 import { money } from "../domain/plans.js";
 
@@ -36,7 +37,8 @@ export function buildActivationReport(input: {
     check("calendar", "Google Calendar connected", input.googleConnected, input.googleConnected ? "Encrypted refresh credential is present." : "Connect Google Calendar before activation."),
     check("public_url", "Public HTTPS URL", env.PUBLIC_BASE_URL.startsWith("https://"), env.PUBLIC_BASE_URL),
     check("branding", "Customer business identity", !/your service business|north star heating/i.test(`${config.businessName} ${config.greeting}`), "Replace all demo/placeholder business identity before launch."),
-    check("service_area", "Service area configured", config.serviceAreaTerms.length > 0, "At least one city, ZIP, or service-area term is required."),
+    // A shop that switched the service-area check off (or takes no address at all) needs no cities to go live.
+    check("service_area", "Service area configured", config.serviceAreaTerms.length > 0 || !callSteps(config).checkServiceArea, callSteps(config).checkServiceArea ? "At least one city, ZIP, or service-area term is required." : "This shop takes a job at any address: no service area is needed."),
     check("services", "Service categories configured", config.serviceCategories.length > 0, "At least one owner-approved service category is required."),
     check("pricing_script", "Diagnostic-fee script", !config.requireDiagnosticFeeAcceptance || config.priceSnippets.length > 0, "Fee-gated booking requires exact owner-approved wording."),
     check("live_proof", "Live provider proof recorded", Boolean(env.LIVE_PROVIDER_PROOF_AT), env.LIVE_PROVIDER_PROOF_AT ?? "Run the live smoke checklist, then record its timestamp."),

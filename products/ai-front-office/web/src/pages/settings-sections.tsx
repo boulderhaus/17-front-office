@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type ReactNode } from "react"
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { Link, useLocation, useSearchParams } from "react-router-dom"
-import { CalendarDays, Check, CheckCircle2, ChevronDown, ChevronRight, CreditCard, Download, ExternalLink, Loader2, LogOut, Plus, X } from "lucide-react"
+import { CalendarDays, Check, CheckCircle2, ChevronDown, ChevronRight, CreditCard, Download, ExternalLink, Loader2, Lock, LogOut, Plus, X } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -23,6 +23,7 @@ import { recordingHint } from "@/lib/recording-hint"
 import { emergencyChoicesFor, joinEmergencies, joinServices, otherServicesProblem, splitEmergencies, splitServices, type Picks } from "@/lib/settings-picks"
 import { SMS_CONSENT_END, SMS_CONSENT_JOIN, SMS_CONSENT_LEAD, SMS_CONSENT_PRIVACY, SMS_CONSENT_TERMS } from "@/lib/sms-consent"
 import { forwardingOn } from "@/lib/line-status"
+import { joinQuestions, LOCKED_STEPS, MAX_QUESTION_LENGTH, MAX_QUESTIONS, questionLength, questionProblem, questionRows, questionsLine, STEP_ROWS, stepState, TRANSFER_ROW } from "@/lib/call-steps"
 import type { ApiSettings } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { NamesAndWords } from "@/components/app/say-it"
@@ -325,8 +326,109 @@ export function AnsweringSection() {
           </Link>
         )}
       </SettingsCard>
+      <CallStepsCard />
       <EmergenciesSection />
     </>
+  )
+}
+
+/**
+ * What Otto does on a call: each step of a call the owner can switch off, the two that are always on, and the
+ * owner's own questions. Saved with the page's Save button, like every other row here.
+ */
+function CallStepsCard() {
+  const { flag, set, settings } = useSettings()
+  // Live transfer shows only where it is turned on: never a switch that does nothing.
+  const rows = settings.integrations.warmTransferAvailable ? [...STEP_ROWS, TRANSFER_ROW] : STEP_ROWS
+  return (
+    <SettingsCard id="call-steps" title="What Otto does on a call" description="Switch a step off and Otto skips it on every call.">
+      <ul className="grid gap-4">
+        {LOCKED_STEPS.map((step) => (
+          <li key={step.key} className="flex items-start justify-between gap-4">
+            <span className="grid min-w-0 gap-0.5">
+              <span className="text-[15px] font-medium text-balance">{step.label}</span>
+              <span className="text-sm text-muted-foreground text-pretty">{step.line}</span>
+            </span>
+            <span className="mt-0.5 inline-flex shrink-0 items-center gap-1.5 text-sm font-medium text-muted-foreground"><Lock aria-hidden className="size-4" />Always on</span>
+          </li>
+        ))}
+        {rows.map((row) => {
+          const state = stepState(row, flag)
+          return <li key={row.field}><ToggleRow id={row.field} label={row.label} hint={state.hint} checked={state.checked} disabled={state.disabled} onChange={(value) => set(row.field, value)} /></li>
+        })}
+      </ul>
+      <CallQuestions />
+    </SettingsCard>
+  )
+}
+
+/** "Ask every caller": up to three short questions, one box each, with Add and Remove and the limit under each box. */
+function CallQuestions() {
+  const { text, set, flag, settings } = useSettings()
+  const max = settings.callSteps?.maxQuestions ?? MAX_QUESTIONS
+  const maxLength = settings.callSteps?.maxQuestionLength ?? MAX_QUESTION_LENGTH
+  const stored = text("customQuestions")
+  // Empty boxes are kept while editing; only filled ones are saved.
+  const [rows, setRows] = useState<string[]>(() => questionRows(stored))
+  // Saved or discarded from outside: show what's stored.
+  useEffect(() => { if (joinQuestions(rows) !== stored) setRows(questionRows(stored)) }, [stored]) // eslint-disable-line react-hooks/exhaustive-deps
+  const update = (next: string[]) => { setRows(next); set("customQuestions", joinQuestions(next)) }
+  return (
+    <div className="border-t pt-4"><fieldset className="grid gap-3">
+      <legend className="mb-1.5 grid gap-0.5">
+        <span className="text-[15px] font-medium">Ask every caller</span>
+        <span className="text-sm text-muted-foreground text-pretty">{questionsLine(max, flag("stepAskAddress"), flag("stepOfferTimes"))}</span>
+      </legend>
+      {rows.map((row, index) => {
+        const problem = questionProblem(row, maxLength)
+        // One empty box has nothing to remove, so it takes the full width.
+        const removable = rows.length > 1 || row.trim() !== ""
+        return (
+          <div key={index} className="grid grid-cols-[minmax(0,1fr)_2.75rem] gap-x-3 gap-y-1.5">
+            <label htmlFor={`question-${index}`} className="col-span-2 text-[15px] font-medium">Question {index + 1}</label>
+            <QuestionBox id={`question-${index}`} className={cn(!removable && "col-span-2")} value={row} placeholder={index === 0 ? "Do you own or rent the home?" : undefined} invalid={Boolean(problem)} describedBy={`question-${index}-help`}
+              onChange={(value) => update(rows.map((item, at) => (at === index ? value : item)))} />
+            {removable && <Button type="button" variant="ghost" size="icon" aria-label={`Remove question ${index + 1}`} className="size-11 text-muted-foreground" onClick={() => update(rows.length > 1 ? rows.filter((_, at) => at !== index) : [""])}><X className="size-5" /></Button>}
+            {problem
+              ? <p id={`question-${index}-help`} role="alert" className="col-span-2 text-sm font-medium text-red-700">{problem}</p>
+              : <p id={`question-${index}-help`} className="col-span-2 text-sm text-muted-foreground tabular-nums">{questionLength(row)} of {maxLength} characters</p>}
+          </div>
+        )
+      })}
+      {rows.length < max
+        ? <Button type="button" variant="outline" size="tap" className={actionClass} onClick={() => setRows([...rows, ""])}><Plus />Add a question</Button>
+        : <p className="text-sm text-muted-foreground">That’s all {max}. Remove one to add another.</p>}
+    </fieldset></div>
+  )
+}
+
+/**
+ * One question: a box that grows with its text, so the whole question shows on a phone (two lines to start there,
+ * one on a computer). Styled like the page's other fields. A question is one line: Enter adds no line break, and a
+ * pasted one becomes a space.
+ */
+function QuestionBox({ id, value, onChange, placeholder, invalid, describedBy, className }: { id: string; value: string; onChange: (value: string) => void; placeholder?: string | undefined; invalid: boolean; describedBy: string; className?: string }) {
+  const box = useRef<HTMLTextAreaElement>(null)
+  // Fit the height to the text on every change and when the box's width changes (not every browser sizes a text box to its content).
+  useLayoutEffect(() => {
+    const el = box.current
+    if (!el) return
+    const fit = () => {
+      el.style.height = "auto"
+      el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`
+    }
+    fit()
+    if (typeof ResizeObserver === "undefined") return
+    let width = el.clientWidth
+    const observer = new ResizeObserver(() => { if (el.clientWidth !== width) { width = el.clientWidth; fit() } })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [value])
+  return (
+    <Textarea ref={box} id={id} rows={1} value={value} placeholder={placeholder} enterKeyHint="done" aria-invalid={invalid ? true : undefined} aria-describedby={describedBy}
+      className={cn(areaClass, "min-h-[4.5rem] resize-none overflow-hidden py-2.5 sm:min-h-12", className)}
+      onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) event.preventDefault() }}
+      onChange={(event) => onChange(event.target.value.replace(/[\r\n]+/g, " "))} />
   )
 }
 

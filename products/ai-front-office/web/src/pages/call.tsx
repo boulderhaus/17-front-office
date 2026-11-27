@@ -7,7 +7,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
-import { ActionBar, CallBackNote, CallHeader, Facts, phoneFact, SafetyNote, SpamNote, Transcript } from "@/components/app/call-parts"
+import { ActionBar, addressFact, CallBackNote, CallHeader, ExtraAnswers, Facts, phoneFact, SafetyNote, SpamNote, Transcript } from "@/components/app/call-parts"
 import { CallPathCard, useLiveCallPath } from "@/components/app/call-path"
 import { useTaskTiles } from "./today"
 import { api, useApi } from "@/lib/api"
@@ -62,7 +62,7 @@ export function CallPage() {
   const bookedFor = booking?.requestedStart ? booking.status === "confirmed" : call.outcome === "booked"
   const facts: Array<[string, string]> = [
     phoneFact(call),
-    ["Address", call.fields.address?.trim() || "Not confirmed"],
+    ...addressFact(call, dashboard?.shop.asksAddress),
     ["Called", compactDate(call.startedAt, tz)],
     ["Length", minutes(call.durationSeconds)],
     ...(spam ? [] : [["Category", call.fields.serviceCategory ?? "Not classified"] as [string, string]]),
@@ -95,6 +95,7 @@ export function CallPage() {
       <ActionBar call={call} extra={spam ? [] : tiles(task, () => detail.reload())} reachNote={<CallBackNote call={call} />} />
       {detail.data.path && <CallPathCard path={detail.data.path} stale={pathStale} onRefresh={() => { setPathStale(false); void detail.reload() }} />}
       <Facts rows={facts} />
+      <ExtraAnswers call={call} />
       {detail.data.recordingUrl && (
         <section className="ph-no-capture grid gap-2">
           <h3 className="flex items-center gap-2 text-[15px] font-semibold"><Play className="size-4" />Recording</h3>

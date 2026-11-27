@@ -8,6 +8,7 @@ import { formatDaysOff, localDate, upcomingDaysOff, type DayOff } from "../domai
 import { fairUseCalls, type PlanId, type PriceQuote } from "../domain/plans.js";
 import { extraCalls } from "../domain/usage.js";
 import { COMPANY } from "../admin/footer.js";
+import { CALL_STEP_KEYS, callSteps, normalizeCallSteps, normalizeCustomQuestions, type CallStepKey } from "../domain/call-steps.js";
 import type { GuaranteeStatus } from "../application/billing-jobs.js";
 import type { BookingRecord, BusinessConfig, CallbackTask, CallRecord, OutboxNotification, OwnerAccount, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 
@@ -27,6 +28,8 @@ export interface ApiCall {
     equipmentDetails: string | null;
     accessNotes: string | null;
     requestedStart: string | null;
+    /** The caller's answers to the shop's own questions ("Ask every caller"); empty when there are none. */
+    extraAnswers: Array<{ question: string; answer: string }>;
   };
   emergency: { emergency: boolean; severity: "routine" | "urgent" | "life_safety"; immediateInstruction: string | null } | null;
   transcript: string | null;
@@ -118,6 +121,8 @@ export interface ApiDashboard {
     alertsOn: boolean;
     /** Texts can be sent at all (carrier approval is recorded). Until then every text switch waits. */
     textsLive: boolean;
+    /** False when the shop switched "Ask for the address" off: a call with no address is then complete. */
+    asksAddress: boolean;
     rulesSaved: boolean;
     greeting: string;
     hours: string;
@@ -185,6 +190,7 @@ export function apiCall(call: CallRecord): ApiCall {
       equipmentDetails: call.fields.equipmentDetails,
       accessNotes: call.fields.accessNotes,
       requestedStart: call.fields.requestedStart,
+      extraAnswers: (call.fields.extraAnswers ?? []).map(({ question, answer }) => ({ question, answer })),
     },
     emergency: call.emergency ? { emergency: call.emergency.emergency, severity: call.emergency.severity, immediateInstruction: call.emergency.immediateInstruction } : null,
     transcript: call.transcript,
@@ -247,7 +253,8 @@ export function apiDashboard(input: {
       pausedForBilling: c.pausedForBilling === true,
       alertsOn: textsOn(c, input.smsConsent === true),
       textsLive: input.textsLive === true,
-      rulesSaved: c.serviceAreaTerms.length > 0 && c.greeting.trim().length > 0,
+      asksAddress: callSteps(c).askAddress,
+      rulesSaved: (c.serviceAreaTerms.length > 0 || !callSteps(c).checkServiceArea) && c.greeting.trim().length > 0,
       greeting: c.greeting,
       hours: describeHours(c.bookableHours),
       daysOff: upcomingDaysOff(c.daysOff, localDate(new Date(input.now), c.timezone)),
@@ -480,12 +487,29 @@ export function apiSettings(config: BusinessConfig, now: Date = new Date()): Rec
     pronunciations: config.pronunciations.map((item) => `${item.term}: ${item.spokenAs}`).join("\n"),
     supportEmail: config.supportEmail ?? "",
     flatMonthlyPrice: String(Math.round(config.flatMonthlyPriceCents / 100)),
+    // "What Otto does on a call": the switches as saved (the app greys out the service-area check while the address is off).
+    ...Object.fromEntries(CALL_STEP_KEYS.map((key) => [CALL_STEP_FIELDS[key], normalizeCallSteps(config.callSteps)[key]])),
+    warmTransferEnabled: config.warmTransferEnabled === true,
+    customQuestions: normalizeCustomQuestions(config.customQuestions).join("\n"),
   };
 }
+
+/** The settings API's name for each "What Otto does on a call" switch (a boolean, both ways). */
+export const CALL_STEP_FIELDS: Readonly<Record<CallStepKey, string>> = {
+  screenSalesCalls: "stepScreenSalesCalls",
+  askAddress: "stepAskAddress",
+  checkServiceArea: "stepCheckServiceArea",
+  offerTimes: "stepOfferTimes",
+  quotePrices: "stepQuotePrices",
+  answerQuestions: "stepAnswerQuestions",
+};
+/** Switches whose "off" must be said out loud: left out, the saved choice stays (an app tab from before the card). */
+const ON_OFF_FIELDS = new Set([...Object.values(CALL_STEP_FIELDS), "warmTransferEnabled"]);
 
 // Not here on purpose: repeat-caller limits and call retention are fixed by Call Otto, not owner settings.
 const SETTINGS_FIELDS = new Set([
   "serviceState", "operationMode", "answerAfterRings", "weekends", "weekdayStart", "weekdayEnd", "holidayDates", "businessName", "timezone", "greeting", "recordingNotice", "serviceAreaTerms", "serviceCategories", "bookableWeekdayStart", "bookableWeekdayEnd", "defaultServiceDurationMinutes", "minimumLeadTimeMinutes", "bookableWeekends", "daysOff", "bookingMode", "requireDiagnosticFeeAcceptance", "priceSnippets", "approvedKnowledge", "ownerPhone", "ownerDailySmsEnabled", "ownerDailySmsHour", "ownerRealtimeSmsEnabled", "ownerWeeklyEmailEnabled", "usageAlertPercent", "emergencyKeywords", "emergencyThreshold", "pronunciations", "supportEmail", "flatMonthlyPrice",
+  ...ON_OFF_FIELDS, "customQuestions",
 ]);
 
 /**
@@ -497,6 +521,11 @@ export function settingsForm(body: unknown): URLSearchParams {
   const form = new URLSearchParams();
   for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
     if (!SETTINGS_FIELDS.has(key)) continue;
+    if (ON_OFF_FIELDS.has(key)) {
+      if (typeof value !== "boolean") throw new Error(`Invalid value for ${key}`);
+      form.set(key, value ? "on" : "off");
+      continue;
+    }
     if (value === true) form.set(key, "on");
     else if (value === false || value === null || value === undefined) continue;
     else if (typeof value === "string" || typeof value === "number") form.set(key, String(value));
