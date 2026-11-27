@@ -162,6 +162,7 @@ export function renderOwnerApp(input: {
       ...(call.fields.requestedStart ? [[call.outcome === "booked" ? "Booked for" : "Asked for", compactDate(call.fields.requestedStart, tz)] as [string, string]] : []),
       ...(call.fields.equipmentDetails ? [["Equipment", call.fields.equipmentDetails] as [string, string]] : []),
       ...(call.fields.accessNotes ? [["Access", call.fields.accessNotes] as [string, string]] : []),
+      ...(call.fields.extraAnswers ?? []).map((item) => [item.question, item.answer] as [string, string]),
     ];
     return `<section id="detail" class="fo-card fo-detail ${standalone ? "standalone" : ""}">${standalone ? `<a class="fo-back" href="${link(view)}">${ownerIcon("back")}Back</a>` : ""}<div class="fo-detail-head"><div><h2>${e(callerLabel(call))}</h2><p>${e(call.fields.problemDescription || "No problem summary captured")}</p></div><span class="fo-pill ${badge.cls}">${badge.label}</span></div>${call.emergency?.immediateInstruction ? `<p class="fo-safety">${ownerIcon("alert")}${e(call.emergency.immediateInstruction)}</p>` : ""}<div class="fo-detail-actions">${phone ? `<a class="fo-btn" href="tel:${e(phone)}">${ownerIcon("phone")}Call back</a><a class="fo-ghost" href="sms:${e(phone)}">Text</a>` : ""}${address ? `<a class="fo-ghost" href="https://www.google.com/maps/search/?api=1&amp;query=${encodeURIComponent(address)}" target="_blank" rel="noreferrer">${ownerIcon("map")}Map</a>` : ""}</div><dl class="fo-facts">${facts.map(([key, value]) => `<div><dt>${e(key)}</dt><dd>${e(value)}</dd></div>`).join("")}</dl><details class="fo-transcript"><summary>Read the call</summary><p>${e(call.transcript ?? "Transcript unavailable")}</p></details>${preview ? "" : `<a class="fo-link" href="/app/calls/${encodeURIComponent(call.id)}">Full record, recording &amp; delete</a>`}</section>`;
   };
@@ -246,6 +247,7 @@ export function renderOwnerCallRecord(input: {
     ...(input.booking?.requestedStart ? [[input.booking.status === "confirmed" ? "Booked for" : "Asked for", compactDate(input.booking.requestedStart, tz)] as [string, string]] : []),
     ...(call.fields.equipmentDetails ? [["Equipment", call.fields.equipmentDetails] as [string, string]] : []),
     ...(call.fields.accessNotes ? [["Access", call.fields.accessNotes] as [string, string]] : []),
+    ...(call.fields.extraAnswers ?? []).map((item) => [item.question, item.answer] as [string, string]),
     ...(task ? [["Follow-up", `${e(ownerTaskReason(task.reason))} · ${task.status === "completed" ? "handled" : `due ${compactDate(task.dueAt, tz)}`}`] as [string, string]] : []),
   ];
   const alerts = input.notifications.filter((item) => item.channel === "sms").map((item) => `<li><span>${item.priority === "high" ? "Urgent text" : "Text"}</span><span>${e(notificationWords(item.state))}</span></li>`).join("");

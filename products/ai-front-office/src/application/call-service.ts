@@ -13,6 +13,7 @@ import type {
 import { evaluateServiceArea, isInServiceArea, slotWithinBookableHours } from "../domain/config.js";
 import { slotTouchesDayOff } from "../domain/days-off.js";
 import { triageEmergency } from "../domain/triage.js";
+import { callSteps, feeAcceptanceRequired, mergeExtraAnswers, normalizeCustomQuestions, pairExtraAnswers } from "../domain/call-steps.js";
 import { audioRecordingEnabled, WRAP_UP_AFTER_SECONDS } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import { BookingCoordinator } from "./booking-coordinator.js";
@@ -45,6 +46,11 @@ export const AVAILABILITY_TRY_TIMEOUT_MS = 1_700;
 /** No calendar connected, or it failed: take the details, never a time. */
 export const CALENDAR_UNAVAILABLE_MESSAGE = "No calendar time can be offered. Never suggest a time. Ask what day and time suits them, put it in save_intake access_notes (\"Prefers: ...\"), and say the owner will confirm it.";
 export const NO_SLOTS_MESSAGE = "Nothing open then. If you have not yet, call check_availability once more with a window from the next day to a week out, and offer those. If still none, never suggest a time: ask what day and time suits them, put it in save_intake access_notes (\"Prefers: ...\"), and say the owner will confirm it.";
+
+/** check_availability or book_slot for a shop that switched "Offer open times" off ("What Otto does on a call"). */
+export const TIMES_OFF_MESSAGE = "This shop does not book over the phone. Never offer, suggest or confirm a time. Put when they'd like it in save_intake access_notes (\"Prefers: ...\") and say the owner will call back to set it up.";
+/** The calendar event's place for a shop that takes no address: left empty, never a made-up one. */
+const NO_ADDRESS_PLACE = "";
 
 type BookSlotResult = { status: "confirmed" | "pending" | "conflict" | "unknown"; message: string };
 
@@ -284,12 +290,17 @@ export class CallService {
       callback: /^\+[1-9]\d{7,14}$/.test(fields.callbackNumber ?? call.fromNumber),
       address: Boolean(fields.address?.trim()),
     });
+    // "What Otto does on a call": a shop that takes no address is never told one is missing, and the shop's own
+    // questions ("Ask every caller") count as missing until answered (never in an emergency).
+    const steps = callSteps(config);
+    const answered = new Set((fields.extraAnswers ?? []).map((item) => item.question));
     const missing = [
       !fields.callerName?.trim() ? "caller_name" : null,
       !/^\+[1-9]\d{7,14}$/.test(fields.callbackNumber ?? call.fromNumber) ? "callback_number" : null,
-      !fields.address?.trim() ? "service_address" : null,
+      steps.askAddress && !fields.address?.trim() ? "service_address" : null,
       !fields.problemDescription.trim() ? "problem_description" : null,
       !fields.serviceCategory?.trim() ? "service_category" : null,
+      ...(emergency.emergency ? [] : normalizeCustomQuestions(config.customQuestions).map((question, index) => (answered.has(question) ? null : `extra_answer_${index + 1}`))),
     ].filter((value): value is string => value !== null);
     // The model has no clock; the soft five-minute limit rides on tool results.
     return { status: "saved", missing, wrap_up: this.wrapUpFor((await this.store.getCallByProviderId(input.providerCallId)) ?? call) };
@@ -306,6 +317,7 @@ export class CallService {
     signal?.throwIfAborted();
     const config = await this.store.getConfig(input.tenantId);
     const call = await this.ensureCall(input.tenantId, input.providerCallId, "unknown", this.clock.now().toISOString());
+    if (!callSteps(config).offerTimes) return { slots: [], status: "pending", message: TIMES_OFF_MESSAGE, spokenSummary: null, timezone: config.timezone };
     if (call.emergency?.emergency) return { slots: [], status: "pending", message: "Emergency escalation is active. Do not offer appointments; the owner has been alerted.", spokenSummary: null, timezone: config.timezone };
     const windowError = validateAvailabilityWindow(input.windowStart, input.windowEnd, this.clock.now());
     if (windowError) {
@@ -407,7 +419,8 @@ export class CallService {
     slotStart: string;
     callerName: string;
     callbackNumber: string;
-    address: string;
+    /** Absent only for a shop that takes no address ("What Otto does on a call"). */
+    address?: string | undefined;
     serviceCategory: string;
     problemDescription: string;
     explicitConfirmation: boolean;
@@ -433,6 +446,10 @@ export class CallService {
     const config = await this.store.getConfig(input.tenantId);
     let call = await this.store.getCallByProviderId(input.providerCallId);
     if (!call || call.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
+    const steps = callSteps(config);
+    // The shop switched booking off: nothing is saved as a requested time and nothing reaches the calendar.
+    if (!steps.offerTimes) return { status: "pending", message: TIMES_OFF_MESSAGE };
+    const address = input.address?.trim() ? input.address : null;
     // Already booked on this call (the model asking again, maybe for another time): one short, final line.
     const booked = await this.store.getBookingForCall(call.id);
     if (booked?.status === "confirmed" && booked.requestedStart) {
@@ -445,7 +462,7 @@ export class CallService {
         ...call.fields,
         callerName: input.callerName,
         callbackNumber: isAllowedCustomerNumber(input.callbackNumber) ? input.callbackNumber : call.fields.callbackNumber,
-        address: input.address,
+        address: address ?? call.fields.address,
         serviceCategory: input.serviceCategory,
         serviceCategoryConfidence: 1,
         problemDescription: input.problemDescription,
@@ -473,7 +490,8 @@ export class CallService {
     if (!input.explicitConfirmation) return { status: "pending", message: "Do not book until the caller explicitly confirms the offered slot." };
     if (!isAllowedCustomerNumber(input.callbackNumber)) return { status: "pending", message: "The callback number is not confirmed. Queue owner follow-up instead of booking." };
     if (!isConfiguredServiceCategory(input.serviceCategory, config)) return { status: "pending", message: "The requested service is not an owner-approved category. Queue owner confirmation." };
-    if (!isInServiceArea(input.address, config)) return { status: "pending", message: "The address may be outside the service area. Queue owner confirmation." };
+    if (steps.askAddress && !address) return { status: "pending", message: "The service address is missing. Ask for it, then book again." };
+    if (steps.checkServiceArea && !isInServiceArea(address, config)) return { status: "pending", message: "The address may be outside the service area. Queue owner confirmation." };
     const slotStart = Date.parse(input.slotStart);
     if (!Number.isFinite(slotStart) || slotStart < this.clock.now().getTime()) {
       return { status: "pending", message: "That time is invalid or in the past. Do not save or promise it; check current availability again." };
@@ -506,11 +524,13 @@ export class CallService {
     };
     input.signal?.throwIfAborted();
     await this.store.saveCall(call);
-    if (config.requireDiagnosticFeeAcceptance && config.priceSnippets.length === 0) {
+    // The fee question follows "Quote my prices": with prices off Otto can't read the fee, so it isn't asked.
+    const feeRequired = feeAcceptanceRequired(config);
+    if (feeRequired && config.priceSnippets.length === 0) {
       await this.queuePendingBooking(call, input.slotStart, config, "No owner-approved diagnostic fee is configured");
       return { status: "pending", message: "No owner-approved diagnostic fee is configured. Queue owner confirmation instead of booking." };
     }
-    if (config.requireDiagnosticFeeAcceptance && !input.diagnosticFeeAccepted) {
+    if (feeRequired && !input.diagnosticFeeAccepted) {
       await this.queuePendingBooking(call, input.slotStart, config, "Diagnostic fee was not explicitly accepted");
       return { status: "pending", message: "Do not book until the caller explicitly accepts the owner-approved diagnostic fee." };
     }
@@ -536,7 +556,7 @@ export class CallService {
         durationMinutes: config.defaultServiceDurationMinutes,
         callerName: input.callerName,
         callbackNumber: input.callbackNumber,
-        address: input.address,
+        address: address ?? NO_ADDRESS_PLACE,
         problemDescription: input.problemDescription,
       }, { signal: input.signal });
     } catch (error) {
@@ -710,7 +730,14 @@ export class CallService {
     const saveUnfinished = (record: CallRecord): Promise<void> => this.store.saveCall({ ...record, endedAt: priorEndedAt, qualityFlags: priorFlags });
     // A callback number the model wrote its own way ("941-555-0110", "same number") must never replace the number
     // that called: keep it only when it is a real number, in the one form every screen and text can use.
-    const fields = mergeCollectedFields(call.fields, { ...input.fields, callbackNumber: normalizeCustomerNumber(input.fields.callbackNumber) });
+    const steps = callSteps(config);
+    // The shop's own questions: answers the provider's history shows (by position) fill in any a mid-call save missed.
+    const slotAnswers = input.extraAnswerSlots ? pairExtraAnswers(normalizeCustomQuestions(config.customQuestions), input.extraAnswerSlots) : [];
+    const fields = mergeCollectedFields(call.fields, {
+      ...input.fields,
+      callbackNumber: normalizeCustomerNumber(input.fields.callbackNumber),
+      ...(slotAnswers.length > 0 || input.fields.extraAnswers ? { extraAnswers: mergeExtraAnswers(slotAnswers, input.fields.extraAnswers) } : {}),
+    });
     // Triage what the caller said, never the assistant's own screening questions.
     const rawSafetyText = [fields.problemDescription, callerSpeech(input.transcript ?? call.transcript)].filter(Boolean).join("\n");
     const emergency = mergeEmergencyDecision(
@@ -766,6 +793,7 @@ export class CallService {
     const onDayOff = Number.isFinite(requestedMs)
       && slotTouchesDayOff(new Date(requestedMs), new Date(requestedMs + config.defaultServiceDurationMinutes * 60_000), config.timezone, config.daysOff);
     const canAttemptDirectBooking = config.bookingMode === "direct"
+      && steps.offerTimes
       && !emergency.emergency
       && !call.fields.humanRequested
       && Boolean(call.fields.requestedStart)
@@ -774,11 +802,11 @@ export class CallService {
       && !onDayOff
       && latestOffered
       && call.fields.explicitSlotConfirmation
-      && (!config.requireDiagnosticFeeAcceptance || (config.priceSnippets.length > 0 && call.fields.diagnosticFeeAccepted))
+      && (!feeAcceptanceRequired(config) || (config.priceSnippets.length > 0 && call.fields.diagnosticFeeAccepted))
       && Boolean(call.fields.callerName?.trim())
       && isAllowedCustomerNumber(call.fields.callbackNumber ?? call.fromNumber)
-      && Boolean(call.fields.address?.trim())
-      && isInServiceArea(call.fields.address, config)
+      && (!steps.askAddress || Boolean(call.fields.address?.trim()))
+      && (!steps.checkServiceArea || isInServiceArea(call.fields.address, config))
       && isConfiguredServiceCategory(call.fields.serviceCategory, config)
       && Boolean(call.fields.problemDescription.trim());
     if (!booking && canAttemptDirectBooking && !repair) {
@@ -790,10 +818,10 @@ export class CallService {
         durationMinutes: config.defaultServiceDurationMinutes,
         callerName: call.fields.callerName ?? "Caller",
         callbackNumber: call.fields.callbackNumber ?? call.fromNumber,
-        address: call.fields.address ?? "Address not confirmed",
+        address: call.fields.address ?? (steps.askAddress ? "Address not confirmed" : NO_ADDRESS_PLACE),
         problemDescription: call.fields.problemDescription,
       });
-    } else if (!booking && call.fields.requestedStart && call.fields.explicitSlotConfirmation && !emergency.emergency) {
+    } else if (!booking && steps.offerTimes && call.fields.requestedStart && call.fields.explicitSlotConfirmation && !emergency.emergency) {
       booking = await this.queuePendingBooking(call, call.fields.requestedStart, config,
         config.bookingMode === "confirm" ? "Owner confirmation mode is active"
           // A repair never writes to the calendar: the owner confirms the time the caller asked for.
@@ -916,12 +944,14 @@ export class CallService {
     if (!call.recordingUrl && audioRecordingEnabled(config)) flags.push("recording_missing");
     if (!call.fields.callerName?.trim()) flags.push("caller_name_missing");
     if (!isAllowedCustomerNumber(call.fields.callbackNumber ?? call.fromNumber)) flags.push("callback_number_invalid");
-    if (!call.fields.address?.trim()) flags.push("service_address_missing");
+    // "What Otto does on a call": a step the shop switched off is never a gap in the call.
+    const steps = callSteps(config);
+    if (steps.askAddress && !call.fields.address?.trim()) flags.push("service_address_missing");
     if (!call.fields.problemDescription.trim()) flags.push("problem_description_missing");
     if (!call.fields.serviceCategory?.trim()) flags.push("service_category_missing");
-    if (config.requireDiagnosticFeeAcceptance && !call.fields.diagnosticFeeAccepted) flags.push("diagnostic_fee_not_accepted");
-    if (booking?.status !== "confirmed" || !booking.writeVerifiedAt) flags.push("system_write_not_verified");
-    if (config.customerSmsEnabled && !confirmationQueued) flags.push("customer_confirmation_not_queued");
+    if (steps.offerTimes && feeAcceptanceRequired(config) && !call.fields.diagnosticFeeAccepted) flags.push("diagnostic_fee_not_accepted");
+    if (steps.offerTimes && (booking?.status !== "confirmed" || !booking.writeVerifiedAt)) flags.push("system_write_not_verified");
+    if (steps.offerTimes && config.customerSmsEnabled && !confirmationQueued) flags.push("customer_confirmation_not_queued");
     return [...new Set(flags)];
   }
 
@@ -1054,6 +1084,7 @@ export class CallService {
     await this.store.enqueueNotification(ownerCallEmailNotification({
       tenantId: call.tenantId, callId: call.id, email: account.email, smsBody,
       settingsUrl: `${this.publicBaseUrl.replace(/\/$/, "")}/app/settings`, high, keyBase, now,
+      extraAnswers: call.fields.extraAnswers,
     }));
   }
 
@@ -1176,6 +1207,8 @@ function mergeCollectedFields(existing: CollectedCallFields, incoming: Collected
     diagnosticFeeAccepted: existing.diagnosticFeeAccepted || incoming.diagnosticFeeAccepted,
     humanRequested: existing.humanRequested || incoming.humanRequested,
     confidence: Math.max(existing.confidence, incoming.confidence),
+    // Only once a caller answered one of the shop's own questions; a call without any keeps no such field.
+    ...(existing.extraAnswers?.length || incoming.extraAnswers?.length ? { extraAnswers: mergeExtraAnswers(existing.extraAnswers, incoming.extraAnswers) } : {}),
   };
 }
 
@@ -1195,6 +1228,7 @@ function completePartialFields(fields: Partial<CollectedCallFields>): CollectedC
     diagnosticFeeAccepted: fields.diagnosticFeeAccepted ?? false,
     humanRequested: fields.humanRequested ?? false,
     confidence: fields.confidence ?? 0,
+    ...(fields.extraAnswers?.length ? { extraAnswers: fields.extraAnswers } : {}),
   };
 }
 

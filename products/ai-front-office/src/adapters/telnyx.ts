@@ -216,6 +216,7 @@ export function toTelnyxCallSummary(
   const startedAt = firstMessageAt ?? (durationSeconds === null
     ? endedAt
     : new Date(Date.parse(endedAt) - durationSeconds * 1_000).toISOString());
+  const extraAnswerSlots = [1, 2, 3].map((slot) => text(`extra_answer_${slot}`));
   const llmEmergencyScore = numeric("llm_score") ?? numeric("emergency_score");
   const llmEmergencyReason = text("llm_reason") ?? text("emergency_reason");
   return {
@@ -232,6 +233,8 @@ export function toTelnyxCallSummary(
     consentState: bool("recording_disclosure_declined") ? "declined" : bool("recording_disclosure_given") ? "disclosed" : "unknown",
     ...(llmEmergencyScore === undefined ? {} : { llmEmergencyScore }),
     ...(llmEmergencyReason === null ? {} : { llmEmergencyReason }),
+    // "Ask every caller": answers by position; finalize pairs them with the shop's questions.
+    ...(extraAnswerSlots.some(Boolean) ? { extraAnswerSlots } : {}),
   };
 }
 

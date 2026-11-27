@@ -4,6 +4,8 @@
  * unreadable. So every failure is a short, plain-English result the model can act on, and each tool
  * has a per-call budget after which it gets a fixed "stop, take a message" result.
  */
+import type { CallStepKey } from "../domain/call-steps.js";
+
 export type VoiceToolName =
   | "save_intake"
   | "get_approved_answer"
@@ -47,7 +49,8 @@ export const TOOL_DEADLINE_MS = 4_000;
 
 export interface ToolFailure {
   ok: false;
-  status: "unavailable" | "limit_reached";
+  /** switched_off: the shop turned this step off in "What Otto does on a call"; not a failure of the tool. */
+  status: "unavailable" | "limit_reached" | "switched_off";
   /** One short line the assistant can say to the caller. */
   say: string;
   /** What the assistant does next. */
@@ -102,6 +105,41 @@ export function toolLimitReached(tool: VoiceToolName): ToolFailure {
     say: tool === "save_intake" ? "Got it." : "Let me have the owner follow up on that; the owner will get back to you.",
     instruction: `Do not call ${tool} again on this call. Never invent times, prices or answers. Take a message: save the intake, tell the caller the owner will follow up, and wrap up.`,
   };
+}
+
+const SWITCHED_OFF: Readonly<Record<CallStepKey, { say: string; instruction: string }>> = {
+  screenSalesCalls: {
+    say: "Sorry about that. How can I help?",
+    instruction: "This shop takes a message from every caller. The call was not marked as spam: do not hang up and do not call mark_spam_call again. Take a name, a number and a short message, and save it with save_intake.",
+  },
+  askAddress: {
+    say: "Okay.",
+    instruction: "This shop does not take an address. Do not ask for one; continue the intake.",
+  },
+  checkServiceArea: {
+    say: "Okay.",
+    instruction: "This shop does not check its service area. Do not call check_service_area again and never say an address is outside the area; continue the intake.",
+  },
+  offerTimes: {
+    say: "The owner will call you back to set up a time.",
+    instruction: "This shop does not book over the phone. Do not call check_availability or book_slot again, and never offer, suggest or confirm a time. Save the details with save_intake and continue.",
+  },
+  quotePrices: {
+    say: "The owner will go over pricing when they call you back.",
+    instruction: "This shop does not quote prices over the phone. Never quote or estimate a price and do not ask get_approved_answer for one again. Note the question with save_intake and continue.",
+  },
+  answerQuestions: {
+    say: "The owner will answer that when they call you back.",
+    instruction: "This shop takes a message for questions like this. Do not answer it and do not ask get_approved_answer for an answer again. Note the question with save_intake and continue.",
+  },
+};
+
+/**
+ * The result when a shop switched this tool's step off ("What Otto does on a call") and the tool is called anyway:
+ * the same ok=false shape, with a line to say and what to do next. Its status is not a failed one: nothing broke.
+ */
+export function toolSwitchedOff(step: CallStepKey): ToolFailure {
+  return { ok: false, status: "switched_off", ...SWITCHED_OFF[step] };
 }
 
 /**
