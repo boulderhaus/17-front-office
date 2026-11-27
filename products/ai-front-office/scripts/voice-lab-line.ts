@@ -11,11 +11,11 @@ import { createDemoConfig } from "../src/domain/config.js";
 import type { BusinessConfig } from "../src/domain/models.js";
 import { PLATFORM_TENANT_ID, type Store } from "../src/ports.js";
 import { buildTelnyxAssistantUpdate } from "../src/voice/system-prompt.js";
-import { buildShopAssistantPayload, speechToSpeechSettings } from "../src/voice/voice-mode.js";
+import { buildShopAssistantPayload, isSpeechToSpeechTenant, speechToSpeechSettings, type VoiceFallback } from "../src/voice/voice-mode.js";
 
 /**
  * The voice lab line: one complimentary lab shop on a number already on our Telnyx account, in the shop's configured
- * voice mode (TELNYX_S2S_TENANT_IDS, src/voice/voice-mode.ts), to compare by ear with a normal line. Never buys a
+ * voice mode (TELNYX_VOICE_MODE and TELNYX_S2S_TENANT_IDS, src/voice/voice-mode.ts), to compare by ear with a normal line. Never buys a
  * number. Dry run by default; --apply changes things. Run with the server's env, e.g.
  *   railway run node --import tsx scripts/voice-lab-line.ts --create-tenant [--apply]
  *   railway run node --import tsx scripts/voice-lab-line.ts --tenant <tenant id> --number-id <Telnyx number id> [--apply]
@@ -28,7 +28,7 @@ export const LAB_BUSINESS_NAME = "Otto Lab Plumbing";
 
 export interface LabDeps {
   store: Store;
-  env: Pick<Environment, "TELNYX_API_KEY" | "TELNYX_ASSISTANT_ID" | "TELNYX_TEMPLATE_ASSISTANT_ID" | "TELNYX_MESSAGING_PROFILE_ID" | "TELNYX_VOICEMAIL_APP_ID" | "TELNYX_FROM_NUMBER" | "TELNYX_VOICE" | "PUBLIC_BASE_URL" | "DEFAULT_TENANT_ID" | "PUBLIC_DEMO_TENANT_ID" | "TELNYX_S2S_TENANT_IDS" | "TELNYX_S2S_MODEL" | "TELNYX_S2S_VOICE" | "TELNYX_S2S_BACKEND_MODEL">;
+  env: Pick<Environment, "TELNYX_API_KEY" | "TELNYX_ASSISTANT_ID" | "TELNYX_TEMPLATE_ASSISTANT_ID" | "TELNYX_MESSAGING_PROFILE_ID" | "TELNYX_VOICEMAIL_APP_ID" | "TELNYX_FROM_NUMBER" | "TELNYX_VOICE" | "PUBLIC_BASE_URL" | "DEFAULT_TENANT_ID" | "PUBLIC_DEMO_TENANT_ID" | "TELNYX_S2S_TENANT_IDS" | "TELNYX_S2S_MODEL" | "TELNYX_S2S_VOICE" | "TELNYX_S2S_BACKEND_MODEL" | "TELNYX_VOICE_MODE" | "TELNYX_STANDARD_TENANT_IDS">;
   fetcher?: typeof fetch | undefined;
   now?: (() => Date) | undefined;
 }
@@ -141,7 +141,7 @@ export async function planLabLine(deps: LabDeps, input: { tenantId: string; numb
  * the number off the cancelled shop that held it, set the call-end callback, save the line on the lab shop the way
  * go-live does, and point the number at the assistant. Idempotent: a rerun updates the assistant and changes nothing else.
  */
-export async function applyLabLine(deps: LabDeps, plan: LabLinePlan): Promise<{ assistantId: string; mode: string; cut: string[] }> {
+export async function applyLabLine(deps: LabDeps, plan: LabLinePlan): Promise<{ assistantId: string; mode: string; cut: string[]; fallback?: VoiceFallback }> {
   const { store, env } = deps;
   const apiKey = env.TELNYX_API_KEY!;
   const config = await store.getConfig(plan.tenantId);
@@ -160,6 +160,7 @@ export async function applyLabLine(deps: LabDeps, plan: LabLinePlan): Promise<{ 
   const built = buildShopAssistantPayload(config, env.PUBLIC_BASE_URL, { voice: env.TELNYX_VOICE, speechToSpeech, existing });
   mode = built.mode;
   cut = built.cut;
+  const fallback = built.fallback;
   await telnyx(deps, `/ai/assistants/${encodeURIComponent(assistantId)}`, { method: "POST", body: JSON.stringify(built.payload) });
 
   // Recorded before anything moves, so the grace sweep or a delete never releases the number mid-way.
@@ -193,7 +194,7 @@ export async function applyLabLine(deps: LabDeps, plan: LabLinePlan): Promise<{ 
   await store.saveProviderRoute({ provider: "telnyx", externalId: assistantId, tenantId: plan.tenantId, createdAt: route?.createdAt ?? now, updatedAt: now });
   await routing(deps, plan.phoneNumber, assistantId).setPaused(false);
   await store.withLock(`config:${plan.tenantId}`, async () => store.saveConfig({ ...await store.getConfig(plan.tenantId), paused: false }));
-  return { assistantId, mode, cut };
+  return { assistantId, mode, cut, ...(fallback ? { fallback } : {}) };
 }
 
 /** Put the number back as it was found, give it back to the shop that held it, delete the lab assistant. */
@@ -291,9 +292,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       if (!tenantId || !numberId) throw new Error("Usage: --create-tenant | --tenant <id> --number-id <id> | --remove, each with optional --apply");
       const plan = await planLabLine(deps, { tenantId, numberId });
       const s2s = speechToSpeechSettings(env);
-      const summary = { tenantId: plan.tenantId, number: masked(plan.phoneNumber), currentConnectionId: plan.currentConnectionId, holderTenantId: plan.holderTenantId, holderKeys: plan.holderKeys, assistantId: plan.assistantId, voiceMode: s2s.tenantIds.includes(plan.tenantId) ? "speech_to_speech" : "standard" };
+      const summary = { tenantId: plan.tenantId, number: masked(plan.phoneNumber), currentConnectionId: plan.currentConnectionId, holderTenantId: plan.holderTenantId, holderKeys: plan.holderKeys, assistantId: plan.assistantId, voiceMode: isSpeechToSpeechTenant(s2s, plan.tenantId) ? "speech_to_speech" : "standard" };
       if (!apply) console.log(JSON.stringify({ mode: "dry_run", ...summary }));
-      else { const result = await applyLabLine(deps, plan); console.log(JSON.stringify({ mode: "applied", ...summary, assistantId: result.assistantId, voiceMode: result.mode, cut: result.cut })); }
+      else { const result = await applyLabLine(deps, plan); console.log(JSON.stringify({ mode: "applied", ...summary, assistantId: result.assistantId, voiceMode: result.mode, fallback: result.fallback ?? null, cut: result.cut })); }
     }
   } catch (error) {
     console.error(JSON.stringify({ refused: error instanceof LabRefusal, error: error instanceof Error ? error.message : String(error) }));

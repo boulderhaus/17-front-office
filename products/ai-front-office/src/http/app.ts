@@ -2929,7 +2929,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         try {
           assistantId = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "provisioned_assistant_id");
           if (!assistantId) {
-            assistantId = await provisioner.createAssistant({ tenantId: account.tenantId, businessName: config.businessName, assistantUpdate: buildTelnyxAssistantUpdate(config, dependencies.env.PUBLIC_BASE_URL, { voice: dependencies.env.TELNYX_VOICE }), speechToSpeech: speechToSpeechSettings(dependencies.env) });
+            assistantId = await provisioner.createAssistant({
+              tenantId: account.tenantId, businessName: config.businessName, assistantUpdate: buildTelnyxAssistantUpdate(config, dependencies.env.PUBLIC_BASE_URL, { voice: dependencies.env.TELNYX_VOICE }), speechToSpeech: speechToSpeechSettings(dependencies.env),
+              // Which voice the new shop got: a shop the default can't make speech-to-speech is standard, with the reason.
+              onVoice: (voice) => { if (voice.mode !== "standard" || voice.fallback || voice.rollback) log({ level: voice.fallback ? "warn" : "info", event: "assistant_voice_mode", tenantId: account.tenantId, mode: voice.mode, fallback: voice.fallback ?? null, rollback: voice.rollback, cut: voice.cut }); },
+            });
             await dependencies.store.saveIntegrationSecret(account.tenantId, "telnyx", "provisioned_assistant_id", assistantId);
           }
           inboundNumber = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number");

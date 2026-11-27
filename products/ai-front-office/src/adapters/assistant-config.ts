@@ -2,18 +2,20 @@ import type { Environment } from "../config/environment.js";
 import type { BusinessConfig } from "../domain/models.js";
 import type { Store } from "../ports.js";
 import { buildTelnyxAssistantUpdate } from "../voice/system-prompt.js";
-import { buildShopAssistantPayload, isSpeechToSpeechTenant, speechToSpeechSettings } from "../voice/voice-mode.js";
+import { buildShopAssistantPayload, isSpeechToSpeechTenant, speechToSpeechSettings, type ShopAssistantPayload } from "../voice/voice-mode.js";
 import { withTimeout } from "../application/retry.js";
 import { TelnyxVoiceRoutingClient } from "./telnyx.js";
 
+type Log = (entry: Record<string, unknown>) => void;
+
 /** Never show saved rules while the live assistant still has different rules. */
-export async function saveAssistantConfig(store: Store, env: Environment, config: BusinessConfig, fetcher: typeof fetch = fetch): Promise<void> {
+export async function saveAssistantConfig(store: Store, env: Environment, config: BusinessConfig, fetcher: typeof fetch = fetch, log: Log = (entry) => console.log(JSON.stringify(entry))): Promise<void> {
   // Callers serialize read/modify/write under config:<tenant>. Also serialize
   // the external update and rollback so provider revisions cannot interleave.
-  return store.withLock(`assistant-config:${config.tenantId}`, () => synchronize(store, env, config, fetcher));
+  return store.withLock(`assistant-config:${config.tenantId}`, () => synchronize(store, env, config, fetcher, log));
 }
 
-async function synchronize(store: Store, env: Environment, config: BusinessConfig, fetcher: typeof fetch): Promise<void> {
+async function synchronize(store: Store, env: Environment, config: BusinessConfig, fetcher: typeof fetch, log: Log): Promise<void> {
   const current = await store.getConfig(config.tenantId);
   const route = await store.getProviderRouteForTenant("telnyx", config.tenantId);
   const assistantId = route?.externalId ?? (config.tenantId === env.DEFAULT_TENANT_ID ? env.TELNYX_ASSISTANT_ID : undefined);
@@ -22,16 +24,22 @@ async function synchronize(store: Store, env: Environment, config: BusinessConfi
     if (!env.TELNYX_API_KEY) throw new Error("Voice configuration is unavailable");
     const url = `https://api.telnyx.com/v2/ai/assistants/${encodeURIComponent(assistantId)}`;
     const headers = { authorization: `Bearer ${env.TELNYX_API_KEY}`, "content-type": "application/json" };
-    let body: Record<string, unknown>;
     const s2s = speechToSpeechSettings(env);
-    if (isSpeechToSpeechTenant(s2s, value.tenantId) && value.tenantId !== env.DEFAULT_TENANT_ID) {
-      // Opt-in speech-to-speech shop (src/voice/voice-mode.ts): read the assistant for its backend text model.
-      const current = await withTimeout(fetcher(url, { headers }), 8_000);
-      if (!current.ok) throw new Error(`Voice configuration read failed with HTTP ${current.status}`);
-      body = buildShopAssistantPayload(value, env.PUBLIC_BASE_URL, { voice: env.TELNYX_VOICE, speechToSpeech: s2s, existing: await current.json() as Record<string, unknown> }).payload;
-    } else {
-      body = buildTelnyxAssistantUpdate(value, env.PUBLIC_BASE_URL, { voice: env.TELNYX_VOICE });
+    const read = async (): Promise<Record<string, unknown>> => {
+      const found = await withTimeout(fetcher(url, { headers }), 8_000);
+      if (!found.ok) throw new Error(`Voice configuration read failed with HTTP ${found.status}`);
+      return await found.json() as Record<string, unknown>;
+    };
+    const build = (existing: Record<string, unknown>): ShopAssistantPayload => buildShopAssistantPayload(value, env.PUBLIC_BASE_URL, { voice: env.TELNYX_VOICE, speechToSpeech: s2s, existing });
+    let built: ShopAssistantPayload | null = null;
+    if (isSpeechToSpeechTenant(s2s, value.tenantId) || s2s.defaultMode === "speech_to_speech") {
+      // Speech-to-speech by default or by the opt-in list (src/voice/voice-mode.ts), the demo line included: read the
+      // assistant for its backend text model. A shop the default can't make speech-to-speech, or one opted out, gets
+      // the standard payload, with its text model back when its assistant is still in speech-to-speech mode.
+      built = build(await read());
     }
+    if (built && (built.fallback || built.rollback)) log({ level: built.fallback ? "warn" : "info", event: "assistant_voice_mode", tenantId: value.tenantId, mode: built.mode, fallback: built.fallback ?? null, rollback: built.rollback });
+    const body = built?.payload ?? buildTelnyxAssistantUpdate(value, env.PUBLIC_BASE_URL, { voice: env.TELNYX_VOICE });
     const response = await withTimeout(fetcher(url, { method: "POST", headers, body: JSON.stringify(body) }), 8_000);
     if (!response.ok) throw new Error(`Voice configuration update failed with HTTP ${response.status}`);
   };

@@ -1,5 +1,5 @@
 import { withTimeout } from "../application/retry.js";
-import { resolveVoiceMode, speechToSpeechPayload, type SpeechToSpeechSettings } from "../voice/voice-mode.js";
+import { assistantVoicePayload, isSpeechToSpeechAssistant, type ShopAssistantPayload, type SpeechToSpeechSettings } from "../voice/voice-mode.js";
 
 /**
  * Self-serve line provisioning, the Rosie/Goodcall model: every shop gets its own local
@@ -114,17 +114,24 @@ function callEndCallbackDelivers(app: Record<string, unknown>, want: string): bo
 export class TelnyxProvisioner {
   constructor(private readonly options: TelnyxProvisionerOptions) {}
 
-  /** Create the shop's assistant from the template's voice and model plus this shop's prompt and tools. */
-  async createAssistant(input: { tenantId: string; businessName: string; assistantUpdate: Record<string, unknown>; speechToSpeech?: SpeechToSpeechSettings | undefined }): Promise<string> {
+  /**
+   * Create the shop's assistant from the template's voice and model plus this shop's prompt and tools, in the shop's
+   * voice mode (src/voice/voice-mode.ts). The template may itself be in speech-to-speech mode (the demo assistant is,
+   * once that is the default), so its model is never copied blind: a speech-to-speech shop delegates tools to the
+   * template's text model, and a standard shop (opted out, or one the default can't make speech-to-speech) gets that
+   * text model with delegation off. `onVoice` hears which mode was built and why.
+   */
+  async createAssistant(input: { tenantId: string; businessName: string; assistantUpdate: Record<string, unknown>; speechToSpeech?: SpeechToSpeechSettings | undefined; onVoice?: ((voice: Omit<ShopAssistantPayload, "payload">) => void) | undefined }): Promise<string> {
     const template = objectData(await this.request(`/ai/assistants/${encodeURIComponent(this.options.templateAssistantId)}`));
+    const { payload: built, ...voice } = assistantVoicePayload(input.assistantUpdate, { tenantId: input.tenantId, speechToSpeech: input.speechToSpeech, existing: template });
     const inherited = Object.fromEntries(
       ["model", "voice_settings", "llm_api_key_ref", "enabled_features", "insight_settings", "privacy_settings"]
         .filter((key) => template[key] !== undefined && template[key] !== null)
+        // A speech-to-speech template's voice only works with its speaking model: a standard shop never copies it.
+        .filter((key) => !(key === "voice_settings" && voice.mode === "standard" && isSpeechToSpeechAssistant(template)))
         .map((key) => [key, template[key]]),
     );
-    // An opt-in speech-to-speech tenant (src/voice/voice-mode.ts) delegates tools to the template's text model.
-    const mode = resolveVoiceMode(input.speechToSpeech, input.tenantId, template);
-    const built = mode.kind === "speech_to_speech" ? speechToSpeechPayload(input.assistantUpdate, mode).payload : input.assistantUpdate;
+    input.onVoice?.(voice);
     const { promote_to_main: _promote, ...update } = built;
     const created = objectData(await this.request("/ai/assistants", {
       method: "POST",
