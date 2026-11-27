@@ -304,7 +304,8 @@ describe("homepage links", () => {
     expect(css).toContain(".brand{display:inline-block;padding-block:8px;font:800 34px/1 Georgia,serif;");
     expect(css).toContain("footer .brand{display:inline-block;font-size:27px;padding-block:9px}");
     expect(withOffer.match(/<a class="brand" href="\/">Call <em>Otto<\/em><\/a>/g)).toHaveLength(2);
-    expect(withOffer).not.toMatch(/<script(?![^>]*src=)/);
+    // The JSON-LD data block is not run, so the strict CSP allows it; any other inline script fails.
+    expect(withOffer).not.toMatch(/<script(?![^>]*src=)(?! type="application\/ld\+json")/);
     // Strict CSP (img-src 'self'): icons are inline SVG, never a data: image.
     expect(withOffer).not.toMatch(/url\(\s*["']?data:/);
   });

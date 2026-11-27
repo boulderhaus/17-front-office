@@ -66,8 +66,8 @@ import { renderFounderBooking, renderFounderCalendars } from "../admin/founder.j
 import { ensureReviewAccount, isLinkPreview, REVIEW_NO_LINE, ReviewAccountError, reviewAccountTokenValid } from "../application/review-account.js";
 import { renderReviewAccount } from "../admin/review-account.js";
 import { dialsBackToOtto } from "../application/forwarding-loop.js";
-import { carrierFamily, forwardingChoice, forwardingOffInstruction, forwardsBackToOtto, parseTestedFor, everyCallVerdict, rangSeconds, ringFirstVerdict, SETUP_CALL_STALE_MS, type CarrierFamily, type CarrierInfo, forwardingPlan, gsmNetwork, parseRingFirstMisses, ringFirstMissesKept, type ForwardingMode, type TestedFor } from "../domain/forwarding.js";
-import { forwardingSteps, forwardToDigits, ringFirstNext, settingsStepsText } from "../domain/forwarding-steps.js";
+import { carrierFamily, everyCallProven, forwardingChoice, forwardingOffInstruction, forwardsBackToOtto, parseTestedFor, everyCallVerdict, rangSeconds, ringFirstVerdict, SETUP_CALL_STALE_MS, type CarrierFamily, type CarrierInfo, forwardingPlan, gsmNetwork, parseRingFirstMisses, ringFirstMissesKept, type ForwardingMode, type TestedFor } from "../domain/forwarding.js";
+import { forwardingClear, forwardingSteps, forwardToDigits, ringFirstNext } from "../domain/forwarding-steps.js";
 import { FORWARDING_CHECK_WINDOW_MS, forwardingCheckStatus, forwardingUpdate, shopForwardingPlan, type ForwardingCheckRecord, type ForwardingState } from "./owner-api-model.js";
 import {
   clearGrace,
@@ -131,6 +131,12 @@ import {
   verifyCsrf,
   verifyGoogleOAuthAttempt,
 } from "./security.js";
+import { ROBOTS_TXT, SITE_URL, sitemapXml } from "../admin/seo.js";
+
+/** Public pages that answer HEAD like GET. Everything else keeps HEAD off, so no GET handler with side effects runs. */
+const HEAD_AS_GET = new Set(["/", "/signup", "/login", "/privacy", "/terms", "/robots.txt", "/sitemap.xml"]);
+/** The www alias, sent on to SITE_URL. */
+const WWW_HOST = "www.callotto.co";
 
 /** Brock's founder-calendar connect: its own cookie on the shared Google redirect path, never the owner's. */
 const FOUNDER_OAUTH_COOKIE = "afo_google_founder";
@@ -824,9 +830,16 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const requestId = typeof request.headers["x-request-id"] === "string" ? request.headers["x-request-id"] : randomUUID();
     response.setHeader("x-request-id", requestId);
     const started = Date.now();
-    const method = request.method ?? "GET";
+    // HEAD gets GET's answer on read-only public pages (Node sends no body), so crawlers and link checkers see 200, not 404.
+    const method = request.method === "HEAD" && HEAD_AS_GET.has(url.pathname) ? "GET" : request.method ?? "GET";
     const route = routeKey(url.pathname);
     const ip = requestIp(request);
+    // www is only an alias: send it to the one address search engines and AI answers should credit.
+    if ((request.headers.host ?? "").toLowerCase() === WWW_HOST) {
+      response.writeHead(301, { location: `${SITE_URL}${url.pathname}${url.search}` });
+      response.end();
+      return;
+    }
     if (url.pathname.startsWith(`${POSTHOG_PROXY_PREFIX}/`)) {
       // Analytics traffic is chatty (replay chunks), so it skips the request log and has its own limit.
       if (!dependencies.env.POSTHOG_KEY) throw new HttpError(404, "Not found");
@@ -834,7 +847,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       return proxyToPostHog(request, response, { ingestionHost: dependencies.env.POSTHOG_HOST, clientIp: ip, fetcher: dependencies.fetcher ?? fetch });
     }
     response.once("finish", () => {
-      log({ level: "info", event: "request_completed", requestId, method, route, status: response.statusCode, latencyMs: Date.now() - started });
+      log({ level: "info", event: "request_completed", requestId, method: request.method ?? "GET", route, status: response.statusCode, latencyMs: Date.now() - started });
     });
     // The live call path polls every two seconds from every open call page, so several viewers behind one
     // office IP share this; its real limit is per account and call, in the handler.
@@ -842,6 +855,16 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       throw new HttpError(429, "Too many requests");
     }
 
+    if (method === "GET" && url.pathname === "/robots.txt") {
+      response.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=3600" });
+      response.end(ROBOTS_TXT);
+      return;
+    }
+    if (method === "GET" && url.pathname === "/sitemap.xml") {
+      response.writeHead(200, { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=3600" });
+      response.end(sitemapXml());
+      return;
+    }
     if (method === "GET" && url.pathname === "/app/sw.js") {
       // Allowed to cover /app itself (the Calls screen), not only /app/..., so a tap can move an open app window.
       response.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "service-worker-allowed": "/app" });
@@ -2121,16 +2144,21 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const device = /iPhone|iPad|iPod/i.test(agent) ? "iphone" : /Android/i.test(agent) && !/Firefox/i.test(agent) ? "android" : "other";
     // The same steps the computer shows, one code per screen: when our last test found every call still forwarded,
     // the clear code first, then (Next) the shop's code. An office line does it in the phone company's website.
-    // An iPhone on a GSM-family carrier uses its Settings switch for every call (and to clear it), code behind a link.
+    // Always the code. On a GSM-family iPhone the Settings switch for every call (and to clear it) is the other way,
+    // closed behind "Code didn't work?".
     const update = forwardingUpdate(plan, config.operationMode, state.testedFor ?? null);
     const forwardsAll = forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "forwards_all";
-    const steps = forwardingSteps({ device: device === "other" ? "phone" : device, family: plan.family, everyCall: plan.forwardsAll, leavingEveryCall: Boolean(update?.leavingEveryCall) });
+    const steps = forwardingSteps({ device: device === "other" ? "phone" : device, family: plan.family, everyCall: plan.forwardsAll, leavingProvenEveryCall: Boolean(update?.leavingEveryCall) && Boolean(state.confirmedAt) && everyCallProven(state.testedFor) });
     // Ring first that never rang: the next step from ringFirstTry. "instead" and "help" clear nothing; "clear_again" is
-    // the all-forwarding code (the iPhone switch was the first clear).
+    // the all-forwarding code alone (no switch behind a link).
     const next = ringFirstNext({ retry: plan.retry, neverRang: forwardsAll, everyCall: plan.forwardsAll });
     const retry = next.retry;
-    const clearFirst = (forwardsAll || steps.clearFirst) && plan.off && next.mayClear && url.searchParams.get("step") !== "code" ? { code: plan.off, dialLink: plan.offDialLink } : null;
-    const settings = (clearFirst ? (next.clearByCode ? "code" : steps.clear) : steps.on) === "settings" ? { ottoNumber: prettyPhone(lineNumber) ?? lineNumber, digits: forwardToDigits(lineNumber) } : null;
+    // What clears it, the same code the computer shows (forwardingClear): leaving every call, the code that turns every
+    // call off, before any ring-first test once a test proved it on and after a test found every call still forwarded.
+    // Otherwise ring first's own clear code for this try.
+    const clear = forwardingClear({ neverRang: forwardsAll, leavingEveryCall: Boolean(update?.leavingEveryCall), plan });
+    const clearFirst = (forwardsAll || steps.clearFirst) && clear && next.mayClear && url.searchParams.get("step") !== "code" ? clear : null;
+    const settings = (clearFirst ? !next.clearByCode && steps.iphoneSwitch.clear : steps.iphoneSwitch.on) ? { ottoNumber: prettyPhone(lineNumber) ?? lineNumber, digits: forwardToDigits(lineNumber) } : null;
     const what = (forwardsAll || update?.leavingEveryCall) && !plan.on && plan.family === "office"
       ? `In your phone company’s website or app, turn off forward all calls. Then forward calls you don’t answer to ${prettyPhone(lineNumber) ?? lineNumber}.`
       : plan.what;
@@ -3302,13 +3330,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   async function emailForwardingSteps(tenantId: string, email: string, onceKey?: string): Promise<boolean> {
     const link = await newHandoffLink(tenantId, EMAILED_HANDOFF_TTL_MS);
     const now = dependencies.clock.now().toISOString();
-    // The same steps the computer shows: every call on an iPhone (GSM family) is the Settings switch, with the
-    // link for the rest (the code, for Verizon-family phones and odd carriers).
-    const { plan, lineNumber } = await handoffPlan(tenantId);
-    const iphone = plan && lineNumber && forwardingSteps({ device: "desktop", family: plan.family, everyCall: plan.forwardsAll }).on === "settings";
-    const body = iphone
-      ? formatEmailBody("Your Call Otto forwarding steps", `${settingsStepsText(lineNumber)}\n\nNot an iPhone, or no Call Forwarding? Open this on the phone your customers call:\n\n${link}\n\nThe link works for 24 hours.`)
-      : formatEmailBody("Your Call Otto forwarding code", `Open this on the phone your customers call. It shows your code and how to dial it:\n\n${link}\n\nThe link works for 24 hours.`);
+    // The same steps the computer shows, for every carrier and choice: the page with this shop's code. Never phone
+    // Settings steps in the email; the iPhone switch stays behind "Code didn't work?" on that page.
+    const body = formatEmailBody("Your Call Otto forwarding code", `Open this on the phone your customers call. It shows your code and how to dial it:\n\n${link}\n\nThe link works for 24 hours.`);
     const queued = await dependencies.store.enqueueNotification({
       id: randomUUID(), tenantId: tenantId, callId: null, channel: "email", destinationRef: `email:${email}`,
       body,
@@ -3348,8 +3372,12 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       ringFirstSeconds: ringFirst?.ringSeconds ?? null,
       // Only while ring first is picked: after switching to every call, the screen asks for the new code instead.
       phoneAnswersTest: !plan?.forwardsAll && forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "phone_answers",
-      // Leaving every call: the off code first, then the ring-first code (forward-all wins over it otherwise).
+      // Leaving every call (forward-all wins over the ring-first code). Proven on by our own timed test: the screen
+      // clears it first, so the helper says so too. Unproven: the ring-first code alone, like the screen, and the
+      // clear code only if a test then finds every call still forwarded.
       everyCallOn: state.testedFor?.mode === "every-call",
+      everyCallProven: Boolean(state.confirmedAt) && everyCallProven(state.testedFor),
+      everyCallOffCode: plan?.everyCallOff ?? null,
       // The same next step the screen shows after a ring-first test that never rang (ringFirstTry).
       ringFirstRetry: !plan?.forwardsAll && forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "forwards_all" ? plan?.retry ?? null : null,
       ringFirstExtras: ringFirst?.extras ?? [],

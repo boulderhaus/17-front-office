@@ -1,7 +1,7 @@
 import type { CallPath } from "../domain/call-path.js";
 import { ownerTaskReason } from "../domain/task-reason.js";
 import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
-import { CARRIER_CHOICES, forwardingChoice, forwardingPlan, mayForwardAll, NOT_FORWARDING_AFTER_MS, ringFirstSeconds, type CarrierInfo, type ForwardingChoice, type ForwardingMode, type ForwardingPlan, type TestedFor } from "../domain/forwarding.js";
+import { CARRIER_CHOICES, everyCallProven, forwardingChoice, forwardingPlan, mayForwardAll, NOT_FORWARDING_AFTER_MS, ringFirstSeconds, type CarrierInfo, type ForwardingChoice, type ForwardingMode, type ForwardingPlan, type TestedFor } from "../domain/forwarding.js";
 import { hasPlanAccess } from "../domain/billing.js";
 import { describeHours } from "../domain/hours.js";
 import { formatDaysOff, localDate, upcomingDaysOff, type DayOff } from "../domain/days-off.js";
@@ -55,12 +55,14 @@ export interface ApiDashboard {
       /**
        * Today's choice or code (every call, ring first, ring time) differs from what the last passed test was set up
        * for (or may be set up for: every call was picked when they left it, untested): dial plan.on once to apply it,
-       * after clearFirst (the off code) when leaving every call for ring first. leavingEveryCall without a code: an
+       * after clearFirst (the code that turns every call off) when leaving every call for ring first. leavingEveryCall without a code: an
        * office line turns off "forward all calls" in the website first. Stays until a test passes for the new choice.
        */
       update: { clearFirst: string | null; leavingEveryCall: boolean } | null;
       /** Forwarding works, and the last passed test was for every call. */
       everyCallOn: boolean;
+      /** Our own timed test proved every call on: leaving it for ring first clears it first (see everyCallProven). */
+      everyCallProven: boolean;
       /** Forwarding works, and the last passed test was for today's choice and code, so its ring time is what they get. */
       codeApplied: boolean;
       /**
@@ -409,6 +411,7 @@ function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "oper
       suggested: state?.businessNumber ? null : ownerMobile,
       update,
       everyCallOn: Boolean(confirmedAt) && testedFor?.mode === "every-call",
+      everyCallProven: Boolean(confirmedAt) && everyCallProven(testedFor),
       codeApplied: Boolean(confirmedAt && plan && testedFor) && !update,
       mayForwardAll: mayForwardAll({ mode, testedFor }),
       ringFirstSeconds: state?.carrier ? ringFirstSeconds(state.carrier.family, config.answerAfterRings) : null,
@@ -425,8 +428,8 @@ function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "oper
 /**
  * Today's choice or code differs from what the last passed test was set up for (or what the phone may be set up
  * for, see rememberLegacyTestedFor): dial the new code once (office lines: change it in the phone company's website).
- * Leaving every call for ring first turns forward-all off first, since it wins over every conditional code: the off
- * code (clearFirst), or for office lines "forward all calls" in the website (leavingEveryCall, no code). Never
+ * Leaving every call for ring first turns forward-all off first, since it wins over every conditional code: the
+ * every-call off code (clearFirst), or for office lines "forward all calls" in the website (leavingEveryCall, no code). Never
  * inferred from test timing.
  */
 export function forwardingUpdate(plan: ForwardingPlan | null, mode: ForwardingMode, testedFor: TestedFor | null): { clearFirst: string | null; leavingEveryCall: boolean } | null {
@@ -434,7 +437,9 @@ export function forwardingUpdate(plan: ForwardingPlan | null, mode: ForwardingMo
   const choice = forwardingChoice(mode);
   if (testedFor.mode === choice && testedFor.code === plan.on) return null;
   const leavingEveryCall = testedFor.mode === "every-call" && choice === "ring-first";
-  return { clearFirst: leavingEveryCall ? plan.off : null, leavingEveryCall };
+  // The code that turns every call off, the one the screen shows (forwardingClear): ring first's own clear code
+  // (T-Mobile's ##004#) leaves forward-all on.
+  return { clearFirst: leavingEveryCall ? plan.everyCallOff ?? plan.off : null, leavingEveryCall };
 }
 
 /** The owner settings form as plain values; the client posts the same names back. */

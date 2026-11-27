@@ -112,8 +112,8 @@ describe("trades", () => {
     expect(html).toContain("Sewage is backing up into the tub.");
     expect(html).toContain("<b>Urgent if they say</b><span>burst pipe</span><span>sewage is backing up</span>");
     expect(html).toContain("<span>won’t close</span>");
-    // Strict CSP: icons are inline SVG, never a script.
-    expect(html).not.toMatch(/<script(?![^>]*src=)/);
+    // Strict CSP: icons are inline SVG, never a script. The JSON-LD data block is not run, so CSP allows it.
+    expect(html).not.toMatch(/<script(?![^>]*src=)(?! type="application\/ld\+json")/);
   });
 });
 

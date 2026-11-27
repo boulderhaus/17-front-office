@@ -44,6 +44,13 @@ export interface ForwardingPlan {
   family: CarrierFamily
   on: string | null
   off: string | null
+  /**
+   * The code that turns every call off, whatever today's choice: what clears it when leaving every call (before any
+   * ring-first test once a test proved it on, or after a test found every call still forwarded).
+   */
+  everyCallOff?: string | null
+  /** Android-safe tel: link for everyCallOff. */
+  everyCallOffDialLink?: string | null
   dialLink: string | null
   offDialLink: string | null
   /** Every call goes to Call Otto; the owner's phone never rings for this number. */
@@ -83,6 +90,8 @@ export interface ApiDashboard {
       update: { clearFirst: string | null; leavingEveryCall: boolean } | null
       /** Forwarding works and the last passed test was for every call. */
       everyCallOn: boolean
+      /** Our own timed test proved every call on: leaving it for ring first clears it first, before any ring-first test. */
+      everyCallProven?: boolean
       /** Forwarding works and the last passed test was for today's choice and code, so its ring time is real. */
       codeApplied: boolean
       /** Every call is picked, or the last passed test was for every call: all calls to the number may go to Otto. */

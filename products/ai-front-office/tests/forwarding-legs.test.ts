@@ -159,6 +159,38 @@ describe("the phone page follows the same steps", () => {
     expect(page).toContain("Ring first didn’t work on this phone.");
     expect(page).toContain("Call me now");
     expect(page).not.toContain('<div class="code">');
+    // Even if a caller passed the switch: help shows no code, so there is no "Code didn't work?" either.
+    expect(renderDialHandoff({ ...base, device: "iphone", code: "**61*13125550100**10#", retry: "help", settings: { ottoNumber: "(312) 555-0100", digits: "3125550100" } })).not.toContain("<details");
+  });
+
+  it("the code is always the page; the iPhone switch sits closed under it, code again first", () => {
+    const main = (page: string) => page.slice(page.indexOf("<main>"));
+    const settings = { ottoNumber: "(312) 555-0100", digits: "3125550100" };
+    const page = main(renderDialHandoff({ ...base, device: "iphone", code: "**21*13125550100#", settings }));
+    expect(page).toContain("<h1>Dial this on (941) 555-0100</h1>");
+    const [code, other] = page.split("<details><summary>Code didn’t work?</summary>");
+    expect(code).toContain('<div class="code">**21*13125550100#</div>');
+    expect(code).toContain("Your carrier shows a gray box that says Succeeded. Tap Dismiss and come back here.");
+    expect(code).not.toMatch(/Settings|Call Forwarding|Live Voicemail|Screen Unknown/);
+    expect(other).toMatch(/^<div class="alt-flow"><p>First try the code once more, typed by hand\.<\/p><p class="next">Or use the switch on your iPhone:<\/p><div class="num">\(312\) 555-0100<\/div>/);
+    expect(other).toContain("<li>Open Settings › Apps › Phone.</li>");
+    expect(page).not.toContain("<details open");
+    // No switch for this step (ring first, Verizon, Android): no link at all, and no Settings anywhere.
+    const plain = main(renderDialHandoff({ ...base, device: "iphone", code: "**61*13125550100**10#" }));
+    expect(plain).not.toContain("<details");
+    expect(plain).not.toMatch(/Settings|Call Forwarding|Live Voicemail|Screen Unknown/);
+  });
+
+  it("clearing: the clear code and Next stay the page; turning the switch off is behind the same link", () => {
+    const page = renderDialHandoff({ ...base, device: "iphone", code: "**61*13125550100**10#", clearFirst: { code: "##002#", dialLink: null }, nextHref: "/d/abc?step=code", settings: { ottoNumber: "(312) 555-0100", digits: "3125550100" } });
+    const [code, other] = page.slice(page.indexOf("<main>")).split("<details><summary>Code didn’t work?</summary>");
+    expect(code).toContain("<h1>Clear the old forwarding on (941) 555-0100</h1>");
+    expect(code).toContain('<div class="code">##002#</div>');
+    expect(code).toContain('<a class="back alt" href="/d/abc?step=code">Next: your code</a>');
+    expect(code).not.toMatch(/Settings|Call Forwarding/);
+    expect(other).toContain("<p>Open Settings › Apps › Phone. Tap Call Forwarding and turn it off.</p>");
+    expect(other).not.toContain("copy-number.js");
+    expect(page.match(/class="code"/g)).toHaveLength(1);
   });
 });
 
@@ -185,6 +217,39 @@ describe("the setup helper says the same steps", () => {
     expect(instead).not.toContain("they first turn forwarding off");
     expect(instead).toContain("For Ring my phone first, the code is **61*13125550100**10#");
     expect(setupSteps(facts).join("\n")).not.toContain("Don't give them another code.");
+  });
+
+  it("leaving a proven every call clears with the code that turns every call off, the one the screen shows", () => {
+    // T-Mobile family: ring first's own clear code is ##004#, but forward-all needs ##002#.
+    const leaving = setupSteps({ ...facts, everyCallOn: true, everyCallProven: true, everyCallOffCode: "##002#" }).join("\n");
+    expect(leaving).toContain("every call may still be on, so they first turn forwarding off: dial ##002# (say it as: pound pound 0 0 2 pound) and press Call. Then they dial the ring-first code, **61*13125550100**10#");
+    expect(leaving).not.toContain("turn forwarding off: dial ##004#");
+    // Never the Settings switch in that step, even on this iPhone.
+    expect(leaving.split("\n").find((step) => step.startsWith("2. "))).not.toMatch(/Settings|switch/);
+    // Without that fact (older callers): the off code as before.
+    expect(setupSteps({ ...facts, everyCallOn: true, everyCallProven: true }).join("\n")).toContain("turn forwarding off: dial ##004#");
+  });
+
+  it("leaving an unproven every call: one code, like the screen, and the clear code only if a test then says so", () => {
+    // A new T-Mobile iPhone owner taps Ring my phone first: the screen shows **61 alone, so the voice does too.
+    const step = setupSteps({ ...facts, everyCallOn: true, everyCallOffCode: "##002#" }).find((line) => line.startsWith("2. "))!;
+    expect(step).toContain("For Ring my phone first, the code is **61*13125550100**10# (say it as:");
+    expect(step).toContain("Only if a test then says every call is still forwarded, they dial ##002# (say it as: pound pound 0 0 2 pound) first and press Call, then the ring-first code again.");
+    expect(step).not.toContain("so they first turn forwarding off");
+    expect(step).not.toContain("##004#");
+    expect(step).not.toMatch(/Settings|switch/);
+  });
+
+  it("after a test found every call still forwarded, the voice names the clear code the screen shows", () => {
+    // Leaving every call on the T-Mobile family: ##002# (forward-all is what's on), not ring first's ##004#.
+    const clear = setupSteps({ ...facts, everyCallOn: true, everyCallOffCode: "##002#", ringFirstRetry: "clear" }).join("\n");
+    expect(clear).toContain("First they dial ##002# (say it as: pound pound 0 0 2 pound) and press Call, then the ring-first code again, **61*13125550100**10#");
+    expect(clear).not.toContain("First they dial ##004#");
+    // And no second clear sentence in the codes step.
+    expect(clear).not.toContain("so they first turn forwarding off");
+    expect(clear).not.toContain("Only if a test then says");
+    // Clearing again: the all-forwarding code.
+    expect(setupSteps({ ...facts, offCode: "##002#", everyCallOn: true, everyCallOffCode: "##002#", ringFirstRetry: "clear_again" }).join("\n")).toContain("First they dial ##002#");
   });
 
   it("offers the extras only as optional, one at a time", () => {

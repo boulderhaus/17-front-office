@@ -25,6 +25,16 @@ export interface ForwardingPlan {
   on: string | null;
   /** What the owner dials to turn it off, or null for office lines. */
   off: string | null;
+  /**
+   * The code that turns every call off (GSM ##002#, Verizon *73), whatever today's choice. Dialed first when the owner
+   * leaves an every call (forwardingClear): before any ring-first test once a test proved it on
+   * (forwardingSteps.clearFirst), or after a ring-first test found every call still forwarded. Forward-all beats any
+   * ring-first code, and ring first's own clear code (T-Mobile's ##004#) is for missed-call rules. Unset for office
+   * lines.
+   */
+  everyCallOff?: string | null;
+  /** Android-safe tel: link for everyCallOff. */
+  everyCallOffDialLink?: string | null;
   /** Android-safe tel: link for the on code. Never rendered on iPhones: iOS blocks forwarding links. */
   dialLink: string | null;
   offDialLink: string | null;
@@ -129,6 +139,15 @@ export interface TestedFor {
 }
 
 /**
+ * Our own timed test proved every call on (it reached Otto with no ring), whether a code or the iPhone's switch set
+ * it. Leaving it for ring first clears it first where forwardingSteps says so. A choice that was only picked, a test
+ * from another phone, or an older pass for ring first proves nothing about forward-all.
+ */
+export function everyCallProven(testedFor: TestedFor | null | undefined): boolean {
+  return testedFor?.mode === "every-call" && testedFor.timed === true;
+}
+
+/**
  * Ring-first test, timed by our own check call: from the moment Telnyx accepted our call to the moment the forwarded
  * call reached Otto (Telnyx's own event timestamp, so a slow or retried webhook never stretches it).
  * Forward-all (or a phone that turns the call away at once) gets there in about 2-4 s with no ring. The shortest
@@ -227,6 +246,9 @@ export interface RingFirstTry {
  *   with ##002#, then **61. Missed again: help.
  * - AT&T family and unknown GSM: **004. Missed: clear with ##002#, then **004. Missed again: "Try this code instead",
  *   **61. Missed again: help.
+ * `clear` is ring first's own off code. The clear step the owner sees is forwardingClear (forwarding-steps.ts): while
+ * every call is on record, which a miss itself records, it shows the every-call off code (##002#) instead of ##004#,
+ * since ##004# only resets the missed-call rules and leaves forward-all on.
  */
 export function ringFirstTry(network: GsmNetwork, misses: number): RingFirstTry {
   const count = Number.isFinite(misses) && misses > 0 ? Math.floor(misses) : 0;
@@ -281,7 +303,7 @@ export function forwardingPlan(family: CarrierFamily, frontOfficeNumber: string,
   if (family === "verizon") {
     const on = `${always ? "*72" : "*71"}${digits}`;
     return {
-      family, on, off: "*73", dialLink: telLink(on), offDialLink: telLink("*73"), forwardsAll: always,
+      family, on, off: "*73", everyCallOff: "*73", everyCallOffDialLink: telLink("*73"), dialLink: telLink(on), offDialLink: telLink("*73"), forwardsAll: always,
       ringSeconds: always ? null : VERIZON_RING_SECONDS,
       what: always ? everyCall : "Your phone rings about 30 seconds first (Verizon sets that). Calls you miss or decline go to Call Otto.",
       tips: [],
@@ -295,9 +317,10 @@ export function forwardingPlan(family: CarrierFamily, frontOfficeNumber: string,
     const network = gsmNetwork(options.carrierName);
     const step = ringFirstTry(network, options.misses ?? 0);
     const on = always ? `**21*1${digits}#` : step.code === "no_answer" ? `**61*1${digits}**${seconds}#` : `**004*1${digits}**${seconds}#`;
-    const off = always ? "##002#" : step.clear;
+    const everyCallOff = "##002#";
+    const off = always ? everyCallOff : step.clear;
     return {
-      family, on, off, dialLink: telLink(on), offDialLink: telLink(off), forwardsAll: always,
+      family, on, off, everyCallOff, everyCallOffDialLink: telLink(everyCallOff), dialLink: telLink(on), offDialLink: telLink(off), forwardsAll: always,
       ringSeconds: always ? null : seconds,
       what: always ? everyCall : step.code === "no_answer" ? `Your phone rings ${seconds} seconds first. Calls you miss go to Call Otto.` : `Your phone rings ${seconds} seconds first. Calls you miss or decline go to Call Otto.`,
       tips: [],

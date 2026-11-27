@@ -636,7 +636,7 @@ describe("owner one-tap go-live", () => {
             const init = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id, occurred_at: made.clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: "+15555550199", call_control_id: `v3:${id}`, assistant_id: "assistant-1" } } });
             return fetch(`${made.baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, made.privateKey, made.clock.now()), body: init });
           };
-          type Line = { check: { status: string; forwardedAfterSec: number | null; code?: string | null }; business: { update: { clearFirst: string | null } | null; lastTest: { mode: string; rangSeconds: number | null } | null; mayForwardAll: boolean; plan: { on: string | null; off: string | null; retry?: string | null; extras?: string[] } | null } };
+          type Line = { check: { status: string; forwardedAfterSec: number | null; code?: string | null }; business: { update: { clearFirst: string | null; leavingEveryCall?: boolean } | null; lastTest: { mode: string; rangSeconds: number | null } | null; mayForwardAll: boolean; plan: { on: string | null; off: string | null; everyCallOff?: string | null; everyCallOffDialLink?: string | null; retry?: string | null; extras?: string[] } | null } };
           const line = async () => ((await made.dashboard()) as unknown as { line: Line }).line;
           return { ...made, arrives, line };
         }
@@ -646,8 +646,9 @@ describe("owner one-tap go-live", () => {
           expect((await made.arrives(2, "fast")).status).toBe(200);
           const line = await made.line();
           expect(line.check).toMatchObject({ status: "forwards_all", forwardedAfterSec: 2 });
-          // T-Mobile family: its own clear code, ##004#.
-          expect(line.business).toMatchObject({ update: { clearFirst: "##004#" }, lastTest: null, mayForwardAll: true });
+          // What clears it is the code that turns every call off (forward-all is what's on), never T-Mobile's
+          // ##004#: that only resets the missed-call rules. Ring first's own off code stays ##004#.
+          expect(line.business).toMatchObject({ update: { clearFirst: "##002#", leavingEveryCall: true }, plan: { off: "##004#", everyCallOff: "##002#", everyCallOffDialLink: "tel:%23%23002%23", retry: "clear" }, lastTest: null, mayForwardAll: true });
           // Then they clear it, redial the ring-first code and test again: Otto answers 12 s after our call went out,
           // about 10 s of ringing once call setup is left out.
           made.clock.at = new Date(made.clock.at.getTime() + 60_000);
@@ -666,16 +667,20 @@ describe("owner one-tap go-live", () => {
           return made.line();
         }
 
-        it("T-Mobile family: **61 first, then clear with ##004#, then ##002#, then help; a pass starts over and offers the extra codes", async () => {
+        it("T-Mobile family: **61 first, then clear (##002#, since a miss means every call is on), then clear again, then help; a pass starts over and offers the extra codes", async () => {
           const made = await ringFirstTest("Aerial Communications");
           const first = await made.line();
           expect(first.business.plan).toMatchObject({ off: "##004#", retry: null });
           expect(first.business.plan!.on).toMatch(/^\*\*61\*1\d{10}\*\*10#$/);
           await made.arrives(2, "miss-1");
-          expect((await made.line()).business.plan).toMatchObject({ off: "##004#", retry: "clear" });
+          // ringFirstTry is unchanged (ring first's own off code is still ##004#), but the clear step the screen shows
+          // for a line that forwards every call is the every-call off code.
+          expect((await made.line()).business.plan).toMatchObject({ off: "##004#", everyCallOff: "##002#", retry: "clear" });
+          expect((await made.line()).business.update).toMatchObject({ clearFirst: "##002#", leavingEveryCall: true });
           const second = await testAgain(made, 2, "miss-2");
           expect(second.check.status).toBe("forwards_all");
           expect(second.business.plan).toMatchObject({ off: "##002#", retry: "clear_again" });
+          expect(second.business.update).toMatchObject({ clearFirst: "##002#", leavingEveryCall: true });
           expect(second.business.plan!.on).toMatch(/^\*\*61\*/);
           const third = await testAgain(made, 2, "miss-3");
           expect(third.business.plan).toMatchObject({ retry: "help" });
@@ -858,8 +863,13 @@ describe("owner one-tap go-live", () => {
       const vars = startBody.assistant.dynamic_variables;
       expect(vars).toMatchObject({ shop_name: "Gulf Air", picked_mode: "Otto answers every call", device: "an iPhone", carrier_family: "AT&T or T-Mobile family", business_number_last4: "0177", otto_number_digits: "9 4 1 5 5 5 0 1 2 3", last_test: "not_run: No test yet." });
       expect(vars.setup_steps).toContain("**004*19415550123**10#");
-      expect(vars.setup_steps).toContain("Screen Unknown Callers to Never");
-      expect(vars.setup_steps).toContain("on this iPhone they use the Call Forwarding switch");
+      // The code first, for both choices. Phone settings only after a test the phone picked up; the iPhone's switch
+      // only after a code failed.
+      expect(vars.setup_steps).toContain("For Otto answers every call, the code is **21*19415550123#");
+      expect(vars.setup_steps).not.toContain("they first turn off Live Voicemail");
+      expect(vars.setup_steps).not.toContain("on this iPhone they use the Call Forwarding switch");
+      expect(vars.setup_steps).toContain("Only if a test says their phone picked up the call itself");
+      expect(vars.setup_steps).toContain("Only if a code fails after they've dialed it, typed by hand: this iPhone has a fallback for every call, its own Call Forwarding switch");
       expect(startBody.assistant.tools.map((tool) => tool.webhook?.name ?? tool.type)).toEqual(["start_forwarding_test", "get_test_result", "email_steps", "get_open_times", "book_time", "hangup"]);
       expect(startBody.assistant.tools[0]!.webhook!.url).toMatch(/\/setup-help\/tools\/start_forwarding_test$/);
 
@@ -922,6 +932,8 @@ describe("owner one-tap go-live", () => {
         expect((await api("/api/app/line/mode", { mode: "overflow" })).status).toBe(200);
         expect(assistantUpdates()).toHaveLength(before + 2);
         expect((await line(made)).business).toMatchObject({ plan: { on: "**004*19415550123**10#", forwardsAll: false }, update: { clearFirst: "##002#" }, everyCallOn: true, mayForwardAll: true });
+        // Our own timed test proved every call on, so the card clears it first, with the code that turns every call off.
+        expect((await line(made)).business).toMatchObject({ everyCallProven: true, plan: { everyCallOff: "##002#" } });
 
         // A passing test records what they picked when they started it, however long it took: the owner's choice is
         // the source of truth, never the timing.
@@ -1068,7 +1080,7 @@ describe("owner one-tap go-live", () => {
         // They may have dialed **21 already. Ring my phone first, untested: the off code first, and still guarded.
         expect((await api("/api/app/line/mode", { mode: "overflow" })).status).toBe(200);
         expect(await testedFor(made)).toMatchObject({ mode: "every-call", code: "**21*19415550123#" });
-        expect(await line(made)).toMatchObject({ confirmedAt: null, business: { plan: { on: "**004*19415550123**10#" }, update: { clearFirst: "##002#", leavingEveryCall: true }, everyCallOn: false, mayForwardAll: true } });
+        expect(await line(made)).toMatchObject({ confirmedAt: null, business: { plan: { on: "**004*19415550123**10#" }, update: { clearFirst: "##002#", leavingEveryCall: true }, everyCallOn: false, everyCallProven: false, mayForwardAll: true } });
         expect(await dialsBackToOtto(store, account.tenantId, "+19415550199")).toBe(true);
         expect(await urgent()).toMatchObject({ held: true });
         expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
@@ -1083,6 +1095,45 @@ describe("owner one-tap go-live", () => {
         expect((await line(made)).business).toMatchObject({ update: null, mayForwardAll: false });
         expect(await dialsBackToOtto(store, account.tenantId, "+19415550199")).toBe(false);
         expect(await urgent()).toMatchObject({ held: false });
+      });
+
+      it("Call me now after tapping Ring my phone first: the helper says one code, like the screen; two only once a test proved every call on", async () => {
+        // The owner's mobile is not the business number here, so the helper can ring them while every call may be on.
+        const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection", TELNYX_TEMPLATE_ASSISTANT_ID: "template-assistant" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } } });
+        const { api, telnyx, baseUrl, privateKey, clock } = made;
+        await api("/api/app/line/business-number", { number: "9415550177" });
+        const helperSteps = async (id: string) => {
+          expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+          const state = (helpDials(made).at(-1)!.body as { client_state: string }).client_state;
+          const answered = JSON.stringify({ data: { record_type: "event", event_type: "call.answered", id, occurred_at: clock.now().toISOString(), payload: { call_control_id: "v3:check-call", client_state: state } } });
+          expect((await fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(answered, privateKey, clock.now()), body: answered })).status).toBe(200);
+          const start = telnyx.calls.filter((call) => call.url.endsWith("/actions/ai_assistant_start")).at(-1)!;
+          return (start.body as { assistant: { dynamic_variables: Record<string, string> } }).assistant.dynamic_variables.setup_steps!;
+        };
+        // New shop on every call (the default), nothing tested. They tap Ring my phone first: the screen shows the
+        // ring-first code alone (no clear step), so the helper never adds a second code and a second gray box.
+        expect((await api("/api/app/line/mode", { mode: "overflow" })).status).toBe(200);
+        expect(await testedFor(made)).toMatchObject({ mode: "every-call", code: "**21*19415550123#" });
+        expect((await line(made)).business).toMatchObject({ everyCallProven: false, update: { clearFirst: "##002#", leavingEveryCall: true } });
+        const unproven = await helperSteps("evt-help-unproven");
+        expect(unproven).toContain("For Ring my phone first, the code is **61*19415550123**10# (say it as:");
+        expect(unproven).toContain("Only if a test then says every call is still forwarded, they dial ##002# (say it as: pound pound 0 0 2 pound) first and press Call, then the ring-first code again.");
+        expect(unproven).not.toContain("so they first turn forwarding off");
+        expect(unproven).not.toContain("##004# (say it as: pound pound 0 0 4 pound) and press Call");
+
+        // Every call again, and our own timed test proves it on. Leaving it now, the screen clears it first, and the
+        // helper says the same two codes in the same order.
+        expect((await api("/api/app/line/mode", { mode: "always" })).status).toBe(200);
+        later(made, 60);
+        await api("/api/app/line/check");
+        await forwarded(made, "every-call-proven", 2);
+        expect(await testedFor(made)).toMatchObject({ mode: "every-call", code: "**21*19415550123#", timed: true });
+        expect((await api("/api/app/line/mode", { mode: "overflow" })).status).toBe(200);
+        expect((await line(made)).business).toMatchObject({ everyCallProven: true, update: { clearFirst: "##002#", leavingEveryCall: true } });
+        later(made, 60);
+        const proven = await helperSteps("evt-help-proven");
+        expect(proven).toContain("For Ring my phone first, every call may still be on, so they first turn forwarding off: dial ##002# (say it as: pound pound 0 0 2 pound) and press Call. Then they dial the ring-first code, **61*19415550123**10#");
+        expect(proven).not.toContain("Only if a test then says every call is still forwarded");
       });
 
       it("picking ring first before there's a code on screen records nothing", async () => {
