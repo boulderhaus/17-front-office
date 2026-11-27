@@ -108,7 +108,9 @@ describe("an availability window the call has outrun", () => {
 
     const store = new InMemoryStore();
     await store.saveConfig(createDemoConfig());
-    const clock = { now: () => now };
+    // A clock that moves on every reading, as a real one does.
+    let ticks = 0;
+    const clock = { now: () => new Date(now.getTime() + (ticks += 7)) };
     const service = new CallService(store, new InMemoryCalendar(), clock, "https://front-office.example");
     await service.recordStarted({ eventId: "start:outrun", tenantId: "demo", providerCallId: "outrun", fromNumber: "+15555550100", startedAt: now.toISOString() });
     const result = await service.checkAvailability({ tenantId: "demo", providerCallId: "outrun", windowStart: "2026-01-15T18:30:00.000Z", windowEnd: "2026-01-22T23:59:59.000Z" });

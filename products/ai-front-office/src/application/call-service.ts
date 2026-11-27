@@ -347,8 +347,10 @@ export class CallService {
     // The model has no clock: its window starts at the time the call began, which is in the past a minute into the
     // call. A window that began earlier today and is still open starts now instead of being refused (a real call
     // burned its two availability checks on a start two minutes old, then could not offer a time at all).
-    const windowStart = startNoEarlierThanNow(input.windowStart, input.windowEnd, this.clock.now());
-    const windowError = validateAvailabilityWindow(windowStart, input.windowEnd, this.clock.now());
+    // One clock reading for both: a start clamped to "now" must not be a millisecond in the past when validated.
+    const windowNow = this.clock.now();
+    const windowStart = startNoEarlierThanNow(input.windowStart, input.windowEnd, windowNow);
+    const windowError = validateAvailabilityWindow(windowStart, input.windowEnd, windowNow);
     if (windowError) {
       return {
         slots: [],
