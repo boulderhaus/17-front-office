@@ -14,6 +14,7 @@ interface AlertCall {
   endedAt: string | null
   durationSeconds: number | null
   outcome: string
+  phone?: string | null
   fields: { callerName: string | null; problemDescription: string; requestedStart: string | null }
   emergency: { emergency: boolean } | null
 }
@@ -55,7 +56,18 @@ export function buildAlerts<C extends AlertCall>(input: { calls: C[]; tasks: Ale
     }
   }
   const newest = (list: AlertItem[]) => list.sort((left, right) => right.at.localeCompare(left.at))
+  // One "waiting" alert per caller (walk 11-26): the urgent one if any, else the newest. Others stay on their calls.
+  const phoneOf = new Map(input.calls.map((call) => [call.id, call.phone ?? null]))
+  const seen = new Set<string>()
   const waiting = items.filter((item) => item.kind === "urgent" || item.kind === "callback")
+    .sort((left, right) => Number(right.kind === "urgent") - Number(left.kind === "urgent") || right.at.localeCompare(left.at))
+    .filter((item) => {
+      const phone = phoneOf.get(item.callId)
+      if (!phone) return true
+      if (seen.has(phone)) return false
+      seen.add(phone)
+      return true
+    })
   const rest = newest(items.filter((item) => item.kind !== "urgent" && item.kind !== "callback")).slice(0, Math.max(0, limit - waiting.length))
   return newest([...waiting, ...rest])
 }

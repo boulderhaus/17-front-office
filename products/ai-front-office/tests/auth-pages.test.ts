@@ -89,6 +89,8 @@ describe("public page system", () => {
     // CSS picks the one summary that matches the checked plan and switch: no script needed.
     expect(page).toContain('.publicform:has(#plan-team:checked):has(#unlimited:checked) .quote[data-plan="team+unlimited"]{display:grid}');
     expect(page).not.toContain("Bigger shop");
+    // Each plan card's price follows the switch too, so a $149.99 card never sits beside a $224.99 total (walk 11-26).
+    expect(page).toContain('<span class="price"><span class="std">$149.99</span><span class="unl">$224.99</span><small>/mo</small></span>');
   });
 
   it("signup and sign-in carry the Call Otto wordmark, not plain text", () => {
@@ -178,6 +180,14 @@ describe("signup errors", () => {
     expect(page).not.toContain('value="short"');
     // Nothing was stored.
     expect(response.headers.getSetCookie().some((cookie) => cookie.startsWith("afo_pending_identity=") && !cookie.startsWith("afo_pending_identity=;"))).toBe(false);
+  });
+
+  it("account screen with no email and no password: only the email error, never one for the closed password box (walk 11-26)", async () => {
+    const response = await signup({ step: "account", email: "", password: "" });
+    expect(response.status).toBe(400);
+    const page = await response.text();
+    expect(page).toContain('<div class="formerror" role="alert" id="signup-error"><p><a href="#signup-email">Enter an email like you@yourshop.com.</a></p></div>');
+    expect(page).not.toContain("Make your password at least");
   });
 
   it("shop screen: each problem under its field, keeps what was typed and focuses the first one", async () => {

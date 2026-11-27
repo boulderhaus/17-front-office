@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Link, useLocation, useSearchParams } from "react-router-dom"
-import { Check, CheckCircle2, ChevronDown, ChevronRight, CreditCard, Download, ExternalLink, Loader2, LogOut, Plus, X } from "lucide-react"
+import { CalendarDays, Check, CheckCircle2, ChevronDown, ChevronRight, CreditCard, Download, ExternalLink, Loader2, LogOut, Plus, X } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -77,6 +77,21 @@ function NativeSelect({ className, children, ...props }: React.ComponentProps<"s
     <span className="relative block min-w-0">
       <select className={cn(selectClass, className)} {...props}>{children}</select>
       <ChevronDown aria-hidden className="pointer-events-none absolute top-1/2 right-3.5 size-5 -translate-y-1/2 text-muted-foreground" />
+    </span>
+  )
+}
+
+/**
+ * A date box that says what it wants while empty: iPhone shows an empty date field as a blank white box (walk 11-26),
+ * so "Pick a day" and a calendar sit inside it until a day is picked. The phone's own picker opens on tap.
+ */
+function DateInput({ className, value, ...props }: React.ComponentProps<"input">) {
+  return (
+    <span className="relative block min-w-0">
+      {/* Chrome's own calendar button is stretched over the box (invisible), so a click anywhere opens the picker. */}
+      <Input type="date" className={cn("peer relative [&::-webkit-calendar-picker-indicator]:absolute [&::-webkit-calendar-picker-indicator]:inset-0 [&::-webkit-calendar-picker-indicator]:size-full [&::-webkit-calendar-picker-indicator]:cursor-pointer [&::-webkit-calendar-picker-indicator]:opacity-0", className, !value && "text-transparent focus:text-foreground")} value={value} {...props} />
+      {!value && <span aria-hidden className="pointer-events-none absolute inset-y-0 left-3.5 flex items-center text-base text-muted-foreground peer-focus:hidden">Pick a day</span>}
+      <CalendarDays aria-hidden className="pointer-events-none absolute top-1/2 right-3.5 size-5 -translate-y-1/2 text-muted-foreground" />
     </span>
   )
 }
@@ -529,9 +544,14 @@ export function AlertsSection() {
             <NativeSelect {...bind("ownerDailySmsHour")}>{Array.from({ length: 24 }, (_, hour) => <option key={hour} value={hour}>{new Intl.DateTimeFormat("en-US", { hour: "numeric", timeZone: "UTC" }).format(new Date(Date.UTC(2026, 0, 1, hour)))}</option>)}</NativeSelect>
           </Field>
         )}
-        {/* Shown only once email can actually be sent: never a switch that says "not available". */}
-        {i.weeklyEmailAvailable && <ToggleRow id="ownerWeeklyEmailEnabled" label="Sunday email" hint="Open callbacks and the week ahead." checked={flag("ownerWeeklyEmailEnabled")} onChange={(value) => set("ownerWeeklyEmailEnabled", value)} />}
       </SettingsCard>
+      {/* Shown only once email can actually be sent: never a switch that says "not available". Its own card, not
+          under Texts (walk 11-26). */}
+      {i.weeklyEmailAvailable && (
+        <SettingsCard title="Email">
+          <ToggleRow id="ownerWeeklyEmailEnabled" label="Sunday email" hint="Open callbacks and the week ahead." checked={flag("ownerWeeklyEmailEnabled")} onChange={(value) => set("ownerWeeklyEmailEnabled", value)} />
+        </SettingsCard>
+      )}
       <SettingsCard title="Running low on calls" description={settings.plan.unlimited && settings.plan.unlimitedOffer ? `One alert when you reach this share of your ${settings.plan.unlimitedOffer.fairUseCalls.toLocaleString("en-US")} fair-use calls, and one if you use them all.` : `One alert when you reach this share of your ${settings.plan.includedCalls} calls, and one if you use them all.`}>
         <Field label="Alert me" className="sm:max-w-60">
           <NativeSelect {...bind("usageAlertPercent")}>
@@ -675,8 +695,8 @@ function DaysOffCard() {
         </ul>
       ) : <p className="text-[15px] text-muted-foreground">No days off yet.</p>}
       <Pair>
-        <Field label="First day off" error={firstProblem}><Input type="date" className={cn(fieldClass, "appearance-none")} min={today} value={first} onChange={(event) => { setFirst(event.target.value); if (last && event.target.value > last) setLast("") }} /></Field>
-        <Field label="Last day off" hint="Leave it empty for one day." error={problem}><Input type="date" className={cn(fieldClass, "appearance-none")} min={first || today} value={last} onChange={(event) => setLast(event.target.value)} /></Field>
+        <Field label="First day off" error={firstProblem}><DateInput className={cn(fieldClass, "appearance-none")} min={today} value={first} onChange={(event) => { setFirst(event.target.value); if (last && event.target.value > last) setLast("") }} /></Field>
+        <Field label="Last day off" hint="Leave it empty for one day." error={problem}><DateInput className={cn(fieldClass, "appearance-none")} min={first || today} value={last} onChange={(event) => setLast(event.target.value)} /></Field>
       </Pair>
       <Button type="button" variant="outline" size="tap" className={actionClass} disabled={!first || Boolean(firstProblem || problem)} onClick={add}><Plus />Add days off</Button>
     </SettingsCard>
@@ -913,7 +933,8 @@ export function PlanSection() {
   const billing = params.get("billing")
   const usage = dashboard?.usage
   const comp = dashboard?.billing.status === "comp"
-  const billingNote = billing === "comp" || (comp && billing) ? "This is a complimentary account. There’s no billing to manage." : billing === "none" ? "There’s no paid plan to manage yet." : billing === "unavailable" ? "Billing couldn’t open just now. Nothing changed. Try again in a minute." : null
+  // A complimentary shop has no card, bills or cancel: say so up front, not only after a trip to billing (walk 11-26).
+  const billingNote = comp ? "Complimentary account: no card, no bills, nothing to cancel." : billing === "none" ? "There’s no paid plan to manage yet." : billing === "unavailable" ? "Billing couldn’t open just now. Nothing changed. Try again in a minute." : null
   const tz = dashboard?.shop.timezone ?? "America/New_York"
   const leads = dashboard?.guarantee.state === "watching" ? dashboard.guarantee.leads : null
   const monthly = plan.unlimited && plan.unlimitedOffer ? plan.unlimitedOffer.priceCents : plan.flatMonthlyPriceCents
@@ -1026,7 +1047,7 @@ export function PlanSection() {
         )}
         <div className="grid gap-2">
           <span className="text-[15px] font-semibold text-muted-foreground">Your plan: {plan.label}{plan.unlimited ? " with Unlimited calls" : ""}</span>
-          <Price cents={monthly} />
+          {comp ? <strong className="text-[40px] leading-none font-semibold tracking-tight">Free</strong> : <Price cents={monthly} />}
           {!plan.sold && <span className="text-sm text-muted-foreground">No longer offered. Yours to keep.</span>}
         </div>
         <dl className="divide-y border-t">
@@ -1037,7 +1058,9 @@ export function PlanSection() {
             </div>
           ))}
         </dl>
-        <p className="text-sm text-muted-foreground">Spam and calls under 15 seconds are never counted.</p>
+        <p className="text-sm text-muted-foreground text-pretty">Spam and calls under 15 seconds don’t count.</p>
+        {/* A complimentary shop (the Google review account) has no card or Stripe billing to open. */}
+        {comp && billingNote && <p role={billing ? "alert" : undefined} className="rounded-md bg-secondary px-3 py-2.5 text-[15px] text-pretty">{billingNote}</p>}
       </section>
 
       {plan.plans.length > 0 && (
@@ -1070,8 +1093,6 @@ export function PlanSection() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* A complimentary shop (the Google review account) has no card or Stripe billing to open. */}
-      {comp && billingNote && <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">{billingNote}</p>}
       {/* Paying: card, bills and cancel, all on this page. */}
       {!comp && plan.paid && (
         <>

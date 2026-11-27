@@ -40,7 +40,7 @@ export interface JobColumn<C> { id: JobColumnId; title: string; empty: string; c
  */
 export function jobColumns<C extends JobCall, T extends JobTask>(input: {
   callsById: Map<string, C>; actionable: T[]; snoozed: T[]; handled: T[]; nowMs: number
-  due: (task: T) => string; date: (iso: string) => string
+  date: (iso: string) => string
 }): Array<JobColumn<C>> {
   const cards = (tasks: T[], make: (task: T, call: C) => JobCard<C>) => tasks.flatMap((task) => {
     const call = input.callsById.get(task.callId)
@@ -48,10 +48,8 @@ export function jobColumns<C extends JobCall, T extends JobTask>(input: {
   })
   const reply = cards(input.actionable, (task, call) => {
     const urgent = task.priority === "high"
-    const due = input.due(task)
-    // Due now (nearly always): say how long the caller has waited, so a busy column doesn't read "Now" on every card.
-    const now = due === "Due now"
-    return { call, label: urgent ? "Urgent" : call.fields.requestedStart ? "Confirm time" : "Call back", tone: urgent ? "danger" : call.fields.requestedStart ? "warn" : "neutral", whenLabel: now ? "Called" : "Call back", when: now ? agoLabel(call.startedAt, input.nowMs) : due.replace(/^Due today /, "Today ").replace(/^Due /, ""), action: "call", sortAt: call.startedAt } as JobCard<C>
+    // Always how long the caller has waited (walk 11-26 sim): a due time beside "6h ago" read like a call time.
+    return { call, label: urgent ? "Urgent" : call.fields.requestedStart ? "Confirm time" : "Call back", tone: urgent ? "danger" : call.fields.requestedStart ? "warn" : "neutral", whenLabel: "Called", when: agoLabel(call.startedAt, input.nowMs), action: "call", sortAt: call.startedAt } as JobCard<C>
   }).sort((left, right) => Number(right.tone === "danger") - Number(left.tone === "danger") || right.sortAt.localeCompare(left.sortAt))
   const waiting = cards(input.snoozed, (task, call) => ({ call, label: "Later", tone: "neutral", whenLabel: "Back on", when: input.date(task.dueAt), action: "call", sortAt: task.dueAt }))
     .sort((left, right) => left.sortAt.localeCompare(right.sortAt))
@@ -77,4 +75,32 @@ export function jobColumns<C extends JobCall, T extends JobTask>(input: {
 export function jobTab(value: string | null): JobColumnId {
   if (value === "handled" || value === "complete") return "done"
   return value === "waiting" || value === "booked" || value === "done" ? value : "reply"
+}
+
+/**
+ * One job per caller (walk 11-26): four calls from Dana are one job, not four cards. Her job is her most urgent call,
+ * then her newest; `earlier` maps that call to her other open calls, which Done and Later close with it. Calls with
+ * no number, and spam, stay one job each. Keeps the order it was given.
+ */
+export function oneJobPerCaller<T extends { callId: string; priority: string }>(tasks: T[], callsById: ReadonlyMap<string, { phone: string | null; startedAt: string; outcome: string }>): { jobs: T[]; earlier: Map<string, string[]> } {
+  const keyOf = (task: T) => {
+    const call = callsById.get(task.callId)
+    return call?.phone && call.outcome !== "ignored_spam" ? call.phone : null
+  }
+  const newer = (left: T, right: T) => (callsById.get(left.callId)?.startedAt ?? "") > (callsById.get(right.callId)?.startedAt ?? "")
+  const lead = new Map<string, T>()
+  const members = new Map<string, string[]>()
+  for (const task of tasks) {
+    const key = keyOf(task)
+    if (!key) continue
+    members.set(key, [...(members.get(key) ?? []), task.callId])
+    const current = lead.get(key)
+    if (!current || (task.priority === "high" && current.priority !== "high") || (task.priority === current.priority && newer(task, current))) lead.set(key, task)
+  }
+  const earlier = new Map<string, string[]>()
+  for (const [key, task] of lead) {
+    const others = members.get(key)!.filter((callId) => callId !== task.callId)
+    if (others.length) earlier.set(task.callId, others)
+  }
+  return { jobs: tasks.filter((task) => { const key = keyOf(task); return !key || lead.get(key) === task }), earlier }
 }

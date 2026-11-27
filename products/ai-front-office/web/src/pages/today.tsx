@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react"
 import { Link, Navigate, useLocation, useNavigate, useSearchParams } from "react-router-dom"
-import { ArrowRight, Check, ChevronRight, Clock, Loader2, MapPin, Phone, PhoneForwarded, RotateCcw } from "lucide-react"
+import { ArrowRight, Check, ChevronRight, Clock, Loader2, MapPin, Phone, PhoneForwarded, PhoneIncoming, RotateCcw } from "lucide-react"
 import { toast } from "sonner"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -23,10 +23,21 @@ import { usageTile } from "@/lib/usage-tile"
 // One gate for every Done, Later and Undo on the page: one save at a time, and a double-click never reaches the next caller.
 const taskGate = createTaskGate()
 
+// A caller's other open calls closed with their job, by the job's call: Undo reopens the same ones.
+const closedWith = new Map<string, string[]>()
+
 export function useTaskActions() {
-  const { reload } = useMode()
+  const { reload, dashboard } = useMode()
+  const one = (callId: string, action: TaskAction, minutes?: number) => api(`/api/app/calls/${encodeURIComponent(callId)}/task`, { method: "POST", body: { action, ...(minutes ? { minutes } : {}) } })
   const deps: TaskDeps = {
-    post: (callId, action, minutes) => api(`/api/app/calls/${encodeURIComponent(callId)}/task`, { method: "POST", body: { action, ...(minutes ? { minutes } : {}) } }),
+    // One job per caller: Done and Later on it close the caller's other open calls too, so none comes back.
+    post: async (callId, action, minutes) => {
+      const others = action === "reopen" ? closedWith.get(callId) ?? [] : (dashboard ? derive(dashboard).earlier.get(callId) ?? [] : [])
+      const result = await one(callId, action, minutes)
+      if (action === "complete") closedWith.set(callId, others)
+      await Promise.all(others.map((other) => one(other, action, minutes)))
+      return result
+    },
     reload,
     toast: { success: (message, options) => void toast.success(message, options), message: (message) => void toast(message), error: (message) => void toast.error(message) },
     gate: taskGate,
@@ -104,7 +115,7 @@ export function TodayPage() {
         <section aria-labelledby="attention" className="grid gap-2.5 scroll-mt-20" id="attention-list">
           <SectionTitle id="attention" title="Needs your attention" count={d.actionable.length} urgent={d.urgentCount > 0} />
           {d.actionable.length ? (
-            <ListBox className="@container">{d.actionable.map((task) => <TaskRow key={task.callId} task={task} call={d.callsById.get(task.callId)} due={d.due(task)} selected={attentionRowSelected({ wide, panelId: panelCall?.id, callId: task.callId, from })} open={wide && panelCall?.id === task.callId} wide={wide} />)}</ListBox>
+            <ListBox className="@container">{d.actionable.map((task) => <TaskRow key={task.callId} task={task} call={d.callsById.get(task.callId)} due={d.due(task)} calls={1 + (d.earlier.get(task.callId)?.length ?? 0)} selected={attentionRowSelected({ wide, panelId: panelCall?.id, callId: task.callId, from })} open={wide && panelCall?.id === task.callId} wide={wide} />)}</ListBox>
           ) : (
             <Empty image title="You’re all caught up." text="Emergencies, callbacks and times to confirm show up here the moment a call ends." />
           )}
@@ -187,7 +198,7 @@ function Meta({ icon, children }: { icon: ReactNode; children: ReactNode }) {
  * Wide screens: the row selects; every row but the open one carries one quiet Done. The open call's buttons live
  * once, in the pane on the right (`open`, whichever list it was opened from; `selected` is the lit row).
  */
-function TaskRow({ task, call, due, selected, open, wide }: { task: ApiTask; call: ApiCall | undefined; due: string; selected: boolean; open: boolean; wide: boolean }) {
+function TaskRow({ task, call, due, selected, open, wide, calls = 1 }: { task: ApiTask; call: ApiCall | undefined; due: string; selected: boolean; open: boolean; wide: boolean; calls?: number }) {
   const { preview } = useMode()
   const act = useTaskActions()
   const [pending, setPending] = useState(false)
@@ -203,6 +214,7 @@ function TaskRow({ task, call, due, selected, open, wide }: { task: ApiTask; cal
       <span className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground">
         {/* Urgent always reads "Call back now", at least as strong as a routine call that's due. */}
         <Meta icon={<Clock />}><span className={cn(badge.tone === "danger" && "font-semibold text-red-700")}>{due === "Due now" || badge.tone === "danger" ? "Call back now" : due.startsWith("Due today ") ? `Call back today by ${due.slice("Due today ".length)}` : due.replace(/^Due/, "Call back by")}</span></Meta>
+        {calls > 1 && <Meta icon={<PhoneIncoming />}>{calls} calls</Meta>}
         {address && <Meta icon={<MapPin />}>{address}</Meta>}
       </span>
     </>

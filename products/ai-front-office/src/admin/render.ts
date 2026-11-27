@@ -144,14 +144,14 @@ ${planCss}
   // Unlimited calls: an add-on, off unless the owner turns it on (here or on the pricing page). Fair use sits right next to it.
   const unlimitedOn = values.unlimited === "yes";
   // With Unlimited on, a plan's calls line says what they get then, not its included calls.
-  const callsLine = (plan: SignupPlan, standard: string): string => plan.unlimited ? `<span class="std">${standard}</span><span class="unl">Unlimited calls, up to ${plan.unlimited.fairUseCalls.toLocaleString("en-US")}&nbsp;a&nbsp;month</span>` : standard;
+  const callsLine = (plan: SignupPlan, standard: string): string => plan.unlimited ? `<span class="std">${standard}</span><span class="unl">Unlimited calls, up&nbsp;to&nbsp;${plan.unlimited.fairUseCalls.toLocaleString("en-US")}&nbsp;a&nbsp;month</span>` : standard;
   const several = plans.length > 1;
   const addOnPrices = plans.filter((plan) => plan.unlimited).map((plan) => `<span class="addonprice" data-plan="${escapeHtml(plan.id)}">+${dollars(plan.unlimited!.addOnCents)}/mo</span>`).join("");
   const unlimitedBox = plans.some((plan) => plan.unlimited)
     ? `<div class="addon"><span class="addonhead">Add-on</span><label class="unltoggle" for="unlimited"><input type="checkbox" role="switch" id="unlimited" name="unlimited" value="yes"${unlimitedOn ? " checked" : ""}><span class="switch" aria-hidden="true"></span><span class="unlname">Unlimited calls</span>${addOnPrices}</label><span class="fair">${escapeHtml(FAIR_USE_LINE)} Off anytime in Settings.</span></div>`
     : "";
   const planPicker = several
-    ? `<fieldset class="plans"><legend>Your plan</legend><div class="plancards">${plans.map((plan) => `<label class="plan" for="plan-${escapeHtml(plan.id)}">${radio(plan)}<strong>${escapeHtml(plan.label)}</strong><span class="price">${dollars(plan.priceCents)}<small>/mo</small></span><span class="calls">${callsLine(plan, `${plan.includedCalls} answered calls a month`)}</span><span class="who">${escapeHtml(plan.who)}</span></label>`).join("")}</div>${unlimitedBox}</fieldset>`
+    ? `<fieldset class="plans"><legend>Your plan</legend><div class="plancards">${plans.map((plan) => `<label class="plan" for="plan-${escapeHtml(plan.id)}">${radio(plan)}<strong>${escapeHtml(plan.label)}</strong><span class="price">${plan.unlimited ? `<span class="std">${dollars(plan.priceCents)}</span><span class="unl">${dollars(plan.unlimited.priceCents)}</span>` : dollars(plan.priceCents)}<small>/mo</small></span><span class="calls">${callsLine(plan, `${plan.includedCalls} answered calls a month`)}</span><span class="who">${escapeHtml(plan.who)}</span></label>`).join("")}</div>${unlimitedBox}</fieldset>`
     : plans[0] ? `<input type="hidden" name="plan" value="${escapeHtml(plans[0].id)}">${unlimitedBox ? `<fieldset class="plans">${unlimitedBox}</fieldset>` : ""}` : "";
   // One summary, the same numbers as the card step and Stripe (priceQuote): today's price big, the full price struck.
   const renewal = (iso: string): string => {

@@ -467,7 +467,7 @@ describe("homepage pricing and terms", () => {
 
   it("matches the owner text example on the homepage", () => {
     const html = renderMarketing(config, [], { plans: planCatalog(demoEnvironment({})) });
-    expect(html).toContain("<b>New call: Maria</b><br>- AC not cooling<br>- 41 Palm Ave, Sarasota<br>- Wants someone today<br><br>Call back:");
+    expect(html).toContain("<b>New call: Maria</b><br>- AC not cooling<br>- 41 Palm Ave, Sarasota<br>- Wants&nbsp;someone&nbsp;today<br><br>Call back:");
   });
 });
 

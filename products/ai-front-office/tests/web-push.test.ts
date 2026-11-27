@@ -163,7 +163,7 @@ describe("web push call alerts", () => {
     const source = await worker.text();
     expect(source).toContain("showNotification");
     expect(source).not.toContain("\"fetch\"");
-    expect(await (await fetch(`${base}/app/manifest.webmanifest`)).json()).toMatchObject({ start_url: "/app", display: "standalone" });
+    expect(await (await fetch(`${base}/app/manifest.webmanifest`)).json()).toMatchObject({ start_url: "/app", scope: "/", display: "standalone" });
     expect((await fetch(`${base}/assets/icon-192.png`)).headers.get("content-type")).toBe("image/png");
 
     const signup = await fetch(`${base}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Gulf Air", email: "owner@push.example", password: "synthetic-password-42", consent: "yes", phone: "9415550199" }) });

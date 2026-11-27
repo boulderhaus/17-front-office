@@ -154,10 +154,14 @@ function You({ data, onSaved, alone }: { data: TeamData; onSaved: () => void; al
   )
 }
 
+/** Active accounts a shop can have, owner included (src/application/team-service.ts). */
+const TEAM_CAP = 10
+
 function People({ data, onChanged }: { data: TeamData; onChanged: () => void }) {
   const active = data.people.filter((person) => person.active)
   return (
-    <Section title="People" action={<span className="tabular text-[15px] text-muted-foreground">{active.length} of 10</span>}>
+    // The 10-account cap is the same on every plan, so it shows only near it: "1 of 10" on Solo ("One person") read wrong.
+    <Section title="People" action={active.length >= TEAM_CAP - 2 ? <span className="tabular text-[15px] text-muted-foreground">{active.length} of {TEAM_CAP}</span> : undefined}>
       <ul className="divide-y overflow-hidden rounded-xl border bg-card">
         {active.map((person) => (
           <li key={person.id} className="flex min-h-16 items-center justify-between gap-3 px-4 py-3">

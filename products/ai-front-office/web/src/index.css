@@ -136,6 +136,8 @@
   html {
     @apply font-sans;
     }
+  /* No lone last word on a line (walk 11-26 iPhone: "here.", "emergency." alone). */
+  p, li, dd, h1, h2, h3 { text-wrap: pretty; }
 }
 @theme inline {
     --color-brand-yellow: var(--brand-yellow);
@@ -165,3 +167,13 @@
 
 html, body, #root { min-height: 100dvh; }
 body { -webkit-tap-highlight-color: transparent; -webkit-font-smoothing: antialiased; }
+
+/* Toasts (walk 11-26 iPhone): the close × was a 20px dot on the corner. Now a 44px target inside the toast, at the right. */
+[data-sonner-toaster][data-sonner-theme] [data-sonner-toast][data-styled="true"] { padding-right: 52px; }
+/* Sonner adds its own sheet after ours: these selectors are one step more specific than its richest one. */
+[data-sonner-toaster][data-sonner-theme] [data-sonner-toast][data-styled="true"] [data-close-button] {
+  left: auto; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 44px; height: 44px; border: 0; background: transparent; color: inherit;
+}
+[data-sonner-toaster][data-sonner-theme] [data-sonner-toast][data-styled="true"] [data-close-button] svg { width: 18px; height: 18px; }
+[data-sonner-toaster][data-sonner-theme] [data-sonner-toast][data-styled="true"] [data-close-button]:hover { background: transparent; }

@@ -10,13 +10,13 @@ export function renderErrorPage(input: { status: number; title: string; message:
 :root{--ink:#0b2545;--paper:#faf8f1;--muted:#5d6676;--yellow:#e9f447;--border:#e6e1d3}
 *{box-sizing:border-box}body{margin:0;min-height:100dvh;background:var(--paper);color:var(--ink);font:400 17px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
 header{display:flex;align-items:center;min-height:56px;padding:0 16px;border-bottom:1px solid var(--border)}
-.brand{display:inline-flex;align-items:center;min-height:44px;color:var(--ink);font-weight:650;font-size:18px;text-decoration:none}.brand em{font-family:Georgia,serif;font-style:italic;font-weight:500}
+.brand{display:inline-flex;align-items:center;gap:10px;min-height:44px;color:var(--ink);font-weight:650;font-size:18px;text-decoration:none}.brand em{font-family:Georgia,serif;font-style:italic;font-weight:600}.brand b{display:grid;place-items:center;width:32px;height:32px;border-radius:9px;background:var(--yellow);color:var(--ink);font:900 13px/1 ui-sans-serif,system-ui,-apple-system,sans-serif;letter-spacing:-.02em}
 main{max-width:34rem;margin:0 auto;padding:48px 16px}
 h1{margin:0 0 8px;font-size:28px;line-height:1.2;letter-spacing:-.01em;text-wrap:balance}
 p{margin:0 0 24px;color:var(--muted)}
 .back{display:inline-flex;align-items:center;justify-content:center;min-height:48px;padding:0 20px;border-radius:10px;background:var(--yellow);color:var(--ink);font-weight:650;text-decoration:none}
 a:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
-</style></head><body><header><a class="brand" href="/">Call&nbsp;<em>Otto</em></a></header><main><h1>${e(input.title)}</h1><p>${e(input.message)}</p><a class="back" href="${e(input.back.href)}">${e(input.back.label)}</a></main></body></html>`;
+</style></head><body><header><a class="brand" href="/"><b aria-hidden="true">CO</b><span>Call&nbsp;<em>Otto</em></span></a></header><main><h1>${e(input.title)}</h1><p>${e(input.message)}</p><a class="back" href="${e(input.back.href)}">${e(input.back.label)}</a></main></body></html>`;
 }
 
 /**
@@ -54,7 +54,7 @@ export function renderDialHandoff(input: { businessNumber: string; code: string 
 :root{--ink:#0b2545;--paper:#faf8f1;--muted:#5d6676;--yellow:#e9f447;--border:#e6e1d3}
 *{box-sizing:border-box}body{margin:0;min-height:100dvh;background:var(--paper);color:var(--ink);font:400 17px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
 header{display:flex;align-items:center;min-height:56px;padding:0 16px;border-bottom:1px solid var(--border)}
-.brand{font-weight:650;font-size:18px}.brand em{font-family:Georgia,serif;font-style:italic;font-weight:500}
+.brand{display:inline-flex;align-items:center;gap:10px;font-weight:650;font-size:18px;color:inherit;text-decoration:none}.brand em{font-family:Georgia,serif;font-style:italic;font-weight:600}.brand b{display:grid;place-items:center;width:32px;height:32px;border-radius:9px;background:var(--yellow);color:var(--ink);font:900 13px/1 ui-sans-serif,system-ui,-apple-system,sans-serif;letter-spacing:-.02em}
 main{max-width:34rem;margin:0 auto;padding:28px 16px 48px;display:grid;gap:14px}
 h1{margin:0;font-size:24px;line-height:1.25;text-wrap:balance}
 .code,.num{padding:14px 8px;border:2px solid var(--ink);border-radius:12px;background:var(--yellow);text-align:center;font:700 clamp(20px,6.4vw,28px)/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;user-select:all;-webkit-user-select:all;overflow-wrap:anywhere}
@@ -68,5 +68,5 @@ details summary{display:flex;align-items:center;min-height:44px;cursor:pointer;f
 details .alt-flow{display:grid;gap:14px;padding-top:6px}
 summary:focus-visible,button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
 a:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
-</style></head><body><header><span class="brand">Call&nbsp;<em>Otto</em></span></header><main><h1>${retry === "help" && !clearing ? "Let’s set up" : clearing ? "Clear the old forwarding on" : retry === "instead" ? "Try this code on" : settings ? "Forward calls on" : "Dial this on"} ${e(input.businessNumber)}</h1>${body}<p class="muted">This link stops working soon. Get a new one on your computer.</p></main></body></html>`;
+</style></head><body><header><span class="brand"><b aria-hidden="true">CO</b><span>Call&nbsp;<em>Otto</em></span></span></header><main><h1>${retry === "help" && !clearing ? "Let’s set up" : clearing ? "Clear the old forwarding on" : retry === "instead" ? "Try this code on" : settings ? "Forward calls on" : "Dial this on"} ${e(input.businessNumber)}</h1>${body}<p class="muted">This link stops working soon. Get a new one on your computer.</p></main></body></html>`;
 }
