@@ -207,6 +207,18 @@ describe("a new shop's assistant, made from a template in either mode", () => {
       const created = on.telnyx.requests.find((request) => request.method === "POST" && request.path === "/v2/ai/assistants")!.body!;
       expect(created).toMatchObject({ model: SPEECH_MODEL, voice_settings: { voice: SPEECH_VOICE }, delegation_settings: { enabled: true, mode: "telnyx", model: "synthetic/model" } });
       expect(on.logs).toContainEqual(expect.objectContaining({ event: "assistant_voice_mode", tenantId: on.tenantId, mode: "speech_to_speech", fallback: null }));
+      // A settings save in the owner app reads the assistant first. This fake reports no text model for it, so the save
+      // still goes through, on the standard payload, and the server log says why.
+      const csrf = ((await (await fetch(`${on.baseUrl}/api/app/dashboard`, { headers: { cookie: on.cookie } })).json()) as { csrf: string }).csrf;
+      const before = on.telnyx.requests.length;
+      const saved = await fetch(`${on.baseUrl}/api/app/onboarding/hours`, { method: "POST", headers: { cookie: on.cookie, "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify({ preset: "every_day" }) });
+      expect(saved.status).toBe(200);
+      const pushed = on.telnyx.requests.slice(before).filter((request) => request.path === "/v2/ai/assistants/assistant-1");
+      expect(pushed.map((request) => request.method)).toEqual(["GET", "POST"]);
+      expect(pushed[1]!.body!.model).toBeUndefined();
+      expect(pushed[1]!.body!.delegation_settings).toBeUndefined();
+      expect(on.logs).toContainEqual({ level: "warn", event: "assistant_voice_mode", tenantId: on.tenantId, mode: "standard", fallback: "no_backend_model", rollback: false });
+      expect((await on.store.getConfig(on.tenantId)).bookableHours.weekends).toBe(true);
     } finally { await on.close(); }
     // The mode is on but the model and voice were never set: the shop goes live on the standard voice, and the log says why.
     const incomplete = await liveShop({ env: { TELNYX_VOICE_MODE: "speech_to_speech" } });

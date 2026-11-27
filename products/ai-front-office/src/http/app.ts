@@ -1451,7 +1451,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const updated = { ...config, pronunciations: withPronunciation(config.pronunciations, upload.term, heard) };
       // Same path as Save: the live assistant gets the new "sounds like" before it shows as saved.
       try {
-        await saveAssistantConfig(dependencies.store, dependencies.env, updated, dependencies.fetcher);
+        await saveAssistantConfig(dependencies.store, dependencies.env, updated, dependencies.fetcher, log);
         return updated;
       } catch (error) {
         // The clip stays; the app puts what was heard in the field as an unsaved edit, and Save retries.
@@ -1660,7 +1660,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         const before = await dependencies.store.getIntegrationSecret(account.tenantId, "forwarding", "mode_before_every_call");
         const next = mode === "always" ? "always" : before === "after_hours" ? "after_hours" : "overflow";
         // Same as saving settings: the live assistant's coverage changes with the mode, not just the stored config.
-        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, operationMode: next }, dependencies.fetcher).catch((error: unknown) => {
+        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, operationMode: next }, dependencies.fetcher, log).catch((error: unknown) => {
           log({ level: "error", event: "forwarding_mode_save_failed", tenantId: account.tenantId, error: safeError(error) });
           throw new HttpError(502, "We couldn’t change that just now. Nothing was changed. Try again in a minute.");
         });
@@ -1797,7 +1797,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           ...current,
           bookableHours: choice.bookableHours,
           afterHours: { ...current.afterHours, ...choice.afterHours },
-        }, dependencies.fetcher ?? fetch);
+        }, dependencies.fetcher ?? fetch, log);
       });
       await dependencies.store.saveIntegrationSecret(account.tenantId, "onboarding", "hours_set_at", dependencies.clock.now().toISOString());
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
@@ -2180,7 +2180,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         });
     }
     try {
-      await saveAssistantConfig(dependencies.store, dependencies.env, updated, dependencies.fetcher);
+      await saveAssistantConfig(dependencies.store, dependencies.env, updated, dependencies.fetcher, log);
     } catch (error) {
       if (liveRouteChange) await liveRouteChange.setPaused(current.paused).catch((rollbackError) => log({ level: "error", event: "owner_route_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
       throw error;
@@ -3002,7 +3002,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           const builtFrom = JSON.stringify(buildTelnyxAssistantUpdate(config, dependencies.env.PUBLIC_BASE_URL, { voice: dependencies.env.TELNYX_VOICE }));
           const wanted = JSON.stringify(buildTelnyxAssistantUpdate(fresh, dependencies.env.PUBLIC_BASE_URL, { voice: dependencies.env.TELNYX_VOICE }));
           if (builtFrom !== wanted) {
-            await saveAssistantConfig(dependencies.store, dependencies.env, { ...fresh, paused: false }, dependencies.fetcher ?? fetch).catch(async (error: unknown) => {
+            await saveAssistantConfig(dependencies.store, dependencies.env, { ...fresh, paused: false }, dependencies.fetcher ?? fetch, log).catch(async (error: unknown) => {
               log({ level: "error", event: "go_live_assistant_resync_failed", tenantId: account.tenantId, error: safeError(error) });
               await dependencies.store.saveConfig({ ...fresh, paused: false });
             });
@@ -4709,7 +4709,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           throw new HttpError(502, "Telnyx voice routing could not be updated; configuration was not changed");
         });
       }
-      await saveAssistantConfig(dependencies.store, dependencies.env, updated);
+      await saveAssistantConfig(dependencies.store, dependencies.env, updated, undefined, log);
       });
       return redirect(response, "/admin/config");
     }
