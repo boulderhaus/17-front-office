@@ -151,6 +151,8 @@ interface SetupCallRecord {
   outcome?: SetupCallOutcome;
   /** A time with our team was booked on this call. */
   bookedAt?: string;
+  /** The setup helper emailed the forwarding steps on this call: once per call, however often the model asks. */
+  stepsEmailedAt?: string;
 }
 
 /** done: they talked; missed: never picked up; voicemail: a machine answered; looped: their phone sent it to Otto. */
@@ -3204,7 +3206,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   }
 
   /** "Email me these steps" (the owner app and the setup helper): the same steps the computer shows. True once queued. */
-  async function emailForwardingSteps(tenantId: string, email: string): Promise<boolean> {
+  async function emailForwardingSteps(tenantId: string, email: string, onceKey?: string): Promise<boolean> {
     const link = await newHandoffLink(tenantId, EMAILED_HANDOFF_TTL_MS);
     const now = dependencies.clock.now().toISOString();
     // The same steps the computer shows: every call on an iPhone (GSM family) is the Settings switch, with the
@@ -3218,7 +3220,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       id: randomUUID(), tenantId: tenantId, callId: null, channel: "email", destinationRef: `email:${email}`,
       body,
       priority: "high", state: "pending", attempts: 0, nextAttemptAt: now,
-      idempotencyKey: `handoff-email:${tenantId}:${now}`, providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
+      idempotencyKey: onceKey ?? `handoff-email:${tenantId}:${now}`, providerReceipt: null, lastError: null, createdAt: now, sentAt: null,
     });
     return queued;
   }
@@ -3381,6 +3383,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     };
     const config = await dependencies.store.getConfig(tenantId);
     if (tool === "start_forwarding_test") {
+      // Asked again while our test call is still ringing their phone: never hang it up and dial a second one.
+      const running = await readForwarding(tenantId);
+      if (running.check?.method === "auto" && forwardingCheckStatus(running.check, running.confirmedAt, now.toISOString()) === "calling") {
+        return reply({ status: "already_calling", say: "The test is already calling. Wait for it." });
+      }
       try {
         await startForwardingCheck(tenantId);
       } catch (error) {
@@ -3396,10 +3403,28 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       return reply({ status, say: words?.say ?? "There's no test yet." });
     }
     if (tool === "email_steps") {
+      // Once per support call: a repeat (the model asking again) sends nothing and says so, short and final.
+      const alreadySent = { status: "already_sent", say: "It's already in your email." };
+      if (call.stepsEmailedAt) return reply(alreadySent);
       if (!dependencies.env.RESEND_API_KEY || !dependencies.env.RESEND_FROM_EMAIL) return reply({ status: "unavailable", say: "I can't email right now. The steps are on your Call Otto screen." });
-      if (!limiter.allow(`handoff-email:${tenantId}`, 5, 24 * 60 * 60_000)) return reply({ status: "already_sent", say: "We've emailed these a few times today. Check your inbox and spam folder." });
-      const queued = await emailForwardingSteps(tenantId, account.email);
-      return reply(queued ? { status: "sent", say: "Done. The steps are in your email." } : { status: "failed", say: "That didn't send. The steps are on your Call Otto screen." });
+      const sent = await dependencies.store.withLock(`setup-steps:${callId}`, async (): Promise<"sent" | "repeat" | "limit" | "failed"> => {
+        const latest = readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"));
+        if (latest?.stepsEmailedAt) return "repeat";
+        if (!limiter.allow(`handoff-email:${tenantId}`, 5, 24 * 60 * 60_000)) return "limit";
+        // Keyed to this call, so even two at once queue one email.
+        const queued = await emailForwardingSteps(tenantId, account.email, `handoff-email:${tenantId}:call:${callId}`);
+        await dependencies.store.withLock(`setup-call:${tenantId}`, async () => {
+          const current = readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"));
+          if (current?.callControlId === callId && !current.stepsEmailedAt) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...current, stepsEmailedAt: now.toISOString() } satisfies SetupCallRecord));
+        });
+        return queued ? "sent" : "repeat";
+      }).catch((error: unknown) => {
+        log({ level: "error", event: "setup_help_email_failed", tenantId, error: safeError(error) });
+        return "failed" as const;
+      });
+      if (sent === "repeat") return reply(alreadySent);
+      if (sent === "limit") return reply({ status: "already_sent", say: "We've emailed these a few times today. Check your inbox and spam folder." });
+      return reply(sent === "sent" ? { status: "sent", say: "Done. The steps are in your email." } : { status: "failed", say: "That didn't send. The steps are on your Call Otto screen." });
     }
     if (tool === "get_open_times") {
       const existing = await founder.existingBooking(tenantId);
@@ -3420,6 +3445,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       return reply({ status: "open", times: picked.map((slot) => ({ slot_start: slot.start, label: slotFullLabel(slot.start, config.timezone) })) });
     }
     // book_time
+    // Already booked on this call: one short, final line, never a second event or email.
+    if (call.bookedAt) {
+      const existing = await founder.existingBooking(tenantId);
+      if (existing) return reply({ status: "already_booked", when: slotFullLabel(existing.start, config.timezone), say: "You're already booked. That's all set." });
+    }
     const start = typeof payload.slot_start === "string" ? payload.slot_start : "";
     if (payload.explicit_confirmation !== true) return reply({ status: "needs_confirmation", say: "Ask them to say yes to that exact time first." });
     const facts = await founderBookingFacts(account);
@@ -4398,6 +4428,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         throw new HttpError(409, "Emergency handoff requires a prior deterministic emergency triage result");
       }
     }
+    // Once per call: a repeat (the model asking again) changes nothing and gets one short, final line.
+    const onceKey = `request-human:${input.provider_call_id}`;
+    if (await dependencies.store.getIntegrationSecret(tenantId, "transfer", onceKey)) {
+      return { status: "handoff_queued", already: true, transferAvailable: false, transferTargets: [], wrap_up: await service.wrapUp(input.provider_call_id), message: "Already done. The owner has it. Do not call request_human again; tell the caller the owner will call back." };
+    }
     const result = await service.queueHumanHandoff({
       tenantId,
       providerCallId: input.provider_call_id,
@@ -4406,6 +4441,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       ...(input.problem_description === undefined ? {} : { problemDescription: input.problem_description }),
       reason: input.reason,
     });
+    await dependencies.store.saveIntegrationSecret(tenantId, "transfer", onceKey, dependencies.clock.now().toISOString());
     const config = await dependencies.store.getConfig(tenantId);
     const call = await dependencies.store.getCallByProviderId(input.provider_call_id);
     const targets = await dependencies.store.withLock(`transfer:${input.provider_call_id}`, async () => {
