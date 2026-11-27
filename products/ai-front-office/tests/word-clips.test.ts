@@ -207,6 +207,71 @@ describe("Say it endpoints", () => {
   });
 });
 
+describe("Say it reaches the live line (review of #82)", () => {
+  const clock: Clock = { now: () => new Date("2026-11-26T15:00:00.000Z") };
+
+  async function liveShop(assistantStatus: number) {
+    const store = new InMemoryStore();
+    await store.saveConfig(createDemoConfig());
+    const webDir = await mkdtemp(join(tmpdir(), "afo-sayit-live-"));
+    await writeFile(join(webDir, "index.html"), '<!doctype html><div id="root"></div>');
+    const assistantUpdates: string[] = [];
+    // Only the Telnyx assistant update is answered; anything else outbound fails the test.
+    const fetcher = (async (url: string | URL | Request, init?: RequestInit) => {
+      const target = String(url);
+      if (target === "https://api.telnyx.com/v2/ai/assistants/assistant_synthetic" && init?.method === "POST") {
+        assistantUpdates.push(String(init.body));
+        return new Response("{}", { status: assistantStatus });
+      }
+      throw new Error(`Unexpected outbound request in test: ${target}`);
+    }) as typeof fetch;
+    const base = demoEnvironment({ ADMIN_TOKEN: "admin-token-abcdefghijklmnopqrstuvwxyz", TOOL_TOKEN: "tool-token-abcdefghijklmnopqrstuvwxyz", PUBLIC_BASE_URL: "http://127.0.0.1:8787", TELNYX_API_KEY: "KEY_synthetic" });
+    const transcriber: Transcriber = { transcribe: async () => "my AK uh" };
+    const server = createServer(createRequestHandler({ env: { ...base, DEMO_MODE: false }, store, calendar: new InMemoryCalendar(), clock, integrations: {}, logger: () => undefined, ownerWeb: { dir: webDir }, transcriber, fetcher }));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("no port");
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    const email = `owner-${Math.random().toString(36).slice(2, 8)}@synthetic.example`;
+    const signup = await fetch(`${baseUrl}/signup`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ businessName: "Synthetic Air", email, password: "long-password-for-tests", phone: "(941) 555-0142", trade: "hvac" }) });
+    const cookie = signup.headers.get("set-cookie")!.split(";")[0]!;
+    const tenantId = (await store.getOwnerAccountByEmail(email))!.tenantId;
+    await store.saveProviderRoute({ provider: "telnyx", externalId: "assistant_synthetic", tenantId, createdAt: clock.now().toISOString(), updatedAt: clock.now().toISOString() });
+    const { csrf } = await (await fetch(`${baseUrl}/api/app/settings`, { headers: { cookie } })).json() as { csrf: string };
+    const upload = () => fetch(`${baseUrl}/api/app/words/clip`, { method: "POST", headers: { cookie, "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify({ term: "Myakka", mimeType: "audio/webm", audio: webm().toString("base64"), durationMs: 1_800 }) });
+    const close = async () => { await new Promise<void>((resolve) => server.close(() => resolve())); await rm(webDir, { recursive: true, force: true }); };
+    return { store, tenantId, assistantUpdates, upload, close };
+  }
+
+  it("sends the new 'sounds like' to the live assistant before it shows as saved", async () => {
+    const shop = await liveShop(200);
+    try {
+      const body = await (await shop.upload()).json() as { pronunciations: string | null };
+      expect(body.pronunciations).toBe("Myakka: my AK uh");
+      expect(shop.assistantUpdates).toHaveLength(1);
+      expect(shop.assistantUpdates[0]).toContain("Myakka: pronounce as my AK uh");
+      expect((await shop.store.getConfig(shop.tenantId)).pronunciations).toEqual([{ term: "Myakka", spokenAs: "my AK uh" }]);
+    } finally { await shop.close(); }
+  });
+
+  it("keeps the clip and hands back what was heard, unsaved, when the live assistant refuses it", async () => {
+    const shop = await liveShop(500);
+    try {
+      const response = await shop.upload();
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ heard: "my AK uh", pronunciations: null });
+      expect((await shop.store.getConfig(shop.tenantId)).pronunciations).toEqual([]);
+      expect(await shop.store.listWordClips(shop.tenantId)).toMatchObject([{ term: "Myakka", heard: "my AK uh" }]);
+    } finally { await shop.close(); }
+  });
+
+  it("names no speech-to-text model of its own: unset, clips are kept and nothing is transcribed", async () => {
+    const { readFile: read } = await import("node:fs/promises");
+    expect(await read(new URL("../src/adapters/telnyx-transcribe.ts", import.meta.url), "utf8")).not.toMatch(/whisper|DEFAULT_TELNYX_STT_MODEL/i);
+    expect(demoEnvironment().TELNYX_STT_MODEL).toBeUndefined();
+  });
+});
+
 describe("Names and words rows in the app", () => {
   it("shows a row per saved line and per said word, and saves only complete lines in the server's format", async () => {
     const { rowsFrom, textFrom, withLine } = await import("../web/src/lib/words.js");
@@ -216,5 +281,28 @@ describe("Names and words rows in the app", () => {
     expect(textFrom(rows)).toBe("Myakka: my-AK-uh\nVenice: VEN-iss");
     expect(withLine("Myakka: old\nVenice: VEN-iss", "myakka", "my AK uh")).toBe("Myakka: my AK uh\nVenice: VEN-iss");
     expect(withLine("Venice: VEN-iss", "Osprey", "OSS-pray")).toBe("Venice: VEN-iss\nOsprey: OSS-pray");
+  });
+
+  it("puts a late 'sounds like' on the word it was said for and keeps every newer edit (review of #82)", async () => {
+    const { rowsFrom, textFrom, withHeard } = await import("../web/src/lib/words.js");
+    // Said "Myakka", then while it saved: renamed that row, fixed Venice, and started Osprey.
+    const rows = rowsFrom("Myakka: old\nVenice: VEN-iss")
+    const edited = [{ ...rows[0]!, term: "Myakka River" }, { ...rows[1]!, soundsLike: "VEH-niss" }, { id: "typing", term: "Osprey", soundsLike: "" }];
+    const next = withHeard(edited, "Myakka", "my AK uh");
+    expect(next.map((row) => [row.term, row.soundsLike])).toEqual([["Myakka River", "old"], ["Venice", "VEH-niss"], ["Osprey", ""], ["Myakka", "my AK uh"]]);
+    expect(textFrom(next)).toBe("Myakka River: old\nVenice: VEH-niss\nMyakka: my AK uh");
+    // The row still has the word: only its "sounds like" changes.
+    expect(withHeard(rowsFrom("Myakka: old"), "MYAKKA", "new").map((row) => row.soundsLike)).toEqual(["new"]);
+  });
+
+  it("takes a saved value from outside without dropping a row being typed or changing row ids", async () => {
+    const { mergeRows, rowsFrom } = await import("../web/src/lib/words.js");
+    const current = [...rowsFrom("Myakka: old"), { id: "typing", term: "Osprey", soundsLike: "" }, { id: "blank", term: "", soundsLike: "" }];
+    const merged = mergeRows(current, "Venice: VEN-iss\nMyakka: my AK uh", ["Myakka"]);
+    expect(merged.map((row) => [row.term, row.soundsLike])).toEqual([["Venice", "VEN-iss"], ["Myakka", "my AK uh"], ["Osprey", ""], ["", ""]]);
+    expect(merged[1]!.id).toBe(current[0]!.id);
+    expect(merged.slice(2).map((row) => row.id)).toEqual(["typing", "blank"]);
+    // Discard drops a finished line that was never saved.
+    expect(mergeRows([{ id: "x", term: "Venice", soundsLike: "VEN-iss" }], "").map((row) => row.term)).toEqual([]);
   });
 });

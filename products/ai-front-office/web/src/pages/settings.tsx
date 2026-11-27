@@ -140,12 +140,15 @@ export function SettingsArea() {
       reload: async () => { await settings.reload(); await reloadDashboard() },
       urgentBusy,
       toggleUrgentCalls,
-      patchSettings: (patch) => { if (settings.data) settings.setData(patch(settings.data)) },
+      // Functional updates: a patch that lands late (a clip saving) never puts back older settings.
+      patchSettings: (patch) => settings.setData((current) => (current ? patch(current) : current)),
       markSaved: (name, savedValue, local, patch) => {
-        if (!settings.data) return
         keepEdits.current = true
-        const next = { ...settings.data, values: { ...settings.data.values, [name]: savedValue } }
-        settings.setData(patch ? patch(next) : next)
+        settings.setData((current) => {
+          if (!current) return current
+          const next = { ...current, values: { ...current.values, [name]: savedValue } }
+          return patch ? patch(next) : next
+        })
         set(name, local)
       },
     }

@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
 import type { ApiSettings } from "@/lib/types"
 import { cn } from "@/lib/utils"
-import { blankRow, rowsFrom, textFrom, withLine, wordKey, type WordRow } from "@/lib/words"
+import { blankRow, mergeRows, rowsFrom, textFrom, withHeard, withLine, wordKey, type WordRow } from "@/lib/words"
 
 /** The app stops recording by itself after this long (the server caps the bytes). */
 const MAX_MS = 5_000
@@ -35,8 +35,8 @@ export interface SayItProps {
   text: string
   onText: (text: string) => void
   clips: Clip[]
-  /** The server saved this clip (and maybe its "sounds like"): show it as saved. */
-  onSaid: (result: SaidResult) => void
+  /** The server saved this clip (and maybe its "sounds like"): show it as saved. local is the list with what was heard. */
+  onSaid: (result: SaidResult, local: string) => void
   onUnsaid: (term: string) => void
 }
 
@@ -47,16 +47,20 @@ export interface SayItProps {
 export function NamesAndWords({ text, onText, clips, onSaid, onUnsaid }: SayItProps) {
   const clipTerms = clips.map((clip) => clip.term)
   const [rows, setRows] = useState<WordRow[]>(() => withOneRow(rowsFrom(text, clipTerms)))
-  // A saved value from outside (Save, Discard, a clip filling its row) wins over the rows on screen.
+  // The rows as they are now, for answers that arrive later (a clip saving, a recording removed).
+  const latest = useRef(rows)
+  latest.current = rows
+  // A saved value from outside (Save, Discard, a clip filling its row) wins over the rows on screen; a row being
+  // typed keeps its place and focus.
   useEffect(() => {
-    setRows((current) => (textFrom(current) === text && sameClipRows(current, clipTerms) ? current : withOneRow(rowsFrom(text, clipTerms))))
+    setRows((current) => (textFrom(current) === text ? current : withOneRow(mergeRows(current, text, clipTerms))))
   }, [text, clipTerms.join("\n")]) // eslint-disable-line react-hooks/exhaustive-deps
   // A browser that can't record at all turns Say it off; a blocked microphone only says so, and the next tap asks again.
   const [unsupported] = useState(() => !canRecord())
   const [problem, setProblem] = useState<string | null>(() => (unsupported ? "This browser can’t record. Type how it sounds." : null))
   const player = useRef<HTMLAudioElement | null>(null)
 
-  const change = (next: WordRow[]) => { setRows(next); onText(textFrom(next)) }
+  const change = (next: WordRow[]) => { latest.current = next; setRows(next); onText(textFrom(next)) }
   const edit = (id: string, patch: Partial<WordRow>) => change(rows.map((row) => (row.id === id ? { ...row, ...patch } : row)))
   const clipFor = (term: string) => clips.find((clip) => wordKey(clip.term) === wordKey(term) && term.trim())
 
@@ -73,7 +77,7 @@ export function NamesAndWords({ text, onText, clips, onSaid, onUnsaid }: SayItPr
   }
   const removeRow = async (row: WordRow) => {
     if (clipFor(row.term) && !(await removeRecording(row.term))) return
-    change(withOneRow(rows.filter((item) => item.id !== row.id)))
+    change(withOneRow(latest.current.filter((item) => item.id !== row.id)))
   }
   const play = (clip: Clip) => {
     player.current?.pause()
@@ -95,9 +99,10 @@ export function NamesAndWords({ text, onText, clips, onSaid, onUnsaid }: SayItPr
                 <SayItButton term={row.term} disabled={unsupported} said={Boolean(clip)}
                   onProblem={setProblem}
                   onSaid={(result) => {
-                    onSaid(result)
-                    if (result.heard) setRows((current) => current.map((item) => (item.id === row.id ? { ...item, soundsLike: result.heard! } : item)))
-                    toast.success(result.heard ? "Saved." : "Saved your voice. Type how it sounds, too.")
+                    const next = result.heard ? withHeard(latest.current, result.term, result.heard) : latest.current
+                    if (next !== latest.current) { latest.current = next; setRows(next) }
+                    onSaid(result, textFrom(next))
+                    toast.success(result.pronunciations !== null ? "Saved." : result.heard ? "Saved your voice. Tap Save to keep how it sounds." : "Saved your voice. Type how it sounds, too.")
                   }} />
                 <Button type="button" variant="ghost" className="size-12 shrink-0 text-muted-foreground lg:pointer-fine:size-11" aria-label={row.term.trim() ? `Remove ${row.term.trim()}` : "Remove this word"} onClick={() => void removeRow(row)}><X className="size-5" /></Button>
               </div>
@@ -123,7 +128,6 @@ export function NamesAndWords({ text, onText, clips, onSaid, onUnsaid }: SayItPr
 }
 
 const withOneRow = (rows: WordRow[]) => (rows.length ? rows : [blankRow()])
-const sameClipRows = (rows: WordRow[], clipTerms: string[]) => clipTerms.every((term) => rows.some((row) => wordKey(row.term) === wordKey(term)))
 
 /** Tap, say the word, tap again (or it stops by itself after 5 seconds); the clip goes to the server. */
 function SayItButton({ term, disabled, said, onSaid, onProblem }: { term: string; disabled: boolean; said: boolean; onSaid: (result: SaidResult) => void; onProblem: (line: string | null) => void }) {
@@ -131,24 +135,39 @@ function SayItButton({ term, disabled, said, onSaid, onProblem }: { term: string
   const [left, setLeft] = useState(MAX_MS / 1000)
   const recorder = useRef<MediaRecorder | null>(null)
   const timers = useRef<number[]>([])
+  // The newest onSaid: a clip answers up to 15 s later, after more typing, and must not bring back older text.
+  const latestOnSaid = useRef(onSaid)
+  latestOnSaid.current = onSaid
+  // busy: asking for the microphone, recording or saving (a second tap does nothing). gone: the row was removed.
+  const busy = useRef(false)
+  const gone = useRef(false)
   const clear = () => { for (const timer of timers.current) window.clearTimeout(timer); timers.current = [] }
-  useEffect(() => () => { clear(); recorder.current?.state === "recording" && recorder.current.stop() }, [])
+  useEffect(() => {
+    gone.current = false
+    return () => { gone.current = true; clear(); if (recorder.current?.state === "recording") recorder.current.stop() }
+  }, [])
 
   const start = async () => {
+    if (busy.current) return
     if (!term.trim()) { toast.error("Type the word first, then say it."); return }
+    busy.current = true
     let stream: MediaStream
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true })
     } catch (error) {
+      busy.current = false
       const name = error instanceof DOMException ? error.name : ""
       onProblem(name === "NotAllowedError" || name === "SecurityError" ? "Your microphone is off. Type how it sounds." : "We couldn’t find a microphone. Type how it sounds.")
       return
     }
+    // The row went away while the browser asked: let go of the microphone.
+    if (gone.current) { for (const track of stream.getTracks()) track.stop(); busy.current = false; return }
     onProblem(null)
     const type = recordType()
     let media: MediaRecorder
     try { media = new MediaRecorder(stream, type ? { mimeType: type } : undefined) } catch {
       for (const track of stream.getTracks()) track.stop()
+      busy.current = false
       onProblem("This browser can’t record. Type how it sounds.")
       return
     }
@@ -158,14 +177,17 @@ function SayItButton({ term, disabled, said, onSaid, onProblem }: { term: string
     media.onstop = async () => {
       clear()
       for (const track of stream.getTracks()) track.stop()
+      // Removed while recording: nothing is saved, so the word doesn't come back.
+      if (gone.current) { busy.current = false; return }
       setState("saving")
       try {
         const blob = new Blob(chunks, { type: media.mimeType || type || "audio/webm" })
         const result = await api<SaidResult>("/api/app/words/clip", { method: "POST", body: { term: term.trim(), mimeType: blob.type, audio: await base64Of(blob), durationMs: Date.now() - began } })
-        onSaid(result)
+        latestOnSaid.current(result)
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "That didn’t save. Please try again.")
       } finally {
+        busy.current = false
         setState("idle")
       }
     }
