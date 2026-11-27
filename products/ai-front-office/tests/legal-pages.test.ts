@@ -80,7 +80,8 @@ describe("Privacy and Terms: a document layout that changes no words (LEGAL-01)"
 
   it("uses the site's own top bar and footer, not the old admin page", () => {
     const home = renderMarketing(config, []);
-    const footer = /<footer class="wrap">.*?<\/footer>/.exec(home)![0];
+    // The homepage footer adds one line saying what Call Otto is (seo.ts); Privacy and Terms share the rest.
+    const footer = /<footer class="wrap">.*?<\/footer>/.exec(home)![0].replace(/<p class="entity">.*?<\/p>/, "");
     for (const page of [pages.privacy, pages.terms]) {
       // Same links as the homepage, pointed back at it.
       expect(page).toContain('<header class="nav"><a class="brand" href="/">Call <em>Otto</em></a><nav aria-label="Main"><a href="/#compare">Why Call Otto</a><a href="/#trades">Trades</a><a href="/#pricing">Pricing</a><a class="signin" href="/login">Sign in</a><a class="button" href="/signup">Get started</a></nav></header>');

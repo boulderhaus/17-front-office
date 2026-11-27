@@ -5,10 +5,10 @@ import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
 import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
 import { planCatalog } from "../src/domain/plans.js";
-import { renderMarketing } from "../src/admin/marketing.js";
+import { renderMarketing, SITE_FOOTER } from "../src/admin/marketing.js";
 import { createRequestHandler } from "../src/http/app.js";
 
-const ENTITY = "Call Otto (callotto.co) is a $49.99-a-month AI answering service for solo HVAC and plumbing owners, made by Dutchworks LLC.";
+const ENTITY = "Call Otto (callotto.co) is a $49.99-a-month AI answering service for HVAC, plumbing and other trades teams of 1 to 10.";
 
 /** One raw request, so the Host header can be set (fetch won't). */
 function raw(port: number, method: string, path: string, host = "callotto.co"): Promise<{ status: number; headers: Record<string, unknown>; body: string }> {
@@ -89,11 +89,21 @@ describe("homepage entity facts", () => {
   const graph = (JSON.parse(jsonLd) as { "@graph": Array<Record<string, unknown>> })["@graph"];
   const byType = (type: string) => graph.find((node) => node["@type"] === type)!;
 
-  it("says what Call Otto is, word for word, near the top of the page", () => {
+  it("says what Call Otto is, word for word, as real text in the footer", () => {
     const visible = html.replace(/<style>[\s\S]*?<\/style>/g, " ").replace(/<script[\s\S]*?<\/script>/g, " ");
-    expect(visible).toContain(`<p class="entity">${ENTITY}</p>`);
-    // Inside the hero, before the trades, pricing and FAQ.
-    expect(visible.indexOf(ENTITY)).toBeLessThan(visible.indexOf('id="trades"'));
+    const footer = visible.slice(visible.indexOf("<footer"));
+    expect(footer).toContain(`<p class="entity">${ENTITY}</p>`);
+    // Only in the footer: the hero and the rest of the page stay as they were.
+    expect(visible.indexOf(ENTITY)).toBe(visible.indexOf("<footer") + footer.indexOf(ENTITY));
+    // Shown, not hidden: Google wants structured data to match text people can read.
+    expect(html).toMatch(/\.foot-copy \.entity\{[^}]*font-size:13px/);
+    expect(html).not.toMatch(/\.entity\{[^}]*(display:\s*none|visibility:\s*hidden|font-size:\s*[0-9]px)/);
+    // Brand copy never names the company behind it.
+    expect(footer).not.toContain("Dutchworks");
+  });
+
+  it("keeps Privacy and Terms footers as they were", () => {
+    expect(SITE_FOOTER).not.toContain('class="entity"');
   });
 
   it("carries Organization, WebSite and SoftwareApplication JSON-LD that parses", () => {
