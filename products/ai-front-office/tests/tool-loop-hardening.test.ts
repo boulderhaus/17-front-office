@@ -401,6 +401,40 @@ describe("a tool the model repeats in one call does its work once", () => {
     expect(tasksFor(store, call.id)).toHaveLength(1);
   });
 
+  it("request_human three at once: one owner alert, one task, and only the first answer is the real one", async () => {
+    const { store, post } = await demoApp();
+    const body = { provider_call_id: "thrice-human-at-once", from_number: "+15555550110", reason: "explicit_request", caller_quote: "I want to speak to the owner", problem_description: "Water heater leaking" };
+    const answers = await Promise.all([0, 1, 2].map(async () => json(await post("/tools/request-human", body))));
+    expect(answers.filter((answer) => answer.status === "handoff_queued" && !answer.already)).toHaveLength(1);
+    const call = (await store.getCallByProviderId("thrice-human-at-once"))!;
+    expect(forCall(store, call.id).filter((item) => item.channel === "sms")).toHaveLength(1);
+    expect(one(forCall(store, call.id))).toBe(true);
+    expect(tasksFor(store, call.id)).toHaveLength(1);
+  });
+
+  it("request_human that fails partway is finished by the next try, not answered as already done", async () => {
+    const { store, post } = await demoApp();
+    const real = store.getIntegrationSecret.bind(store);
+    let failed = false;
+    store.getIntegrationSecret = async (tenantId, provider, key) => {
+      if (!failed && key.startsWith("attempt:")) {
+        failed = true;
+        throw new Error("synthetic transfer lookup failure");
+      }
+      return real(tenantId, provider, key);
+    };
+    const body = { provider_call_id: "human-retry", from_number: "+15555550110", reason: "explicit_request", caller_quote: "I want to speak to the owner", problem_description: "Water heater leaking" };
+    const first = await json(await post("/tools/request-human", body));
+    expect(failed).toBe(true);
+    expect(first.transferTargets).toBeUndefined();
+    const retry = await json(await post("/tools/request-human", body));
+    expect(retry).toMatchObject({ status: "handoff_queued" });
+    expect(retry.already).toBeUndefined();
+    const call = (await store.getCallByProviderId("human-retry"))!;
+    expect(forCall(store, call.id).filter((item) => item.channel === "sms")).toHaveLength(1);
+    expect(tasksFor(store, call.id)).toHaveLength(1);
+  });
+
   it("triage_call on an emergency: one owner alert and one task", async () => {
     const { store, post } = await demoApp();
     const body = { provider_call_id: "thrice-triage", from_number: "+15555550110", problem_description: "I smell gas in the basement" };
@@ -443,7 +477,8 @@ describe("a tool the model repeats in one call does its work once", () => {
     expect(slots[1]!.start).not.toBe(slots[0]!.start);
     const again = await json(await post("/tools/book", booking(slots[1]!.start)));
     // Never a second appointment for the same caller, whatever the repeat names.
-    expect(["confirmed", "pending"]).toContain(again.status);
+    expect(again).toMatchObject({ status: "confirmed" });
+    expect(again.message).toMatch(/^Already booked for .+\. Do not book again\.$/);
     expect(await json(await post("/tools/book", booking(slots[0]!.start)))).toMatchObject({ status: "limit_reached" });
     expect(calendar.createCalls).toBe(1);
     expect(calendar.events).toHaveLength(1);

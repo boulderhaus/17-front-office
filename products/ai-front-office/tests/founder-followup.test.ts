@@ -1086,6 +1086,12 @@ describe("Call me now: Otto's support call", () => {
     }
     expect(checkDials()).toHaveLength(1);
     expect(made.recorded.filter((call) => /\/actions\/hangup$/.test(call.url))).toHaveLength(0);
+    // Two at once while nothing rings: still one test call.
+    const fresh = await onTheCall();
+    const freshDials = () => fresh.recorded.filter((call) => call.url === "https://api.telnyx.com/v2/calls" && (call.body as { to?: string }).to === "+19415550177");
+    const pair = await Promise.all([0, 1].map(async () => (await fresh.tool("start_forwarding_test", { provider_call_id: "v3:help-call" })).json() as Promise<{ status: string }>));
+    expect(pair.map((item) => item.status).sort()).toEqual(["already_calling", "calling"]);
+    expect(freshDials()).toHaveLength(1);
     // Once that test is over, a new one may start.
     made.clock.at = new Date(made.clock.at.getTime() + 3 * 60_000);
     expect(await (await made.tool("start_forwarding_test", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "calling" });
@@ -1109,6 +1115,13 @@ describe("Call me now: Otto's support call", () => {
     expect(made.recorded.filter((call) => call.method === "POST" && call.url.includes("/calendars/primary/events"))).toHaveLength(1);
     expect(made.founderEmails(made.account.tenantId).filter((item) => item.idempotencyKey.endsWith(":confirmation"))).toHaveLength(1);
     expect([...made.store.notifications.values()].filter((item) => item.destinationRef === "email:help@callotto.example" && item.idempotencyKey.startsWith("setup-help-booking:"))).toHaveLength(1);
+    // Our team's email never got queued (the outbox failed): the repeat sends it, once.
+    const teamEmails = () => [...made.store.notifications.values()].filter((item) => item.idempotencyKey.startsWith("setup-help-booking:"));
+    for (const item of teamEmails()) made.store.notifications.delete(item.id);
+    expect(teamEmails()).toHaveLength(0);
+    expect((await book(open.times[0]!.slot_start)).status).toBe("already_booked");
+    expect((await book(open.times[0]!.slot_start)).status).toBe("already_booked");
+    expect(teamEmails()).toHaveLength(1);
   });
 
   it("book_time books inside our team's windows, says the time, and emails the owner and the support inbox with a calendar invite", async () => {

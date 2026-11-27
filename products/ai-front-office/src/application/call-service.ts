@@ -433,6 +433,11 @@ export class CallService {
     const config = await this.store.getConfig(input.tenantId);
     let call = await this.store.getCallByProviderId(input.providerCallId);
     if (!call || call.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
+    // Already booked on this call (the model asking again, maybe for another time): one short, final line.
+    const booked = await this.store.getBookingForCall(call.id);
+    if (booked?.status === "confirmed" && booked.requestedStart) {
+      return { status: "confirmed", message: `Already booked for ${formatLocalDateTime(booked.requestedStart, config.timezone)}. Do not book again.` };
+    }
     input.signal?.throwIfAborted();
     call = {
       ...call,

@@ -3384,17 +3384,21 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const config = await dependencies.store.getConfig(tenantId);
     if (tool === "start_forwarding_test") {
       // Asked again while our test call is still ringing their phone: never hang it up and dial a second one.
-      const running = await readForwarding(tenantId);
-      if (running.check?.method === "auto" && forwardingCheckStatus(running.check, running.confirmedAt, now.toISOString()) === "calling") {
-        return reply({ status: "already_calling", say: "The test is already calling. Wait for it." });
-      }
-      try {
-        await startForwardingCheck(tenantId);
-      } catch (error) {
-        if (error instanceof HttpError) return reply({ status: "not_started", say: error.message });
-        throw error;
-      }
-      return reply({ status: "calling", say: "The test is calling your business phone now. Don't answer it. I'll tell you in a few seconds." });
+      // Read and start under one lock, so two at once still place one test call.
+      const started = await dependencies.store.withLock(`setup-test:${tenantId}`, async (): Promise<Record<string, unknown>> => {
+        const running = await readForwarding(tenantId);
+        if (running.check?.method === "auto" && forwardingCheckStatus(running.check, running.confirmedAt, dependencies.clock.now().toISOString()) === "calling") {
+          return { status: "already_calling", say: "The test is already calling. Wait for it." };
+        }
+        try {
+          await startForwardingCheck(tenantId);
+        } catch (error) {
+          if (error instanceof HttpError) return { status: "not_started", say: error.message };
+          throw error;
+        }
+        return { status: "calling", say: "The test is calling your business phone now. Don't answer it. I'll tell you in a few seconds." };
+      });
+      return reply(started);
     }
     if (tool === "get_test_result") {
       const state = await readForwarding(tenantId);
@@ -3446,9 +3450,14 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     }
     // book_time
     // Already booked on this call: one short, final line, never a second event or email.
+    // Both emails are keyed to the booking, so this only sends one that never got queued.
     if (call.bookedAt) {
-      const existing = await founder.existingBooking(tenantId);
-      if (existing) return reply({ status: "already_booked", when: slotFullLabel(existing.start, config.timezone), say: "You're already booked. That's all set." });
+      const facts = await founderBookingFacts(account);
+      const existing = await founder.bookedCall(tenantId, facts);
+      if (existing) {
+        await queueTeamBookingEmail(tenantId, existing, facts);
+        return reply({ status: "already_booked", when: slotFullLabel(existing.start, config.timezone), say: "You're already booked. That's all set." });
+      }
     }
     const start = typeof payload.slot_start === "string" ? payload.slot_start : "";
     if (payload.explicit_confirmation !== true) return reply({ status: "needs_confirmation", say: "Ask them to say yes to that exact time first." });
@@ -4428,30 +4437,33 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         throw new HttpError(409, "Emergency handoff requires a prior deterministic emergency triage result");
       }
     }
-    // Once per call: a repeat (the model asking again) changes nothing and gets one short, final line.
-    const onceKey = `request-human:${input.provider_call_id}`;
-    if (await dependencies.store.getIntegrationSecret(tenantId, "transfer", onceKey)) {
-      return { status: "handoff_queued", already: true, transferAvailable: false, transferTargets: [], wrap_up: await service.wrapUp(input.provider_call_id), message: "Already done. The owner has it. Do not call request_human again; tell the caller the owner will call back." };
-    }
-    const result = await service.queueHumanHandoff({
-      tenantId,
-      providerCallId: input.provider_call_id,
-      fromNumber: await callerNumber(input.provider_call_id, input.from_number),
-      ...(input.caller_name === undefined ? {} : { callerName: input.caller_name }),
-      ...(input.problem_description === undefined ? {} : { problemDescription: input.problem_description }),
-      reason: input.reason,
-    });
-    await dependencies.store.saveIntegrationSecret(tenantId, "transfer", onceKey, dependencies.clock.now().toISOString());
-    const config = await dependencies.store.getConfig(tenantId);
-    const call = await dependencies.store.getCallByProviderId(input.provider_call_id);
-    const targets = await dependencies.store.withLock(`transfer:${input.provider_call_id}`, async () => {
+    // Once per call: a repeat (the model asking again) changes nothing and gets one short, final line. Check,
+    // handoff, transfer lookup and the done mark all sit under one lock, and the mark is saved only after all
+    // of it worked, so a failed first try can still be finished by the next one.
+    return dependencies.store.withLock(`transfer:${input.provider_call_id}`, async () => {
+      const onceKey = `request-human:${input.provider_call_id}`;
+      if (await dependencies.store.getIntegrationSecret(tenantId, "transfer", onceKey)) {
+        return { status: "handoff_queued", already: true, transferAvailable: false, transferTargets: [], wrap_up: await service.wrapUp(input.provider_call_id), message: "Already done. Do not call request_human again. Carry on from your last result." };
+      }
+      const result = await service.queueHumanHandoff({
+        tenantId,
+        providerCallId: input.provider_call_id,
+        fromNumber: await callerNumber(input.provider_call_id, input.from_number),
+        ...(input.caller_name === undefined ? {} : { callerName: input.caller_name }),
+        ...(input.problem_description === undefined ? {} : { problemDescription: input.problem_description }),
+        reason: input.reason,
+      });
+      const config = await dependencies.store.getConfig(tenantId);
+      const call = await dependencies.store.getCallByProviderId(input.provider_call_id);
       const key = `attempt:${input.provider_call_id}`;
-      if (await dependencies.store.getIntegrationSecret(tenantId, "transfer", key)) return [];
-      const approved = await approvedTransferTargets(dependencies.store, config, call?.fromNumber ?? input.from_number, tenantId === dependencies.env.DEFAULT_TENANT_ID ? dependencies.env.TELNYX_FROM_NUMBER : undefined);
-      if (approved.length) await dependencies.store.saveIntegrationSecret(tenantId, "transfer", key, "issued");
-      return approved;
+      let targets: Awaited<ReturnType<typeof approvedTransferTargets>> = [];
+      if (!await dependencies.store.getIntegrationSecret(tenantId, "transfer", key)) {
+        targets = await approvedTransferTargets(dependencies.store, config, call?.fromNumber ?? input.from_number, tenantId === dependencies.env.DEFAULT_TENANT_ID ? dependencies.env.TELNYX_FROM_NUMBER : undefined);
+        if (targets.length) await dependencies.store.saveIntegrationSecret(tenantId, "transfer", key, "issued");
+      }
+      await dependencies.store.saveIntegrationSecret(tenantId, "transfer", onceKey, dependencies.clock.now().toISOString());
+      return { ...result, wrap_up: await service.wrapUp(input.provider_call_id), transferAvailable: targets.length > 0, transferTargets: targets, message: targets.length ? "Owner alert and callback are saved. Offer one warm transfer to the configured Owner target. If it fails, return to the caller; the callback remains open." : result.message };
     });
-    return { ...result, wrap_up: await service.wrapUp(input.provider_call_id), transferAvailable: targets.length > 0, transferTargets: targets, message: targets.length ? "Owner alert and callback are saved. Offer one warm transfer to the configured Owner target. If it fails, return to the caller; the callback remains open." : result.message };
   }
 
   async function handleAdmin(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
