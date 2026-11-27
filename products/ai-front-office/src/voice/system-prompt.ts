@@ -370,7 +370,8 @@ export function buildTelnyxAssistantUpdate(config: BusinessConfig, publicBaseUrl
       user_idle_timeout_secs: USER_IDLE_TIMEOUT_SECONDS,
       user_idle_reply_secs: USER_IDLE_REPLY_SECONDS,
       conversation_ended_full_history: true,
-      noise_suppression: "aicoustics",
+      // Off: replaying the Nov 26 cell call, aicoustics (default 0.8) dropped the short quiet answers (-33 to -40 dBFS) 3 of 3 runs; off heard 19 of 20 at the same 1.5 s median reply gap.
+      noise_suppression: "disabled",
       recording_settings: { enabled: audioRecordingEnabled(config), channels: "dual", format: "mp3", stop_on_conversation_end: true },
     },
     ...ottoSpeechSettings(),
