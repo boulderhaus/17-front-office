@@ -12,7 +12,7 @@ import { AlertsOffNotice, LineStatus } from "@/components/app/shell"
 import { api } from "@/lib/api"
 import { derive, forwardingOn, shortAddress, urgency } from "@/lib/derive"
 import { allCallsRowSelected, attentionRowSelected, nextOpenCall, PANEL_EDGE, panelSearch, revealDelta, ROW_FOCUS, rowShowsDone, SELECTED_ROW, stillOpenCalls } from "@/lib/selection"
-import { createTaskGate, QUIET_MS, runTaskAction, type TaskAction, type TaskDeps, type TaskMoves } from "@/lib/task-action"
+import { createTaskGate, groupedPost, QUIET_MS, runTaskAction, type TaskAction, type TaskDeps, type TaskMoves } from "@/lib/task-action"
 import { callerLabel, compactDate, dateKey, money, perCall, timeOnly } from "@/lib/format"
 import { useMediaQuery, useMode } from "@/lib/mode"
 import type { ApiCall, ApiDashboard, ApiTask } from "@/lib/types"
@@ -31,13 +31,7 @@ export function useTaskActions() {
   const one = (callId: string, action: TaskAction, minutes?: number) => api(`/api/app/calls/${encodeURIComponent(callId)}/task`, { method: "POST", body: { action, ...(minutes ? { minutes } : {}) } })
   const deps: TaskDeps = {
     // One job per caller: Done and Later on it close the caller's other open calls too, so none comes back.
-    post: async (callId, action, minutes) => {
-      const others = action === "reopen" ? closedWith.get(callId) ?? [] : (dashboard ? derive(dashboard).earlier.get(callId) ?? [] : [])
-      const result = await one(callId, action, minutes)
-      if (action === "complete") closedWith.set(callId, others)
-      await Promise.all(others.map((other) => one(other, action, minutes)))
-      return result
-    },
+    post: groupedPost(one, (callId) => (dashboard ? derive(dashboard).earlier.get(callId) ?? [] : []), closedWith),
     reload,
     toast: { success: (message, options) => void toast.success(message, options), message: (message) => void toast(message), error: (message) => void toast.error(message) },
     gate: taskGate,

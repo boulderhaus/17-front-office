@@ -95,11 +95,11 @@ export function NamesAndWords({ text, onText, clips, onSaid, onUnsaid }: SayItPr
           return (
             <li key={row.id} className="grid gap-2 border-t py-3 first:border-t-0 first:pt-0">
               <div className="flex items-center gap-2">
-                <Input id={`word-${row.id}`} aria-label="Word" placeholder="Word, like Myakka" className="h-12 flex-1 bg-card" value={row.term} maxLength={120} onChange={(event) => edit(row.id, { term: event.target.value.replace(/:/g, "") })} />
+                <Input id={`word-${row.id}`} aria-label="Word" placeholder="Word, like Myakka" className="h-12 flex-1 bg-card" value={row.term} maxLength={120} onChange={(event) => { edit(row.id, { term: event.target.value.replace(/:/g, "") }); setProblem((line) => (line === EMPTY_WORD ? null : line)) }} />
                 <SayItButton term={row.term} disabled={unsupported} said={Boolean(clip)}
                   onProblem={setProblem}
                   // No word yet: the cursor goes to the word box and the line says what to do (no error toast).
-                  onEmpty={() => { setProblem("Type the word first."); document.getElementById(`word-${row.id}`)?.focus() }}
+                  onEmpty={() => { setProblem(EMPTY_WORD); document.getElementById(`word-${row.id}`)?.focus() }}
                   onSaid={(result) => {
                     const next = result.heard ? withHeard(latest.current, result.term, result.heard) : latest.current
                     if (next !== latest.current) { latest.current = next; setRows(next) }
@@ -128,6 +128,9 @@ export function NamesAndWords({ text, onText, clips, onSaid, onUnsaid }: SayItPr
     </div>
   )
 }
+
+/** Said when Say it is tapped with no word; typing clears it. */
+const EMPTY_WORD = "Type the word first."
 
 const withOneRow = (rows: WordRow[]) => (rows.length ? rows : [blankRow()])
 

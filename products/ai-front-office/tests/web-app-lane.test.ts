@@ -5,6 +5,7 @@ import { installHelp } from "../web/src/lib/install.js";
 import { opensAtTop } from "../web/src/lib/scroll.js";
 import { usageTile } from "../web/src/lib/usage-tile.js";
 import { withinTime, SlowCheck } from "../web/src/lib/install.js";
+import { groupedPost } from "../web/src/lib/task-action.js";
 import { agoLabel, BOARD_CAP, cappedCards, jobColumns, jobTab, oneJobPerCaller, PHONE_CAP } from "../web/src/lib/jobs.js";
 
 const NOW = Date.parse("2026-11-26T15:00:00.000Z");
@@ -186,6 +187,42 @@ describe("one job per caller (walk 11-26 iOS walk: Dana's four calls were four c
     expect(earlier.get("d2")).toEqual(["d1"]);
   });
 });
+
+describe("Done, Later and Undo on one caller's job (review of the walk 11-26 fix)", () => {
+  const server = (fail: string[] = []) => {
+    const status = new Map([["d1", "open"], ["d2", "open"], ["d3", "open"]])
+    const one = async (callId: string, action: string) => {
+      if (fail.includes(callId)) throw new Error("That didn't save.")
+      if (action === "reopen" && status.get(callId) !== "completed") throw new Error("Completed task not found")
+      status.set(callId, action === "complete" ? "completed" : action === "snooze" ? "snoozed" : "open")
+    }
+    return { status, one }
+  }
+  const othersOf = (callId: string) => (callId === "d1" ? ["d2", "d3"] : [])
+  it("Done closes the whole job and Undo reopens the same calls", async () => {
+    const { status, one } = server()
+    const post = groupedPost(one, othersOf, new Map())
+    await post("d1", "complete")
+    expect([...status.values()]).toEqual(["completed", "completed", "completed"])
+    await post("d1", "reopen")
+    expect([...status.values()]).toEqual(["open", "open", "open"])
+  })
+  it("Later moves the whole job, and a later Undo of an old Done doesn't replay it", async () => {
+    const { status, one } = server()
+    const closedWith = new Map<string, string[]>()
+    const post = groupedPost(one, othersOf, closedWith)
+    await post("d1", "snooze", 60)
+    expect([...status.values()]).toEqual(["snoozed", "snoozed", "snoozed"])
+    expect(closedWith.has("d1")).toBe(false)
+  })
+  it("a sibling that fails leaves the job's own save standing (it shows as its own job), and the job's failure is the error", async () => {
+    const flaky = server(["d3"])
+    await expect(groupedPost(flaky.one, othersOf, new Map())("d1", "complete")).resolves.toBeUndefined()
+    expect([...flaky.status.values()]).toEqual(["completed", "completed", "open"])
+    const broken = server(["d1"])
+    await expect(groupedPost(broken.one, othersOf, new Map())("d1", "complete")).rejects.toThrow("didn't save")
+  })
+})
 
 describe("a phone check that never answers (walk 11-26 iOS walk: Checking this phone... forever)", () => {
   it("gives up after the time limit with SlowCheck, and passes answers and errors through", async () => {

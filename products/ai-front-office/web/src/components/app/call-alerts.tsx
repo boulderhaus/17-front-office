@@ -102,8 +102,9 @@ export function CallAlertsCard({ className }: { className?: string }) {
       }
       const registration = await withinTime(navigator.serviceWorker.getRegistration(SCOPE)) ?? await withinTime(navigator.serviceWorker.register("/app/sw.js", { scope: SCOPE }))
       await withinTime(navigator.serviceWorker.ready)
+      // subscribe is never cut short: one that finishes late would leave this phone subscribed with no alerts saved.
       const subscription = await withinTime(registration.pushManager.getSubscription())
-        ?? await withinTime(registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationServerKey(publicKey) }))
+        ?? await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationServerKey(publicKey) })
       await api("/api/app/push/subscribe", { method: "POST", body: subscription.toJSON() })
       setState("on")
       toast.success(`Call alerts are on for this ${deviceWord()}.`)

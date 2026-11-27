@@ -49,7 +49,7 @@ export function renderMarketing(config: BusinessConfig, reviews: Review[] = REVI
   const callPrice = perCall(base?.overageCentsPerCall ?? config.overageCentsPerCall);
   // The add-on sits under the plans, in its own box: the plan price is the first thing to think about.
   const unlimitedToggle = plans?.some((plan) => plan.unlimited)
-    ? `<div class="addon"><span class="addon-tag">Add-on</span><div class="unl-toggle"><label class="unl-switch" for="unlimited-toggle"><input type="checkbox" id="unlimited-toggle" role="switch"><span class="track" aria-hidden="true"></span><span class="unl-label">Unlimited calls</span></label><span class="fair">${escape(FAIR_USE_LINE)}</span></div><p class="unl-note"><span class="std">Busy season? ${plans.filter((plan) => plan.unlimited).map((plan) => `+${money(plan.unlimited!.addOnCents)} ${escape(plan.label)}`).join(", ")} a month. Off anytime.</span><span class="unl">Past that, extra calls are ${callPrice}.</span></p></div>`
+    ? `<div class="addon"><span class="addon-tag">Add-on</span><div class="unl-toggle"><label class="unl-switch" for="unlimited-toggle"><input type="checkbox" id="unlimited-toggle" role="switch"><span class="track" aria-hidden="true"></span><span class="unl-label">Unlimited calls</span></label><span class="fair">${escape(FAIR_USE_LINE)}</span></div><p class="unl-note"><span class="std">Busy season? ${plans.filter((plan) => plan.unlimited).map((plan) => `+${money(plan.unlimited!.addOnCents)} ${escape(plan.label)}`).join(", ")} a month. Off anytime.</span><span class="unl">Over fair use, extra calls are ${callPrice} each.</span></p></div>`
     : "";
   const trialDays = options.trialDays ?? 0;
   const trial = trialDays > 0 ? `${trialDays} days free · ` : "";
