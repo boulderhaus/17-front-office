@@ -15,15 +15,21 @@ export const FAIR_USE_LINE = "Fair use: up to 3× your plan’s calls.";
 export const DEFAULT_OVERAGE_CENTS_PER_CALL = 75;
 
 /**
- * The founder-approved plans (2026-11-23). Env can relabel or reprice them; these are the defaults.
+ * The founder-approved plans (2026-11-23; Team $149.99 from 2026-11-26). Env can relabel or reprice them; these are the defaults.
  * unlimitedAddOnCents is the monthly price of the Unlimited add-on on that plan (null: not offered, e.g. legacy Pro).
  */
 export const DEFAULT_PLANS: Record<PlanId, { label: string; priceCents: number; includedCalls: number; who: string; unlimitedAddOnCents: number | null }> = {
   solo: { label: "Solo", priceCents: 4_999, includedCalls: 60, who: "One person", unlimitedAddOnCents: 5_000 },
   pro: { label: "Pro", priceCents: 9_999, includedCalls: 125, who: "A busy owner", unlimitedAddOnCents: null },
-  team: { label: "Team", priceCents: 17_999, includedCalls: 250, who: "About 5 people", unlimitedAddOnCents: 7_500 },
+  team: { label: "Team", priceCents: 14_999, includedCalls: 250, who: "About 5 people", unlimitedAddOnCents: 7_500 },
   fleet: { label: "Fleet", priceCents: 34_999, includedCalls: 500, who: "About 10 people", unlimitedAddOnCents: 12_500 },
 };
+
+/**
+ * What a plan's older (legacy) Stripe price charges each month, where it differs from today's price:
+ * Team was $179.99 before 2026-11-26. A subscription still on that price is shown and saved at it, not today's.
+ */
+export const LEGACY_PRICE_CENTS: Partial<Record<PlanId, number>> = { team: 17_999 };
 
 /** The Unlimited add-on on one plan: a second Stripe subscription item, toggled at checkout or in Settings. */
 export interface UnlimitedAddOn {
@@ -67,7 +73,7 @@ export interface Plan {
 
 type PlanEnv = Pick<Environment,
   | "STRIPE_SECRET_KEY" | "STRIPE_PRICE_ID" | "STRIPE_PRICE_ID_PLUS"
-  | "STRIPE_PRICE_ID_SOLO" | "STRIPE_PRICE_ID_PRO" | "STRIPE_PRICE_ID_TEAM" | "STRIPE_PRICE_ID_FLEET"
+  | "STRIPE_PRICE_ID_SOLO" | "STRIPE_PRICE_ID_PRO" | "STRIPE_PRICE_ID_TEAM" | "STRIPE_PRICE_ID_TEAM_LEGACY" | "STRIPE_PRICE_ID_FLEET"
   | "STRIPE_PRICE_ID_UNLIMITED_SOLO" | "STRIPE_PRICE_ID_UNLIMITED_TEAM" | "STRIPE_PRICE_ID_UNLIMITED_FLEET"
   | "PLAN_SOLO_UNLIMITED_CENTS" | "PLAN_TEAM_UNLIMITED_CENTS" | "PLAN_FLEET_UNLIMITED_CENTS"
   | "STRIPE_FIRST_MONTH_COUPON_ID" | "STRIPE_FIRST_MONTH_PERCENT_OFF" | "STRIPE_TRIAL_DAYS" | "OVERAGE_CENTS_PER_CALL" | "FIRST_MONTH_OFFER_ENABLED"
@@ -90,11 +96,12 @@ export function planPriceIds(env: Pick<PlanEnv, "STRIPE_PRICE_ID" | "STRIPE_PRIC
  * The PR #16 prices once the new ones are set: STRIPE_PRICE_ID stays Solo and STRIPE_PRICE_ID_PLUS stays Pro,
  * so subscriptions already paying on them keep being recognized (and keep their plan) after the switch.
  */
-export function legacyPlanPriceIds(env: Pick<PlanEnv, "STRIPE_PRICE_ID" | "STRIPE_PRICE_ID_PLUS" | "STRIPE_PRICE_ID_SOLO" | "STRIPE_PRICE_ID_PRO">): Record<PlanId, string[]> {
+export function legacyPlanPriceIds(env: Pick<PlanEnv, "STRIPE_PRICE_ID" | "STRIPE_PRICE_ID_PLUS" | "STRIPE_PRICE_ID_SOLO" | "STRIPE_PRICE_ID_PRO"> & Partial<Pick<PlanEnv, "STRIPE_PRICE_ID_TEAM" | "STRIPE_PRICE_ID_TEAM_LEGACY">>): Record<PlanId, string[]> {
   return {
     solo: env.STRIPE_PRICE_ID && env.STRIPE_PRICE_ID_SOLO && env.STRIPE_PRICE_ID !== env.STRIPE_PRICE_ID_SOLO ? [env.STRIPE_PRICE_ID] : [],
     pro: env.STRIPE_PRICE_ID_PLUS && env.STRIPE_PRICE_ID_PRO && env.STRIPE_PRICE_ID_PLUS !== env.STRIPE_PRICE_ID_PRO ? [env.STRIPE_PRICE_ID_PLUS] : [],
-    team: [],
+    // The $179.99 Team price, once STRIPE_PRICE_ID_TEAM points at the $149.99 one.
+    team: env.STRIPE_PRICE_ID_TEAM_LEGACY && env.STRIPE_PRICE_ID_TEAM_LEGACY !== env.STRIPE_PRICE_ID_TEAM ? [env.STRIPE_PRICE_ID_TEAM_LEGACY] : [],
     fleet: [],
   };
 }
@@ -208,9 +215,37 @@ export function pickPlan(plans: Plan[], value: unknown): Plan {
   return plans.find((plan) => plan.id === id) ?? plans[0]!;
 }
 
-/** Which plan a Stripe subscription is on, from its price ids; null when it is none of ours. */
+/**
+ * Which plan a Stripe subscription is on, from its price ids; null when it is none of ours.
+ * On a legacy price with its own amount (Team at $179.99), the plan comes back at what that price charges.
+ */
 export function planForPriceIds(plans: Plan[], priceIds: string[]): Plan | null {
-  return plans.find((plan) => (plan.priceId !== null && priceIds.includes(plan.priceId)) || plan.legacyPriceIds.some((id) => priceIds.includes(id))) ?? null;
+  const plan = plans.find((item) => (item.priceId !== null && priceIds.includes(item.priceId)) || item.legacyPriceIds.some((id) => priceIds.includes(id)));
+  if (!plan) return null;
+  const onToday = plan.priceId !== null && priceIds.includes(plan.priceId);
+  const legacyCents = LEGACY_PRICE_CENTS[plan.id];
+  return !onToday && legacyCents !== undefined ? atPrice(plan, legacyCents) : plan;
+}
+
+/** A plan at another monthly price (a legacy one): no intro offer, the add-on keeps its own amount. */
+function atPrice(plan: Plan, priceCents: number): Plan {
+  if (priceCents === plan.priceCents) return plan;
+  return {
+    ...plan,
+    priceCents,
+    firstMonthCents: priceCents,
+    unlimited: plan.unlimited ? { ...plan.unlimited, priceCents: priceCents + plan.unlimited.addOnCents, firstMonthCents: priceCents + plan.unlimited.addOnCents } : null,
+  };
+}
+
+/**
+ * The plan a shop is billed on: currentPlan, but at the legacy amount when its saved price is that amount and
+ * the plan has an older price on live subscriptions (Team still paying $179.99). Use it for what Stripe charges.
+ */
+export function billedPlan(known: Plan[], config: { planId?: PlanId | undefined; flatMonthlyPriceCents: number }): Plan {
+  const plan = currentPlan(known, config.planId);
+  const legacyCents = LEGACY_PRICE_CENTS[plan.id];
+  return legacyCents !== undefined && plan.legacyPriceIds.length > 0 && config.flatMonthlyPriceCents === legacyCents ? atPrice(plan, legacyCents) : plan;
 }
 
 /** The first month with a percent-off coupon, discount rounded to the cent: $49.99 at 50% off → $24.99. */

@@ -7,7 +7,7 @@ import { LeadGuaranteeService, OverageBillingService, recordFirstPaid } from "..
 import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig, normalizeBusinessConfig } from "../src/domain/config.js";
 import type { CallRecord, CollectedCallFields } from "../src/domain/models.js";
-import { knownPlans, planBlurb, planForPriceIds } from "../src/domain/plans.js";
+import { billedPlan, DEFAULT_PLANS, knownPlans, LEGACY_PRICE_CENTS, monthlyCents, planBlurb, planForPriceIds } from "../src/domain/plans.js";
 import { isQualifyingLead, lastClosedBillingPeriod } from "../src/domain/usage.js";
 import { createRequestHandler, createStripeClient } from "../src/http/app.js";
 import { planStripeSetup } from "../scripts/create-stripe-plans.js";
@@ -320,7 +320,7 @@ describe("plan changes and the guarantee over HTTP", () => {
     expect(response.status).toBe(200);
     const update = stripe.requests.find((request) => request.method === "POST" && request.url.endsWith("/v1/subscriptions/sub_synthetic"))!;
     expect(Object.fromEntries(update.body)).toMatchObject({ "items[0][id]": "si_plan", "items[0][price]": "price_team_synthetic", proration_behavior: "always_invoice", payment_behavior: "error_if_incomplete", proration_date: String(Math.floor(now.getTime() / 1_000)) });
-    expect(await store.getConfig(shop.tenantId)).toMatchObject({ planId: "team", flatMonthlyPriceCents: 17_999, includedCalls: 250 });
+    expect(await store.getConfig(shop.tenantId)).toMatchObject({ planId: "team", flatMonthlyPriceCents: 14_999, includedCalls: 250 });
     const dashboard = await response.json() as { billing: { planId: string }; usage: { includedCalls: number } };
     expect(dashboard.billing.planId).toBe("team");
     expect(dashboard.usage.includedCalls).toBe(250);
@@ -401,7 +401,7 @@ describe("scripts/create-stripe-plans.ts", () => {
     expect(setup.products.map((product) => product.name)).toEqual(["Call Otto Solo", "Call Otto Team", "Call Otto Fleet", "Unlimited calls"]);
     expect(setup.prices.filter((price) => price.kind === "plan").map((price) => [price.envName, price.label, price.unitAmount, price.includedCalls, price.lookupKey])).toEqual([
       ["STRIPE_PRICE_ID_SOLO", "Solo", 4_999, 60, "front_office_solo_4999_monthly"],
-      ["STRIPE_PRICE_ID_TEAM", "Team", 17_999, 250, "front_office_team_17999_monthly"],
+      ["STRIPE_PRICE_ID_TEAM", "Team", 14_999, 250, "front_office_team_14999_monthly"],
       ["STRIPE_PRICE_ID_FLEET", "Fleet", 34_999, 500, "front_office_fleet_34999_monthly"],
     ]);
     expect(setup.coupon).toEqual({ id: "front_office_first_month_50", percentOff: 50 });
@@ -596,5 +596,56 @@ describe("money-path hardening (review fixes)", () => {
     await client.changePlan("sub_old", "pro");
     expect(stripe.requests.at(-1)!.body.get("items[0][id]")).toBe("si_old");
     expect(stripe.requests.at(-1)!.body.get("items[0][price]")).toBe("price_pro_new");
+  });
+
+  it("Team is $149.99 and the old $179.99 Team price stays recognized as Team once the new one is set", async () => {
+    expect(DEFAULT_PLANS.team.priceCents).toBe(14_999);
+    expect(demoEnvironment().PLAN_TEAM_PRICE_CENTS).toBe(DEFAULT_PLANS.team.priceCents);
+    const base = {
+      STRIPE_SECRET_KEY: "sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", STRIPE_WEBHOOK_SECRET: "whsec_synthetic_abcdefghijklmnopqrstuvwxyz",
+      STRIPE_PRICE_ID_SOLO: "price_solo_synthetic", STRIPE_PRICE_ID_TEAM: "price_team_new",
+    };
+    const env = demoEnvironment({ ...base, STRIPE_PRICE_ID_TEAM_LEGACY: "price_team_old" });
+    const plans = knownPlans(env);
+    const team = plans.find((plan) => plan.id === "team")!;
+    expect([team.priceCents, team.firstMonthCents, team.priceId]).toEqual([14_999, 14_999, "price_team_new"]);
+    expect(planForPriceIds(plans, ["price_team_old"])?.id).toBe("team");
+    const stripe = fakeStripe((request) => {
+      if (request.method === "GET" && request.url.endsWith("/v1/subscriptions/sub_team_old")) return { json: { id: "sub_team_old", items: { data: [{ id: "si_team_old", price: { id: "price_team_old" } }] } } };
+      if (request.method === "POST" && request.url.endsWith("/v1/subscriptions/sub_team_old")) return { json: { id: "sub_team_old" } };
+      return null;
+    });
+    const client = createStripeClient(env, stripe.fetcher)!;
+    expect(client.hasPlanPrice(["price_team_old"])).toBe(true);
+    // Moving an old-price Team subscription swaps its existing item instead of adding a second plan item.
+    await client.changePlan("sub_team_old", "solo");
+    expect(stripe.requests.at(-1)!.body.get("items[0][id]")).toBe("si_team_old");
+    expect(stripe.requests.at(-1)!.body.get("items[0][price]")).toBe("price_solo_synthetic");
+    // Without the legacy setting the old price is not ours, and the same id twice is no legacy price.
+    expect(planForPriceIds(knownPlans(demoEnvironment(base)), ["price_team_old"])).toBeNull();
+    expect(knownPlans(demoEnvironment({ ...base, STRIPE_PRICE_ID_TEAM_LEGACY: "price_team_new" })).find((plan) => plan.id === "team")!.legacyPriceIds).toEqual([]);
+  });
+
+  it("a Team subscription still on the old price is shown and saved at what Stripe charges it, not today's price", () => {
+    const env = demoEnvironment({
+      STRIPE_SECRET_KEY: "sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", STRIPE_WEBHOOK_SECRET: "whsec_synthetic_abcdefghijklmnopqrstuvwxyz",
+      STRIPE_PRICE_ID_SOLO: "price_solo_synthetic", STRIPE_PRICE_ID_TEAM: "price_team_new", STRIPE_PRICE_ID_TEAM_LEGACY: "price_team_old",
+      STRIPE_PRICE_ID_UNLIMITED_TEAM: "price_unl_team_synthetic", STRIPE_FIRST_MONTH_COUPON_ID: "coupon_synthetic",
+    });
+    const plans = knownPlans(env);
+    const old = LEGACY_PRICE_CENTS.team!;
+    const addOn = DEFAULT_PLANS.team.unlimitedAddOnCents!;
+    const legacy = planForPriceIds(plans, ["price_team_old", "price_unl_team_synthetic"])!;
+    expect([legacy.id, legacy.priceCents, legacy.firstMonthCents, legacy.unlimited?.priceCents]).toEqual(["team", old, old, old + addOn]);
+    // On today's price nothing changes: the catalog price, first-month offer included.
+    const today = planForPriceIds(plans, ["price_team_new"])!;
+    expect(today.priceCents).toBe(DEFAULT_PLANS.team.priceCents);
+    expect(today.firstMonthCents).toBeLessThan(today.priceCents);
+    // What the shop is billed follows its saved price: old price saved, old price shown.
+    expect(monthlyCents(billedPlan(plans, { planId: "team", flatMonthlyPriceCents: old }), true)).toBe(old + addOn);
+    expect(monthlyCents(billedPlan(plans, { planId: "team", flatMonthlyPriceCents: DEFAULT_PLANS.team.priceCents }), false)).toBe(DEFAULT_PLANS.team.priceCents);
+    // Without the legacy price set, the old amount means nothing.
+    const plain = knownPlans(demoEnvironment({ STRIPE_SECRET_KEY: "sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", STRIPE_WEBHOOK_SECRET: "whsec_synthetic_abcdefghijklmnopqrstuvwxyz", STRIPE_PRICE_ID_SOLO: "price_solo_synthetic", STRIPE_PRICE_ID_TEAM: "price_team_new" }));
+    expect(billedPlan(plain, { planId: "team", flatMonthlyPriceCents: old }).priceCents).toBe(DEFAULT_PLANS.team.priceCents);
   });
 });

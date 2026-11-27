@@ -171,10 +171,10 @@ describe("three taps to a live line", () => {
     // Walk 11-26 (SIGNUP-04): all three plans in plain view, no "Bigger shop?" link.
     expect(page).not.toContain("Bigger shop");
     expect(page).toContain('<div class="plancards">');
-    for (const text of ["Solo", "$49.99", "60 answered calls a month", "One person", "Team", "$179.99", "About 5 people", "Fleet", "$349.99", "About 10 people", "Lead guarantee"]) expect(page).toContain(text);
+    for (const text of ["Solo", "$49.99", "60 answered calls a month", "One person", "Team", "$149.99", "About 5 people", "Fleet", "$349.99", "About 10 people", "Lead guarantee"]) expect(page).toContain(text);
     // One summary per choice, from priceQuote: today's price big, the full price struck, then the monthly price and date.
     expect(page).toContain('<div class="quote" data-plan="solo"><span class="qlabel">Today · First month half off</span><span class="qbig"><b>$24.99</b><s>$49.99</s></span><span class="qline">then $49.99 a month from Dec\u00a023</span></div>');
-    expect(page).toContain('<div class="quote" data-plan="team"><span class="qlabel">Today · First month half off</span><span class="qbig"><b>$89.99</b><s>$179.99</s></span>');
+    expect(page).toContain('<div class="quote" data-plan="team"><span class="qlabel">Today · First month half off</span><span class="qbig"><b>$74.99</b><s>$149.99</s></span>');
     expect(page).not.toContain('class="charge');
     expect(page).not.toMatch(/unlimited/i);
     // Terms are one line under the button, never a box to tick.
@@ -186,9 +186,9 @@ describe("three taps to a live line", () => {
     const checkout = new URLSearchParams(providers.calls.find((call) => call.url.endsWith("/v1/checkout/sessions"))!.body!);
     expect(checkout.get("line_items[0][price]")).toBe("price_team_synthetic");
     expect(checkout.get("discounts[0][coupon]")).toBe("first_month_half_off");
-    expect(checkout.get("custom_text[submit][message]")).toBe("Today: $89.99 (limited-time half off). Then $179.99/month. Cancel anytime.");
+    expect(checkout.get("custom_text[submit][message]")).toBe("Today: $74.99 (limited-time half off). Then $149.99/month. Cancel anytime.");
     const account = (await store.getOwnerAccountByEmail("owner@example.test"))!;
-    expect(await store.getConfig(account.tenantId)).toMatchObject({ planId: "team", flatMonthlyPriceCents: 17_999, includedCalls: 250 });
+    expect(await store.getConfig(account.tenantId)).toMatchObject({ planId: "team", flatMonthlyPriceCents: 14_999, includedCalls: 250 });
   });
 
   it("never sells Pro: a form still sending pro (or the old plus) buys Solo", async () => {
@@ -205,8 +205,8 @@ describe("three taps to a live line", () => {
     const { cookie } = await signUp(baseUrl, { plan: "team" });
     const before = await (await fetch(`${baseUrl}/api/app/dashboard`, { headers: { cookie } })).json() as { billing: { planId: string; chargeNote: string; plans: Array<{ id: string; label: string; priceCents: number; firstMonthCents: number; includedCalls: number }> } };
     expect(before.billing.planId).toBe("team");
-    expect(before.billing.chargeNote).toBe("Today: $89.99 (limited-time half off). Then $179.99/month. Cancel anytime.");
-    expect(before.billing.plans.map((plan) => [plan.id, plan.priceCents, plan.firstMonthCents, plan.includedCalls])).toEqual([["solo", 4_999, 2_499, 60], ["team", 17_999, 8_999, 250], ["fleet", 34_999, 17_499, 500]]);
+    expect(before.billing.chargeNote).toBe("Today: $74.99 (limited-time half off). Then $149.99/month. Cancel anytime.");
+    expect(before.billing.plans.map((plan) => [plan.id, plan.priceCents, plan.firstMonthCents, plan.includedCalls])).toEqual([["solo", 4_999, 2_499, 60], ["team", 14_999, 7_499, 250], ["fleet", 34_999, 17_499, 500]]);
     const model = await (await api(baseUrl, cookie, "/api/app/onboarding/activate", { sessionId: "cs_test_synthetic1" })).json() as { activation: { status: string }; paid: boolean };
     expect(model.paid).toBe(true);
     expect(model.activation.status).toBe("live");
@@ -387,7 +387,7 @@ describe("hours and charge wording", () => {
     const env = demoEnvironment({ PLAN_SOLO_PRICE_CENTS: "5999", PLAN_TEAM_CALLS: "300" });
     // Without Stripe the three plans for sale show for display, Solo first, and no intro price is promised. Prices and calls come from env.
     expect(planCatalog(env).map((plan) => [plan.id, plan.label, plan.priceCents, plan.firstMonthCents, plan.includedCalls, plan.overageCentsPerCall])).toEqual([
-      ["solo", "Solo", 5_999, 5_999, 60, 75], ["team", "Team", 17_999, 17_999, 300, 75], ["fleet", "Fleet", 34_999, 34_999, 500, 75],
+      ["solo", "Solo", 5_999, 5_999, 60, 75], ["team", "Team", 14_999, 14_999, 300, 75], ["fleet", "Fleet", 34_999, 34_999, 500, 75],
     ]);
     expect(money(4_999)).toBe("$49.99");
     expect(money(5_000)).toBe("$50");

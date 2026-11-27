@@ -9,6 +9,7 @@ import { findTrade } from "../src/domain/trades.js";
 import { verifyOwnerPassword } from "../src/security/owner-auth.js";
 import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig } from "../src/domain/config.js";
+import { DEFAULT_PLANS, firstMonthCents } from "../src/domain/plans.js";
 import { OWNER_CALL_CONSENT_DETAIL, OWNER_CALL_CONSENT_LABEL, OWNER_CALL_CONSENT_SIGNUP_LABEL, OWNER_CALL_CONSENT_SIGNUP_VERSION, OWNER_CALL_CONSENT_VERSION } from "../src/domain/owner-call-consent.js";
 import { createRequestHandler } from "../src/http/app.js";
 import { startSignup } from "./signup-steps.js";
@@ -76,15 +77,15 @@ describe("public page system", () => {
   });
 
   it("signup: Unlimited is a switch in its own add-on box, and the summary has a line for each plan with and without it", () => {
-    const unlimited = (planCents: number, addOnCents: number) => ({ addOnCents, priceCents: planCents + addOnCents, firstMonthCents: Math.round((planCents + addOnCents) / 2), fairUseCalls: 180, priceId: null });
+    const unlimited = (planCents: number, addOnCents: number) => ({ addOnCents, priceCents: planCents + addOnCents, firstMonthCents: firstMonthCents(planCents + addOnCents, 50), fairUseCalls: 180, priceId: null });
     const solo = { id: "solo", label: "Solo", priceCents: 4_999, firstMonthCents: 2_499, includedCalls: 60, blurb: "", who: "One person", chargeNote: "", unlimited: unlimited(4_999, 5_000) };
-    const team = { ...solo, id: "team", label: "Team", priceCents: 17_999, firstMonthCents: 8_999, includedCalls: 250, who: "About 5 people", unlimited: unlimited(17_999, 7_500) };
+    const team = { ...solo, id: "team", label: "Team", priceCents: DEFAULT_PLANS.team.priceCents, firstMonthCents: firstMonthCents(DEFAULT_PLANS.team.priceCents, 50), includedCalls: 250, who: "About 5 people", unlimited: unlimited(DEFAULT_PLANS.team.priceCents, 7_500) };
     const page = renderOwnerSignup("", { unlimited: "yes", plan: "team" }, { plans: [solo, team], verified: { email: "owner@synthetic.example", provider: "google" } });
     expect(page).toMatch(/<div class="addon"><span class="addonhead">Add-on<\/span><label class="unltoggle" for="unlimited"><input type="checkbox" role="switch" id="unlimited" name="unlimited" value="yes" checked>/);
     expect(page).toMatch(/<input type="radio" name="plan" id="plan-team" value="team" checked>/);
     for (const key of ["solo", "solo+unlimited", "team", "team+unlimited"]) expect(page).toContain(`<div class="quote" data-plan="${key}">`);
-    // Team with Unlimited: $254.99 a month, half off today.
-    expect(page).toMatch(/data-plan="team\+unlimited"><span class="qlabel">Today · First month half off<\/span><span class="qbig"><b>\$127\.50<\/b><s>\$254\.99<\/s>/);
+    // Team with Unlimited: $224.99 a month, half off today ($112.49, as the coupon rounds).
+    expect(page).toMatch(/data-plan="team\+unlimited"><span class="qlabel">Today · First month half off<\/span><span class="qbig"><b>\$112\.49<\/b><s>\$224\.99<\/s>/);
     // CSS picks the one summary that matches the checked plan and switch: no script needed.
     expect(page).toContain('.publicform:has(#plan-team:checked):has(#unlimited:checked) .quote[data-plan="team+unlimited"]{display:grid}');
     expect(page).not.toContain("Bigger shop");

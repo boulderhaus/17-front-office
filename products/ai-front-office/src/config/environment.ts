@@ -4,6 +4,7 @@ import { DEFAULT_TELNYX_VOICE } from "../voice/system-prompt.js";
 import { DEFAULT_TELNYX_STT_MODEL } from "../adapters/telnyx-transcribe.js";
 import { validVapidKeys } from "../adapters/web-push.js";
 import { parseBookingWindows } from "../domain/founder-booking.js";
+import { DEFAULT_PLANS } from "../domain/plans.js";
 
 export { DEFAULT_TELNYX_VOICE };
 
@@ -105,6 +106,8 @@ const schema = z.object({
   STRIPE_PRICE_ID_SOLO: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   STRIPE_PRICE_ID_PRO: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   STRIPE_PRICE_ID_TEAM: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
+  /** The Team price before the 2026-11-26 change to $149.99: Team subscriptions still on it keep being recognized as Team (never sold). */
+  STRIPE_PRICE_ID_TEAM_LEGACY: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   STRIPE_PRICE_ID_FLEET: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
   /** The Unlimited calls add-on, one monthly price per plan (a second subscription item). Unset: that plan doesn't offer it. */
   STRIPE_PRICE_ID_UNLIMITED_SOLO: z.preprocess((value) => value === "" ? undefined : value, z.string().startsWith("price_").optional()),
@@ -120,16 +123,16 @@ const schema = z.object({
   STRIPE_TRIAL_DAYS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(0).max(90).default(0)),
   /** What each plan is called, costs and includes, shown on the homepage, card step and Settings. Must match the Stripe prices. */
   PLAN_SOLO_LABEL: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(40).default("Solo")),
-  PLAN_SOLO_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(4_999)),
+  PLAN_SOLO_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(DEFAULT_PLANS.solo.priceCents)),
   PLAN_SOLO_CALLS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(1).max(100_000).default(60)),
   PLAN_PRO_LABEL: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(40).default("Pro")),
-  PLAN_PRO_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(9_999)),
+  PLAN_PRO_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(DEFAULT_PLANS.pro.priceCents)),
   PLAN_PRO_CALLS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(1).max(100_000).default(125)),
   PLAN_TEAM_LABEL: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(40).default("Team")),
-  PLAN_TEAM_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(17_999)),
+  PLAN_TEAM_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(DEFAULT_PLANS.team.priceCents)),
   PLAN_TEAM_CALLS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(1).max(100_000).default(250)),
   PLAN_FLEET_LABEL: z.preprocess((value) => value === "" ? undefined : value, z.string().trim().min(1).max(40).default("Fleet")),
-  PLAN_FLEET_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(34_999)),
+  PLAN_FLEET_PRICE_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(DEFAULT_PLANS.fleet.priceCents)),
   PLAN_FLEET_CALLS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(1).max(100_000).default(500)),
   /** What the Unlimited add-on adds to each plan per month. Must match the STRIPE_PRICE_ID_UNLIMITED_* prices. */
   PLAN_SOLO_UNLIMITED_CENTS: z.preprocess((value) => value === "" ? undefined : value, z.coerce.number().int().min(100).max(1_000_000).default(5_000)),
@@ -181,7 +184,7 @@ export function loadEnvironment(values: NodeJS.ProcessEnv): Environment {
   }
   const stripeValues = [parsed.STRIPE_SECRET_KEY, parsed.STRIPE_WEBHOOK_SECRET, parsed.STRIPE_PRICE_ID_SOLO ?? parsed.STRIPE_PRICE_ID].filter(Boolean).length;
   if (stripeValues !== 0 && stripeValues !== 3) throw new Error("STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and STRIPE_PRICE_ID_SOLO (or STRIPE_PRICE_ID) must be configured together");
-  if ((parsed.STRIPE_PRICE_ID_PLUS || parsed.STRIPE_PRICE_ID_PRO || parsed.STRIPE_PRICE_ID_TEAM || parsed.STRIPE_PRICE_ID_FLEET || parsed.STRIPE_PRICE_ID_UNLIMITED_SOLO || parsed.STRIPE_PRICE_ID_UNLIMITED_TEAM || parsed.STRIPE_PRICE_ID_UNLIMITED_FLEET || parsed.STRIPE_FIRST_MONTH_COUPON_ID) && stripeValues !== 3) {
+  if ((parsed.STRIPE_PRICE_ID_PLUS || parsed.STRIPE_PRICE_ID_PRO || parsed.STRIPE_PRICE_ID_TEAM || parsed.STRIPE_PRICE_ID_TEAM_LEGACY || parsed.STRIPE_PRICE_ID_FLEET || parsed.STRIPE_PRICE_ID_UNLIMITED_SOLO || parsed.STRIPE_PRICE_ID_UNLIMITED_TEAM || parsed.STRIPE_PRICE_ID_UNLIMITED_FLEET || parsed.STRIPE_FIRST_MONTH_COUPON_ID) && stripeValues !== 3) {
     throw new Error("The Unlimited add-on prices, the bigger plans and the first-month coupon require the base Stripe configuration");
   }
   if (Boolean(parsed.VAPID_PUBLIC_KEY) !== Boolean(parsed.VAPID_PRIVATE_KEY)) throw new Error("VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY must be configured together");

@@ -55,7 +55,7 @@ describe("plans for sale: Solo, Team, Fleet (Pro is legacy only)", () => {
   it("sells three plans, Solo first, and never offers Pro", () => {
     const plans = planCatalog(demoEnvironment(STRIPE_ENV));
     expect(plans.map((plan) => [plan.id, plan.priceCents, plan.includedCalls, plan.overageCentsPerCall])).toEqual([
-      ["solo", 4_999, 60, 75], ["team", 17_999, 250, 75], ["fleet", 34_999, 500, 75],
+      ["solo", 4_999, 60, 75], ["team", 14_999, 250, 75], ["fleet", 34_999, 500, 75],
     ]);
     expect(planCatalog(demoEnvironment({})).map((plan) => plan.id)).toEqual(["solo", "team", "fleet"]);
   });
@@ -74,7 +74,7 @@ describe("plans for sale: Solo, Team, Fleet (Pro is legacy only)", () => {
     expect(FAIR_USE_MULTIPLIER).toBe(3);
     expect(plans.map((plan) => [plan.id, plan.unlimited?.addOnCents, plan.unlimited?.priceCents, plan.unlimited?.fairUseCalls, plan.unlimited?.priceId])).toEqual([
       ["solo", 5_000, 9_999, 180, "price_unl_solo"],
-      ["team", 7_500, 25_499, 750, "price_unl_team"],
+      ["team", 7_500, 22_499, 750, "price_unl_team"],
       ["fleet", 12_500, 47_499, 1_500, "price_unl_fleet"],
     ]);
     // A plan whose add-on price isn't set in Stripe doesn't offer it.
@@ -83,9 +83,9 @@ describe("plans for sale: Solo, Team, Fleet (Pro is legacy only)", () => {
 
   it("takes half off the whole first invoice, add-on included, only with the offer on and the coupon set", () => {
     const withCoupon = planCatalog(demoEnvironment({ ...STRIPE_ENV, STRIPE_FIRST_MONTH_COUPON_ID: "front_office_first_month_50" }));
-    expect(withCoupon.map((plan) => [plan.firstMonthCents, plan.unlimited?.firstMonthCents])).toEqual([[2_499, 4_999], [8_999, 12_749], [17_499, 23_749]]);
+    expect(withCoupon.map((plan) => [plan.firstMonthCents, plan.unlimited?.firstMonthCents])).toEqual([[2_499, 4_999], [7_499, 11_249], [17_499, 23_749]]);
     const off = planCatalog(demoEnvironment({ ...STRIPE_ENV, STRIPE_FIRST_MONTH_COUPON_ID: "front_office_first_month_50", FIRST_MONTH_OFFER_ENABLED: "false" }));
-    expect(off.map((plan) => [plan.firstMonthCents, plan.unlimited?.firstMonthCents])).toEqual([[4_999, 9_999], [17_999, 25_499], [34_999, 47_499]]);
+    expect(off.map((plan) => [plan.firstMonthCents, plan.unlimited?.firstMonthCents])).toEqual([[4_999, 9_999], [14_999, 22_499], [34_999, 47_499]]);
     const noCoupon = planCatalog(demoEnvironment(STRIPE_ENV));
     expect(noCoupon[0]!.unlimited!.firstMonthCents).toBe(9_999);
   });
@@ -430,7 +430,7 @@ describe("homepage pricing and terms", () => {
     expect(html).not.toMatch(/<input[^>]*id="unlimited-toggle"[^>]*checked/);
     expect(html).toMatch(/Unlimited calls<\/span><\/label><span class="fair">Fair use: up to 3× your plan’s calls\.<\/span>/);
     expect(html).not.toContain(">Pro<");
-    for (const price of ["$49.99", "$179.99", "$349.99", "$99.99", "$254.99", "$474.99"]) expect(html).toContain(price);
+    for (const price of ["$49.99", "$149.99", "$349.99", "$99.99", "$224.99", "$474.99"]) expect(html).toContain(price);
     // Nothing is half off without the coupon.
     expect(html).not.toContain("half off");
     // Every card carries its own link; with the switch on, each one starts signup with Unlimited picked.
@@ -476,7 +476,7 @@ describe("scripts/create-stripe-plans.ts", () => {
     const setup = planStripeSetup({});
     expect(setup.prices.map((price) => [price.envName, price.unitAmount, price.lookupKey])).toEqual([
       ["STRIPE_PRICE_ID_SOLO", 4_999, "front_office_solo_4999_monthly"],
-      ["STRIPE_PRICE_ID_TEAM", 17_999, "front_office_team_17999_monthly"],
+      ["STRIPE_PRICE_ID_TEAM", 14_999, "front_office_team_14999_monthly"],
       ["STRIPE_PRICE_ID_FLEET", 34_999, "front_office_fleet_34999_monthly"],
       ["STRIPE_PRICE_ID_UNLIMITED_SOLO", 5_000, "front_office_unlimited_solo_5000_monthly"],
       ["STRIPE_PRICE_ID_UNLIMITED_TEAM", 7_500, "front_office_unlimited_team_7500_monthly"],
