@@ -131,6 +131,12 @@ import {
   verifyCsrf,
   verifyGoogleOAuthAttempt,
 } from "./security.js";
+import { ROBOTS_TXT, SITE_URL, sitemapXml } from "../admin/seo.js";
+
+/** Public pages that answer HEAD like GET. Everything else keeps HEAD off, so no GET handler with side effects runs. */
+const HEAD_AS_GET = new Set(["/", "/signup", "/login", "/privacy", "/terms", "/robots.txt", "/sitemap.xml"]);
+/** The www alias, sent on to SITE_URL. */
+const WWW_HOST = "www.callotto.co";
 
 /** Brock's founder-calendar connect: its own cookie on the shared Google redirect path, never the owner's. */
 const FOUNDER_OAUTH_COOKIE = "afo_google_founder";
@@ -765,9 +771,16 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const requestId = typeof request.headers["x-request-id"] === "string" ? request.headers["x-request-id"] : randomUUID();
     response.setHeader("x-request-id", requestId);
     const started = Date.now();
-    const method = request.method ?? "GET";
+    // HEAD gets GET's answer on read-only public pages (Node sends no body), so crawlers and link checkers see 200, not 404.
+    const method = request.method === "HEAD" && HEAD_AS_GET.has(url.pathname) ? "GET" : request.method ?? "GET";
     const route = routeKey(url.pathname);
     const ip = requestIp(request);
+    // www is only an alias: send it to the one address search engines and AI answers should credit.
+    if ((request.headers.host ?? "").toLowerCase() === WWW_HOST) {
+      response.writeHead(301, { location: `${SITE_URL}${url.pathname}${url.search}` });
+      response.end();
+      return;
+    }
     if (url.pathname.startsWith(`${POSTHOG_PROXY_PREFIX}/`)) {
       // Analytics traffic is chatty (replay chunks), so it skips the request log and has its own limit.
       if (!dependencies.env.POSTHOG_KEY) throw new HttpError(404, "Not found");
@@ -775,7 +788,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       return proxyToPostHog(request, response, { ingestionHost: dependencies.env.POSTHOG_HOST, clientIp: ip, fetcher: dependencies.fetcher ?? fetch });
     }
     response.once("finish", () => {
-      log({ level: "info", event: "request_completed", requestId, method, route, status: response.statusCode, latencyMs: Date.now() - started });
+      log({ level: "info", event: "request_completed", requestId, method: request.method ?? "GET", route, status: response.statusCode, latencyMs: Date.now() - started });
     });
     // The live call path polls every two seconds from every open call page, so several viewers behind one
     // office IP share this; its real limit is per account and call, in the handler.
@@ -783,6 +796,16 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       throw new HttpError(429, "Too many requests");
     }
 
+    if (method === "GET" && url.pathname === "/robots.txt") {
+      response.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=3600" });
+      response.end(ROBOTS_TXT);
+      return;
+    }
+    if (method === "GET" && url.pathname === "/sitemap.xml") {
+      response.writeHead(200, { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=3600" });
+      response.end(sitemapXml());
+      return;
+    }
     if (method === "GET" && url.pathname === "/app/sw.js") {
       // Allowed to cover /app itself (the Calls screen), not only /app/..., so a tap can move an open app window.
       response.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "service-worker-allowed": "/app" });
