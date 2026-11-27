@@ -6,6 +6,7 @@ import { parseEmailBody } from "../src/adapters/resend.js";
 import { toTelnyxCallSummary, asTelnyxConversationEnded, parseTelnyxEnvelope } from "../src/adapters/telnyx.js";
 import { CallService } from "../src/application/call-service.js";
 import { ownerCallEmail } from "../src/application/owner-alerts.js";
+import { buildActivationReport } from "../src/application/readiness.js";
 import { demoEnvironment } from "../src/config/environment.js";
 import { buildCallPath } from "../src/domain/call-path.js";
 import {
@@ -81,6 +82,20 @@ describe("call steps: defaults and normalisation", () => {
   it("cleans a saved question list without throwing: three at most, 80 characters, no blanks or repeats", () => {
     expect(normalizeCustomQuestions(["  Own or rent?  ", "", "Own or rent?", 7, "x".repeat(200), "Third?", "Fourth?"])).toEqual(["Own or rent?", "x".repeat(80), "Third?"]);
     for (const odd of [null, undefined, "Own or rent?", { 0: "a" }]) expect(normalizeCustomQuestions(odd)).toEqual([]);
+  });
+});
+
+describe("call steps: going live", () => {
+  it("needs no service area from a shop that doesn't check one, or takes no address", () => {
+    const env = demoEnvironment();
+    const area = (config: BusinessConfig) => buildActivationReport({ env, config, googleConnected: true, ownerPhoneConfigured: true }).checks.find((item) => item.id === "service_area")!;
+    const none = { serviceAreaTerms: [] };
+    expect(area(shop({}, none))).toMatchObject({ status: "block", detail: "At least one city, ZIP, or service-area term is required." });
+    expect(area(shop({ checkServiceArea: false }, none)).status).toBe("pass");
+    expect(area(shop({ askAddress: false }, none)).status).toBe("pass");
+    // Every other switch leaves the check as it was, and a shop with cities passes either way.
+    for (const key of CALL_STEP_KEYS.filter((key) => key !== "checkServiceArea" && key !== "askAddress")) expect(area(shop({ [key]: false }, none)).status, key).toBe("block");
+    expect(area(shop()).status).toBe("pass");
   });
 });
 
