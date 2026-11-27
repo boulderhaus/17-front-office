@@ -43,6 +43,29 @@ export function forwardingSteps(input: { device: SetupDevice; family: string | n
   };
 }
 
+/** After a ring-first test that never rang (see ringFirstTry in forwarding.ts): what comes next. */
+export type RingFirstRetry = "clear" | "clear_again" | "instead" | "help";
+
+export interface RingFirstNext {
+  /** The step to show, or null when the latest test didn't find ring first failing. */
+  retry: RingFirstRetry | null;
+  /** A clear step may show (the off code or the switch). "instead" and "help" clear nothing. */
+  mayClear: boolean;
+  /** Clearing again is the all-forwarding code even on an iPhone: the switch was the first clear. */
+  clearByCode: boolean;
+  /** No more codes: the help that exists (Call me now, a time with our team, or every call). */
+  noCodes: boolean;
+}
+
+/**
+ * The screen's next step after a ring-first test, shared by the owner app and the phone page. Only while ring first
+ * is picked and the latest test found the phone never rang; otherwise the plan's retry is ignored.
+ */
+export function ringFirstNext(input: { retry: RingFirstRetry | null | undefined; neverRang: boolean; everyCall: boolean }): RingFirstNext {
+  const retry = input.neverRang && !input.everyCall ? input.retry ?? null : null;
+  return { retry, mayClear: retry !== "instead" && retry !== "help", clearByCode: retry === "clear_again", noCodes: retry === "help" };
+}
+
 /** Otto's number as the Forward To field takes it: 10 digits, no +1, no punctuation. */
 export function forwardToDigits(number: string): string {
   const digits = number.replace(/\D/g, "");

@@ -18,7 +18,7 @@ export interface LineInput {
   mode?: string
   confirmedAt: string | null
   check: { status: string; choice?: string | null; code?: string | null }
-  business: { everyCallOn: boolean; update: unknown; plan?: { on: string | null } | null }
+  business: { everyCallOn: boolean; update: unknown; plan?: { on: string | null; retry?: string | null } | null }
 }
 
 /**
@@ -29,6 +29,8 @@ export function staleCheck(line: LineInput): boolean {
   const { status, choice, code } = line.check
   if (!choice || status === "calling" || status === "passed" || status === "idle") return false
   const today = line.mode === "always" ? "every-call" : "ring-first"
+  // Ring first that never rang moved the code on (Try this code instead, or help): that result is still today's.
+  if (status === "forwards_all" && choice === today && today === "ring-first" && line.business.plan?.retry) return false
   return choice !== today || (code ?? null) !== (line.business.plan?.on ?? null)
 }
 

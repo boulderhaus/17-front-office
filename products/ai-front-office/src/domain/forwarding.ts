@@ -3,6 +3,8 @@
  * we look up the carrier and show exactly one code to dial, one code to undo it, and nothing else.
  */
 
+import type { RingFirstRetry } from "./forwarding-steps.js";
+
 /** How a phone company turns forwarding on. "office" = landline/VoIP set up in a web portal. */
 export type CarrierFamily = "verizon" | "gsm" | "office" | "unknown";
 export type ForwardingMode = "overflow" | "after_hours" | "always";
@@ -36,7 +38,27 @@ export interface ForwardingPlan {
   tips: string[];
   /** What the owner sees or hears once the code goes through, so they know it took. */
   confirm: string | null;
+  /** GSM only: T-Mobile family (per-leg codes), AT&T family, or a GSM carrier we can't place (null elsewhere). */
+  network?: GsmNetwork | null;
+  /**
+   * Ring first on GSM, after timed tests found the phone never rang (see ringFirstTry): what comes next once the
+   * latest test says so. null: nothing failed yet. Only acted on while the latest test says the phone never rang.
+   */
+  retry?: RingFirstRetry | null;
+  /**
+   * T-Mobile family ring first: optional codes that also send declined calls and no-signal calls to Otto, dialed one
+   * at a time and only after a timed test proved ring first. Empty elsewhere.
+   */
+  extras?: string[];
 }
+
+/** Which GSM network a carrier is on: T-Mobile's documents per-leg codes, AT&T's the combined **004 form. */
+export type GsmNetwork = "tmobile" | "att" | "gsm";
+/**
+ * After a ring-first test where the phone never rang: "clear" the old forwarding (then the code again), "clear_again"
+ * with the all-forwarding code, try the other code "instead", or stop dialing codes and offer "help".
+ */
+export type { RingFirstRetry };
 
 /** GSM carriers ring this long before forwarding unless the owner picks another time: about 7–12 s to pick up. */
 export const DEFAULT_RING_SECONDS = 10;
@@ -176,8 +198,66 @@ export const CARRIER_CHOICES: Array<{ family: Exclude<CarrierFamily, "unknown">;
   { family: "office", label: "An office or landline phone (Comcast Business, Spectrum Business, RingCentral…)" },
 ];
 
+// T-Mobile family, including the legacy names carrier lookups still return for T-Mobile numbers (Aerial
+// Communications, Omnipoint, VoiceStream, Powertel, SunCom, Sprint, Nextel) and the resellers on its network.
+const TMOBILE = /t-?mobile|metro ?pcs|metro by|\bmetro\b|\bmint\b|ultra mobile|\bultra\b|google fi|project fi|us mobile|aerial comm|omnipoint|voicestream|voice stream|powertel|suncom|sprint|nextel|assurance wireless/i;
+const ATT = /at&t|at ?& ?t|\batt\b|new cingular|cingular|cricket|consumer cellular|aio wireless|h2o|red pocket/i;
+
+/** T-Mobile family, AT&T family, or another GSM carrier, from the carrier name the lookup stored. */
+export function gsmNetwork(name: string | null | undefined): GsmNetwork {
+  const carrier = name ?? "";
+  if (TMOBILE.test(carrier)) return "tmobile";
+  if (ATT.test(carrier)) return "att";
+  return "gsm";
+}
+
+/** What ring first shows for this network after `misses` timed tests in a row found the phone never rang. */
+export interface RingFirstTry {
+  /** "combined": **004 (no answer, busy and no signal in one code). "no_answer": **61 (no answer only). */
+  code: "combined" | "no_answer";
+  /** The code that clears forwarding at this point (also the off code for ring first). */
+  clear: string;
+  retry: RingFirstRetry | null;
+}
+
+/**
+ * The ring-first sequence. Never loops: each miss moves one step on, and the last step is help, not another code.
+ * - T-Mobile family: **61 (T-Mobile documents it; the combined **004 fails silently on some of its lines while the
+ *   iPhone still says Succeeded). Missed: clear with ##004# (T-Mobile's clear code), then **61. Missed again: clear
+ *   with ##002#, then **61. Missed again: help.
+ * - AT&T family and unknown GSM: **004. Missed: clear with ##002#, then **004. Missed again: "Try this code instead",
+ *   **61. Missed again: help.
+ */
+export function ringFirstTry(network: GsmNetwork, misses: number): RingFirstTry {
+  const count = Number.isFinite(misses) && misses > 0 ? Math.floor(misses) : 0;
+  if (network === "tmobile") {
+    if (count === 0) return { code: "no_answer", clear: "##004#", retry: null };
+    if (count === 1) return { code: "no_answer", clear: "##004#", retry: "clear" };
+    if (count === 2) return { code: "no_answer", clear: "##002#", retry: "clear_again" };
+    return { code: "no_answer", clear: "##002#", retry: "help" };
+  }
+  if (count === 0) return { code: "combined", clear: "##002#", retry: null };
+  if (count === 1) return { code: "combined", clear: "##002#", retry: "clear" };
+  if (count === 2) return { code: "no_answer", clear: "##002#", retry: "instead" };
+  return { code: "no_answer", clear: "##002#", retry: "help" };
+}
+
+/**
+ * Misses kept once a ring-first test passes (or the owner changes how calls work): back to the start, except that an AT&T-family line that only worked
+ * with **61 keeps it (its next miss goes to help, not back to the code that already failed).
+ */
+export function ringFirstMissesKept(network: GsmNetwork, misses: number): number {
+  return network !== "tmobile" && Number.isFinite(misses) && misses >= 2 ? 2 : 0;
+}
+
+/** Misses saved, read back: a whole number, 0 when unset or unreadable. */
+export function parseRingFirstMisses(value: string | null | undefined): number {
+  const count = Number(value ?? 0);
+  return Number.isFinite(count) && count > 0 ? Math.min(9, Math.floor(count)) : 0;
+}
+
 const VERIZON = /verizon|cellco|xfinity|comcast.*mobile|spectrum mobile|charter.*mobile|visible|straight ?talk.*verizon|total wireless/i;
-const GSM = /at&t|at ?& ?t|\batt\b|new cingular|cingular|cricket|t-?mobile|metro ?pcs|metro by|mint|sprint|consumer cellular|us mobile|ultra mobile|tracfone|h2o|red pocket|boost|dish wireless|google fi/i;
+const GSM = /at&t|at ?& ?t|\batt\b|new cingular|cingular|cricket|t-?mobile|metro ?pcs|metro by|mint|sprint|consumer cellular|us mobile|ultra mobile|tracfone|h2o|red pocket|boost|dish wireless|google fi|aerial comm|omnipoint|voicestream|voice stream|powertel|suncom|nextel/i;
 
 export function carrierFamily(name: string | null | undefined, lineType: string | null | undefined): CarrierFamily {
   const carrier = name ?? "";
@@ -190,7 +270,11 @@ export function carrierFamily(name: string | null | undefined, lineType: string 
   return carrier ? "office" : "unknown";
 }
 
-export function forwardingPlan(family: CarrierFamily, frontOfficeNumber: string, mode: ForwardingMode, answerAfterRings?: number | null): ForwardingPlan {
+/**
+ * `carrierName`: what the lookup stored (tells the T-Mobile family from the AT&T family). `misses`: timed ring-first
+ * tests in a row that found the phone never rang (see ringFirstTry).
+ */
+export function forwardingPlan(family: CarrierFamily, frontOfficeNumber: string, mode: ForwardingMode, answerAfterRings?: number | null, options: { carrierName?: string | null; misses?: number | null } = {}): ForwardingPlan {
   const digits = frontOfficeNumber.replace(/^\+1/, "").replace(/\D/g, "");
   const always = mode === "always";
   const everyCall = "Every call goes to Call Otto. Your phone won’t ring for this number.";
@@ -205,17 +289,22 @@ export function forwardingPlan(family: CarrierFamily, frontOfficeNumber: string,
     };
   }
   if (family === "gsm") {
-    // **004 covers no answer (after T seconds), busy (tapping Decline) and no signal (attics, basements) in one code.
-    // ##002# clears every kind of forwarding, so the off code is right whichever one was set.
+    // **004 covers no answer (after T seconds), busy (tapping Decline) and no signal (attics, basements) in one code;
+    // **61 is no answer only. Which one, and which clear code, comes from ringFirstTry. Every call clears with ##002#.
     const seconds = ringFirstSeconds("gsm", answerAfterRings)!;
-    const on = always ? `**21*1${digits}#` : `**004*1${digits}**${seconds}#`;
-    const off = "##002#";
+    const network = gsmNetwork(options.carrierName);
+    const step = ringFirstTry(network, options.misses ?? 0);
+    const on = always ? `**21*1${digits}#` : step.code === "no_answer" ? `**61*1${digits}**${seconds}#` : `**004*1${digits}**${seconds}#`;
+    const off = always ? "##002#" : step.clear;
     return {
       family, on, off, dialLink: telLink(on), offDialLink: telLink(off), forwardsAll: always,
       ringSeconds: always ? null : seconds,
-      what: always ? everyCall : `Your phone rings ${seconds} seconds first. Calls you miss or decline go to Call Otto.`,
+      what: always ? everyCall : step.code === "no_answer" ? `Your phone rings ${seconds} seconds first. Calls you miss go to Call Otto.` : `Your phone rings ${seconds} seconds first. Calls you miss or decline go to Call Otto.`,
       tips: [],
       confirm: "You’ll see “Setting Registration Succeeded.”",
+      network,
+      retry: always ? null : step.retry,
+      extras: !always && network === "tmobile" ? [`**67*1${digits}#`, `**62*1${digits}#`] : [],
     };
   }
   if (family === "office") {

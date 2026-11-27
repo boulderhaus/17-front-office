@@ -252,7 +252,7 @@ describe("the AI setup helper's script", () => {
     // The one iPhone prerequisite for ring first; nothing to change for every call.
     expect(text).toContain("On iPhone they first turn off Live Voicemail in Settings, then Apps, then Phone");
     expect(text).toContain("With every call, their phone won't ring, and they'll see a green check in a few seconds.");
-    expect(text).toContain("With ring first, they tap Decline when it rings");
+    expect(text).toContain("With ring first, their phone rings and they don't answer or decline it");
     expect(text).toContain("let it ring (about 15 seconds)");
     expect(text).toContain("Call Forwarding Link Blocked");
     expect(text).toContain("tap Copy code & open Phone on their screen (if the Phone app doesn't open, they open Phone, then Keypad)");
