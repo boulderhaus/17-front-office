@@ -32,3 +32,28 @@ export function withLine(text: string, term: string, soundsLike: string): string
   else rows.push({ id: newId(), term, soundsLike })
   return textFrom(rows)
 }
+
+/** This word's "sounds like" set on its row, or a new row at the end when no row has the word any more. */
+export function withHeard(rows: WordRow[], term: string, heard: string): WordRow[] {
+  const at = rows.findIndex((row) => wordKey(row.term) === wordKey(term))
+  if (at >= 0) return rows.map((row, index) => (index === at ? { ...row, soundsLike: heard } : row))
+  return [...rows.filter((row) => row.term.trim() || row.soundsLike.trim()), { id: newId(), term, soundsLike: heard }]
+}
+
+/**
+ * Rows for a saved value from outside (Save, Discard, a said word): each row keeps its id when its word is still
+ * there (so a box being typed in keeps focus), and a row still being typed (no "sounds like" yet) stays.
+ */
+export function mergeRows(current: WordRow[], text: string, clipTerms: string[] = []): WordRow[] {
+  const fresh = rowsFrom(text, clipTerms)
+  const used = new Set<string>()
+  const rows = fresh.map((row) => {
+    const old = current.find((item) => !used.has(item.id) && item.term.trim() && wordKey(item.term) === wordKey(row.term))
+    if (!old) return row
+    used.add(old.id)
+    return { ...row, id: old.id }
+  })
+  const keys = new Set(rows.map((row) => wordKey(row.term)))
+  for (const row of current) if (!used.has(row.id) && !row.soundsLike.trim() && !keys.has(wordKey(row.term))) rows.push(row)
+  return rows
+}

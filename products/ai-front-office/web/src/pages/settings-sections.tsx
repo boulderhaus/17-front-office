@@ -25,7 +25,7 @@ import { SMS_CONSENT_END, SMS_CONSENT_JOIN, SMS_CONSENT_LEAD, SMS_CONSENT_PRIVAC
 import { forwardingOn } from "@/lib/line-status"
 import type { ApiSettings } from "@/lib/types"
 import { cn } from "@/lib/utils"
-import { NamesAndWords, withLine } from "@/components/app/say-it"
+import { NamesAndWords } from "@/components/app/say-it"
 import { wordKey } from "@/lib/words"
 import { useSettings } from "./settings"
 
@@ -211,13 +211,18 @@ function NamesAndWordsField() {
   const clips = settings.wordClips ?? []
   return (
     <NamesAndWords text={text("pronunciations")} onText={(value) => set("pronunciations", value)} clips={clips}
-      onSaid={(result) => {
+      onSaid={(result, local) => {
         const clip = { term: result.term, heard: result.heard, savedAt: result.savedAt }
         const withClip = (current: ApiSettings) => ({ ...current, wordClips: [...(current.wordClips ?? []).filter((item) => wordKey(item.term) !== wordKey(result.term)), clip] })
-        if (result.pronunciations === null) { patchSettings(withClip); return }
+        if (result.pronunciations === null) {
+          patchSettings(withClip)
+          // Heard but not saved (the live line didn't take it): it waits in the field for Save.
+          if (result.heard) set("pronunciations", local)
+          return
+        }
         // Saved on the server: the new line shows as saved, and any other unsaved edit in the list stays.
-        const local = text("pronunciations") === String(settings.values.pronunciations ?? "") ? result.pronunciations : withLine(text("pronunciations"), result.term, result.heard ?? "")
-        markSaved("pronunciations", result.pronunciations, local, withClip)
+        const unsaved = text("pronunciations") !== String(settings.values.pronunciations ?? "")
+        markSaved("pronunciations", result.pronunciations, unsaved ? local : result.pronunciations, withClip)
       }}
       onUnsaid={(term) => patchSettings((current) => ({ ...current, wordClips: (current.wordClips ?? []).filter((item) => wordKey(item.term) !== wordKey(term)) }))} />
   )

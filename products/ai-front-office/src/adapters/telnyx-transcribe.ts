@@ -4,8 +4,7 @@
  * Telnyx: POST /v2/ai/audio/transcriptions, multipart (model, file), Bearer API key; answers { text }.
  */
 
-/** Multilingual (street names are often Spanish), and it takes webm, mp4 and ogg. TELNYX_STT_MODEL overrides it. */
-export const DEFAULT_TELNYX_STT_MODEL = "openai/whisper-large-v3-turbo";
+/** The model comes only from TELNYX_STT_MODEL (pick one that is multilingual and takes webm, mp4 and ogg); unset, "Say it" keeps the clip and skips speech-to-text. */
 const TRANSCRIBE_URL = "https://api.telnyx.com/v2/ai/audio/transcriptions";
 const TIMEOUT_MS = 15_000;
 const EXTENSIONS: Record<string, string> = { "audio/webm": "webm", "audio/mp4": "mp4", "audio/ogg": "ogg" };

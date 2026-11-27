@@ -573,7 +573,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
   const limiter = new RateLimiter();
   const transcriber: Transcriber | null = dependencies.transcriber !== undefined ? dependencies.transcriber
-    : dependencies.env.TELNYX_API_KEY && !dependencies.env.PROVIDER_TEST_MODE && !dependencies.env.DEMO_MODE
+    : dependencies.env.TELNYX_API_KEY && dependencies.env.TELNYX_STT_MODEL && !dependencies.env.PROVIDER_TEST_MODE && !dependencies.env.DEMO_MODE
       ? new TelnyxTranscriber(dependencies.env.TELNYX_API_KEY, dependencies.env.TELNYX_STT_MODEL, dependencies.fetcher ?? fetch) : null;
   const log = dependencies.logger ?? ((entry) => console.log(JSON.stringify(entry)));
   const signIn = createOwnerSignIn({ env: dependencies.env, store: dependencies.store, clock: dependencies.clock, fetcher: (input, init) => (dependencies.fetcher ?? globalThis.fetch)(input, init), limiter, log });
@@ -1434,8 +1434,15 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       if (!heard) return null;
       const config = await dependencies.store.getConfig(tenantId);
       const updated = { ...config, pronunciations: withPronunciation(config.pronunciations, upload.term, heard) };
-      await dependencies.store.saveConfig(updated);
-      return updated;
+      // Same path as Save: the live assistant gets the new "sounds like" before it shows as saved.
+      try {
+        await saveAssistantConfig(dependencies.store, dependencies.env, updated, dependencies.fetcher);
+        return updated;
+      } catch (error) {
+        // The clip stays; the app puts what was heard in the field as an unsaved edit, and Save retries.
+        log({ level: "warn", event: "word_clip_assistant_sync_failed", tenantId, error: safeError(error) });
+        return null;
+      }
     });
     log({ level: "info", event: "word_clip_saved", tenantId, heard: Boolean(heard) });
     return sendJson(response, 200, {
