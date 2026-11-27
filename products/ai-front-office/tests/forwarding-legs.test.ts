@@ -219,6 +219,17 @@ describe("the setup helper says the same steps", () => {
     expect(setupSteps(facts).join("\n")).not.toContain("Don't give them another code.");
   });
 
+  it("leaving every call clears with the code that turns every call off, the one the screen shows", () => {
+    // T-Mobile family: ring first's own clear code is ##004#, but forward-all needs ##002#.
+    const leaving = setupSteps({ ...facts, everyCallOn: true, everyCallOffCode: "##002#" }).join("\n");
+    expect(leaving).toContain("every call may still be on, so they first turn forwarding off: dial ##002# (say it as: pound pound 0 0 2 pound) and press Call. Then they dial the ring-first code, **61*13125550100**10#");
+    expect(leaving).not.toContain("turn forwarding off: dial ##004#");
+    // Never the Settings switch in that step, even on this iPhone.
+    expect(leaving.split("\n").find((step) => step.startsWith("2. "))).not.toMatch(/Settings|switch/);
+    // Without that fact (older callers): the off code as before.
+    expect(setupSteps({ ...facts, everyCallOn: true }).join("\n")).toContain("turn forwarding off: dial ##004#");
+  });
+
   it("offers the extras only as optional, one at a time", () => {
     const text = setupSteps({ ...facts, ringFirstExtras: ["**67*13125550100#", "**62*13125550100#"] }).join("\n");
     expect(text).toContain("it's optional. They dial **67*13125550100# (say it as:");

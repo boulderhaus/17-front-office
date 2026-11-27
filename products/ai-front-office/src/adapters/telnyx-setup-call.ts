@@ -41,6 +41,11 @@ export interface SetupCallFacts {
    * first. Forward-all wins otherwise.
    */
   everyCallOn?: boolean;
+  /**
+   * The code that turns every call off, whatever today's choice (the plan's everyCallOff): what they dial first when
+   * leaving every call, the same code the screen shows. Unset: offCode.
+   */
+  everyCallOffCode?: string | null;
   /** Ring first, and the latest timed test reached Otto with no ring: what the screen shows next (see ringFirstTry). */
   ringFirstRetry?: "clear" | "clear_again" | "instead" | "help" | null;
   /** T-Mobile family ring first: optional decline and no-signal codes, one at a time, only after a ring-first pass. */
@@ -84,33 +89,33 @@ const TEAM_FALLBACK = "offer a quick 10-minute call with our team (get_open_time
 
 /**
  * The numbered steps for this shop's case. The way to turn forwarding on comes from forwardingSteps, the one decision
- * the owner app, the phone page and the emailed steps use, so the voice never says something the screen doesn't.
+ * the owner app, the phone page and the emailed steps use, so the voice never says something the screen doesn't:
+ * always a code first. Phone settings come up only after a test the phone picked up itself (every call offered
+ * first), and the iPhone's switch only after a code has failed.
  */
 export function setupSteps(facts: SetupCallFacts): string[] {
   const say = (code: string) => `${code} (say it as: ${spoken(code)})`;
   const ringFor = facts.family === "verizon" ? "about 30 seconds (Verizon sets that; nobody can change it)" : facts.ringFirstSeconds ? `${facts.ringFirstSeconds} seconds` : null;
-  const iphoneFirst = "On iPhone they first turn off Live Voicemail in Settings, then Apps, then Phone (and set Screen Unknown Callers to Never if it's on).";
   const picked = facts.forwardsAll ? "Otto answers every call" : "Ring my phone first";
   const steps: string[] = [];
   const everyCallCode = facts.everyCallCode ?? (facts.forwardsAll ? facts.code : null);
   const ringFirstCode = facts.ringFirstCode ?? (facts.forwardsAll ? null : facts.code);
-  // An iPhone on an AT&T or T-Mobile family line turns every call on with its own Call Forwarding switch, no code.
-  const switchWay = facts.device === "iphone" && forwardingSteps({ device: "iphone", family: facts.family, everyCall: true }).iphoneSwitch.on;
+  // An iPhone on an AT&T or T-Mobile family line also has its own Call Forwarding switch for every call: the fallback
+  // when a code fails (on their screen it's behind "Code didn't work?"), never the first thing said.
+  const switchFallback = facts.device === "iphone" && forwardingSteps({ device: "iphone", family: facts.family, everyCall: true }).iphoneSwitch.on;
   const digits = spoken(forwardToDigits(facts.ottoNumber));
+  // Leaving every call: the code that turns every call off (the one the screen shows), not ring first's own clear code.
+  const everyCallOff = facts.everyCallOffCode ?? facts.offCode;
   if (facts.code) {
-    steps.push(`Ask which they want, and explain each in one sentence, every call first. Otto answers every call: no phone settings to change, Otto answers right away, and their phone won't ring for calls to this number (calls they make and texts work like before). Ring my phone first: their phone rings${ringFor ? ` for ${ringFor}` : ""} first and Otto takes the calls they miss or decline. ${facts.device === "android" ? "On Android there's nothing else to change." : iphoneFirst} Suggest every call unless they want their phone to ring. Their screen shows both choices at the top, and ${picked} is picked now; if they want the other one, they tap it and the steps on screen change to match.`);
+    steps.push(`Ask which they want, and explain each in one sentence, every call first. Otto answers every call: no phone settings to change, Otto answers right away, and their phone won't ring for calls to this number (calls they make and texts work like before). Ring my phone first: their phone rings${ringFor ? ` for ${ringFor}` : ""} first and Otto takes the calls they miss or decline. ${facts.device === "android" ? "On Android there's nothing else to change. " : ""}Suggest every call unless they want their phone to ring. Their screen shows both choices at the top, and ${picked} is picked now; if they want the other one, they tap it and the steps on screen change to match.`);
     // Ring first that never rang: the same next step the screen shows. "help" gives no ring-first code at all, and
     // "instead" clears nothing first.
     const retry = facts.forwardsAll ? null : facts.ringFirstRetry ?? null;
     const codes = [
-      everyCallCode
-        ? switchWay
-          ? `For Otto answers every call, on this iPhone they use the Call Forwarding switch, no code. They can do it while on this call: open Settings, then Apps, then Phone. Tap Call Forwarding and turn it on. Tap Forward To and enter Otto's number, ${digits}. Older iPhones: Settings, then Phone. If they don't see Call Forwarding, the code is ${say(everyCallCode)}.`
-          : `For Otto answers every call, the code is ${say(everyCallCode)}.`
-        : "",
+      everyCallCode ? `For Otto answers every call, the code is ${say(everyCallCode)}.` : "",
       ringFirstCode && retry !== "help"
-        ? facts.everyCallOn && facts.offCode && !retry
-          ? `For Ring my phone first, every call may still be on, so they first turn forwarding off${switchWay ? " (on this iPhone: the Call Forwarding switch in Settings, then Apps, then Phone, turned off; or" : ":"} dial ${say(facts.offCode)} and press Call${switchWay ? ")" : ""}. Then they dial the ring-first code, ${say(ringFirstCode)}.`
+        ? facts.everyCallOn && everyCallOff && !retry
+          ? `For Ring my phone first, every call may still be on, so they first turn forwarding off: dial ${say(everyCallOff)} and press Call. Then they dial the ring-first code, ${say(ringFirstCode)}.`
           : `For Ring my phone first, the code is ${say(ringFirstCode)}.`
         : "",
     ].filter(Boolean).join(" ");
@@ -118,13 +123,14 @@ export function setupSteps(facts: SetupCallFacts): string[] {
     if (facts.device !== "android") steps.push("To dial a code on iPhone: tap Copy code & open Phone on their screen (if the Phone app doesn't open, they open Phone, then Keypad), touch and hold above the numbers, tap Paste, then tap Call right away. Or type it in. iPhones block forwarding codes sent as links, so never offer to text them a link. If they see \"Call Forwarding Link Blocked\", tell them to close the Phone app and type the code.");
     if (facts.device !== "iphone") steps.push("On Android: they tap Tap to dial on their screen. The Phone app opens with the code filled in, and they tap Call. Android may ask them to confirm; that's expected.");
     if (facts.confirm) steps.push(`What they should see or hear after a code: ${facts.confirm}`);
-    steps.push(`${switchWay ? "The switch works during this call. " : ""}A code can't be dialed during this call, so once they understand it, tell them to hang up, dial it, then come back to the Call Otto screen and tap Test it (or Test again). If it's on already, run start_forwarding_test yourself. With every call, their phone won't ring, and they'll see a green check in a few seconds. With ring first, their phone rings and they don't answer or decline it: they let it ring${facts.ringFirstSeconds ? ` (about ${facts.ringFirstSeconds} seconds)` : " until it stops"}, and they'll see a green check. The test times the ring, so a Decline makes it look like the phone never rang.`);
-    if ((retry === "clear" || retry === "clear_again") && facts.offCode && ringFirstCode) steps.push(`Their last ring-first test reached Otto with no ring, so old forwarding is still on. First they dial ${say(facts.offCode)} and press Call${retry === "clear" && switchWay ? " (on this iPhone they can turn off the Call Forwarding switch instead)" : ""}, then the ring-first code again, ${say(ringFirstCode)}, then test again.`);
+    steps.push(`A code can't be dialed during this call, so once they understand it, tell them to hang up, dial it, then come back to the Call Otto screen and tap Test it (or Test again). If it's on already, run start_forwarding_test yourself. With every call, their phone won't ring, and they'll see a green check in a few seconds. With ring first, their phone rings and they don't answer or decline it: they let it ring${facts.ringFirstSeconds ? ` (about ${facts.ringFirstSeconds} seconds)` : " until it stops"}, and they'll see a green check. The test times the ring, so a Decline makes it look like the phone never rang.`);
+    if ((retry === "clear" || retry === "clear_again") && facts.offCode && ringFirstCode) steps.push(`Their last ring-first test reached Otto with no ring, so old forwarding is still on. First they dial ${say(facts.offCode)} and press Call, then the ring-first code again, ${say(ringFirstCode)}, then test again.`);
     if (retry === "instead" && ringFirstCode) steps.push(`Their last two ring-first tests reached Otto with no ring, so this phone may not take that code. Their screen now says Try this code instead: ${say(ringFirstCode)}. They dial it, then test again.`);
     if (retry === "help") steps.push(`Ring first codes didn't work on this phone after several tries. Don't give them another code. Offer Otto answers every call, or ${TEAM_FALLBACK}.`);
     if (!facts.forwardsAll && facts.ringFirstExtras?.length) steps.push(`Only after a ring-first test has passed, and only if they ask about declined calls or no signal: it's optional. They dial ${facts.ringFirstExtras.map(say).join(", then ")}, one at a time, each followed by Call.`);
-    steps.push(`${facts.phoneAnswersTest ? "Their last test: their phone picked up our test call by itself. Start with this. " : ""}If the test says their phone picked up the call itself (Live Voicemail or call screening), carrier forwarding never got a chance. Two fixes: switch to Otto answers every call (tap it on the screen${everyCallCode && !switchWay ? `, then dial the new code, ${say(everyCallCode)}` : ""}), or keep ring first and turn off the phone's own answering, then test again. On iPhone that's Live Voicemail in Settings, then Apps, then Phone, and Screen Unknown Callers set to Never. On Android, automatic call screening in the Phone app's settings.`);
-    if (facts.offCode) steps.push(`To turn forwarding off later, they dial ${say(facts.offCode)} on the business phone${switchWay ? " (or turn the iPhone switch off for every call)" : ""}. With every call, they do that before they ever pause Call Otto, or calls to this number won't go through.`);
+    steps.push(`${facts.phoneAnswersTest ? "Their last test: their phone picked up our test call by itself. Start with this. " : ""}Only if a test says their phone picked up the call itself (their last test, or one you run on this call): carrier forwarding never got a chance, because the phone's own answering (Live Voicemail or call screening) took the call. Offer the fix with no phone settings first: switch to Otto answers every call (tap it on the screen${everyCallCode ? `, then dial the new code, ${say(everyCallCode)}` : ""}). Only if they want to keep ring first, they turn off the phone's own answering, then test again. On iPhone that's Live Voicemail in Settings, then Apps, then Phone, and Screen Unknown Callers set to Never. On Android, automatic call screening in the Phone app's settings.`);
+    if (switchFallback && everyCallCode) steps.push(`Only if a code fails after they've dialed it, typed by hand: this iPhone has a fallback for every call, its own Call Forwarding switch (on their screen it's behind Code didn't work?). Never bring it up first. They can change it while on this call: open Settings, then Apps, then Phone. Tap Call Forwarding and turn it on. Tap Forward To and enter Otto's number, ${digits}. Older iPhones: Settings, then Phone. Turning the same switch off turns every call off.`);
+    if (facts.offCode) steps.push(`To turn forwarding off later, they dial ${say(facts.offCode)} on the business phone. With every call, they do that before they ever pause Call Otto, or calls to this number won't go through.`);
   } else if (facts.family === "office") {
     steps.push(`Their business number is an office or landline phone. Ask which they want, one sentence each, every call first: Otto answers every call (their phones won't ring for this number), or Ring my phone first (Otto takes the calls they miss). Suggest every call unless they want their phones to ring. Forwarding is set in their phone company's website or app: find Call Forwarding, then forward all calls (for every call) or calls not answered, sometimes called no answer (for ring first), to their Call Otto number, ${digits}.${facts.everyCallOn ? " Every call may still be on: for Ring my phone first, they turn off forward all calls there first, then set calls not answered." : ""} You can't see their portal: if they get stuck, ${TEAM_FALLBACK}.`);
   } else {
@@ -186,7 +192,7 @@ export const SETUP_HELP_INSTRUCTIONS = [
   "",
   "Rules:",
   "- Only give the codes and settings written above. Never invent a code, a setting path, a price or a promise. Read numbers and codes one digit at a time.",
-  "- Don't ask them to change phone settings unless they pick Ring my phone first on an iPhone, or their phone picked up our test call by itself.",
+  "- Never start with phone settings, and never ask for a settings change because they picked Ring my phone first: forwarding is the code (or the phone company's website) written above. Only two things bring phone settings up: a test says their phone picked up our test call by itself (offer Otto answers every call first, the phone's settings second), or a code they dialed failed (then the iPhone switch, only if it's written above).",
   "- {{mode_rule}}",
   "- Every tool answer says minutes_on_call. If it isn't working after about two minutes, or they ask for a person, " + TEAM_FALLBACK + ". Never give a person's name: say our team.",
   "- If something isn't covered here (billing, a carrier that refuses the code, an error message you don't recognize), " + TEAM_FALLBACK + ".",

@@ -858,8 +858,13 @@ describe("owner one-tap go-live", () => {
       const vars = startBody.assistant.dynamic_variables;
       expect(vars).toMatchObject({ shop_name: "Gulf Air", picked_mode: "Otto answers every call", device: "an iPhone", carrier_family: "AT&T or T-Mobile family", business_number_last4: "0177", otto_number_digits: "9 4 1 5 5 5 0 1 2 3", last_test: "not_run: No test yet." });
       expect(vars.setup_steps).toContain("**004*19415550123**10#");
-      expect(vars.setup_steps).toContain("Screen Unknown Callers to Never");
-      expect(vars.setup_steps).toContain("on this iPhone they use the Call Forwarding switch");
+      // The code first, for both choices. Phone settings only after a test the phone picked up; the iPhone's switch
+      // only after a code failed.
+      expect(vars.setup_steps).toContain("For Otto answers every call, the code is **21*19415550123#");
+      expect(vars.setup_steps).not.toContain("they first turn off Live Voicemail");
+      expect(vars.setup_steps).not.toContain("on this iPhone they use the Call Forwarding switch");
+      expect(vars.setup_steps).toContain("Only if a test says their phone picked up the call itself");
+      expect(vars.setup_steps).toContain("Only if a code fails after they've dialed it, typed by hand: this iPhone has a fallback for every call, its own Call Forwarding switch");
       expect(startBody.assistant.tools.map((tool) => tool.webhook?.name ?? tool.type)).toEqual(["start_forwarding_test", "get_test_result", "email_steps", "get_open_times", "book_time", "hangup"]);
       expect(startBody.assistant.tools[0]!.webhook!.url).toMatch(/\/setup-help\/tools\/start_forwarding_test$/);
 

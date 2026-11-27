@@ -3275,6 +3275,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       phoneAnswersTest: !plan?.forwardsAll && forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "phone_answers",
       // Leaving every call: the off code first, then the ring-first code (forward-all wins over it otherwise).
       everyCallOn: state.testedFor?.mode === "every-call",
+      everyCallOffCode: plan?.everyCallOff ?? null,
       // The same next step the screen shows after a ring-first test that never rang (ringFirstTry).
       ringFirstRetry: !plan?.forwardsAll && forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "forwards_all" ? plan?.retry ?? null : null,
       ringFirstExtras: ringFirst?.extras ?? [],

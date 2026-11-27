@@ -244,21 +244,29 @@ describe("the AI setup helper's script", () => {
     expect(ringFirst).toBeGreaterThan(everyCall);
     expect(text).toContain("Suggest every call unless they want their phone to ring.");
     expect(text).toContain("Picked on their screen now: Otto answers every call.");
-    // Both codes, so whichever they pick, the helper can read it.
-    // Every call on an AT&T or T-Mobile iPhone is the Call Forwarding switch (forwardingSteps), code only as fallback.
-    expect(text).toContain("For Otto answers every call, on this iPhone they use the Call Forwarding switch, no code. They can do it while on this call: open Settings, then Apps, then Phone.");
-    expect(text).toContain("Tap Forward To and enter Otto's number, 9 4 1 5 5 5 0 1 2 3.");
-    expect(text).toContain("If they don't see Call Forwarding, the code is **21*19415550123#");
+    // Both codes, so whichever they pick, the helper can read it. The code is the way on every phone.
+    expect(text).toContain("For Otto answers every call, the code is **21*19415550123# (say it as: star star 2 1 star 1 9 4 1 5 5 5 0 1 2 3 pound).");
     expect(text).toContain("For Ring my phone first, the code is **004*19415550123**15#");
-    // The one iPhone prerequisite for ring first; nothing to change for every call.
-    expect(text).toContain("On iPhone they first turn off Live Voicemail in Settings, then Apps, then Phone");
+    expect(text).not.toContain("they use the Call Forwarding switch, no code");
+    // Nothing to change in the phone's settings before either choice (2026-11-27: never Settings up front).
+    expect(text).not.toContain("they first turn off Live Voicemail");
+    const ask = text.slice(text.indexOf("1. Ask which they want"), text.indexOf("\n2. "));
+    expect(ask).not.toMatch(/Settings|Live Voicemail|Screen Unknown|switch/);
+    // The iPhone's switch (AT&T and T-Mobile family) is only the fallback after a code failed, said after every code.
+    const fallback = text.indexOf("Only if a code fails after they've dialed it, typed by hand: this iPhone has a fallback for every call, its own Call Forwarding switch (on their screen it's behind Code didn't work?). Never bring it up first.");
+    expect(fallback).toBeGreaterThan(text.indexOf("For Ring my phone first, the code is"));
+    expect(text.slice(0, fallback)).not.toContain("open Settings, then Apps, then Phone. Tap Call Forwarding");
+    expect(text.slice(fallback)).toContain("open Settings, then Apps, then Phone. Tap Call Forwarding and turn it on. Tap Forward To and enter Otto's number, 9 4 1 5 5 5 0 1 2 3.");
+    expect(text.slice(fallback)).toContain("Turning the same switch off turns every call off.");
     expect(text).toContain("With every call, their phone won't ring, and they'll see a green check in a few seconds.");
     expect(text).toContain("With ring first, their phone rings and they don't answer or decline it");
     expect(text).toContain("let it ring (about 15 seconds)");
     expect(text).toContain("Call Forwarding Link Blocked");
     expect(text).toContain("tap Copy code & open Phone on their screen (if the Phone app doesn't open, they open Phone, then Keypad)");
-    expect(text).toContain("Don't ask them to change phone settings unless they pick Ring my phone first on an iPhone, or their phone picked up our test call by itself.");
-    expect(text).toContain("To turn forwarding off later, they dial ##002#");
+    expect(text).toContain("Never start with phone settings, and never ask for a settings change because they picked Ring my phone first: forwarding is the code (or the phone company's website) written above.");
+    expect(text).toContain("Only two things bring phone settings up: a test says their phone picked up our test call by itself (offer Otto answers every call first, the phone's settings second), or a code they dialed failed (then the iPhone switch, only if it's written above).");
+    expect(text).not.toContain("unless they pick Ring my phone first on an iPhone");
+    expect(text).toContain("To turn forwarding off later, they dial ##002# (say it as: pound pound 0 0 2 pound) on the business phone. With every call");
     expect(text).toContain("With every call, they do that before they ever pause Call Otto");
     expect(text.match(/##002#/g)).toHaveLength(1);
     expect(text).toContain("tap Test it (or Test again)");
@@ -269,26 +277,39 @@ describe("the AI setup helper's script", () => {
     expect(text).toContain("offer a quick 10-minute call with our team (get_open_times, then book_time)");
     expect(text).not.toMatch(/Brock|founder/);
   });
-  it("Android has nothing extra for ring first", () => {
+  it("Android has nothing extra for ring first, and no iPhone switch fallback", () => {
     const text = setupInstructions({ ...base, device: "android" });
     expect(text).toContain("On Android there's nothing else to change.");
     expect(text).not.toContain("On iPhone they first turn off Live Voicemail");
     expect(text).toContain("Tap to dial");
+    expect(text).not.toContain("Call Forwarding switch");
+    // Neither does a Verizon-family iPhone (no switch there) or a phone we couldn't identify.
+    expect(setupInstructions({ ...base, family: "verizon", code: "*729415550123", offCode: "*73", everyCallCode: "*729415550123", ringFirstCode: "*719415550123", device: "iphone" })).not.toContain("Call Forwarding switch");
+    expect(setupInstructions({ ...base, device: "other" })).not.toContain("Call Forwarding switch");
   });
   it("a phone that answered the test itself: switch to every call, or turn off its own answering", () => {
     const text = setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device: "iphone", phoneAnswersTest: true });
     expect(text).toContain("Their last test: their phone picked up our test call by itself.");
     expect(text).toContain("Picked on their screen now: Ring my phone first.");
-    // On this iPhone every call is the switch, so there's no new code to dial.
-    expect(text).toContain("switch to Otto answers every call (tap it on the screen), or keep ring first");
-    // Android still dials the every-call code.
+    // Every call first, and it's one new code on every phone. The phone's settings come second, only to keep ring first.
+    const offer = text.indexOf("Offer the fix with no phone settings first: switch to Otto answers every call (tap it on the screen, then dial the new code, **21*19415550123#");
+    const keep = text.indexOf("Only if they want to keep ring first, they turn off the phone's own answering, then test again.");
+    expect(offer).toBeGreaterThan(0);
+    expect(keep).toBeGreaterThan(offer);
+    expect(text.indexOf("Live Voicemail in Settings, then Apps, then Phone, and Screen Unknown Callers set to Never")).toBeGreaterThan(keep);
     expect(setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device: "android", phoneAnswersTest: true })).toContain("switch to Otto answers every call (tap it on the screen, then dial the new code, **21*19415550123#");
-    expect(text).toContain("Screen Unknown Callers set to Never");
     expect(text).toContain("Right now their phone rings first.");
+    // No test said so: the same step is there for a test run on this call, but it never starts with it, and it only
+    // applies once a test says the phone picked up.
+    const quiet = setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device: "iphone" });
+    expect(quiet).not.toContain("Their last test: their phone picked up our test call by itself.");
+    expect(quiet).toContain("Only if a test says their phone picked up the call itself (their last test, or one you run on this call)");
   });
   it("leaving every call: the off code first, then the ring-first code, since forward-all wins otherwise", () => {
     const leaving = setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device: "android", everyCallOn: true });
     expect(leaving).toContain("For Ring my phone first, every call may still be on, so they first turn forwarding off: dial ##002# (say it as: pound pound 0 0 2 pound) and press Call. Then they dial the ring-first code, **004*19415550123**15#");
+    // An iPhone hears the very same sentence: the off code, never the Settings switch.
+    expect(setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device: "iphone", everyCallOn: true })).toContain("so they first turn forwarding off: dial ##002# (say it as: pound pound 0 0 2 pound) and press Call. Then they dial the ring-first code");
     expect(leaving.indexOf("turn forwarding off: dial ##002#")).toBeLessThan(leaving.indexOf("Then they dial the ring-first code"));
     // Not on: just the code.
     expect(setupInstructions({ ...base, device: "android" })).not.toContain("every call may still be on");
