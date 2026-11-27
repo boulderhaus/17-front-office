@@ -51,11 +51,18 @@ export function callSteps(config: Pick<BusinessConfig, "callSteps">): CallSteps 
 }
 
 /**
- * The service-call fee question (Calendar > Booking) reads the fee from the owner's prices, so it is off while
- * Otto quotes no prices.
+ * The owner's service-call fee question (Calendar > Booking: the caller must say yes to the fee before a time is
+ * booked). Otto reads the fee from the owner's prices, so:
+ * - "none": the owner doesn't ask for it.
+ * - "ask": Otto reads the fee and takes the caller's yes before booking.
+ * - "owner": the question is on but "Give your prices" is off, so Otto can't read the fee. Nothing is booked on
+ *   the call: the time the caller picks waits for the owner's OK (what a shop with no fee saved has always got).
+ * A booking is never confirmed past the fee question.
  */
-export function feeAcceptanceRequired(config: Pick<BusinessConfig, "callSteps" | "requireDiagnosticFeeAcceptance">): boolean {
-  return config.requireDiagnosticFeeAcceptance && callSteps(config).quotePrices;
+export type FeeGate = "none" | "ask" | "owner";
+export function feeGate(config: Pick<BusinessConfig, "callSteps" | "requireDiagnosticFeeAcceptance">): FeeGate {
+  if (!config.requireDiagnosticFeeAcceptance) return "none";
+  return callSteps(config).quotePrices ? "ask" : "owner";
 }
 
 /**

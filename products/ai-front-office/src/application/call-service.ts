@@ -13,7 +13,7 @@ import type {
 import { evaluateServiceArea, isInServiceArea, slotWithinBookableHours } from "../domain/config.js";
 import { slotTouchesDayOff } from "../domain/days-off.js";
 import { triageEmergency } from "../domain/triage.js";
-import { askedQuestions, callSteps, feeAcceptanceRequired, mergeExtraAnswers, normalizeCustomQuestions, pairExtraAnswers } from "../domain/call-steps.js";
+import { askedQuestions, callSteps, feeGate, mergeExtraAnswers, normalizeCustomQuestions, pairExtraAnswers } from "../domain/call-steps.js";
 import { audioRecordingEnabled, WRAP_UP_AFTER_SECONDS } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import { BookingCoordinator } from "./booking-coordinator.js";
@@ -49,6 +49,8 @@ export const NO_SLOTS_MESSAGE = "Nothing open then. If you have not yet, call ch
 
 /** check_availability or book_slot for a shop that switched "Offer open times" off ("What Otto does on a call"). */
 export const TIMES_OFF_MESSAGE = "This shop does not book over the phone. Never offer, suggest or confirm a time. Put when they'd like it in save_intake access_notes (\"Prefers: ...\") and say the owner will call back to set it up.";
+/** Why a picked time waits for the owner when the fee question is on and "Give your prices" is off. */
+const FEE_NOT_READ_REASON = "The service-call fee was not read on the call (prices are off); confirm the time and the fee with the caller";
 /** The calendar event's place for a shop that takes no address: left empty, never a made-up one. */
 const NO_ADDRESS_PLACE = "";
 
@@ -531,8 +533,14 @@ export class CallService {
     };
     input.signal?.throwIfAborted();
     await this.store.saveCall(call);
-    // The fee question follows "Quote my prices": with prices off Otto can't read the fee, so it isn't asked.
-    const feeRequired = feeAcceptanceRequired(config);
+    // The owner's fee question is never skipped. With "Give your prices" off Otto can't read the fee, so nothing is
+    // booked on the call: the time waits for the owner's OK, as it does for a shop with no fee saved.
+    const gate = feeGate(config);
+    if (gate === "owner") {
+      await this.queuePendingBooking(call, input.slotStart, config, FEE_NOT_READ_REASON);
+      return { status: "pending", message: "The requested time is saved for the owner to confirm. Do not say it is booked and never state a fee: say the owner will confirm the time." };
+    }
+    const feeRequired = gate === "ask";
     if (feeRequired && config.priceSnippets.length === 0) {
       await this.queuePendingBooking(call, input.slotStart, config, "No owner-approved diagnostic fee is configured");
       return { status: "pending", message: "No owner-approved diagnostic fee is configured. Queue owner confirmation instead of booking." };
@@ -804,6 +812,7 @@ export class CallService {
     const requestedMs = Date.parse(call.fields.requestedStart ?? "");
     const onDayOff = Number.isFinite(requestedMs)
       && slotTouchesDayOff(new Date(requestedMs), new Date(requestedMs + config.defaultServiceDurationMinutes * 60_000), config.timezone, config.daysOff);
+    const gate = feeGate(config);
     const canAttemptDirectBooking = config.bookingMode === "direct"
       && steps.offerTimes
       && !emergency.emergency
@@ -814,7 +823,8 @@ export class CallService {
       && !onDayOff
       && latestOffered
       && call.fields.explicitSlotConfirmation
-      && (!feeAcceptanceRequired(config) || (config.priceSnippets.length > 0 && call.fields.diagnosticFeeAccepted))
+      // The fee question on with prices off ("owner"): never booked from here either; the owner confirms.
+      && (gate === "none" || (gate === "ask" && config.priceSnippets.length > 0 && call.fields.diagnosticFeeAccepted))
       && Boolean(call.fields.callerName?.trim())
       && isAllowedCustomerNumber(call.fields.callbackNumber ?? call.fromNumber)
       && (!steps.askAddress || Boolean(call.fields.address?.trim()))
@@ -839,6 +849,7 @@ export class CallService {
           // A repair never writes to the calendar: the owner confirms the time the caller asked for.
           : repair && canAttemptDirectBooking ? "Recovered after the call; confirm the time with the caller"
             : onDayOff ? "That day is set as a day off; confirm a time with the caller"
+            : gate === "owner" ? FEE_NOT_READ_REASON
             : "Booking requirements were incomplete");
     }
 
@@ -961,7 +972,8 @@ export class CallService {
     if (steps.askAddress && !call.fields.address?.trim()) flags.push("service_address_missing");
     if (!call.fields.problemDescription.trim()) flags.push("problem_description_missing");
     if (!call.fields.serviceCategory?.trim()) flags.push("service_category_missing");
-    if (steps.offerTimes && feeAcceptanceRequired(config) && !call.fields.diagnosticFeeAccepted) flags.push("diagnostic_fee_not_accepted");
+    // Also while Otto gives no prices and so can't read the fee: the caller never said yes to it, so the owner asks.
+    if (steps.offerTimes && feeGate(config) !== "none" && !call.fields.diagnosticFeeAccepted) flags.push("diagnostic_fee_not_accepted");
     if (steps.offerTimes && (booking?.status !== "confirmed" || !booking.writeVerifiedAt)) flags.push("system_write_not_verified");
     if (steps.offerTimes && config.customerSmsEnabled && !confirmationQueued) flags.push("customer_confirmation_not_queued");
     return [...new Set(flags)];

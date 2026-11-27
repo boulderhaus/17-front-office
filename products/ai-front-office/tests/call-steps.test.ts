@@ -8,7 +8,7 @@ import { ownerCallEmail } from "../src/application/owner-alerts.js";
 import { demoEnvironment } from "../src/config/environment.js";
 import { buildCallPath } from "../src/domain/call-path.js";
 import {
-  CALL_STEP_KEYS, callSteps, cleanCustomQuestion, DEFAULT_CALL_STEPS, feeAcceptanceRequired, hiddenCallPathSteps, MAX_CUSTOM_QUESTION_LENGTH,
+  CALL_STEP_KEYS, callSteps, cleanCustomQuestion, DEFAULT_CALL_STEPS, feeGate, hiddenCallPathSteps, MAX_CUSTOM_QUESTION_LENGTH,
   mergeExtraAnswers, normalizeCallSteps, normalizeCustomQuestions, pairExtraAnswers, parseCustomQuestions, switchedOffStep, type CallSteps,
 } from "../src/domain/call-steps.js";
 import { createDemoConfig, normalizeBusinessConfig } from "../src/domain/config.js";
@@ -16,11 +16,11 @@ import type { BookingAttempt, BusinessConfig } from "../src/domain/models.js";
 import { createRequestHandler, TOO_MUCH_FOR_A_CALL } from "../src/http/app.js";
 import { apiCall, apiSettings, CALL_STEP_FIELDS, settingsForm } from "../src/http/owner-api-model.js";
 import type { Clock } from "../src/ports.js";
-import { buildTelnyxTools, buildVoiceSystemPrompt } from "../src/voice/system-prompt.js";
+import { buildTelnyxTools, buildVoiceSystemPrompt, FEE_OWNER_CONFIRMS_LINE } from "../src/voice/system-prompt.js";
 import { FAILED_TOOL_STATUSES, toolSwitchedOff } from "../src/voice/tool-results.js";
 import { buildShopAssistantPayload, S2S_INSTRUCTION_LIMIT_CHARS, speechToSpeechInstructionsFit, type SpeechToSpeechSettings } from "../src/voice/voice-mode.js";
 import { EXPECTED_TOOL_EVENTS, toolEventResults, verdict } from "../scripts/selftest-call.js";
-import { joinQuestions, LOCKED_STEPS, MAX_QUESTION_LENGTH as WEB_MAX_QUESTION_LENGTH, MAX_QUESTIONS as WEB_MAX_QUESTIONS, questionLength, questionProblem, questionRows, questionsLine, STEP_ROWS, stepState, TRANSFER_ROW } from "../web/src/lib/call-steps.js";
+import { joinQuestions, LOCKED_STEPS, PRICES_OFF_FEE_ON_HINT, MAX_QUESTION_LENGTH as WEB_MAX_QUESTION_LENGTH, MAX_QUESTIONS as WEB_MAX_QUESTIONS, questionLength, questionProblem, questionRows, questionsLine, STEP_ROWS, stepState, TRANSFER_ROW } from "../web/src/lib/call-steps.js";
 import { DEFAULT_SHOPS } from "./support/call-step-shops.js";
 
 // "What Otto does on a call" (Settings). Synthetic shops, 555 numbers and example.test addresses only.
@@ -70,10 +70,11 @@ describe("call steps: defaults and normalisation", () => {
     expect(callSteps(config)).toMatchObject({ askAddress: false, checkServiceArea: false });
   });
 
-  it("drops the fee question while Otto quotes no prices", () => {
-    expect(feeAcceptanceRequired(shop({}, { requireDiagnosticFeeAcceptance: true }))).toBe(true);
-    expect(feeAcceptanceRequired(shop({ quotePrices: false }, { requireDiagnosticFeeAcceptance: true }))).toBe(false);
-    expect(feeAcceptanceRequired(shop({}, { requireDiagnosticFeeAcceptance: false }))).toBe(false);
+  it("never drops the owner's fee question: with prices off the owner confirms every booking instead", () => {
+    expect(feeGate(shop({}, { requireDiagnosticFeeAcceptance: true }))).toBe("ask");
+    expect(feeGate(shop({ quotePrices: false }, { requireDiagnosticFeeAcceptance: true }))).toBe("owner");
+    expect(feeGate(shop({}, { requireDiagnosticFeeAcceptance: false }))).toBe("none");
+    expect(feeGate(shop({ quotePrices: false }, { requireDiagnosticFeeAcceptance: false }))).toBe("none");
   });
 
   it("cleans a saved question list without throwing: three at most, 80 characters, no blanks or repeats", () => {
@@ -212,10 +213,21 @@ describe("call steps: what each switch changes in the instructions and tools", (
     expect(text).not.toContain("$89");
     expect(text).not.toContain("kind=price");
     expect(text).toContain("- Brands: We service all major brands.");
-    // The fee question reads the fee from the prices, so it is off too.
-    expect(text).toContain("- No diagnostic-fee acceptance is required.");
+    // The owner's fee question is on and Otto can't read the fee: it takes the time, and the owner confirms.
+    expect(text).toContain(`- ${FEE_OWNER_CONFIRMS_LINE}`);
+    expect(FEE_OWNER_CONFIRMS_LINE).toBe("This shop has a service-call fee that you can't quote, so the owner confirms every appointment. Take the time the caller picks with book_slot (diagnostic_fee_accepted=false), never say it is booked, and say the owner will confirm it. If they ask about the fee, say the owner will go over it.");
+    expect(text).not.toContain("No diagnostic-fee acceptance is required.");
     expect(tool(config, "get_approved_answer")!.body_parameters.properties.kind.enum).toEqual(["answer"]);
     expect(toolNames(config)).toEqual(allTools);
+    // Even a shop that books on the call is told to take the time for the owner to confirm, never to book it.
+    const direct = section(buildVoiceSystemPrompt(shop({ quotePrices: false }, { requireDiagnosticFeeAcceptance: true, bookingMode: "direct" })), "BOOKING").split("\n");
+    expect(direct[1]).toBe("- The booking mode is confirm. In confirm mode, save the preferred time but never claim it is booked.");
+    expect(direct[4]).toBe(`- ${FEE_OWNER_CONFIRMS_LINE}`);
+    expect(direct.join("\n")).not.toMatch(/book an offered slot|read the exact approved diagnostic fee/);
+    // With the fee question off, prices off changes nothing about booking.
+    const noFee = buildVoiceSystemPrompt(shop({ quotePrices: false }, { requireDiagnosticFeeAcceptance: false, bookingMode: "direct" }));
+    expect(noFee).toContain("- The booking mode is direct.");
+    expect(noFee).toContain("- No diagnostic-fee acceptance is required.");
   });
 
   it("answerQuestions off: takes a message for policy questions; prices still work", () => {
@@ -417,6 +429,53 @@ describe("call steps: the server refuses a tool the shop switched off", () => {
     await strict.post("/tools/check-availability", { provider_call_id: id, ...window });
     expect(await strict.post("/tools/book", { provider_call_id: id, ...booking, address: "9 Far Away Rd, Elsewhere, ZZ 00000" })).toMatchObject({ status: "pending" });
     expect(strict.calendar.events).toHaveLength(0);
+  });
+
+  it("quotePrices off with the fee question on: never books past the fee, the time waits for the owner's OK", async () => {
+    const { store, calendar, post } = await app({ quotePrices: false }, { requireDiagnosticFeeAcceptance: true });
+    const id = "fee-gate";
+    await post("/tools/check-availability", { provider_call_id: id, ...window });
+    const address = "100 Main St, Springfield, IL 62701";
+    // Whatever the assistant sends for the fee flag: the fee was never read, so a yes to it means nothing.
+    for (const accepted of [false, true]) {
+      const answer = await post("/tools/book", { provider_call_id: id, ...booking, address, diagnostic_fee_accepted: accepted });
+      expect(answer, String(accepted)).toMatchObject({ status: "pending" });
+      expect(answer.message).toContain("the owner will confirm the time");
+    }
+    expect(calendar.events).toHaveLength(0);
+    let call = (await store.getCallByProviderId(id))!;
+    expect(await store.getBookingForCall(call.id)).toMatchObject({ status: "pending", requestedStart: booking.slot_start, failureReason: expect.stringContaining("fee was not read") });
+    // The end of the call never books it either, even when the final payload claims a yes to the fee.
+    const service = new CallService(store, calendar, clock, BASE);
+    call = await service.finalize({
+      webhookEventId: `end:${id}`, tenantId: "demo", providerCallId: id, fromNumber: "+15555550110", startedAt: "2026-01-15T08:00:00.000Z", endedAt: "2026-01-15T08:02:00.000Z", durationSeconds: 120,
+      fields: { callerName: "Dana Miller", companyName: null, callbackNumber: "+15555550110", address, serviceCategory: "HVAC repair", serviceCategoryConfidence: 1, problemDescription: "Thermostat screen is blank", equipmentDetails: null, accessNotes: null, requestedStart: booking.slot_start, explicitSlotConfirmation: true, diagnosticFeeAccepted: true, humanRequested: false, confidence: 0.9 },
+      transcript: "Caller: My thermostat screen is blank.\nOtto: Got it.", recordingUrl: "https://example.invalid/recording", consentState: "unknown",
+    });
+    expect(call.outcome).toBe("pending_confirmation");
+    expect(calendar.events).toHaveLength(0);
+    expect(await store.getBookingForCall(call.id)).toMatchObject({ status: "pending" });
+    expect(await store.getCallbackTaskForCall(call.id)).toMatchObject({ status: "open" });
+    // The same outcome main gives a shop whose fee Otto cannot read (the question on, no price saved).
+    const noFeeSaved = await app({}, { requireDiagnosticFeeAcceptance: true, priceSnippets: [] });
+    await noFeeSaved.post("/tools/check-availability", { provider_call_id: id, ...window });
+    expect(await noFeeSaved.post("/tools/book", { provider_call_id: id, ...booking, address })).toMatchObject({ status: "pending" });
+    expect(noFeeSaved.calendar.events).toHaveLength(0);
+    // A call that ends without book_slot ever answering (recovered from history) is not booked from the payload either.
+    const late = await app({ quotePrices: false }, { requireDiagnosticFeeAcceptance: true });
+    await late.post("/tools/check-availability", { provider_call_id: "fee-late", ...window });
+    const recovered = await new CallService(late.store, late.calendar, clock, BASE).finalize({
+      webhookEventId: "end:fee-late", tenantId: "demo", providerCallId: "fee-late", fromNumber: "+15555550110", startedAt: "2026-01-15T08:00:00.000Z", endedAt: "2026-01-15T08:02:00.000Z", durationSeconds: 120,
+      fields: { callerName: "Dana Miller", companyName: null, callbackNumber: "+15555550110", address, serviceCategory: "HVAC repair", serviceCategoryConfidence: 1, problemDescription: "Thermostat screen is blank", equipmentDetails: null, accessNotes: null, requestedStart: booking.slot_start, explicitSlotConfirmation: true, diagnosticFeeAccepted: true, humanRequested: false, confidence: 0.9 },
+      transcript: "Caller: My thermostat screen is blank.\nOtto: Got it.", recordingUrl: "https://example.invalid/recording", consentState: "unknown",
+    });
+    expect(late.calendar.events).toHaveLength(0);
+    expect(await late.store.getBookingForCall(recovered.id)).toMatchObject({ status: "pending", failureReason: expect.stringContaining("fee was not read") });
+    // With the fee question off, prices off still books on the call.
+    const free = await app({ quotePrices: false });
+    await free.post("/tools/check-availability", { provider_call_id: id, ...window });
+    expect(await free.post("/tools/book", { provider_call_id: id, ...booking, address })).toMatchObject({ status: "confirmed" });
+    expect(free.calendar.events).toHaveLength(1);
   });
 
   it("offerTimes off: a call ends as an owner callback with nothing booked and no booking gaps flagged", async () => {
@@ -870,10 +929,14 @@ describe("call steps: the Settings card", () => {
     expect(stepState(area, flags(["stepCheckServiceArea"]))).toEqual({ checked: false, disabled: false, hint: "Otto takes a job at any address." });
   });
 
-  it("says the fee question goes too when prices are switched off", () => {
+  it("says bookings wait for the owner's OK when prices are off while the fee question is on", () => {
     const prices = STEP_ROWS.find((row) => row.field === "stepQuotePrices")!;
-    expect(stepState(prices, flags(["stepQuotePrices"], ["requireDiagnosticFeeAcceptance"])).hint).toBe("Otto never gives a price or asks about your service-call fee. It takes a message.");
+    expect(stepState(prices, flags(["stepQuotePrices"], ["requireDiagnosticFeeAcceptance"])).hint).toBe("Otto never gives a price. Bookings wait for your OK while “Get a yes to your service-call fee” is on.");
+    expect(PRICES_OFF_FEE_ON_HINT).not.toMatch(/\u2014|prompt|model|Telnyx|phone settings|AI\b/i);
     expect(stepState(prices, flags(["stepQuotePrices"])).hint).toBe("Otto never gives a price. It takes a message.");
+    // No times offered means no bookings to wait on, and prices on reads the fee as before.
+    expect(stepState(prices, flags(["stepQuotePrices", "stepOfferTimes"], ["requireDiagnosticFeeAcceptance"])).hint).toBe("Otto never gives a price. It takes a message.");
+    expect(stepState(prices, flags([], ["requireDiagnosticFeeAcceptance"])).hint).toBe(prices.on);
   });
 
   it("edits the questions as rows over one saved value, and counts a question the way the server does", () => {

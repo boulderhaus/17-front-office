@@ -33,14 +33,19 @@ export const TRANSFER_ROW: StepRow = { field: "warmTransferEnabled", label: "Put
 
 export interface StepState { checked: boolean; disabled: boolean; hint: string }
 
+/** The prices row, off, while the service-call fee question (Calendar > Booking) is on. */
+export const PRICES_OFF_FEE_ON_HINT = "Otto never gives a price. Bookings wait for your OK while “Get a yes to your service-call fee” is on."
+
 /**
  * A row as it shows: the service-area check needs the address, so it is off and locked while the address is off
- * (the saved choice comes back with the address). Prices off also drops the service-call fee question.
+ * (the saved choice comes back with the address). Prices off while the service-call fee question is on means
+ * every booking waits for the owner's OK, and the row says so.
  */
 export function stepState(row: StepRow, flag: (field: string) => boolean): StepState {
   if (row.field === "stepCheckServiceArea" && !flag("stepAskAddress")) return { checked: false, disabled: true, hint: "Off, because Otto isn’t asking for the address." }
   const checked = flag(row.field)
-  if (row.field === "stepQuotePrices" && !checked && flag("requireDiagnosticFeeAcceptance")) return { checked, disabled: false, hint: "Otto never gives a price or asks about your service-call fee. It takes a message." }
+  // Prices off while the fee question is on (Calendar > Booking): Otto can't read the fee, so it books nothing itself.
+  if (row.field === "stepQuotePrices" && !checked && flag("requireDiagnosticFeeAcceptance") && flag("stepOfferTimes")) return { checked, disabled: false, hint: PRICES_OFF_FEE_ON_HINT }
   return { checked, disabled: false, hint: checked ? row.on : row.off }
 }
 
