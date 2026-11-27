@@ -4,9 +4,10 @@ import { describe, expect, it } from "vitest";
 const source = (file: string): string => readFileSync(new URL(`../web/src/${file}`, import.meta.url), "utf8");
 
 describe("owner app words that must match what the screen shows (walk 11-26 re-walk)", () => {
-  it("says two iPhone settings and lists exactly two (ONB-02)", () => {
+  it("says two iPhone settings and lists exactly two (ONB-02), as the way to keep ring first after a test", () => {
     const card = source("components/app/forwarding-card.tsx");
-    const box = card.slice(card.indexOf("function IphoneSettings"), card.indexOf("function showFix"));
+    const box = card.slice(card.indexOf("function IphoneSettings"), card.indexOf("function KeepRingFirst"));
+    expect(box).toContain("To keep Ring my phone first, open");
     expect(box).toContain("change two settings:");
     expect(box.match(/<li>/g)).toHaveLength(2);
   });
@@ -16,11 +17,18 @@ describe("owner app words that must match what the screen shows (walk 11-26 re-w
     expect(card).toContain("useEffect(() => { setCleared(null) }, [planForwardsAll])");
   });
 
-  it("turning every call off with the iPhone switch still names the code for old ring-first rules (FWD-01)", () => {
+  it("turning forwarding off is the code; the iPhone switch behind the link still names the code for old ring-first rules (FWD-01)", () => {
     const card = source("components/app/forwarding-card.tsx");
-    const off = card.slice(card.indexOf("{offViaSettings ? ("), card.indexOf('{steps?.off === "settings" && ('));
-    expect(off).toContain("SETTINGS_OFF_LINE");
-    expect(off).toContain("Used Ring my phone first before? Also dial");
+    const off = card.slice(card.indexOf("{offViaSettings ? ("), card.indexOf("{steps?.iphoneSwitch.off && ("));
+    const [viaSwitch, viaCode] = off.split(") : (");
+    // Behind "Code didn't work?": the code again first, then the switch.
+    expect(viaSwitch!.indexOf("{RETRY_CODE_LINE}")).toBeGreaterThan(0);
+    expect(viaSwitch!.indexOf("{SETTINGS_OFF_LINE}")).toBeGreaterThan(viaSwitch!.indexOf("{RETRY_CODE_LINE}"));
+    expect(viaSwitch).toContain("Used Ring my phone first before? Also dial");
+    // The default: the off code, no Settings.
+    expect(viaCode).toContain("{plan.off}</code> and press Call.");
+    expect(viaCode).not.toContain("SETTINGS");
+    expect(card).toContain("const offViaSettings = Boolean(steps?.iphoneSwitch.off) && switchWay");
   });
 
   it("points to Alerts for emergency calls only in words that work without a saved mobile (SET-01)", () => {
