@@ -3178,6 +3178,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       setupAssistantId: dependencies.env.TELNYX_SETUP_ASSISTANT_ID ?? null,
       publicBaseUrl: dependencies.env.PUBLIC_BASE_URL,
       voice: dependencies.env.TELNYX_VOICE,
+      speechToSpeech: speechToSpeechSettings(dependencies.env),
       getSecret: (tenantId, provider, key) => dependencies.store.getIntegrationSecret(tenantId, provider, key),
       saveSecret: (tenantId, provider, key, value) => dependencies.store.saveIntegrationSecret(tenantId, provider, key, value),
       ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}),

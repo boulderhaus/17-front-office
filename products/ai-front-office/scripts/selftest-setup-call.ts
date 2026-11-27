@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 import { setupHelpClientState, TelnyxSetupCaller } from "../src/adapters/telnyx-setup-call.js";
 import { loadEnvironment } from "../src/config/environment.js";
 import { PLATFORM_TENANT_ID } from "../src/ports.js";
+import { speechToSpeechSettings } from "../src/voice/voice-mode.js";
 import { toolResults, type HistoryLike, type ToolResult } from "./selftest-call.js";
 
 /**
@@ -120,7 +121,7 @@ async function main(): Promise<void> {
     // Ring it the way "Call me now" does: the same caller, record and tool lookup, so our server runs the real call.
     const caller = new TelnyxSetupCaller({
       apiKey: key, templateAssistantId: env.TELNYX_TEMPLATE_ASSISTANT_ID ?? template, setupAssistantId: env.TELNYX_SETUP_ASSISTANT_ID ?? null,
-      publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE,
+      publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE, speechToSpeech: speechToSpeechSettings(env),
       getSecret: (tenant, provider, name) => store.getIntegrationSecret(tenant, provider, name),
       saveSecret: (tenant, provider, name, value) => store.saveIntegrationSecret(tenant, provider, name, value),
     });

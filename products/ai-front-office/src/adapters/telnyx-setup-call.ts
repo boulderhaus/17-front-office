@@ -2,6 +2,7 @@ import { withTimeout } from "../application/retry.js";
 import { DEFAULT_TELNYX_VOICE, ottoSpeechSettings, TOOL_CALL_AUDIO } from "../voice/system-prompt.js";
 import { forwardingSteps, forwardToDigits } from "../domain/forwarding-steps.js";
 import { PLATFORM_TENANT_ID } from "../ports.js";
+import { assistantVoicePayload, currentTextModel, isSpeechToSpeechAssistant, VoiceModeError, type ShopAssistantPayload, type SpeechToSpeechSettings } from "../voice/voice-mode.js";
 
 /**
  * "Call me now": Otto's AI setup helper calls the owner's saved mobile right away and walks them through call
@@ -240,9 +241,9 @@ export const SETUP_CALLS_PER_DAY = 3;
 export const SETUP_ASSISTANT_NAME = "Call Otto · Setup helper";
 
 /**
- * The setup helper assistant, as configure-telnyx creates and updates it and the runtime creates it if it was never
- * made. Voice and speech settings are Otto's own (TELNYX_VOICE and ottoSpeechSettings); the model is copied from
- * Otto's assistant, never written here.
+ * The setup helper assistant in the standard voice, as configure-telnyx creates and updates it and the runtime creates
+ * it if it was never made (both through buildSetupHelper, which applies the voice mode). Voice and speech settings are
+ * Otto's own (TELNYX_VOICE and ottoSpeechSettings); the model is copied from Otto's assistant, never written here.
  */
 export function buildSetupAssistant(input: { publicBaseUrl: string; voice?: string | undefined; inherited?: Record<string, unknown> }): Record<string, unknown> {
   return {
@@ -256,6 +257,44 @@ export function buildSetupAssistant(input: { publicBaseUrl: string; voice?: stri
     telephony_settings: { time_limit_secs: SETUP_CALL_TIME_LIMIT_SECS, user_idle_timeout_secs: 120 },
     ...ottoSpeechSettings(),
   };
+}
+
+export interface SetupHelperBuild extends Omit<ShopAssistantPayload, "payload"> {
+  /** The whole assistant, as created or pushed. */
+  body: Record<string, unknown>;
+}
+
+/**
+ * The setup helper in the voice mode every Call Otto voice uses (src/voice/voice-mode.ts). `ottoAssistant` is Otto's
+ * (the demo) assistant as Telnyx has it; `existing` is the helper itself when it already exists.
+ *
+ * Speech-to-speech by default (TELNYX_VOICE_MODE, unless "platform" is in TELNYX_STANDARD_TENANT_IDS): the same
+ * speaking model and voice as Otto, with its own tools delegated to the same backend text model. If that can't be
+ * built it is standard, with the reason (fallback).
+ * Standard: Otto's text model (its delegation backend while Otto's assistant is still in speech-to-speech mode, never
+ * the speaking model, which would run no tools) and the text-to-speech voice, with delegation turned off when the
+ * helper itself is still in speech-to-speech mode (rollback).
+ */
+export function buildSetupHelper(input: { publicBaseUrl: string; voice?: string | undefined; ottoAssistant?: Record<string, unknown> | null | undefined; speechToSpeech?: SpeechToSpeechSettings | undefined; existing?: Record<string, unknown> | null | undefined }): SetupHelperBuild {
+  const otto = dataOf(input.ottoAssistant);
+  const inherited = inheritedModel(otto);
+  const textModel = currentTextModel(otto) ?? currentTextModel(input.existing) ?? input.speechToSpeech?.backendModel ?? null;
+  if (isSpeechToSpeechAssistant(otto)) {
+    if (textModel) inherited.model = textModel;
+    else delete inherited.model;
+  }
+  const standard = buildSetupAssistant({ publicBaseUrl: input.publicBaseUrl, voice: input.voice, inherited });
+  // The helper follows the default only: it is no shop, so the opt-in list and the demo rule never apply to it.
+  const settings = input.speechToSpeech ? { ...input.speechToSpeech, tenantIds: [], demoTenantId: undefined } : undefined;
+  const { payload, ...voice } = assistantVoicePayload(standard, { tenantId: PLATFORM_TENANT_ID, speechToSpeech: settings, existing: textModel ? { model: textModel } : null });
+  if (voice.mode === "speech_to_speech" || !isSpeechToSpeechAssistant(input.existing)) return { body: payload, ...voice };
+  if (!textModel) throw new VoiceModeError("The setup helper is in speech-to-speech mode and has no text model to go back to");
+  return { body: { ...payload, model: textModel, delegation_settings: { enabled: false } }, ...voice, rollback: true };
+}
+
+function dataOf(value: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  const data = value?.data;
+  return data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : value ?? {};
 }
 
 const PLACEHOLDER_FACTS: SetupCallFacts = { businessName: "", businessNumber: null, carrierName: null, family: null, code: null, offCode: null, confirm: null, ottoNumber: "", device: "other" };
@@ -286,6 +325,8 @@ export class TelnyxSetupCaller {
     setupAssistantId?: string | null;
     publicBaseUrl: string;
     voice?: string | undefined;
+    /** The voice mode settings (speechToSpeechSettings(env)), for a helper this caller has to make itself. */
+    speechToSpeech?: SpeechToSpeechSettings | undefined;
     getSecret: (tenantId: string, provider: string, key: string) => Promise<string | null>;
     saveSecret: (tenantId: string, provider: string, key: string, value: string) => Promise<void>;
     fetcher?: typeof fetch;
@@ -354,7 +395,7 @@ export class TelnyxSetupCaller {
     const created = await this.request<{ data?: { id?: unknown }; id?: unknown }>("/ai/assistants", {
       method: "POST",
       headers: { "idempotency-key": "call-otto-setup-helper-v2" },
-      body: JSON.stringify(buildSetupAssistant({ publicBaseUrl: this.options.publicBaseUrl, voice: this.options.voice, inherited: inheritedModel(template) })),
+      body: JSON.stringify(buildSetupHelper({ publicBaseUrl: this.options.publicBaseUrl, voice: this.options.voice, ottoAssistant: template, speechToSpeech: this.options.speechToSpeech }).body),
     });
     const id = typeof created.data?.id === "string" ? created.data.id : typeof created.id === "string" ? created.id : null;
     if (!id) throw new Error("Telnyx did not return a setup assistant id");

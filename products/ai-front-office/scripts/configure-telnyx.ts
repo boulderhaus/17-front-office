@@ -4,7 +4,7 @@ import { withTimeout } from "../src/application/retry.js";
 import { loadEnvironment } from "../src/config/environment.js";
 import type { Store } from "../src/ports.js";
 import { buildShopAssistantPayload, isSpeechToSpeechTenant, speechToSpeechSettings, type SpeechToSpeechSettings, type VoiceFallback } from "../src/voice/voice-mode.js";
-import { buildSetupAssistant, inheritedModel } from "../src/adapters/telnyx-setup-call.js";
+import { buildSetupHelper } from "../src/adapters/telnyx-setup-call.js";
 import { PLATFORM_TENANT_ID } from "../src/ports.js";
 
 export interface AssistantPush {
@@ -112,15 +112,39 @@ export interface SetupHelperPlan {
   /** The existing setup helper to update, or null to create one. */
   assistantId: string | null;
   body: Record<string, unknown>;
+  mode: "standard" | "speech_to_speech";
+  /** The default asked for speech-to-speech and the helper gets the standard payload instead: why. */
+  fallback?: VoiceFallback;
+  /** The helper is still in speech-to-speech mode and this plan puts it back on its text model. */
+  rollback: boolean;
+  cut: string[];
 }
 
 /**
- * The "Call me now" setup helper: one assistant for every shop, with Otto's voice, speech settings and model (copied
- * from Otto's assistant, never named here) and its tools. TELNYX_SETUP_ASSISTANT_ID wins, then the id the app saved.
+ * The "Call me now" setup helper: one assistant for every shop, with Otto's speech settings, its own tools and Otto's
+ * voice mode (buildSetupHelper): in speech-to-speech mode the same speaking model, voice and backend text model as
+ * Otto; in standard mode Otto's text model (copied from Otto's assistant, never named here) and TELNYX_VOICE.
+ * TELNYX_SETUP_ASSISTANT_ID wins, then the id the app saved. `readAssistant` reads the helper as Telnyx has it, so a
+ * helper still in speech-to-speech mode is put back; a helper that can't be read is never pushed blind (it throws).
  */
-export async function planSetupHelper(input: { store: Store; setupAssistantId?: string | undefined; ottoAssistant: Record<string, unknown>; publicBaseUrl: string; voice?: string | undefined }): Promise<SetupHelperPlan> {
+export async function planSetupHelper(input: {
+  store: Store; setupAssistantId?: string | undefined; ottoAssistant: Record<string, unknown>; publicBaseUrl: string; voice?: string | undefined;
+  speechToSpeech?: SpeechToSpeechSettings | undefined;
+  readAssistant?: ((assistantId: string) => Promise<Record<string, unknown>>) | undefined;
+}): Promise<SetupHelperPlan> {
   const assistantId = input.setupAssistantId ?? await input.store.getIntegrationSecret(PLATFORM_TENANT_ID, "telnyx", "setup_assistant_id");
-  return { assistantId, body: buildSetupAssistant({ publicBaseUrl: input.publicBaseUrl, voice: input.voice, inherited: inheritedModel(input.ottoAssistant) }) };
+  const existing = assistantId && input.readAssistant ? await input.readAssistant(assistantId) : null;
+  return { assistantId, ...buildSetupHelper({ publicBaseUrl: input.publicBaseUrl, voice: input.voice, ottoAssistant: input.ottoAssistant, speechToSpeech: input.speechToSpeech, existing }) };
+}
+
+/** The setup helper's plan for the dry run, like describePush. */
+export function describeSetupHelper(plan: SetupHelperPlan): Record<string, unknown> {
+  return {
+    action: plan.assistantId ? "would_update" : "would_create", tenantId: PLATFORM_TENANT_ID, assistantId: plan.assistantId, mode: plan.mode, fallback: plan.fallback ?? null, rollback: plan.rollback, cut: plan.cut,
+    instructionChars: typeof plan.body.instructions === "string" ? plan.body.instructions.length : null,
+    model: plan.body.model, delegation_settings: plan.body.delegation_settings, voice_settings: plan.body.voice_settings,
+    tools: (plan.body.tools as Array<{ type: string; webhook?: { name: string } }>).map((tool) => tool.webhook?.name ?? tool.type), telephony_settings: plan.body.telephony_settings,
+  };
 }
 
 /** Create or update the setup helper; a new one's id is saved where the app reads it. */
@@ -152,6 +176,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       ...(readAssistant ? { readAssistant } : {}),
     });
     if (!apply) {
+      // The setup helper as --apply would build it: from Otto's assistant as it is now (read-only).
+      const setupHelper = await (async () => {
+        const ottoAssistant = readAssistant && env.TELNYX_ASSISTANT_ID ? dataOf(await readAssistant(env.TELNYX_ASSISTANT_ID)) : {};
+        return describeSetupHelper(await planSetupHelper({ store: runtime.store, setupAssistantId: env.TELNYX_SETUP_ASSISTANT_ID, ottoAssistant, publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE, speechToSpeech, ...(readAssistant ? { readAssistant } : {}) }));
+      })().catch((error: unknown) => ({ action: "failed", tenantId: PLATFORM_TENANT_ID, error: error instanceof Error ? error.message : String(error) }));
       console.log(JSON.stringify({
         mode: "dry_run",
         // The plan in one place: the default, who is listed either way, and whether the speaking model and voice are set.
@@ -164,8 +193,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         demoUpdate: pushes.find((push) => push.assistantId === env.TELNYX_ASSISTANT_ID)?.update ?? null,
         // Read-only: which assistants' TeXML apps still lack the end-of-call callback ("would_set").
         callEndCallbacks: env.TELNYX_API_KEY ? await syncCallEndCallbacks({ pushes, apiKey: env.TELNYX_API_KEY, publicBaseUrl: env.PUBLIC_BASE_URL, apply: false }) : "TELNYX_API_KEY not set",
-        // The "Call me now" setup helper (model copied from Otto's assistant on --apply).
-        setupHelper: await planSetupHelper({ store: runtime.store, setupAssistantId: env.TELNYX_SETUP_ASSISTANT_ID, ottoAssistant: {}, publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE }).then((plan) => ({ action: plan.assistantId ? "would_update" : "would_create", assistantId: plan.assistantId, tools: (plan.body.tools as Array<{ type: string; webhook?: { name: string } }>).map((tool) => tool.webhook?.name ?? tool.type), telephony_settings: plan.body.telephony_settings })),
+        // The "Call me now" setup helper, in the same voice mode as Otto.
+        setupHelper,
       }, null, 2));
     } else {
       if (!env.TELNYX_API_KEY || !env.TELNYX_ASSISTANT_ID || !env.TELNYX_MESSAGING_PROFILE_ID) {
@@ -196,11 +225,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       for (const outcome of callEndCallbacks) {
         if (outcome.action === "failed") failed.push({ tenantId: outcome.tenantId, assistantId: outcome.assistantId, error: `call-end callback: ${outcome.error ?? "failed"}` });
       }
-      // The setup helper: same voice, speech settings and model as Otto. A failure is reported, never hides the rest.
-      let setupHelper: { assistantId: string; action: string } | { action: "failed"; error: string };
+      // The setup helper: same voice mode, speech settings and model as Otto (read before the pushes above, so its
+      // text model is known either way). A failure is reported, never hides the rest.
+      let setupHelper: { assistantId: string; action: string; mode: string; fallback: VoiceFallback | null; rollback: boolean } | { action: "failed"; error: string };
       try {
-        const plan = await planSetupHelper({ store: runtime.store, setupAssistantId: env.TELNYX_SETUP_ASSISTANT_ID, ottoAssistant: (current.data && typeof current.data === "object" ? current.data : current) as Record<string, unknown>, publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE });
-        setupHelper = await applySetupHelper({ plan, store: runtime.store, request: (path, init) => telnyxRequest(apiKey, path, init) });
+        const plan = await planSetupHelper({ store: runtime.store, setupAssistantId: env.TELNYX_SETUP_ASSISTANT_ID, ottoAssistant: dataOf(current), publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE, speechToSpeech, ...(readAssistant ? { readAssistant } : {}) });
+        setupHelper = { ...await applySetupHelper({ plan, store: runtime.store, request: (path, init) => telnyxRequest(apiKey, path, init) }), mode: plan.mode, fallback: plan.fallback ?? null, rollback: plan.rollback };
       } catch (error) {
         setupHelper = { action: "failed", error: error instanceof Error ? error.message : String(error) };
         failed.push({ tenantId: PLATFORM_TENANT_ID, assistantId: "setup-helper", error: setupHelper.error });
@@ -244,6 +274,10 @@ async function telnyxRequest<T = unknown>(apiKey: string, path: string, init: Re
   const payload = await response.json().catch(() => ({})) as T & { errors?: Array<{ detail?: string }> };
   if (!response.ok) throw new Error(`Telnyx ${init.method ?? "GET"} ${path} failed with HTTP ${response.status}${payload.errors?.[0]?.detail ? `: ${payload.errors[0].detail}` : ""}`);
   return payload;
+}
+
+function dataOf(value: Record<string, unknown>): Record<string, unknown> {
+  return value.data && typeof value.data === "object" && !Array.isArray(value.data) ? value.data as Record<string, unknown> : value;
 }
 
 function readTexmlAppId(value: Record<string, unknown>): string | null {
