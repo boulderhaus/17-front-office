@@ -246,7 +246,9 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
                   {ringFirst && !isAndroid && family !== "office" && <IphoneSettings />}
                 </Step>
 
-                <Step n={2} done={dialed && !clearing && !noCodes} title={<>{noCodes ? "Let’s set up " : clearing ? "Clear the old forwarding on " : retry === "instead" ? "Try this code instead on " : viaSettings ? "Forward calls on " : plan.on ? "Dial this on " : "Set it up for "}<span className="tabular whitespace-nowrap">{formatPhone(business.number!)}</span> · {change}</>}>
+                {/* Done only once a test passes: a copied number or code isn't forwarding yet (walk 11-26 iPhone). The number
+                    and Change stay on one line together, so Change never sits alone under the dot. */}
+                <Step n={2} done={status === "passed" && !clearing && !noCodes} title={<>{noCodes ? "Let’s set up " : clearing ? "Clear the old forwarding on " : retry === "instead" ? "Try this code instead on " : viaSettings ? "Forward calls on " : plan.on ? "Dial this on " : "Set it up for "}<span className="whitespace-nowrap"><span className="tabular">{formatPhone(business.number!)}</span> · {change}</span></>}>
                   {forwardsAll && (
                     <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">
                       <strong className="font-semibold">{retry && retry !== "clear" ? "Your phone still never rang." : "Your phone never rang."}</strong> Otto answered {line.check.forwardedAfterSec != null ? `in ${Math.max(1, line.check.forwardedAfterSec)} seconds` : "right away"}{retry === "instead" || noCodes ? "." : ", so every call is still being forwarded."}{" "}
@@ -360,9 +362,13 @@ export function ForwardingCard({ dashboard, footer, inApp = false }: { dashboard
               <p className="text-sm" role="status">That didn’t reach us. {line.helpEmail ? <>Email <a className="font-semibold underline underline-offset-4" href={`mailto:${line.helpEmail}`}>{line.helpEmail}</a> and we’ll help.</> : "Please try again."}</p>
             ) : null}
             {!helpLive && !helpDone && (
-              <Button type="button" variant="link" className={linkButton} disabled={busy === "help"} onClick={() => void post("help", "/api/app/line/help", { device: isIphone ? "iphone" : isAndroid ? "android" : "other" })}>
-                {busy === "help" ? <Loader2 className="size-4 motion-safe:animate-spin" /> : <LifeBuoy className="size-4" />}{busy === "help" ? "Calling…" : line.helpCall ? "Call me again" : "Call me now"}
-              </Button>
+              // A card, not a small link (walk 11-26, HELP-02): who calls, and the one button.
+              <div className="grid gap-2.5 rounded-lg bg-brand-paper p-3.5">
+                <p className="flex items-start gap-2 text-[15px]"><LifeBuoy aria-hidden className="mt-0.5 size-4.5 shrink-0" /><span><strong className="font-semibold">Stuck?</strong> We call your mobile and walk you through it.</span></p>
+                <Button type="button" size="tap" variant="outline" className={cn(fullButton, outlineButton)} disabled={busy === "help"} onClick={() => void post("help", "/api/app/line/help", { device: isIphone ? "iphone" : isAndroid ? "android" : "other" })}>
+                  {busy === "help" ? <Loader2 className="size-4 motion-safe:animate-spin" /> : <PhoneCall className="size-4" />}{busy === "help" ? "Calling…" : line.helpCall ? "Call me again" : "Call me now"}
+                </Button>
+              </div>
             )}
             {/* The quiet way out: a time with our team, whenever the call didn't ring or didn't get there. */}
             {bookLink && (helpCalling || (helpEnded && !helpEnded.ok)) && (

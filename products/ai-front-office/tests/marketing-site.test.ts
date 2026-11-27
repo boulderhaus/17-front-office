@@ -93,7 +93,7 @@ describe("homepage trades and steps", () => {
   it("never says you pick a trade at signup (SITE-21)", () => {
     for (const page of [withOffer, noOffer]) {
       expect(text(page)).not.toMatch(/pick your trade|choose your trade|your trade, your mobile/i);
-      expect(page).toContain("<p>Shop name, your mobile and email. About a minute.</p>");
+      expect(page).toContain("<p>Shop name, your mobile and email. About a&nbsp;minute.</p>");
       expect(page).toContain("<p>Otto listens for your trade’s emergency words. Change them anytime in Settings.</p>");
     }
   });

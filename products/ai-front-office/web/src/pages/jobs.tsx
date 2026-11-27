@@ -23,7 +23,7 @@ export function JobsPage() {
   const board = useMediaQuery("(min-width: 1024px)")
   if (!dashboard) return null
   const d = derive(dashboard)
-  const columns = jobColumns({ callsById: d.callsById, actionable: d.actionable, snoozed: d.snoozed, handled: d.handled, nowMs: d.nowMs, due: d.due, date: (iso) => compactDate(iso, d.tz) })
+  const columns = jobColumns({ callsById: d.callsById, actionable: d.actionable, snoozed: d.snoozed, handled: d.handled, nowMs: d.nowMs, date: (iso) => compactDate(iso, d.tz) })
   if (board) {
     return (
       // One row as tall as the board (minmax(0,1fr)), so each column's max-h-full is a real height and its list scrolls on its own.
@@ -130,7 +130,9 @@ function ShowAll({ count, onClick }: { count: number; onClick: () => void }) {
 
 /** What a card or row shares: where it opens, whether it can dial, and its status word (Urgent, Confirm time). */
 function useJob(card: JobCard<ApiCall>, status: boolean) {
-  const { base, preview } = useMode()
+  const { base, preview, dashboard } = useMode()
+  // One job per caller: how many open calls it stands for ("3 calls"), so a repeat caller reads as one person.
+  const calls = 1 + (dashboard ? derive(dashboard).earlier.get(card.call.id)?.length ?? 0 : 0)
   const location = useLocation()
   const call = card.call
   return {
@@ -138,6 +140,7 @@ function useJob(card: JobCard<ApiCall>, status: boolean) {
     state: { origin: callOrigin({ base, pathname: location.pathname, search: location.search }) },
     dial: Boolean(card.action === "call" && call.phone && call.outcome !== "ignored_spam" && !preview),
     badge: status && card.label !== "Call back" ? <ToneBadge tone={card.tone} className="h-5.5 shrink-0 px-1.5 text-xs">{card.label}</ToneBadge> : null,
+    calls: calls > 1 ? <span className="tabular shrink-0 text-sm text-muted-foreground">{calls} calls</span> : null,
   }
 }
 
@@ -158,6 +161,7 @@ function Card({ card, status }: { card: JobCard<ApiCall>; status: boolean }) {
     <article className="ph-no-capture relative grid grid-cols-[minmax(0,1fr)] gap-1 rounded-lg border bg-card px-3 py-2.5 shadow-xs transition-colors hover:border-foreground/25">
       <div className="flex min-w-0 items-center gap-2">
         <Link data-open to={job.to} state={job.state} className={cn(OPEN, "flex-1 text-[15px] after:rounded-lg")}>{callerLabel(call)}</Link>
+        {job.calls}
         {job.badge}
       </div>
       <p className="truncate text-sm text-foreground/80">{call.fields.problemDescription || "No summary"}</p>
@@ -179,6 +183,7 @@ function Row({ card, status }: { card: JobCard<ApiCall>; status: boolean }) {
         {/* Wraps the time under the name only when name, status and time can't share the line (320px, long due time). */}
         <div className="flex min-w-0 flex-wrap items-center gap-x-2">
           <Link data-open to={job.to} state={job.state} className={cn(OPEN, "text-base")}>{callerLabel(call)}</Link>
+          {job.calls}
           {job.badge}
           <span className="ml-auto flex shrink-0 pl-1"><When card={card} /></span>
         </div>

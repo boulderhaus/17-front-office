@@ -77,3 +77,20 @@ export async function runTaskAction(deps: TaskDeps, callId: string, action: Task
     deps.gate.leave()
   }
 }
+
+/**
+ * Done and Later on one caller's job (walk 11-26): the caller's other open calls (`others`) change first, each on its
+ * own, and the job's call last. A sibling that fails to save just stays open and shows as its own job after the
+ * reload; only the job's own save decides success, so a retry never trips on a half-done job (Done and Later are safe
+ * to repeat). Undo reopens exactly the calls that Done closed with it; `closedWith` remembers them until then.
+ */
+export function groupedPost(one: (callId: string, action: TaskAction, minutes?: number) => Promise<unknown>, othersOf: (callId: string) => string[], closedWith: Map<string, string[]>) {
+  return async (callId: string, action: TaskAction, minutes?: number): Promise<unknown> => {
+    const others = action === "reopen" ? closedWith.get(callId) ?? [] : othersOf(callId)
+    await Promise.allSettled(others.map((other) => one(other, action, minutes)))
+    const result = await one(callId, action, minutes)
+    if (action === "complete") closedWith.set(callId, others)
+    else closedWith.delete(callId)
+    return result
+  }
+}

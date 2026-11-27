@@ -45,7 +45,9 @@ export const WEB_MANIFEST = JSON.stringify({
   description: "Who called, and who's waiting on you.",
   id: "/app",
   start_url: "/app",
-  scope: "/app",
+  // The whole site, not just /app: sign-in (/login, /signup) opens inside the Home Screen app too. With scope /app,
+  // iPhone drew its own browser bar over our header there and the field being typed in hid under the keyboard.
+  scope: "/",
   display: "standalone",
   background_color: "#faf8f1",
   theme_color: "#faf8f1",

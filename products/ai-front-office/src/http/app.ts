@@ -919,6 +919,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         // fill in the shop; leaving now leaves no account and no workspace behind.
         const account = ownerSignupSchema.pick({ email: true, password: true }).safeParse({ email: values.email ?? "", password: values.password ?? "" });
         const errors = signupFieldErrors(account.success ? [] : account.error.issues, { email: values.email ?? "", password: values.password ?? "" }, false, ["email", "password"]);
+        // No usable email and no password typed: the password box was still closed, so only the email gets an error.
+        if (errors.email && !values.password) delete errors.password;
         // A good email and no password yet: open the password box (the no-script path; the page reveals it as they type).
         if (!values.password && !errors.email) return sendHtml(response, 200, signupPage(request, "", { ...keepPicks(), email: account.success ? account.data.email : values.email ?? "" }));
         if (!account.success || Object.keys(errors).length > 0) return sendHtml(response, 400, signupPage(request, "", { ...keepPicks(), email: values.email ?? "" }, null, errors));

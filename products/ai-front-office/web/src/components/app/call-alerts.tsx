@@ -4,7 +4,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { api } from "@/lib/api"
 import { useMode } from "@/lib/mode"
-import { installHelp } from "@/lib/install"
+import { installHelp, SlowCheck, withinTime } from "@/lib/install"
 import { cn, tapWidth } from "@/lib/utils"
 
 /**
@@ -79,11 +79,13 @@ export function CallAlertsCard({ className }: { className?: string }) {
       if (!supported()) return setState(isIphone() && !isInstalled() ? "iphone-install" : "unsupported")
       if (Notification.permission === "denied") return setState("blocked")
       // Registered up front so the tap below can ask for permission straight away (iPhone requires that).
-      const registration = await navigator.serviceWorker.register("/app/sw.js", { scope: SCOPE })
-      const existing = await registration.pushManager.getSubscription()
+      const registration = await withinTime(navigator.serviceWorker.register("/app/sw.js", { scope: SCOPE }))
+      const existing = await withinTime(registration.pushManager.getSubscription())
       if (!cancelled) setState(existing && Notification.permission === "granted" ? "on" : "off")
     }
-    check().catch(() => { if (!cancelled) setState("unsupported") })
+    // A phone that never answers (seen on an iPhone Home Screen app) shows the button after a few seconds, never a
+    // spinner forever: the tap says plainly if it can't turn on.
+    check().catch((error) => { if (!cancelled) setState(error instanceof SlowCheck ? "off" : "unsupported") })
     return () => { cancelled = true }
   }, [publicKey, preview])
 
@@ -98,15 +100,16 @@ export function CallAlertsCard({ className }: { className?: string }) {
         setState(permission === "denied" ? "blocked" : "off")
         return
       }
-      const registration = await navigator.serviceWorker.getRegistration(SCOPE) ?? await navigator.serviceWorker.register("/app/sw.js", { scope: SCOPE })
-      await navigator.serviceWorker.ready
-      const subscription = await registration.pushManager.getSubscription()
+      const registration = await withinTime(navigator.serviceWorker.getRegistration(SCOPE)) ?? await withinTime(navigator.serviceWorker.register("/app/sw.js", { scope: SCOPE }))
+      await withinTime(navigator.serviceWorker.ready)
+      // subscribe is never cut short: one that finishes late would leave this phone subscribed with no alerts saved.
+      const subscription = await withinTime(registration.pushManager.getSubscription())
         ?? await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationServerKey(publicKey) })
       await api("/api/app/push/subscribe", { method: "POST", body: subscription.toJSON() })
       setState("on")
       toast.success(`Call alerts are on for this ${deviceWord()}.`)
     } catch (error) {
-      toast.error(error instanceof Error && error.message ? error.message : "Call alerts didn’t turn on. Please try again.")
+      toast.error(error instanceof SlowCheck ? "This phone didn’t answer. Close Call Otto, open it again and try once more." : error instanceof Error && error.message ? error.message : "Call alerts didn’t turn on. Please try again.")
     } finally {
       setBusy(false)
     }
@@ -176,7 +179,8 @@ export function CallAlertsCard({ className }: { className?: string }) {
 
 /**
  * iPhone: Apple allows no one-tap install, so it is two taps, in the words of the browser the owner is in
- * (Chrome has Add to Home Screen in its Share menu, top right; Safari in its Share menu, under ··· on newer iPhones).
+ * (Chrome has Add to Home Screen in its Share menu, top right; Safari in its Share menu, behind ··· or ≡ in the bottom
+ * bar on newer iPhones, then under View More).
  */
 function IphoneSteps() {
   const help = installHelp({ userAgent: navigator.userAgent, touchMac: touchMac(), standalone: isInstalled(), canPrompt: false })
@@ -190,9 +194,10 @@ function IphoneSteps() {
         <ol className="grid list-decimal gap-1.5 pl-5">
           {help === "iphone-chrome"
             ? <li>Tap Share {share} at the top right, next to the address.</li>
-            : <li>Tap Share {share}. On newer iPhones it’s in the <strong className="font-semibold">···</strong> menu.</li>}
-          <li>Tap <strong className="font-semibold">Add to Home Screen</strong>, then <strong className="font-semibold">Add</strong>.</li>
-          <li>Open Call Otto from your Home Screen and turn on alerts here.</li>
+            : <li>Tap Share {share}. No Share button? Tap <strong className="font-semibold">···</strong> or <strong className="font-semibold">≡</strong> at the bottom first.</li>}
+          <li>Tap <strong className="font-semibold">Add to Home Screen</strong> (under <strong className="font-semibold">View More</strong>), then <strong className="font-semibold">Add</strong>.</li>
+          {/* The Home Screen app doesn't share Safari's sign-in: say so, so the sign-in screen isn't a surprise. */}
+          <li>Open Call Otto from your Home Screen, sign in, and turn on alerts here.</li>
         </ol>
       )}
       <span className="text-[13px] text-muted-foreground">iPhones don’t allow a one-tap install. Needs iOS 16.4 or newer.</span>

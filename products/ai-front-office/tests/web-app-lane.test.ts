@@ -4,7 +4,9 @@ import { smsDraft, smsHref } from "../web/src/lib/sms-draft.js";
 import { installHelp } from "../web/src/lib/install.js";
 import { opensAtTop } from "../web/src/lib/scroll.js";
 import { usageTile } from "../web/src/lib/usage-tile.js";
-import { agoLabel, BOARD_CAP, cappedCards, jobColumns, jobTab, PHONE_CAP } from "../web/src/lib/jobs.js";
+import { withinTime, SlowCheck } from "../web/src/lib/install.js";
+import { groupedPost } from "../web/src/lib/task-action.js";
+import { agoLabel, BOARD_CAP, cappedCards, jobColumns, jobTab, oneJobPerCaller, PHONE_CAP } from "../web/src/lib/jobs.js";
 
 const NOW = Date.parse("2026-11-26T15:00:00.000Z");
 const at = (minutesAgo: number) => new Date(NOW - minutesAgo * 60_000).toISOString();
@@ -30,6 +32,12 @@ describe("the bell's alerts (APP-04)", () => {
     expect(alerts.map((alert) => [alert.callId, alert.kind])).toEqual([["d", "short"], ["b", "callback"], ["c", "booked"], ["a", "urgent"]]);
     expect(alerts[0]!.title).toBe("Hung up early: Unknown caller");
     expect(alerts[3]!.title).toBe("Urgent: Pat Example");
+  });
+  it("says one caller is waiting once, however many times they called (urgent first)", () => {
+    const dana = (id: string, minutesAgo: number, urgent = false) => ({ ...call(id, minutesAgo, { urgent }), phone: "+15555550110" });
+    const open = (callId: string, priority = "normal") => ({ callId, status: "open", priority, dueAt: at(1) });
+    const alerts = buildAlerts({ calls: [dana("d1", 10), dana("d2", 60, true), dana("d3", 90), { ...call("s", 20), phone: "+15555550111" }], tasks: [open("d1"), open("d2", "high"), open("d3"), open("s")], nowMs: NOW });
+    expect(alerts.map((alert) => [alert.callId, alert.kind])).toEqual([["s", "callback"], ["d2", "urgent"]]);
   });
   it("is empty for a new shop, and counts only what came in since the bell was opened", () => {
     expect(buildAlerts({ calls: [], tasks: [], nowMs: NOW })).toEqual([]);
@@ -113,7 +121,7 @@ describe("the Jobs board (APP-08)", () => {
   const c = (id: string, minutesAgo: number, requested: string | null = null, outcome = "handoff_queued") => ({ id, startedAt: at(minutesAgo), outcome, fields: { requestedStart: requested } });
   const task = (callId: string, priority = "normal", completedMinutesAgo = 5) => ({ callId, priority, dueAt: at(0), completedAt: at(completedMinutesAgo), updatedAt: at(completedMinutesAgo) });
   const build = (calls: ReturnType<typeof c>[], tasks: { actionable?: ReturnType<typeof task>[]; snoozed?: ReturnType<typeof task>[]; handled?: ReturnType<typeof task>[] }) =>
-    jobColumns({ callsById: new Map(calls.map((one) => [one.id, one])), actionable: tasks.actionable ?? [], snoozed: tasks.snoozed ?? [], handled: tasks.handled ?? [], nowMs: NOW, due: () => "Due now", date: () => "Nov 27" });
+    jobColumns({ callsById: new Map(calls.map((one) => [one.id, one])), actionable: tasks.actionable ?? [], snoozed: tasks.snoozed ?? [], handled: tasks.handled ?? [], nowMs: NOW, date: () => "Nov 27" });
   it("has four columns in the order a job moves, each card with when and one next step", () => {
     const columns = build([c("a", 1), c("b", 2, at(-60)), c("s", 3), c("k", 4, at(-120), "booked"), c("d", 5)], { actionable: [task("a", "high"), task("b")], snoozed: [task("s")], handled: [task("d")] });
     expect(columns.map((column) => [column.title, column.cards.length])).toEqual([["Needs reply", 2], ["Waiting", 1], ["Booked", 1], ["Done", 1]]);
@@ -131,10 +139,9 @@ describe("the Jobs board (APP-08)", () => {
     const columns = build([c("old", 300), c("new", 3), c("mid", 40), c("hot", 500)], { actionable: [task("old"), task("hot", "high"), task("mid"), task("new")] });
     expect(columns[0]!.cards.map((card) => [card.call.id, card.when])).toEqual([["hot", "8h ago"], ["new", "3m ago"], ["mid", "40m ago"], ["old", "5h ago"]]);
   });
-  it("tells each card apart by how long ago they called, and keeps a later due time when one is set", () => {
-    const columns = jobColumns({ callsById: new Map([["a", c("a", 10)], ["b", c("b", 90)]]), actionable: [task("a"), task("b")], snoozed: [], handled: [], nowMs: NOW,
-      due: (one) => (one.callId === "b" ? "Due today 5:00 PM" : "Due now"), date: () => "Nov 27" });
-    expect(columns[0]!.cards.map((card) => [card.whenLabel, card.when])).toEqual([["Called", "10m ago"], ["Call back", "Today 5:00 PM"]]);
+  it("tells each card apart by how long ago they called, even when the call back isn't due yet (one meaning per column)", () => {
+    const columns = jobColumns({ callsById: new Map([["a", c("a", 10)], ["b", c("b", 90)]]), actionable: [task("a"), { ...task("b"), dueAt: at(-60) }], snoozed: [], handled: [], nowMs: NOW, date: () => "Nov 27" });
+    expect(columns[0]!.cards.map((card) => [card.whenLabel, card.when])).toEqual([["Called", "10m ago"], ["Called", "1h ago"]]);
   });
   it("orders Waiting by the soonest back", () => {
     const later = { ...task("late"), dueAt: at(-600) }, sooner = { ...task("soon"), dueAt: at(-60) };
@@ -162,5 +169,65 @@ describe("the Jobs board (APP-08)", () => {
     expect(columns[0]!.empty).toBe("Nobody is waiting on you.");
     expect(columns[2]!.empty).toBe("Nothing booked yet.");
     expect([jobTab(null), jobTab("handled"), jobTab("all"), jobTab("booked")]).toEqual(["reply", "done", "reply", "booked"]);
+  });
+});
+
+describe("one job per caller (walk 11-26 iOS walk: Dana's four calls were four cards)", () => {
+  const call = (id: string, phone: string | null, minutesAgo: number, outcome = "handoff_queued") => [id, { phone, startedAt: at(minutesAgo), outcome }] as const;
+  const calls = new Map([call("d1", "+15555550110", 30), call("s1", "+15555550111", 60), call("d2", "+15555550110", 200), call("d3", "+15555550110", 900), call("x1", null, 10), call("x2", null, 20), call("p1", "+15555550199", 5, "ignored_spam"), call("p2", "+15555550199", 6, "ignored_spam")]);
+  const task = (callId: string, priority = "normal") => ({ callId, priority });
+  it("keeps one job per number, the newest call, in the order given, and lists the others", () => {
+    const { jobs, earlier } = oneJobPerCaller([task("d3"), task("s1"), task("d2"), task("d1"), task("x1"), task("x2"), task("p1"), task("p2")], calls);
+    expect(jobs.map((one) => one.callId)).toEqual(["s1", "d1", "x1", "x2", "p1", "p2"]);
+    expect([...earlier]).toEqual([["d1", ["d3", "d2"]]]);
+  });
+  it("lets an urgent call lead the caller's job even when a newer call is routine", () => {
+    const { jobs, earlier } = oneJobPerCaller([task("d2", "high"), task("d1")], calls);
+    expect(jobs.map((one) => one.callId)).toEqual(["d2"]);
+    expect(earlier.get("d2")).toEqual(["d1"]);
+  });
+});
+
+describe("Done, Later and Undo on one caller's job (review of the walk 11-26 fix)", () => {
+  const server = (fail: string[] = []) => {
+    const status = new Map([["d1", "open"], ["d2", "open"], ["d3", "open"]])
+    const one = async (callId: string, action: string) => {
+      if (fail.includes(callId)) throw new Error("That didn't save.")
+      if (action === "reopen" && status.get(callId) !== "completed") throw new Error("Completed task not found")
+      status.set(callId, action === "complete" ? "completed" : action === "snooze" ? "snoozed" : "open")
+    }
+    return { status, one }
+  }
+  const othersOf = (callId: string) => (callId === "d1" ? ["d2", "d3"] : [])
+  it("Done closes the whole job and Undo reopens the same calls", async () => {
+    const { status, one } = server()
+    const post = groupedPost(one, othersOf, new Map())
+    await post("d1", "complete")
+    expect([...status.values()]).toEqual(["completed", "completed", "completed"])
+    await post("d1", "reopen")
+    expect([...status.values()]).toEqual(["open", "open", "open"])
+  })
+  it("Later moves the whole job, and a later Undo of an old Done doesn't replay it", async () => {
+    const { status, one } = server()
+    const closedWith = new Map<string, string[]>()
+    const post = groupedPost(one, othersOf, closedWith)
+    await post("d1", "snooze", 60)
+    expect([...status.values()]).toEqual(["snoozed", "snoozed", "snoozed"])
+    expect(closedWith.has("d1")).toBe(false)
+  })
+  it("a sibling that fails leaves the job's own save standing (it shows as its own job), and the job's failure is the error", async () => {
+    const flaky = server(["d3"])
+    await expect(groupedPost(flaky.one, othersOf, new Map())("d1", "complete")).resolves.toBeUndefined()
+    expect([...flaky.status.values()]).toEqual(["completed", "completed", "open"])
+    const broken = server(["d1"])
+    await expect(groupedPost(broken.one, othersOf, new Map())("d1", "complete")).rejects.toThrow("didn't save")
+  })
+})
+
+describe("a phone check that never answers (walk 11-26 iOS walk: Checking this phone... forever)", () => {
+  it("gives up after the time limit with SlowCheck, and passes answers and errors through", async () => {
+    await expect(withinTime(new Promise(() => undefined), 5)).rejects.toBeInstanceOf(SlowCheck);
+    await expect(withinTime(Promise.resolve(7), 50)).resolves.toBe(7);
+    await expect(withinTime(Promise.reject(new Error("no")), 50)).rejects.toThrow("no");
   });
 });
