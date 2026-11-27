@@ -569,3 +569,13 @@ describe("configure-telnyx: every assistant through the same build", () => {
     expect(pushes.shop_a!.error).toBeUndefined();
   });
 });
+
+describe("speech-to-speech instructions are plain ASCII", () => {
+  it("folds curly quotes, dashes and accents an owner typed, and leaves ASCII text alone", async () => {
+    const { plainAscii, speechToSpeechPayload } = await import("../src/voice/voice-mode.js");
+    expect(plainAscii("Mike\u2019s Plumbing \u2014 Jos\u00e9 said \u201cyes\u201d\u2026 Settings \u203a Phone")).toBe("Mike's Plumbing - Jose said \"yes\"... Settings > Phone");
+    expect(plainAscii("Plain text, {{caller_phone}}.\n- rule")).toBe("Plain text, {{caller_phone}}.\n- rule");
+    const built = speechToSpeechPayload({ instructions: "You answer the phone for Mike\u2019s Plumbing.", voice_settings: {} }, { kind: "speech_to_speech", model: "speaker", voice: "Voice.A", backendModel: "text-model" });
+    expect(built.payload.instructions).toBe("You answer the phone for Mike's Plumbing.");
+  });
+});

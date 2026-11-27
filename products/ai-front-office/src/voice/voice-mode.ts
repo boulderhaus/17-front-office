@@ -183,9 +183,27 @@ export function isPayloadRejection(status: number | undefined): boolean {
   return status !== undefined && status >= 400 && status < 500 && ![401, 403, 408, 409, 429].includes(status);
 }
 
+/**
+ * NVIDIA's model card says the speaking model takes ASCII instructions. Owners type curly quotes, dashes and accents
+ * (an iPhone keyboard does it by default: "Mike\u2019s Plumbing"), so those are folded to plain characters and anything
+ * else outside ASCII is dropped. Standard assistants keep the text as typed.
+ */
+export function plainAscii(text: string): string {
+  return text
+    .replace(/[\u2018\u2019\u201A\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u2033]/g, '"')
+    .replace(/[\u2010-\u2015\u2212]/g, "-")
+    .replace(/\u2026/g, "...")
+    .replace(/[\u203A\u2192]/g, ">")
+    .replace(/[\u00A0\u2009\u202F]/g, " ")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, "");
+}
+
 /** The instructions as the speaking model gets them: whole, or without the "HOW YOU SOUND" style section when over the limit. */
 function fitInstructions(text: string): { instructions: string; cut: string[]; fits: boolean } {
-  let instructions = text;
+  let instructions = plainAscii(text);
   const cut: string[] = [];
   if (instructions.length > S2S_INSTRUCTION_LIMIT_CHARS) {
     const shorter = instructions.replace(/\nHOW YOU SOUND[^\n]*\n(?:- [^\n]*\n)+/, "\n");
