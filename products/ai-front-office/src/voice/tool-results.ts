@@ -105,6 +105,20 @@ export function toolLimitReached(tool: VoiceToolName): ToolFailure {
 }
 
 /**
+ * The tool_events row our server adds to a call when it answers one of its voice tools with toolFailure or
+ * toolLimitReached. The model only hears the fixed result and the real status goes to the log; this row is the
+ * call's own record of it. A speech-to-speech call's tool calls never show in the provider's conversation history,
+ * so it is the one place the post-deploy selftest can see that a tool did not work.
+ */
+export const TOOL_FAILED_EVENT = "tool.failed";
+
+/**
+ * Tool answer statuses that mean the tool did not work. The post-deploy selftests fail on them, and a support call's
+ * record never drops one to make room for later answers.
+ */
+export const FAILED_TOOL_STATUSES: ReadonlySet<string> = new Set(["unavailable", "error", "failed", "invalid", "rejected"]);
+
+/**
  * The per-call counts live in the store (tool_call_budgets), so they hold across replicas and restarts.
  * Calls end by about six minutes (seven at the Telnyx backstop); the retention loop drops ledger rows untouched for two hours.
  */

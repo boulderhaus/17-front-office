@@ -18,7 +18,7 @@ import { labCallerVoice, statusOk, toolResults, type HistoryLike, type ToolResul
  *
  * Tools are judged from Telnyx's conversation history when the helper is a standard assistant. A speech-to-speech
  * helper's tools are run by its delegation backend and never show there, so they are judged from what our server
- * recorded on the call (each helper tool's name and status).
+ * recorded on the call (each helper tool's name and status, including one it refused, rate limited or that threw).
  *
  * The shop's saved owner mobile must BE the lab number: the script refuses anything else, so it can never ring a
  * real owner. The lab number is pointed at the lab assistant for the call and put back afterwards; the lab assistant

@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 import { BLIND_CLOSURE_FLAG, PROVIDER_HISTORY_FLAG } from "../src/application/call-service.js";
 import { loadEnvironment } from "../src/config/environment.js";
 import type { CallRecord, ToolEvent } from "../src/domain/models.js";
+import { FAILED_TOOL_STATUSES } from "../src/voice/tool-results.js";
 import { currentTextModel, isSpeechToSpeechAssistant } from "../src/voice/voice-mode.js";
 
 /**
@@ -15,7 +16,9 @@ import { currentTextModel, isSpeechToSpeechAssistant } from "../src/voice/voice-
  *
  * Tools are judged from Telnyx's conversation history on a standard line. On a speech-to-speech line the delegation
  * backend runs the tools and they never show in that history, so they are judged from our own tool_events rows for
- * the call instead: triage and intake ran, and no tool recorded an error.
+ * the call instead: triage and intake ran, and no tool recorded an error. Every tool our server answered with a
+ * failure or a limit leaves a failed row there (tool.failed, src/http/app.ts recordToolFailure), so a broken tool
+ * fails the gate in either mode.
  *
  *   node --import tsx scripts/selftest-call.ts --line <E.164 line> --from <E.164 lab caller id>
  *   (or SELFTEST_LINE / SELFTEST_FROM; production image: node dist/scripts/selftest-call.js ...)
@@ -47,7 +50,7 @@ export function parseSelftestArgs(argv: string[], env: Record<string, string | u
 export interface HistoryLike { role: string; text?: string | null; tool_call_id?: string | null; tool_calls?: Array<{ id: string; function?: { name?: string; arguments?: string } }> | null }
 export interface ToolResult { name: string; status: string; ok: boolean }
 
-const FAILED_STATUSES = new Set(["unavailable", "error", "failed", "invalid", "rejected"]);
+const FAILED_STATUSES = FAILED_TOOL_STATUSES;
 
 /** A tool answer's status as our server wrote it: ok unless it is one of the failed ones. */
 export function statusOk(status: string): boolean {
