@@ -1056,6 +1056,76 @@ describe("Call me now: Otto's support call", () => {
     expect(email.body).toContain("Your Call Otto forwarding");
   });
 
+  it("keeps each helper tool's name and status on the call's record (what the selftest reads for a speech-to-speech helper), and never shows it to the owner", async () => {
+    const made = await onTheCall();
+    const record = async () => JSON.parse((await made.store.getIntegrationSecret(made.account.tenantId, "forwarding", "setup_call"))!) as { tools?: Array<{ name: string; status: string }>; stepsEmailedAt?: string; callControlId?: string };
+    expect((await record()).tools).toBeUndefined();
+    expect(await (await made.tool("get_test_result", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "idle" });
+    expect(await (await made.tool("email_steps", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "sent" });
+    expect(await (await made.tool("email_steps", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "already_sent" });
+    // A refused call (not this shop's live call) records nothing.
+    expect(await (await made.tool("get_test_result", { provider_call_id: "v3:someone-else" })).json()).toMatchObject({ status: "unavailable" });
+    expect(await record()).toMatchObject({ callControlId: "v3:help-call", stepsEmailedAt: expect.any(String), tools: [{ name: "get_test_result", status: "idle" }, { name: "email_steps", status: "sent" }, { name: "email_steps", status: "already_sent" }] });
+    expect((await record()).tools).toHaveLength(3);
+    expect(JSON.stringify((await line(made, made.cookie)).helpCall)).not.toContain("tools");
+    // The record keeps only the latest answers of a runaway call.
+    for (let repeat = 0; repeat < 45; repeat += 1) await made.tool("get_test_result", { provider_call_id: "v3:help-call" });
+    expect((await record()).tools).toHaveLength(40);
+    // Still there after hang-up, when the selftest reads it; nothing more is added once the call is over.
+    await made.webhook("call.hangup", "evt-hangup", { call_control_id: "v3:help-call", client_state: made.dialState(), hangup_cause: "normal_clearing" });
+    expect(await (await made.tool("get_test_result", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "unavailable" });
+    expect(await record()).toMatchObject({ endedAt: expect.any(String), outcome: "done" });
+    expect((await record()).tools).toHaveLength(40);
+  });
+
+  it("a helper tool that was refused, rate limited or threw is kept on the call's record too, and later answers never push it off", async () => {
+    type Kept = { tools?: Array<{ name: string; status: string }> };
+    const kept = async (made: Awaited<ReturnType<typeof onTheCall>>) => (JSON.parse((await made.store.getIntegrationSecret(made.account.tenantId, "forwarding", "setup_call"))!) as Kept).tools;
+    const help = { provider_call_id: "v3:help-call" };
+
+    // The tool throws on a live call (the store is down for one read): a 500 as before, and the record says so.
+    const thrown = await onTheCall();
+    expect(await (await thrown.tool("get_test_result", help)).json()).toMatchObject({ status: "idle" });
+    const getConfig = thrown.store.getConfig.bind(thrown.store);
+    let down = true;
+    thrown.store.getConfig = async (tenantId) => {
+      if (down && tenantId === thrown.account.tenantId) { down = false; throw new Error("store unavailable"); }
+      return getConfig(tenantId);
+    };
+    expect((await thrown.tool("email_steps", help)).status).toBe(500);
+    expect(await kept(thrown)).toEqual([{ name: "get_test_result", status: "idle" }, { name: "email_steps", status: "error" }]);
+    // The support-call selftest reads exactly this record for a speech-to-speech helper: one failed tool fails it.
+    const { setupVerdict } = await import("../scripts/selftest-setup-call.js");
+    const verdictFor = (tools: Kept["tools"]) => setupVerdict({ tools: [], record: { answeredAt: "a", endedAt: "b", outcome: "done", ...(tools ? { tools } : {}) }, book: false, elapsedMs: 60_000, speechToSpeech: true });
+    expect(verdictFor([{ name: "get_test_result", status: "idle" }])).toMatchObject({ pass: true, tools_ok: true });
+    expect(verdictFor(await kept(thrown))).toMatchObject({ pass: false, tools_ok: false });
+    // A runaway call's later answers never push the failed one off the record.
+    for (let repeat = 0; repeat < 45; repeat += 1) await thrown.tool("get_test_result", help);
+    expect(await kept(thrown)).toHaveLength(40);
+    expect((await kept(thrown))![0]).toEqual({ name: "email_steps", status: "error" });
+    expect(verdictFor(await kept(thrown)).tools_ok).toBe(false);
+
+    // Rate limited (more than 60 tool calls a minute on one call): answered "unavailable", kept once.
+    const flooded = await onTheCall();
+    for (let repeat = 0; repeat < 60; repeat += 1) await flooded.tool("get_test_result", help);
+    expect((await kept(flooded))!.every((item) => item.status === "idle")).toBe(true);
+    for (let repeat = 0; repeat < 3; repeat += 1) expect(await (await flooded.tool("book_time", help)).json()).toMatchObject({ status: "unavailable", say: "One moment, then try again." });
+    expect((await kept(flooded))!.filter((item) => item.status === "unavailable")).toEqual([{ name: "book_time", status: "unavailable" }]);
+    expect(await kept(flooded)).toHaveLength(40);
+    expect(verdictFor(await kept(flooded)).tools_ok).toBe(false);
+
+    // Refused on this shop's own call (rung, not picked up yet), and for a suspended account: kept as "unavailable".
+    const early = await app();
+    const owner = await early.owner();
+    expect((await owner.api("/api/app/line/help", { device: "android" })).status).toBe(200);
+    expect(await (await early.tool("get_test_result", help)).json()).toMatchObject({ status: "unavailable" });
+    expect(await kept({ ...early, ...owner } as Awaited<ReturnType<typeof onTheCall>>)).toEqual([{ name: "get_test_result", status: "unavailable" }]);
+    const suspended = await onTheCall();
+    await suspended.store.updateOwnerAccountStatus(suspended.account.id, "suspended", suspended.clock.now().toISOString());
+    expect(await (await suspended.tool("get_test_result", help)).json()).toMatchObject({ status: "unavailable" });
+    expect(await kept(suspended)).toEqual([{ name: "get_test_result", status: "unavailable" }]);
+  });
+
   it("email_steps sends once per support call: a repeat sends nothing and says it's already sent; the app's button keeps its own limit", async () => {
     const made = await onTheCall();
     const stepEmails = () => [...made.store.notifications.values()].filter((item) => item.idempotencyKey.startsWith("handoff-email:"));

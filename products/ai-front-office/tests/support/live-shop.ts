@@ -44,7 +44,7 @@ export function fakeTelnyx() {
   const calls = new Map<string, CallStatus>();
   const conversations = new Map<string, { id: string; messages: HistoryMessage[]; lastMessageAt: string; endUser: string }>();
   const recordings = new Set<string>();
-  const state = { pageSize: 100 as number, conversationsDown: false, newestFirst: false };
+  const state = { pageSize: 100 as number, conversationsDown: false, newestFirst: false, rejectSpeechToSpeech: false };
   let assistants = 0;
   const fetcher = (async (input: string | URL, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -54,6 +54,10 @@ export function fakeTelnyx() {
     requests.push({ method, path, search: url.searchParams, body });
     const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
     if (path === "/v2/ai/assistants/template-assistant" && method === "GET") return json({ data: { id: "template-assistant", model: "synthetic/model", voice_settings: { voice: "synthetic-voice" }, telephony_settings: { default_texml_app_id: "texml-template-assistant" } } });
+    // Telnyx refusing a speech-to-speech assistant itself (a create or an update with delegation on).
+    if (state.rejectSpeechToSpeech && method === "POST" && path.startsWith("/v2/ai/assistants") && (body?.delegation_settings as { enabled?: unknown } | undefined)?.enabled === true) {
+      return json({ errors: [{ code: "10015", detail: "synthetic: this model can't be used with these settings" }] }, 422);
+    }
     if (path === "/v2/ai/assistants" && method === "POST") {
       assistants += 1;
       return json({ data: { id: `assistant-${assistants}` } });
@@ -171,8 +175,9 @@ export function callbackMessages(history: HistoryMessage[]): Array<Record<string
  * A paid shop that went live through the real go-live route (its own assistant and number), ready to take
  * signed provider webhooks. `recovery` is wired as server.ts wires it: its own CallService on the same store.
  */
-export async function liveShop(options: { config?: Partial<BusinessConfig>; startAt?: string; env?: Record<string, string> } = {}) {
+export async function liveShop(options: { config?: Partial<BusinessConfig>; startAt?: string; env?: Record<string, string>; rejectSpeechToSpeech?: boolean } = {}) {
   const telnyx = fakeTelnyx();
+  telnyx.state.rejectSpeechToSpeech = options.rejectSpeechToSpeech === true;
   const store = new InMemoryStore();
   const calendar = new InMemoryCalendar();
   await store.saveConfig(createDemoConfig());

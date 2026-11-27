@@ -53,13 +53,29 @@ const schema = z.object({
    */
   TELNYX_VOICE: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).default(DEFAULT_TELNYX_VOICE)),
   /**
-   * Opt-in speech-to-speech voice (src/voice/voice-mode.ts): comma-separated tenant ids whose assistant uses a
-   * speech-to-speech model. Empty (the default): every shop and the demo line build exactly today's assistant.
-   * Rollback is removing a tenant here and running scripts/configure-telnyx.ts --apply.
+   * The voice every assistant gets (src/voice/voice-mode.ts). "standard" (the default): a text model with a
+   * text-to-speech voice, as before. "speech_to_speech": every shop, the demo line and the "Call me now" setup helper
+   * use the speech-to-speech model (TELNYX_S2S_MODEL and TELNYX_S2S_VOICE), except tenants in
+   * TELNYX_STANDARD_TENANT_IDS; a shop that can't (model or voice unset, no backend text model, instructions over the
+   * limit) quietly keeps the standard voice. Run scripts/configure-telnyx.ts --apply after changing it.
+   * Rollback: set this back to "standard" and run scripts/configure-telnyx.ts --apply.
+   */
+  TELNYX_VOICE_MODE: z.preprocess((value) => value === "" ? undefined : value, z.enum(["standard", "speech_to_speech"]).default("standard")),
+  /**
+   * Comma-separated tenant ids that keep the standard voice while TELNYX_VOICE_MODE is "speech_to_speech"
+   * ("platform" is the setup helper). Rollback for one shop: add its id here and run scripts/configure-telnyx.ts --apply.
+   */
+  TELNYX_STANDARD_TENANT_IDS: z.preprocess((value) => value === undefined ? "" : value, z.string().max(4_000)
+    .transform((value) => [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))])),
+  /**
+   * Opt-in speech-to-speech voice while TELNYX_VOICE_MODE is "standard": comma-separated tenant ids whose assistant
+   * uses a speech-to-speech model (never the demo line). Empty (the default): every shop and the demo line build the
+   * standard assistant. Rollback is removing a tenant here and running scripts/configure-telnyx.ts --apply.
+   * A tenant listed here is strict in either mode: if it can't be speech-to-speech that is an error, never a quiet fallback.
    */
   TELNYX_S2S_TENANT_IDS: z.preprocess((value) => value === undefined ? "" : value, z.string().max(4_000)
     .transform((value) => [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))])),
-  /** The speech-to-speech model for listed tenants. No default: a listed tenant with this unset is never pushed. */
+  /** The speech-to-speech model. No default: a listed tenant with this unset is never pushed, and the default mode falls back to standard. */
   TELNYX_S2S_MODEL: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).max(200).optional()),
   /** The voice paired with TELNYX_S2S_MODEL (Telnyx rejects a speech-to-speech model with another provider's voice). No default. */
   TELNYX_S2S_VOICE: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).max(200).optional()),

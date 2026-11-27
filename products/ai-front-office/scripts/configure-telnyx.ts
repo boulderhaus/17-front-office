@@ -3,18 +3,19 @@ import { ensureCallEndCallback } from "../src/adapters/telnyx-provisioning.js";
 import { withTimeout } from "../src/application/retry.js";
 import { loadEnvironment } from "../src/config/environment.js";
 import type { Store } from "../src/ports.js";
-import { buildTelnyxAssistantUpdate } from "../src/voice/system-prompt.js";
-import { buildShopAssistantPayload, isSpeechToSpeechTenant, speechToSpeechSettings, type SpeechToSpeechSettings } from "../src/voice/voice-mode.js";
-import { buildSetupAssistant, inheritedModel } from "../src/adapters/telnyx-setup-call.js";
+import { buildShopAssistantPayload, isSpeechToSpeechTenant, speechToSpeechSettings, type SpeechToSpeechSettings, type VoiceFallback } from "../src/voice/voice-mode.js";
+import { buildSetupHelper } from "../src/adapters/telnyx-setup-call.js";
 import { PLATFORM_TENANT_ID } from "../src/ports.js";
 
 export interface AssistantPush {
   tenantId: string;
   assistantId: string;
   update: Record<string, unknown>;
-  /** "speech_to_speech" only for a tenant in TELNYX_S2S_TENANT_IDS (src/voice/voice-mode.ts). */
+  /** "speech_to_speech" when TELNYX_VOICE_MODE makes it the default, or for a tenant in TELNYX_S2S_TENANT_IDS (src/voice/voice-mode.ts). */
   mode?: "standard" | "speech_to_speech";
-  /** This push also returns a speech-to-speech assistant to its text model (the tenant left the list). */
+  /** The default asked for speech-to-speech and this assistant gets the standard payload instead: why. */
+  fallback?: VoiceFallback;
+  /** This push also returns a speech-to-speech assistant to its text model (the mode was turned off, or the tenant opted out or fell back). */
   rollback?: boolean;
   /** Instruction sections cut to fit the speech-to-speech limit. */
   cut?: string[];
@@ -23,8 +24,9 @@ export interface AssistantPush {
 }
 
 /**
- * Every assistant we run gets the current prompt, tools, voice (TELNYX_VOICE), turn-taking and
- * telephony_settings (seven-minute backstop time_limit_secs, idle timers): the demo/template assistant plus each shop's provisioned assistant.
+ * Every assistant we run gets the current prompt, tools, voice mode (TELNYX_VOICE_MODE; TELNYX_VOICE for the standard
+ * voice), turn-taking and telephony_settings (seven-minute backstop time_limit_secs, idle timers): the demo/template
+ * assistant plus each shop's provisioned assistant, all through the same build.
  */
 export async function planAssistantPushes(input: {
   store: Store;
@@ -32,41 +34,53 @@ export async function planAssistantPushes(input: {
   demoAssistantId?: string | undefined;
   publicBaseUrl: string;
   voice?: string | undefined;
-  /** Opt-in speech-to-speech tenants. The demo assistant never uses it. */
+  /** The voice mode settings. The opt-in list never applies to the demo assistant; the default mode does. */
   speechToSpeech?: SpeechToSpeechSettings | undefined;
-  /** Reads a shop's assistant as Telnyx has it (GET), for the speech-to-speech backend model and for rollback. */
+  /** Reads an assistant as Telnyx has it (GET), for the speech-to-speech backend model and for rollback. */
   readAssistant?: ((assistantId: string) => Promise<Record<string, unknown>>) | undefined;
 }): Promise<AssistantPush[]> {
   const pushes: AssistantPush[] = [];
   const seen = new Set<string>();
+  const speechToSpeech = input.speechToSpeech ? { ...input.speechToSpeech, demoTenantId: input.defaultTenantId } : undefined;
+  const plan = async (tenantId: string, assistantId: string): Promise<AssistantPush> => {
+    const config = await input.store.getConfig(tenantId);
+    const asked = isSpeechToSpeechTenant(speechToSpeech, tenantId);
+    let existing: Record<string, unknown> | null = null;
+    if (input.readAssistant) {
+      try { existing = await input.readAssistant(assistantId); }
+      catch (error) {
+        // Never push blind: an assistant we can't read may still be in speech-to-speech mode, and today's payload alone
+        // would leave its speaking model on with a text-to-speech voice. Reported as failed; rerun configure.
+        return { tenantId, assistantId, update: {}, error: `assistant read failed${asked ? " (speech-to-speech)" : ""}: ${error instanceof Error ? error.message : String(error)}` };
+      }
+    }
+    try {
+      const built = buildShopAssistantPayload(config, input.publicBaseUrl, { voice: input.voice, speechToSpeech, existing });
+      return { tenantId, assistantId, update: built.payload, mode: built.mode, ...(built.fallback ? { fallback: built.fallback } : {}), ...(built.rollback ? { rollback: true } : {}), ...(built.cut.length ? { cut: built.cut } : {}) };
+    } catch (error) {
+      return { tenantId, assistantId, update: {}, error: error instanceof Error ? error.message : String(error) };
+    }
+  };
   if (input.demoAssistantId) {
-    pushes.push({ tenantId: input.defaultTenantId, assistantId: input.demoAssistantId, update: buildTelnyxAssistantUpdate(await input.store.getConfig(input.defaultTenantId), input.publicBaseUrl, { voice: input.voice }) });
+    pushes.push(await plan(input.defaultTenantId, input.demoAssistantId));
     seen.add(input.demoAssistantId);
   }
   for (const tenantId of (await input.store.listTenantIds()).sort()) {
     const route = await input.store.getProviderRouteForTenant("telnyx", tenantId);
     if (!route || seen.has(route.externalId)) continue;
     seen.add(route.externalId);
-    const config = await input.store.getConfig(tenantId);
-    const listed = isSpeechToSpeechTenant(input.speechToSpeech, tenantId);
-    let existing: Record<string, unknown> | null = null;
-    if (input.readAssistant) {
-      try { existing = await input.readAssistant(route.externalId); }
-      catch (error) {
-        // Never push blind: an assistant we can't read may still be in speech-to-speech mode, and today's payload alone
-        // would leave its speaking model on with a text-to-speech voice. Reported as failed; rerun configure.
-        pushes.push({ tenantId, assistantId: route.externalId, update: {}, error: `assistant read failed${listed ? " (speech-to-speech)" : ""}: ${error instanceof Error ? error.message : String(error)}` });
-        continue;
-      }
-    }
-    try {
-      const built = buildShopAssistantPayload(config, input.publicBaseUrl, { voice: input.voice, speechToSpeech: input.speechToSpeech, existing });
-      pushes.push({ tenantId, assistantId: route.externalId, update: built.payload, mode: built.mode, ...(built.rollback ? { rollback: true } : {}), ...(built.cut.length ? { cut: built.cut } : {}) });
-    } catch (error) {
-      pushes.push({ tenantId, assistantId: route.externalId, update: {}, error: error instanceof Error ? error.message : String(error) });
-    }
+    pushes.push(await plan(tenantId, route.externalId));
   }
   return pushes;
+}
+
+/** One line per assistant for the dry run: who, which voice mode and why, and the fields that differ between modes. */
+export function describePush(push: AssistantPush): Record<string, unknown> {
+  return {
+    tenantId: push.tenantId, assistantId: push.assistantId, mode: push.mode ?? "standard", fallback: push.fallback ?? null, rollback: push.rollback ?? false, cut: push.cut ?? [], error: push.error,
+    instructionChars: typeof push.update.instructions === "string" ? push.update.instructions.length : null,
+    model: push.update.model, delegation_settings: push.update.delegation_settings, voice_settings: push.update.voice_settings, telephony_settings: push.update.telephony_settings,
+  };
 }
 
 export interface CallEndCallbackOutcome {
@@ -98,15 +112,39 @@ export interface SetupHelperPlan {
   /** The existing setup helper to update, or null to create one. */
   assistantId: string | null;
   body: Record<string, unknown>;
+  mode: "standard" | "speech_to_speech";
+  /** The default asked for speech-to-speech and the helper gets the standard payload instead: why. */
+  fallback?: VoiceFallback;
+  /** The helper is still in speech-to-speech mode and this plan puts it back on its text model. */
+  rollback: boolean;
+  cut: string[];
 }
 
 /**
- * The "Call me now" setup helper: one assistant for every shop, with Otto's voice, speech settings and model (copied
- * from Otto's assistant, never named here) and its tools. TELNYX_SETUP_ASSISTANT_ID wins, then the id the app saved.
+ * The "Call me now" setup helper: one assistant for every shop, with Otto's speech settings, its own tools and Otto's
+ * voice mode (buildSetupHelper): in speech-to-speech mode the same speaking model, voice and backend text model as
+ * Otto; in standard mode Otto's text model (copied from Otto's assistant, never named here) and TELNYX_VOICE.
+ * TELNYX_SETUP_ASSISTANT_ID wins, then the id the app saved. `readAssistant` reads the helper as Telnyx has it, so a
+ * helper still in speech-to-speech mode is put back; a helper that can't be read is never pushed blind (it throws).
  */
-export async function planSetupHelper(input: { store: Store; setupAssistantId?: string | undefined; ottoAssistant: Record<string, unknown>; publicBaseUrl: string; voice?: string | undefined }): Promise<SetupHelperPlan> {
+export async function planSetupHelper(input: {
+  store: Store; setupAssistantId?: string | undefined; ottoAssistant: Record<string, unknown>; publicBaseUrl: string; voice?: string | undefined;
+  speechToSpeech?: SpeechToSpeechSettings | undefined;
+  readAssistant?: ((assistantId: string) => Promise<Record<string, unknown>>) | undefined;
+}): Promise<SetupHelperPlan> {
   const assistantId = input.setupAssistantId ?? await input.store.getIntegrationSecret(PLATFORM_TENANT_ID, "telnyx", "setup_assistant_id");
-  return { assistantId, body: buildSetupAssistant({ publicBaseUrl: input.publicBaseUrl, voice: input.voice, inherited: inheritedModel(input.ottoAssistant) }) };
+  const existing = assistantId && input.readAssistant ? await input.readAssistant(assistantId) : null;
+  return { assistantId, ...buildSetupHelper({ publicBaseUrl: input.publicBaseUrl, voice: input.voice, ottoAssistant: input.ottoAssistant, speechToSpeech: input.speechToSpeech, existing }) };
+}
+
+/** The setup helper's plan for the dry run, like describePush. */
+export function describeSetupHelper(plan: SetupHelperPlan): Record<string, unknown> {
+  return {
+    action: plan.assistantId ? "would_update" : "would_create", tenantId: PLATFORM_TENANT_ID, assistantId: plan.assistantId, mode: plan.mode, fallback: plan.fallback ?? null, rollback: plan.rollback, cut: plan.cut,
+    instructionChars: typeof plan.body.instructions === "string" ? plan.body.instructions.length : null,
+    model: plan.body.model, delegation_settings: plan.body.delegation_settings, voice_settings: plan.body.voice_settings,
+    tools: (plan.body.tools as Array<{ type: string; webhook?: { name: string } }>).map((tool) => tool.webhook?.name ?? tool.type), telephony_settings: plan.body.telephony_settings,
+  };
 }
 
 /** Create or update the setup helper; a new one's id is saved where the app reads it. */
@@ -129,21 +167,34 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const runtime = await createRuntime(env);
 
   try {
+    const speechToSpeech = speechToSpeechSettings(env);
+    // Read-only GETs, in dry runs too: an assistant's backend text model, and rollback for one still in speech-to-speech mode.
+    const readAssistant = env.TELNYX_API_KEY ? (assistantId: string) => telnyxRequest<Record<string, unknown>>(env.TELNYX_API_KEY!, `/ai/assistants/${encodeURIComponent(assistantId)}`) : undefined;
     const pushes = await planAssistantPushes({
       store: runtime.store, defaultTenantId: env.DEFAULT_TENANT_ID, demoAssistantId: env.TELNYX_ASSISTANT_ID, publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE,
-      speechToSpeech: speechToSpeechSettings(env),
-      // Read-only GETs, in dry runs too: a listed shop's backend model, and rollback for a shop that left the list.
-      ...(env.TELNYX_API_KEY ? { readAssistant: (assistantId: string) => telnyxRequest<Record<string, unknown>>(env.TELNYX_API_KEY!, `/ai/assistants/${encodeURIComponent(assistantId)}`) } : {}),
+      speechToSpeech,
+      ...(readAssistant ? { readAssistant } : {}),
     });
     if (!apply) {
+      // The setup helper as --apply would build it: from Otto's assistant as it is now (read-only).
+      const setupHelper = await (async () => {
+        const ottoAssistant = readAssistant && env.TELNYX_ASSISTANT_ID ? dataOf(await readAssistant(env.TELNYX_ASSISTANT_ID)) : {};
+        return describeSetupHelper(await planSetupHelper({ store: runtime.store, setupAssistantId: env.TELNYX_SETUP_ASSISTANT_ID, ottoAssistant, publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE, speechToSpeech, ...(readAssistant ? { readAssistant } : {}) }));
+      })().catch((error: unknown) => ({ action: "failed", tenantId: PLATFORM_TENANT_ID, error: error instanceof Error ? error.message : String(error) }));
       console.log(JSON.stringify({
         mode: "dry_run",
-        assistants: pushes.map((push) => ({ tenantId: push.tenantId, assistantId: push.assistantId, mode: push.mode ?? "standard", rollback: push.rollback ?? false, cut: push.cut ?? [], error: push.error, model: push.update.model, delegation_settings: push.update.delegation_settings, voice_settings: push.update.voice_settings, telephony_settings: push.update.telephony_settings })),
+        // The plan in one place: the default, who is listed either way, and whether the speaking model and voice are set.
+        voice: {
+          defaultMode: speechToSpeech.defaultMode ?? "standard", speechToSpeechTenantIds: speechToSpeech.tenantIds, standardTenantIds: speechToSpeech.standardTenantIds ?? [],
+          speechToSpeechModel: speechToSpeech.model ?? null, speechToSpeechVoice: speechToSpeech.voice ?? null, backendModel: speechToSpeech.backendModel ?? "each assistant's own text model",
+          counts: { speech_to_speech: pushes.filter((push) => push.mode === "speech_to_speech").length, standard: pushes.filter((push) => !push.error && push.mode !== "speech_to_speech").length, fallback: pushes.filter((push) => push.fallback).length, rollback: pushes.filter((push) => push.rollback).length, failed: pushes.filter((push) => push.error).length },
+        },
+        assistants: pushes.map(describePush),
         demoUpdate: pushes.find((push) => push.assistantId === env.TELNYX_ASSISTANT_ID)?.update ?? null,
         // Read-only: which assistants' TeXML apps still lack the end-of-call callback ("would_set").
         callEndCallbacks: env.TELNYX_API_KEY ? await syncCallEndCallbacks({ pushes, apiKey: env.TELNYX_API_KEY, publicBaseUrl: env.PUBLIC_BASE_URL, apply: false }) : "TELNYX_API_KEY not set",
-        // The "Call me now" setup helper (model copied from Otto's assistant on --apply).
-        setupHelper: await planSetupHelper({ store: runtime.store, setupAssistantId: env.TELNYX_SETUP_ASSISTANT_ID, ottoAssistant: {}, publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE }).then((plan) => ({ action: plan.assistantId ? "would_update" : "would_create", assistantId: plan.assistantId, tools: (plan.body.tools as Array<{ type: string; webhook?: { name: string } }>).map((tool) => tool.webhook?.name ?? tool.type), telephony_settings: plan.body.telephony_settings })),
+        // The "Call me now" setup helper, in the same voice mode as Otto.
+        setupHelper,
       }, null, 2));
     } else {
       if (!env.TELNYX_API_KEY || !env.TELNYX_ASSISTANT_ID || !env.TELNYX_MESSAGING_PROFILE_ID) {
@@ -174,11 +225,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       for (const outcome of callEndCallbacks) {
         if (outcome.action === "failed") failed.push({ tenantId: outcome.tenantId, assistantId: outcome.assistantId, error: `call-end callback: ${outcome.error ?? "failed"}` });
       }
-      // The setup helper: same voice, speech settings and model as Otto. A failure is reported, never hides the rest.
-      let setupHelper: { assistantId: string; action: string } | { action: "failed"; error: string };
+      // The setup helper: same voice mode, speech settings and model as Otto (read before the pushes above, so its
+      // text model is known either way). A failure is reported, never hides the rest.
+      let setupHelper: { assistantId: string; action: string; mode: string; fallback: VoiceFallback | null; rollback: boolean } | { action: "failed"; error: string };
       try {
-        const plan = await planSetupHelper({ store: runtime.store, setupAssistantId: env.TELNYX_SETUP_ASSISTANT_ID, ottoAssistant: (current.data && typeof current.data === "object" ? current.data : current) as Record<string, unknown>, publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE });
-        setupHelper = await applySetupHelper({ plan, store: runtime.store, request: (path, init) => telnyxRequest(apiKey, path, init) });
+        const plan = await planSetupHelper({ store: runtime.store, setupAssistantId: env.TELNYX_SETUP_ASSISTANT_ID, ottoAssistant: dataOf(current), publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE, speechToSpeech, ...(readAssistant ? { readAssistant } : {}) });
+        setupHelper = { ...await applySetupHelper({ plan, store: runtime.store, request: (path, init) => telnyxRequest(apiKey, path, init) }), mode: plan.mode, fallback: plan.fallback ?? null, rollback: plan.rollback };
       } catch (error) {
         setupHelper = { action: "failed", error: error instanceof Error ? error.message : String(error) };
         failed.push({ tenantId: PLATFORM_TENANT_ID, assistantId: "setup-helper", error: setupHelper.error });
@@ -194,6 +246,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         mode: "applied",
         assistantId: env.TELNYX_ASSISTANT_ID,
         assistantsUpdated: pushes.length - assistantUpdateFailures,
+        // Which voice each assistant was pushed in, and why a default speech-to-speech one stayed standard.
+        voiceModes: pushes.filter((push) => !push.error).map((push) => ({ tenantId: push.tenantId, assistantId: push.assistantId, mode: push.mode ?? "standard", fallback: push.fallback ?? null, rollback: push.rollback ?? false, cut: push.cut ?? [] })),
         failed,
         callEndCallbacks: callEndCallbacks.map(({ tenantId, assistantId, action }) => ({ tenantId, assistantId, action })),
         texmlAppId,
@@ -220,6 +274,10 @@ async function telnyxRequest<T = unknown>(apiKey: string, path: string, init: Re
   const payload = await response.json().catch(() => ({})) as T & { errors?: Array<{ detail?: string }> };
   if (!response.ok) throw new Error(`Telnyx ${init.method ?? "GET"} ${path} failed with HTTP ${response.status}${payload.errors?.[0]?.detail ? `: ${payload.errors[0].detail}` : ""}`);
   return payload;
+}
+
+function dataOf(value: Record<string, unknown>): Record<string, unknown> {
+  return value.data && typeof value.data === "object" && !Array.isArray(value.data) ? value.data as Record<string, unknown> : value;
 }
 
 function readTexmlAppId(value: Record<string, unknown>): string | null {

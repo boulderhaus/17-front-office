@@ -2,7 +2,8 @@ import { pathToFileURL } from "node:url";
 import { setupHelpClientState, TelnyxSetupCaller } from "../src/adapters/telnyx-setup-call.js";
 import { loadEnvironment } from "../src/config/environment.js";
 import { PLATFORM_TENANT_ID } from "../src/ports.js";
-import { toolResults, type HistoryLike, type ToolResult } from "./selftest-call.js";
+import { isSpeechToSpeechAssistant, speechToSpeechSettings } from "../src/voice/voice-mode.js";
+import { labCallerVoice, statusOk, toolResults, type HistoryLike, type ToolResult } from "./selftest-call.js";
 
 /**
  * Post-deploy gate for "Call me now": one real support call from Otto's setup helper to a lab number answered by a
@@ -15,10 +16,14 @@ import { toolResults, type HistoryLike, type ToolResult } from "./selftest-call.
  *   node --import tsx scripts/selftest-setup-call.ts --tenant <shop id> --lab <E.164 lab number> [--book]
  *   (production image: node dist/scripts/selftest-setup-call.js ...)
  *
+ * Tools are judged from Telnyx's conversation history when the helper is a standard assistant. A speech-to-speech
+ * helper's tools are run by its delegation backend and never show there, so they are judged from what our server
+ * recorded on the call (each helper tool's name and status, including one it refused, rate limited or that threw).
+ *
  * The shop's saved owner mobile must BE the lab number: the script refuses anything else, so it can never ring a
  * real owner. The lab number is pointed at the lab assistant for the call and put back afterwards; the lab assistant
  * and its TeXML app are deleted. --book also books a real 10-minute slot on the team calendar (cancel it after).
- * Needs TELNYX_API_KEY, TELNYX_ASSISTANT_ID (the lab owner copies its model, voice and transcription),
+ * Needs TELNYX_API_KEY, TELNYX_ASSISTANT_ID (the lab owner copies its text model, voice and transcription),
  * TELNYX_CHECK_CONNECTION_ID, TELNYX_FROM_NUMBER, PUBLIC_BASE_URL and DATABASE_URL. Places a real, billed call: run it
  * on purpose, after a deploy. Prints tool names, statuses and booleans only: never a number, name or words said.
  */
@@ -48,9 +53,24 @@ export function labTargetAllowed(input: { lab: string; ownerMobile: string | nul
   return input.ownerMobile === input.lab && input.lab !== input.ottoLine && input.lab !== input.fromNumber;
 }
 
-export function setupVerdict(input: { tools: ToolResult[]; record: { answeredAt?: string; endedAt?: string; outcome?: string; bookedAt?: string } | null; book: boolean; elapsedMs: number }): { pass: boolean; answered: boolean; tools_ok: boolean; outcome_done: boolean; booked: boolean; under_cap: boolean } {
+/** The helper tool answers our server kept on the call's record, as the gate reads them. */
+export function recordedSetupTools(record: { tools?: Array<{ name?: unknown; status?: unknown }> } | null): ToolResult[] {
+  return (Array.isArray(record?.tools) ? record.tools : []).map((tool) => {
+    const status = typeof tool.status === "string" ? tool.status : "unreadable";
+    return { name: typeof tool.name === "string" ? tool.name : "unknown", status, ok: statusOk(status) && status !== "unreadable" };
+  });
+}
+
+/**
+ * `tools` is what the conversation history shows. With a speech-to-speech helper (`speechToSpeech`) it is usually
+ * empty, so the tools pass on what our server recorded for the call (`record.tools`); a failed tool in either fails.
+ */
+export function setupVerdict(input: { tools: ToolResult[]; record: { answeredAt?: string; endedAt?: string; outcome?: string; bookedAt?: string; tools?: Array<{ name?: unknown; status?: unknown }> } | null; book: boolean; elapsedMs: number; speechToSpeech?: boolean }): { pass: boolean; answered: boolean; tools_ok: boolean; outcome_done: boolean; booked: boolean; under_cap: boolean } {
   const helpTools = input.tools.filter((tool) => SETUP_HELP_TOOLS.has(tool.name));
-  const toolsOk = helpTools.length > 0 && helpTools.every((tool) => tool.ok);
+  const recorded = recordedSetupTools(input.record).filter((tool) => SETUP_HELP_TOOLS.has(tool.name));
+  const toolsOk = input.speechToSpeech
+    ? recorded.length > 0 && recorded.every((tool) => tool.ok) && helpTools.every((tool) => tool.ok)
+    : helpTools.length > 0 && helpTools.every((tool) => tool.ok);
   const answered = Boolean(input.record?.answeredAt);
   const done = Boolean(input.record?.endedAt) && input.record?.outcome === "done";
   const booked = !input.book || Boolean(input.record?.bookedAt);
@@ -98,10 +118,10 @@ async function main(): Promise<void> {
     const [, base] = await telnyx("GET", `/ai/assistants/${encodeURIComponent(template)}`);
     const source = (base.data ?? base) as Record<string, any>;
     const [created, assistant] = await telnyx("POST", "/ai/assistants", {
-      name: `fo-lab-setuphelp-${Date.now().toString(36)}`, model: source.model, enabled_features: ["telephony"], instructions: labOwnerScript(book), greeting: "Hello?",
+      name: `fo-lab-setuphelp-${Date.now().toString(36)}`, enabled_features: ["telephony"], instructions: labOwnerScript(book), greeting: "Hello?",
       tools: [{ type: "hangup", hangup: { description: "End the call after you have said goodbye." } }],
       ...(source.transcription ? { transcription: source.transcription } : {}),
-      ...(source.voice_settings ? { voice_settings: source.voice_settings } : {}),
+      ...labCallerVoice(source, env.TELNYX_VOICE),
       telephony_settings: { time_limit_secs: 400, user_idle_timeout_secs: 30, recording_settings: { enabled: false } },
     });
     if (created >= 300) throw new Error(`Could not create the lab owner (${created})`);
@@ -120,7 +140,7 @@ async function main(): Promise<void> {
     // Ring it the way "Call me now" does: the same caller, record and tool lookup, so our server runs the real call.
     const caller = new TelnyxSetupCaller({
       apiKey: key, templateAssistantId: env.TELNYX_TEMPLATE_ASSISTANT_ID ?? template, setupAssistantId: env.TELNYX_SETUP_ASSISTANT_ID ?? null,
-      publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE,
+      publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE, speechToSpeech: speechToSpeechSettings(env),
       getSecret: (tenant, provider, name) => store.getIntegrationSecret(tenant, provider, name),
       saveSecret: (tenant, provider, name, value) => store.saveIntegrationSecret(tenant, provider, name, value),
     });
@@ -132,7 +152,7 @@ async function main(): Promise<void> {
     await store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ startedAt, callControlId, device: "android", to: lab }));
     await store.saveIntegrationSecret(PLATFORM_TENANT_ID, "setup-help", callControlId, tenantId);
 
-    type Record_ = { answeredAt?: string; endedAt?: string; outcome?: string; bookedAt?: string; callControlId?: string };
+    type Record_ = { answeredAt?: string; endedAt?: string; outcome?: string; bookedAt?: string; callControlId?: string; tools?: Array<{ name?: unknown; status?: unknown }> };
     const record = async (): Promise<Record_ | null> => { try { return JSON.parse(await store.getIntegrationSecret(tenantId, "forwarding", "setup_call") ?? "null") as Record_ | null; } catch { return null; } };
     let latest: Record_ | null = null;
     while (Date.now() - started < SETUP_SELFTEST_MAX_MS + 30_000) {
@@ -157,7 +177,12 @@ async function main(): Promise<void> {
     }
     const tools = toolResults(messages);
     for (const tool of tools) say("tool", tool.name, tool.status, tool.ok);
-    const result = setupVerdict({ tools, record: latest, book, elapsedMs });
+    // The helper the call ran on (the same lookup the caller uses), as Telnyx has it: speech-to-speech means its tools are judged from our record.
+    const helperId = env.TELNYX_SETUP_ASSISTANT_ID ?? await store.getIntegrationSecret(PLATFORM_TENANT_ID, "telnyx", "setup_assistant_id");
+    const speechToSpeech = helperId ? isSpeechToSpeechAssistant((await telnyx("GET", `/ai/assistants/${encodeURIComponent(helperId)}`))[1]) : false;
+    say("helper_voice_mode", speechToSpeech ? "speech_to_speech" : "standard");
+    for (const tool of recordedSetupTools(latest)) say("tool_recorded", tool.name, tool.status, tool.ok);
+    const result = setupVerdict({ tools, record: latest, book, elapsedMs, speechToSpeech });
     say(result);
     pass = result.pass;
   } catch (error) {

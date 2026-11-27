@@ -55,7 +55,7 @@ import { createOwnerSignIn, GOOGLE_SIGN_IN_CALLBACK, isSignInState, safeNext, ve
 import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
 import { speechToSpeechSettings } from "../voice/voice-mode.js";
 import { isVoiceLabTenant } from "../application/voice-lab.js";
-import { MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_ROUTES, toolFailure, toolLimitReached, withinToolBudget, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
+import { FAILED_TOOL_STATUSES, MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_FAILED_EVENT, TOOL_ROUTES, toolFailure, toolLimitReached, withinToolBudget, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
 import { callScreeningSetting, ensureCallEndCallback, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import { AMD_ENDED_EVENT, FORWARDING_CHECK_SPEECH, forwardingCheckState, GREETING_ENDED_EVENT, SCREENING_DETECTED_EVENT, TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
 import { SETUP_CALL_TIME_LIMIT_SECS, SETUP_CALLS_PER_DAY, SETUP_HELP_TOOL_NAMES, SETUP_HELP_TOOL_PREFIX, setupHelpState, setupSorrySpeech, TelnyxSetupCaller, type SetupCallFacts, type SetupHelpToolName, type SetupTestSummary } from "../adapters/telnyx-setup-call.js";
@@ -161,6 +161,28 @@ interface SetupCallRecord {
   bookedAt?: string;
   /** The setup helper emailed the forwarding steps on this call: once per call, however often the model asks. */
   stepsEmailedAt?: string;
+  /**
+   * What each helper tool answered on this call, in order (name and status only). A speech-to-speech helper's tools
+   * are run by its delegation backend and never show in Telnyx's conversation history, so the support-call selftest
+   * reads them here.
+   */
+  tools?: Array<{ name: string; status: string }>;
+}
+
+/** How many helper tool answers a support call's record keeps (a six-minute call makes far fewer). */
+const SETUP_TOOL_LOG_LIMIT = 40;
+
+/**
+ * A support call's helper tool answers with one more, kept to SETUP_TOOL_LOG_LIMIT. Past the limit the oldest answer
+ * that worked goes first, so a runaway call's later answers never push a failed one off the record.
+ */
+function withSetupTool(tools: SetupCallRecord["tools"], entry: { name: string; status: string }): NonNullable<SetupCallRecord["tools"]> {
+  const next = [...(tools ?? []), entry];
+  while (next.length > SETUP_TOOL_LOG_LIMIT) {
+    const worked = next.findIndex((item) => !FAILED_TOOL_STATUSES.has(item.status));
+    next.splice(worked < 0 ? 0 : worked, 1);
+  }
+  return next;
 }
 
 /** done: they talked; missed: never picked up; voicemail: a machine answered; looped: their phone sent it to Otto. */
@@ -582,6 +604,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   const deletionService = new DataDeletionService(dependencies.store, recordingClient);
   const dummyOwnerPasswordHash = hashOwnerPassword(`unregistered:${randomUUID()}`);
   const limiter = new RateLimiter();
+  /** Voice tool requests that passed provider auth and whose signed body names the call: request -> provider call id. */
+  const signedToolCalls = new WeakMap<IncomingMessage, string>();
+  /** Setup-helper tool requests running on a shop's live support call. */
+  const liveSetupTools = new WeakMap<IncomingMessage, { tenantId: string; callId: string; tool: SetupHelpToolName }>();
   const transcriber: Transcriber | null = dependencies.transcriber !== undefined ? dependencies.transcriber
     : dependencies.env.TELNYX_API_KEY && dependencies.env.TELNYX_STT_MODEL && !dependencies.env.PROVIDER_TEST_MODE && !dependencies.env.DEMO_MODE
       ? new TelnyxTranscriber(dependencies.env.TELNYX_API_KEY, dependencies.env.TELNYX_STT_MODEL, dependencies.fetcher ?? fetch) : null;
@@ -643,7 +669,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     void handle(request, response).catch((error: unknown) => {
       const requestId = response.getHeader("x-request-id") ?? request.headers["x-request-id"] ?? "unassigned";
       const tool = request.method === "POST" ? toolForPath(new URL(request.url ?? "/", "http://localhost").pathname) : null;
-      if (tool) return answerToolError(tool, error, response, String(requestId));
+      if (tool) return answerToolError(tool, error, response, String(requestId), request);
       const status = error instanceof HttpError ? error.status : error instanceof z.ZodError ? 400 : 500;
       const message = error instanceof HttpError || error instanceof z.ZodError ? error.message : "Internal server error";
       log({ level: status >= 500 ? "error" : "warn", event: "request_failed", requestId, status, error: safeError(error) });
@@ -662,20 +688,42 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
    * The provider only hands a tool's body to the model on 2xx, so every voice tool failure answers 200 with
    * the fixed plain-English result; anything else reads as unreadable and the model retries. The real status
    * is logged here only. Error text (validation messages can quote the caller) never reaches the model.
+   * The failure is also kept on the call's own record (recordToolFailure), after the answer has gone out.
    */
-  function answerToolError(tool: VoiceToolName, error: unknown, response: ServerResponse, requestId: string): void {
+  function answerToolError(tool: VoiceToolName, error: unknown, response: ServerResponse, requestId: string, request: IncomingMessage): void {
+    let reason: string;
     if (error instanceof ToolLimitError) {
       log({ level: "warn", event: "tool_call_limited", requestId, tool, reason: error.reason });
+      reason = `limit_${error.reason}`;
     } else {
       const status = error instanceof HttpError ? error.status : error instanceof z.ZodError ? 400 : error instanceof ToolWriteInProgressError ? 409 : 500;
       log({ level: status >= 500 ? "error" : "warn", event: "tool_request_failed", requestId, tool, status, error: safeError(error), ...(error instanceof z.ZodError ? { fields: invalidFields(error) } : {}) });
       if (status >= 500) telemetry.captureException(error, { route: `tool:${tool}`, method: "POST", status, requestId });
+      reason = `http_${status}`;
     }
-    if (response.headersSent) {
-      response.end();
-      return;
+    if (response.headersSent) response.end();
+    else sendJson(response, 200, error instanceof ToolLimitError ? toolLimitReached(tool) : toolFailure(tool));
+    const callId = signedToolCalls.get(request);
+    if (callId) void recordToolFailure(tool, callId, reason);
+  }
+
+  /**
+   * Keep a failed voice tool answer on its call: one tool_events row (TOOL_FAILED_EVENT, result "failed") naming the
+   * tool and the reason code (never error text, which can quote the caller). Without it a tool the server refused
+   * leaves no trace on the call, and a speech-to-speech call, whose tool calls never show in the provider's history,
+   * would pass the post-deploy selftest with a broken tool. Only for a request Telnyx signed for that call, at most
+   * 20 rows a minute per call, and never in the way of the answer: a write that fails is only logged.
+   */
+  async function recordToolFailure(tool: VoiceToolName, providerCallId: string, reason: string): Promise<void> {
+    try {
+      if (!limiter.allow(`tool-failure:${providerCallId}`, 20, 60_000)) return;
+      const call = await dependencies.store.getCallByProviderId(providerCallId);
+      if (!call) return;
+      const at = dependencies.clock.now().toISOString();
+      await dependencies.store.addToolEvent({ id: randomUUID(), tenantId: call.tenantId, callId: call.id, tool: TOOL_FAILED_EVENT, startedAt: at, completedAt: at, latencyMs: 0, result: "failed", metadata: { tool, reason }, redactedError: reason });
+    } catch (error) {
+      log({ level: "warn", event: "tool_failure_not_recorded", tool, error: safeError(error) });
     }
-    sendJson(response, 200, error instanceof ToolLimitError ? toolLimitReached(tool) : toolFailure(tool));
   }
 
   /**
@@ -718,6 +766,17 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     try {
       const payload = unwrapToolPayload(JSON.parse(rawBody));
       return payload && typeof payload === "object" ? usable((payload as Record<string, unknown>).provider_call_id) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The call id inside the signed tool body (the preset provider_call_id), or null when it can't be read. */
+  function signedToolCallId(rawBody: string): string | null {
+    try {
+      const payload = unwrapToolPayload(JSON.parse(rawBody));
+      const value = payload && typeof payload === "object" ? (payload as Record<string, unknown>).provider_call_id : null;
+      return typeof value === "string" ? value : null;
     } catch {
       return null;
     }
@@ -1225,7 +1284,14 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (method === "POST" && url.pathname === "/webhooks/telnyx") return handleTelnyx(request, response);
     if (url.pathname.startsWith("/texml/voicemail")) return handleVoicemail(request, response, url);
     if (method === "POST" && url.pathname === "/webhooks/stripe") return handleStripe(request, response);
-    if (method === "POST" && url.pathname.startsWith(SETUP_HELP_TOOL_PREFIX)) return handleSetupHelpTool(request, response, url.pathname.slice(SETUP_HELP_TOOL_PREFIX.length));
+    if (method === "POST" && url.pathname.startsWith(SETUP_HELP_TOOL_PREFIX)) {
+      return handleSetupHelpTool(request, response, url.pathname.slice(SETUP_HELP_TOOL_PREFIX.length)).catch(async (error: unknown) => {
+        // A helper tool that threw on a live support call is kept on that call's record, like every other answer.
+        const live = liveSetupTools.get(request);
+        if (live) await noteSetupTool(live.tenantId, live.callId, live.tool, "error");
+        throw error;
+      });
+    }
     const tool = method === "POST" ? toolForPath(url.pathname) : null;
     if (tool) return runTool(tool, request, response, url);
     if (url.pathname.startsWith("/admin")) return handleAdmin(request, response, url);
@@ -1242,6 +1308,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     requireProviderAuth(request, rawBody);
     const callId = toolCallId(request, rawBody);
     if (!callId) throw new ToolLimitError(tool, "missing_call_id");
+    // The call a failed answer is recorded on (answerToolError): only one the signed body names too, since the
+    // header alone is unsigned.
+    if (signedToolCallId(rawBody) === callId) signedToolCalls.set(request, callId);
     // Per call, never per IP: Telnyx sends every shop's tool calls from the same addresses.
     if (!limiter.allow(`provider:${callId}:${tool}`, 240, 60_000)) throw new ToolLimitError(tool, "rate_limited");
     await spendToolBudget(callId, tool);
@@ -1465,7 +1534,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const updated = { ...config, pronunciations: withPronunciation(config.pronunciations, upload.term, heard) };
       // Same path as Save: the live assistant gets the new "sounds like" before it shows as saved.
       try {
-        await saveAssistantConfig(dependencies.store, dependencies.env, updated, dependencies.fetcher);
+        await saveAssistantConfig(dependencies.store, dependencies.env, updated, dependencies.fetcher, log);
         return updated;
       } catch (error) {
         // The clip stays; the app puts what was heard in the field as an unsaved edit, and Save retries.
@@ -1674,7 +1743,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         const before = await dependencies.store.getIntegrationSecret(account.tenantId, "forwarding", "mode_before_every_call");
         const next = mode === "always" ? "always" : before === "after_hours" ? "after_hours" : "overflow";
         // Same as saving settings: the live assistant's coverage changes with the mode, not just the stored config.
-        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, operationMode: next }, dependencies.fetcher).catch((error: unknown) => {
+        await saveAssistantConfig(dependencies.store, dependencies.env, { ...current, operationMode: next }, dependencies.fetcher, log).catch((error: unknown) => {
           log({ level: "error", event: "forwarding_mode_save_failed", tenantId: account.tenantId, error: safeError(error) });
           throw new HttpError(502, "We couldn’t change that just now. Nothing was changed. Try again in a minute.");
         });
@@ -1811,7 +1880,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           ...current,
           bookableHours: choice.bookableHours,
           afterHours: { ...current.afterHours, ...choice.afterHours },
-        }, dependencies.fetcher ?? fetch);
+        }, dependencies.fetcher ?? fetch, log);
       });
       await dependencies.store.saveIntegrationSecret(account.tenantId, "onboarding", "hours_set_at", dependencies.clock.now().toISOString());
       return sendJson(response, 200, await ownerDashboardModel(account, session.csrf));
@@ -2199,7 +2268,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         });
     }
     try {
-      await saveAssistantConfig(dependencies.store, dependencies.env, updated, dependencies.fetcher);
+      await saveAssistantConfig(dependencies.store, dependencies.env, updated, dependencies.fetcher, log);
     } catch (error) {
       if (liveRouteChange) await liveRouteChange.setPaused(current.paused).catch((rollbackError) => log({ level: "error", event: "owner_route_rollback_failed", tenantId: account.tenantId, error: safeError(rollbackError) }));
       throw error;
@@ -2957,7 +3026,12 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         try {
           assistantId = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "provisioned_assistant_id");
           if (!assistantId) {
-            assistantId = await provisioner.createAssistant({ tenantId: account.tenantId, businessName: config.businessName, assistantUpdate: buildTelnyxAssistantUpdate(config, dependencies.env.PUBLIC_BASE_URL, { voice: dependencies.env.TELNYX_VOICE }), speechToSpeech: speechToSpeechSettings(dependencies.env) });
+            assistantId = await provisioner.createAssistant({
+              tenantId: account.tenantId, businessName: config.businessName, assistantUpdate: buildTelnyxAssistantUpdate(config, dependencies.env.PUBLIC_BASE_URL, { voice: dependencies.env.TELNYX_VOICE }), speechToSpeech: speechToSpeechSettings(dependencies.env),
+              // Which voice the new shop got: a shop the default can't make speech-to-speech is standard, with the reason
+              // (heard a second time, with what Telnyx answered, when it refuses the speech-to-speech assistant).
+              onVoice: (voice) => { if (voice.mode !== "standard" || voice.fallback || voice.rollback) log({ level: voice.fallback ? "warn" : "info", event: "assistant_voice_mode", tenantId: account.tenantId, mode: voice.mode, fallback: voice.fallback ?? null, rollback: voice.rollback, cut: voice.cut, ...(voice.providerError ? { providerError: voice.providerError } : {}) }); },
+            });
             await dependencies.store.saveIntegrationSecret(account.tenantId, "telnyx", "provisioned_assistant_id", assistantId);
           }
           inboundNumber = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number");
@@ -3017,7 +3091,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           const builtFrom = JSON.stringify(buildTelnyxAssistantUpdate(config, dependencies.env.PUBLIC_BASE_URL, { voice: dependencies.env.TELNYX_VOICE }));
           const wanted = JSON.stringify(buildTelnyxAssistantUpdate(fresh, dependencies.env.PUBLIC_BASE_URL, { voice: dependencies.env.TELNYX_VOICE }));
           if (builtFrom !== wanted) {
-            await saveAssistantConfig(dependencies.store, dependencies.env, { ...fresh, paused: false }, dependencies.fetcher ?? fetch).catch(async (error: unknown) => {
+            await saveAssistantConfig(dependencies.store, dependencies.env, { ...fresh, paused: false }, dependencies.fetcher ?? fetch, log).catch(async (error: unknown) => {
               log({ level: "error", event: "go_live_assistant_resync_failed", tenantId: account.tenantId, error: safeError(error) });
               await dependencies.store.saveConfig({ ...fresh, paused: false });
             });
@@ -3202,6 +3276,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       setupAssistantId: dependencies.env.TELNYX_SETUP_ASSISTANT_ID ?? null,
       publicBaseUrl: dependencies.env.PUBLIC_BASE_URL,
       voice: dependencies.env.TELNYX_VOICE,
+      speechToSpeech: speechToSpeechSettings(dependencies.env),
       getSecret: (tenantId, provider, key) => dependencies.store.getIntegrationSecret(tenantId, provider, key),
       saveSecret: (tenantId, provider, key, value) => dependencies.store.saveIntegrationSecret(tenantId, provider, key, value),
       ...(dependencies.fetcher ? { fetcher: dependencies.fetcher } : {}),
@@ -3414,21 +3489,40 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     // The call id only from the signed body (the preset {{call_control_id}}): an unsigned header never picks the shop.
     const callId = typeof payload.provider_call_id === "string" ? payload.provider_call_id : null;
     if (!callId || callId.length > MAX_PROVIDER_CALL_ID_LENGTH) return sendJson(response, 200, { status: "unavailable", say: "Sorry, I can't do that on this call." });
-    if (!limiter.allow(`setup-help:${callId}`, 60, 60_000)) return sendJson(response, 200, { status: "unavailable", say: "One moment, then try again." });
+    if (!limiter.allow(`setup-help:${callId}`, 60, 60_000)) {
+      // Kept on the call's record too (once a minute at most, so a flood still costs nothing more).
+      if (limiter.allow(`setup-help-limited:${callId}`, 1, 60_000)) {
+        const limitedTenantId = await dependencies.store.getIntegrationSecret(PLATFORM_TENANT_ID, SETUP_HELP_PROVIDER, callId).catch(() => null);
+        if (limitedTenantId) await noteSetupTool(limitedTenantId, callId, tool, "unavailable");
+      }
+      return sendJson(response, 200, { status: "unavailable", say: "One moment, then try again." });
+    }
     const tenantId = await dependencies.store.getIntegrationSecret(PLATFORM_TENANT_ID, SETUP_HELP_PROVIDER, callId);
     const call = tenantId ? readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call")) : null;
     if (!tenantId || !call || call.callControlId !== callId || call.endedAt || !call.answeredAt || call.outcome === "voicemail" || call.outcome === "looped") {
       log({ level: "warn", event: "setup_help_tool_refused", tool });
+      // This shop's call, still up (not yet answered, or a machine answered): the refusal is kept on its record.
+      if (tenantId) await noteSetupTool(tenantId, callId, tool, "unavailable");
       return sendJson(response, 200, { status: "unavailable", say: "Sorry, I can't do that on this call." });
     }
+    // From here the call is this shop's live support call: an error thrown below is kept on its record (see the route).
+    liveSetupTools.set(request, { tenantId, callId, tool });
     const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
-    if (!account || account.status === "suspended") return sendJson(response, 200, { status: "unavailable", say: "Sorry, I can't do that on this call." });
+    if (!account || account.status === "suspended") {
+      await noteSetupTool(tenantId, callId, tool, "unavailable");
+      return sendJson(response, 200, { status: "unavailable", say: "Sorry, I can't do that on this call." });
+    }
     const now = dependencies.clock.now();
     const minutes = Math.max(0, Math.round((now.getTime() - Date.parse(call.answeredAt)) / 6_000) / 10);
     // About two minutes in and not solved: the helper offers a time with our team.
     const timing = { minutes_on_call: minutes, offer_team_time: minutes >= 2 };
-    const reply = (body: Record<string, unknown>) => {
+    const reply = async (body: Record<string, unknown>) => {
       log({ level: "info", event: "setup_help_tool", tenantId, tool, status: body.status });
+      // Kept on the call's record for the selftest. A write that fails never changes the answer the helper gets.
+      await dependencies.store.withLock(`setup-call:${tenantId}`, async () => {
+        const latest = readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"));
+        if (latest?.callControlId === callId) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...latest, tools: withSetupTool(latest.tools, { name: tool, status: typeof body.status === "string" ? body.status : "ok" }) } satisfies SetupCallRecord));
+      }).catch(() => undefined);
       return sendJson(response, 200, { ...body, ...timing });
     };
     const config = await dependencies.store.getConfig(tenantId);
@@ -3534,6 +3628,18 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     await queueTeamBookingEmail(tenantId, result.slot, facts);
     const last4 = facts.callNumber ? facts.callNumber.slice(-4) : null;
     return reply({ status: "booked", when, say: `You're booked for ${when}. Our team will call you${last4 ? ` at the number ending in ${spokenDigits(last4)}` : ""}. A confirmation email is on its way.` });
+  }
+
+  /**
+   * Keep a helper tool answer that never reached reply() (refused, rate limited, or the tool threw) on the support
+   * call's record, name and status only, so the selftest sees it. Only on the shop's current call while it is still
+   * up; a write that fails never changes what the helper is answered.
+   */
+  async function noteSetupTool(tenantId: string, callId: string, tool: SetupHelpToolName, status: "unavailable" | "error"): Promise<void> {
+    await dependencies.store.withLock(`setup-call:${tenantId}`, async () => {
+      const latest = readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"));
+      if (latest?.callControlId === callId && !latest.endedAt) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...latest, tools: withSetupTool(latest.tools, { name: tool, status }) } satisfies SetupCallRecord));
+    }).catch(() => undefined);
   }
 
   /** The support inbox's copy of a booking, with a calendar invite so it lands on the team calendar. Never throws. */
@@ -4718,7 +4824,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           throw new HttpError(502, "Telnyx voice routing could not be updated; configuration was not changed");
         });
       }
-      await saveAssistantConfig(dependencies.store, dependencies.env, updated);
+      await saveAssistantConfig(dependencies.store, dependencies.env, updated, undefined, log);
       });
       return redirect(response, "/admin/config");
     }
