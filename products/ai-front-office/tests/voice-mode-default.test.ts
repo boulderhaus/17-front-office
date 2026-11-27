@@ -201,6 +201,84 @@ describe("a new shop's assistant, made from a template in either mode", () => {
     for (const settings of [undefined, DEFAULT_OFF]) expect(JSON.stringify((await create(standardAssistant, config, settings)).body)).toBe(expected);
   });
 
+  /** Telnyx that answers every speech-to-speech create (delegation on) with `status`, and makes anything else. */
+  function refusing(template: Record<string, unknown>, status: number, options: { code?: string; refuseStandard?: boolean } = {}) {
+    const posts: Array<{ key: string | null; body: Record<string, unknown> }> = [];
+    const fetcher = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/ai/assistants/template") && !init?.method) return new Response(JSON.stringify(template));
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      posts.push({ key: new Headers(init?.headers).get("idempotency-key"), body });
+      const speaking = (body.delegation_settings as { enabled?: unknown } | undefined)?.enabled === true;
+      if (speaking || options.refuseStandard) return new Response(JSON.stringify({ errors: [{ code: options.code ?? "10015", detail: "synthetic refusal" }] }), { status: speaking ? status : 422 });
+      return new Response(JSON.stringify({ data: { id: "assistant_standard" } }));
+    }) as typeof fetch;
+    const voices: Array<Record<string, unknown>> = [];
+    const make = (config: BusinessConfig, speechToSpeech: SpeechToSpeechSettings) => new TelnyxProvisioner({ apiKey: "synthetic", templateAssistantId: "template", messagingProfileId: "profile", fetcher })
+      .createAssistant({ tenantId: config.tenantId, businessName: config.businessName, assistantUpdate: buildTelnyxAssistantUpdate(config, BASE, { voice: TTS_VOICE }), speechToSpeech, onVoice: (voice) => voices.push(voice) });
+    return { posts, voices, make };
+  }
+
+  it("default on, Telnyx refuses the speech-to-speech assistant: the shop is made once more on the standard payload, under its own key", async () => {
+    const config = shop("shop_new");
+    const { promote_to_main: _promote, ...update } = buildTelnyxAssistantUpdate(config, BASE, { voice: TTS_VOICE });
+    // Standard template: the second create is byte for byte what a standard shop always got.
+    const plain = refusing(standardAssistant, 422);
+    expect(await plain.make(config, DEFAULT_ON)).toBe("assistant_standard");
+    expect(plain.posts.map((post) => post.key)).toEqual(["front-office-assistant-shop_new", "front-office-assistant-shop_new-standard"]);
+    expect(plain.posts[0]!.body).toMatchObject({ model: SPEECH_MODEL, delegation_settings: DELEGATION });
+    expect(JSON.stringify(plain.posts[1]!.body)).toBe(JSON.stringify({ model: TEXT_MODEL, voice_settings: update.voice_settings, enabled_features: ["telephony"], ...update, name: "Call Otto · Synthetic Plumbing" }));
+    expect(plain.voices).toEqual([
+      { mode: "speech_to_speech", cut: [], rollback: false },
+      { mode: "standard", cut: [], rollback: false, fallback: "provider_rejected", providerError: "Telnyx provisioning request failed with HTTP 422: synthetic refusal" },
+    ]);
+    // Speech-to-speech template: the template's backend text model, the text-to-speech voice, delegation explicitly off.
+    const fromS2s = refusing(s2sAssistant, 400);
+    expect(await fromS2s.make(config, DEFAULT_ON)).toBe("assistant_standard");
+    expect(fromS2s.posts).toHaveLength(2);
+    expect(fromS2s.posts[1]!.body).toMatchObject({ model: TEXT_MODEL, voice_settings: { voice: TTS_VOICE, voice_speed: 1 }, delegation_settings: { enabled: false } });
+    expect(JSON.stringify(fromS2s.posts[1]!.body)).not.toContain(SPEECH_MODEL);
+    expect(JSON.stringify(fromS2s.posts[1]!.body)).not.toContain(SPEECH_VOICE);
+    expect(fromS2s.voices[1]).toMatchObject({ mode: "standard", rollback: true, fallback: "provider_rejected" });
+  });
+
+  it("only a refusal of the payload falls back: a listed tenant, a try-again answer, a sign-in problem or a reused key still fail", async () => {
+    const config = shop("shop_new");
+    // A tenant on the opt-in list keeps today's error.
+    const listed = refusing(standardAssistant, 422);
+    await expect(listed.make(config, { ...DEFAULT_ON, tenantIds: ["shop_new"] })).rejects.toThrow(/HTTP 422/);
+    expect(listed.posts).toHaveLength(1);
+    // Not a verdict on the payload: the standard one would fail the same way, or a second assistant would be made.
+    for (const status of [401, 403, 408, 409, 429, 500, 503]) {
+      const provider = refusing(standardAssistant, status);
+      await expect(provider.make(config, DEFAULT_ON), String(status)).rejects.toThrow(`HTTP ${status}`);
+      expect(provider.posts, String(status)).toHaveLength(1);
+    }
+    // The idempotency key was already used with another body (an earlier attempt made the assistant).
+    const reused = refusing(standardAssistant, 422, { code: "10027" });
+    await expect(reused.make(config, DEFAULT_ON)).rejects.toThrow(/HTTP 422/);
+    expect(reused.posts).toHaveLength(1);
+    // Telnyx refuses the standard payload too: one retry, then the error.
+    const both = refusing(standardAssistant, 422, { refuseStandard: true });
+    await expect(both.make(config, DEFAULT_ON)).rejects.toThrow(/HTTP 422/);
+    expect(both.posts).toHaveLength(2);
+  });
+
+  it("go-live still works when Telnyx refuses the speech-to-speech assistant: the shop goes live on the standard voice and the log says why", async () => {
+    const refused = await liveShop({ env: { TELNYX_VOICE_MODE: "speech_to_speech", TELNYX_S2S_MODEL: SPEECH_MODEL, TELNYX_S2S_VOICE: SPEECH_VOICE }, rejectSpeechToSpeech: true });
+    try {
+      const creates = refused.telnyx.requests.filter((request) => request.method === "POST" && request.path === "/v2/ai/assistants").map((request) => request.body!);
+      expect(creates).toHaveLength(2);
+      expect(creates[0]).toMatchObject({ model: SPEECH_MODEL, delegation_settings: { enabled: true } });
+      expect(creates[1]).toMatchObject({ model: "synthetic/model" });
+      expect(creates[1]!.delegation_settings).toBeUndefined();
+      expect(JSON.stringify(creates[1])).not.toContain(SPEECH_MODEL);
+      expect(refused.logs).toContainEqual({ level: "warn", event: "assistant_voice_mode", tenantId: refused.tenantId, mode: "standard", fallback: "provider_rejected", rollback: false, cut: [], providerError: expect.stringContaining("HTTP 422") });
+      expect(refused.logs.some((entry) => entry.event === "line_provisioning_failed")).toBe(false);
+      expect(await refused.store.getIntegrationSecret(refused.tenantId, "telnyx", "provisioned_assistant_id")).toBe("assistant-1");
+      expect((await refused.store.getConfig(refused.tenantId)).paused).toBe(false);
+    } finally { await refused.close(); }
+  });
+
   it("go-live in default mode makes the shop's assistant speech-to-speech, and still goes live when it can't", async () => {
     const on = await liveShop({ env: { TELNYX_VOICE_MODE: "speech_to_speech", TELNYX_S2S_MODEL: SPEECH_MODEL, TELNYX_S2S_VOICE: SPEECH_VOICE } });
     try {
@@ -330,6 +408,70 @@ describe("settings saves (saveAssistantConfig) in default mode", () => {
     const strict = telnyx(standardAssistant);
     await expect(saveAssistantConfig(store, env, { ...shop("shop_lab"), businessName: "Changed" }, strict.fetcher, () => undefined)).rejects.toThrow(/TELNYX_S2S_MODEL/);
     expect(strict.posted()).toHaveLength(0);
+    expect((await store.getConfig("shop_lab")).businessName).toBe("Synthetic Plumbing");
+  });
+
+  /** Telnyx with one assistant that answers a speech-to-speech update (delegation on) with `status`. */
+  function refusingUpdates(assistant: Record<string, unknown>, status: number, refuseStandard = false) {
+    const posted: Array<Record<string, unknown>> = [];
+    const fetcher = (async (_input: string | URL, init?: RequestInit) => {
+      if (!init?.method) return Response.json(assistant);
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      posted.push(body);
+      const speaking = (body.delegation_settings as { enabled?: unknown } | undefined)?.enabled === true;
+      if (speaking) return new Response(JSON.stringify({ errors: [{ detail: "synthetic refusal" }] }), { status });
+      return refuseStandard ? new Response("{}", { status: 422 }) : Response.json({ id: "assistant" });
+    }) as typeof fetch;
+    return { posted, fetcher };
+  }
+
+  it("Telnyx refuses the speech-to-speech update: the save still goes through, on the standard payload, and the log says why", async () => {
+    const store = new InMemoryStore();
+    await store.saveConfig(createDemoConfig());
+    await store.saveConfig(shop("shop_a"));
+    await store.saveProviderRoute(route("shop_a", "assistant_a"));
+    const env = liveEnv({ TELNYX_VOICE_MODE: "speech_to_speech" });
+    const logs: Array<Record<string, unknown>> = [];
+    // A standard assistant: the second push is exactly today's payload.
+    const changed = { ...shop("shop_a"), businessName: "Changed" };
+    const fresh = refusingUpdates(standardAssistant, 422);
+    await saveAssistantConfig(store, env, changed, fresh.fetcher, (entry) => logs.push(entry));
+    expect(fresh.posted).toHaveLength(2);
+    expect(fresh.posted[0]).toMatchObject({ model: SPEECH_MODEL, delegation_settings: DELEGATION });
+    expect(JSON.stringify(fresh.posted[1])).toBe(JSON.stringify(buildTelnyxAssistantUpdate(changed, BASE, { voice: TTS_VOICE })));
+    expect(logs).toEqual([{ level: "warn", event: "assistant_voice_mode", tenantId: "shop_a", mode: "standard", fallback: "provider_rejected", rollback: false, providerError: "HTTP 422: synthetic refusal" }]);
+    expect((await store.getConfig("shop_a")).businessName).toBe("Changed");
+    // An assistant already in speech-to-speech mode: its text model back, delegation off.
+    const again = { ...changed, businessName: "Changed again" };
+    const live = refusingUpdates(s2sAssistant, 400);
+    await saveAssistantConfig(store, env, again, live.fetcher, (entry) => logs.push(entry));
+    expect(live.posted[1]).toEqual({ ...buildTelnyxAssistantUpdate(again, BASE, { voice: TTS_VOICE }), model: TEXT_MODEL, delegation_settings: { enabled: false } });
+    expect(logs[1]).toMatchObject({ level: "warn", fallback: "provider_rejected", rollback: true, providerError: "HTTP 400: synthetic refusal" });
+    expect((await store.getConfig("shop_a")).businessName).toBe("Changed again");
+  });
+
+  it("only a refusal of the payload falls back on a save: a listed tenant, a try-again answer or a refused standard payload still fail it", async () => {
+    const store = new InMemoryStore();
+    await store.saveConfig(createDemoConfig());
+    for (const tenantId of ["shop_a", "shop_lab"]) {
+      await store.saveConfig(shop(tenantId));
+      await store.saveProviderRoute(route(tenantId, `assistant_${tenantId}`));
+    }
+    const changed = { ...shop("shop_a"), businessName: "Changed" };
+    // A tenant on the opt-in list keeps today's error, in either mode.
+    const listed = refusingUpdates(standardAssistant, 422);
+    await expect(saveAssistantConfig(store, liveEnv({ TELNYX_VOICE_MODE: "speech_to_speech", TELNYX_S2S_TENANT_IDS: "shop_lab" }), { ...shop("shop_lab"), businessName: "Changed" }, listed.fetcher, () => undefined)).rejects.toThrow("Voice configuration update failed with HTTP 422");
+    expect(listed.posted).toHaveLength(1);
+    for (const status of [401, 403, 408, 409, 429, 500, 503]) {
+      const provider = refusingUpdates(standardAssistant, status);
+      await expect(saveAssistantConfig(store, liveEnv({ TELNYX_VOICE_MODE: "speech_to_speech" }), changed, provider.fetcher, () => undefined), String(status)).rejects.toThrow(`Voice configuration update failed with HTTP ${status}`);
+      expect(provider.posted, String(status)).toHaveLength(1);
+    }
+    // The standard payload is refused too: one retry, then the save fails as it always did and nothing is saved.
+    const both = refusingUpdates(standardAssistant, 422, true);
+    await expect(saveAssistantConfig(store, liveEnv({ TELNYX_VOICE_MODE: "speech_to_speech" }), changed, both.fetcher, () => undefined)).rejects.toThrow("Voice configuration update failed with HTTP 422");
+    expect(both.posted).toHaveLength(2);
+    expect((await store.getConfig("shop_a")).businessName).toBe("Synthetic Plumbing");
     expect((await store.getConfig("shop_lab")).businessName).toBe("Synthetic Plumbing");
   });
 

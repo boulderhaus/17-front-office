@@ -13,7 +13,9 @@ import { buildTelnyxAssistantUpdate } from "./system-prompt.js";
  * - TELNYX_VOICE_MODE=speech_to_speech: every tenant, the demo line and the "Call me now" setup helper included,
  *   except tenants in TELNYX_STANDARD_TENANT_IDS. A tenant that can't be speech-to-speech (model or voice unset, no
  *   backend text model, instructions over the limit) quietly gets the standard payload and the result names why
- *   (fallback); nothing throws for that reason.
+ *   (fallback); nothing throws for that reason. The same when Telnyx itself refuses the speech-to-speech payload
+ *   (a 4xx to the create or the update): the shop is made or saved on the standard payload instead
+ *   (fallback "provider_rejected").
  * - TELNYX_VOICE_MODE=standard (the default): only tenants in TELNYX_S2S_TENANT_IDS, never the demo line. A listed
  *   tenant that can't be configured throws (VoiceModeError), in either mode.
  * Every other tenant gets buildTelnyxAssistantUpdate's payload unchanged.
@@ -45,8 +47,11 @@ export interface SpeechToSpeechSettings {
   demoTenantId?: string | undefined;
 }
 
-/** Why a tenant that the default would make speech-to-speech got the standard payload instead. */
-export type VoiceFallback = "s2s_model_not_set" | "s2s_voice_not_set" | "no_backend_model" | "backend_model_is_s2s_model" | "instructions_too_long";
+/**
+ * Why a tenant that the default would make speech-to-speech got the standard payload instead. "provider_rejected":
+ * Telnyx answered the speech-to-speech payload itself with a refusal (isPayloadRejection), so the standard one was sent.
+ */
+export type VoiceFallback = "s2s_model_not_set" | "s2s_voice_not_set" | "no_backend_model" | "backend_model_is_s2s_model" | "instructions_too_long" | "provider_rejected";
 
 export type VoiceMode =
   | { kind: "standard"; fallback?: VoiceFallback }
@@ -125,6 +130,8 @@ export interface ShopAssistantPayload {
   rollback: boolean;
   /** Set when the default asked for speech-to-speech and this tenant got the standard payload instead: why. */
   fallback?: VoiceFallback;
+  /** With fallback "provider_rejected": what Telnyx answered to the speech-to-speech payload (status and its own detail). */
+  providerError?: string;
 }
 
 /**
@@ -151,11 +158,29 @@ export function assistantVoicePayload(standard: Record<string, unknown>, options
     }
     mode = { kind: "standard", fallback: "instructions_too_long" };
   }
+  return standardVoicePayload(standard, options, mode.fallback);
+}
+
+/**
+ * The standard payload as this tenant is sent it: as given, plus the text model and delegation off when `existing`
+ * is in speech-to-speech mode. Also what a default tenant is sent after Telnyx refuses its speech-to-speech payload
+ * (`fallback` "provider_rejected").
+ */
+export function standardVoicePayload(standard: Record<string, unknown>, options: { speechToSpeech?: SpeechToSpeechSettings | undefined; existing?: Record<string, unknown> | null | undefined }, fallback?: VoiceFallback): ShopAssistantPayload {
   const restore = rollbackFields(options.existing, options.speechToSpeech?.backendModel);
   return {
     mode: "standard", payload: restore ? { ...standard, ...restore } : standard, cut: [], rollback: Boolean(restore),
-    ...(mode.fallback ? { fallback: mode.fallback } : {}),
+    ...(fallback ? { fallback } : {}),
   };
+}
+
+/**
+ * True when the provider's answer refuses the payload itself (400, 422 and the like), so sending the standard payload
+ * instead can help. Not sign-in or permission (401, 403), not "try again" (408, 429, any 5xx), and not 409 (the same
+ * create is still running): those would fail the standard payload too, or make a second assistant.
+ */
+export function isPayloadRejection(status: number | undefined): boolean {
+  return status !== undefined && status >= 400 && status < 500 && ![401, 403, 408, 409, 429].includes(status);
 }
 
 /** The instructions as the speaking model gets them: whole, or without the "HOW YOU SOUND" style section when over the limit. */

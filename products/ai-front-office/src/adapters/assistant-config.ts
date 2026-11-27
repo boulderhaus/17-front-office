@@ -2,8 +2,8 @@ import type { Environment } from "../config/environment.js";
 import type { BusinessConfig } from "../domain/models.js";
 import type { Store } from "../ports.js";
 import { buildTelnyxAssistantUpdate } from "../voice/system-prompt.js";
-import { buildShopAssistantPayload, isSpeechToSpeechTenant, speechToSpeechConfigured, speechToSpeechSettings, type ShopAssistantPayload } from "../voice/voice-mode.js";
-import { withTimeout } from "../application/retry.js";
+import { buildShopAssistantPayload, isPayloadRejection, isSpeechToSpeechTenant, speechToSpeechConfigured, speechToSpeechSettings, standardVoicePayload, voiceRequest, type ShopAssistantPayload } from "../voice/voice-mode.js";
+import { redactError, withTimeout } from "../application/retry.js";
 import { TelnyxVoiceRoutingClient } from "./telnyx.js";
 
 type Log = (entry: Record<string, unknown>) => void;
@@ -30,7 +30,12 @@ async function synchronize(store: Store, env: Environment, config: BusinessConfi
       if (!found.ok) throw new Error(`Voice configuration read failed with HTTP ${found.status}`);
       return await found.json() as Record<string, unknown>;
     };
-    const build = (existing: Record<string, unknown>): ShopAssistantPayload => buildShopAssistantPayload(value, env.PUBLIC_BASE_URL, { voice: env.TELNYX_VOICE, speechToSpeech: s2s, existing });
+    let existing: Record<string, unknown> | null = null;
+    const build = (assistant: Record<string, unknown>): ShopAssistantPayload => {
+      existing = assistant;
+      return buildShopAssistantPayload(value, env.PUBLIC_BASE_URL, { voice: env.TELNYX_VOICE, speechToSpeech: s2s, existing: assistant });
+    };
+    const push = (body: Record<string, unknown>): Promise<Response> => withTimeout(fetcher(url, { method: "POST", headers, body: JSON.stringify(body) }), 8_000);
     let built: ShopAssistantPayload | null = null;
     if (isSpeechToSpeechTenant(s2s, value.tenantId) || s2s.defaultMode === "speech_to_speech") {
       // Speech-to-speech by default or by the opt-in list (src/voice/voice-mode.ts), the demo line included: read the
@@ -45,7 +50,16 @@ async function synchronize(store: Store, env: Environment, config: BusinessConfi
     }
     if (built && (built.fallback || built.rollback)) log({ level: built.fallback ? "warn" : "info", event: "assistant_voice_mode", tenantId: value.tenantId, mode: built.mode, fallback: built.fallback ?? null, rollback: built.rollback });
     const body = built?.payload ?? buildTelnyxAssistantUpdate(value, env.PUBLIC_BASE_URL, { voice: env.TELNYX_VOICE });
-    const response = await withTimeout(fetcher(url, { method: "POST", headers, body: JSON.stringify(body) }), 8_000);
+    let response = await push(body);
+    if (!response.ok && built?.mode === "speech_to_speech" && !voiceRequest(s2s, value.tenantId).strict && isPayloadRejection(response.status)) {
+      // Telnyx refused the speech-to-speech payload itself. The default never stops a save: push the standard payload
+      // instead (with the text model back when the assistant is in speech-to-speech mode) and say so in the log. A
+      // tenant on the opt-in list keeps the error, and so does a save Telnyx refuses on the standard payload too.
+      const detail = await response.json().then((answer) => (answer as { errors?: Array<{ detail?: unknown }> } | null)?.errors?.[0]?.detail, () => undefined);
+      const standard = standardVoicePayload(buildTelnyxAssistantUpdate(value, env.PUBLIC_BASE_URL, { voice: env.TELNYX_VOICE }), { speechToSpeech: s2s, existing }, "provider_rejected");
+      log({ level: "warn", event: "assistant_voice_mode", tenantId: value.tenantId, mode: standard.mode, fallback: "provider_rejected", rollback: standard.rollback, providerError: redactError(new Error(`HTTP ${response.status}${typeof detail === "string" && detail ? `: ${detail}` : ""}`)) });
+      response = await push(standard.payload);
+    }
     if (!response.ok) throw new Error(`Voice configuration update failed with HTTP ${response.status}`);
   };
   await update(config);

@@ -2940,8 +2940,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
           if (!assistantId) {
             assistantId = await provisioner.createAssistant({
               tenantId: account.tenantId, businessName: config.businessName, assistantUpdate: buildTelnyxAssistantUpdate(config, dependencies.env.PUBLIC_BASE_URL, { voice: dependencies.env.TELNYX_VOICE }), speechToSpeech: speechToSpeechSettings(dependencies.env),
-              // Which voice the new shop got: a shop the default can't make speech-to-speech is standard, with the reason.
-              onVoice: (voice) => { if (voice.mode !== "standard" || voice.fallback || voice.rollback) log({ level: voice.fallback ? "warn" : "info", event: "assistant_voice_mode", tenantId: account.tenantId, mode: voice.mode, fallback: voice.fallback ?? null, rollback: voice.rollback, cut: voice.cut }); },
+              // Which voice the new shop got: a shop the default can't make speech-to-speech is standard, with the reason
+              // (heard a second time, with what Telnyx answered, when it refuses the speech-to-speech assistant).
+              onVoice: (voice) => { if (voice.mode !== "standard" || voice.fallback || voice.rollback) log({ level: voice.fallback ? "warn" : "info", event: "assistant_voice_mode", tenantId: account.tenantId, mode: voice.mode, fallback: voice.fallback ?? null, rollback: voice.rollback, cut: voice.cut, ...(voice.providerError ? { providerError: voice.providerError } : {}) }); },
             });
             await dependencies.store.saveIntegrationSecret(account.tenantId, "telnyx", "provisioned_assistant_id", assistantId);
           }

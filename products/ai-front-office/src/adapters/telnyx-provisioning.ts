@@ -1,5 +1,5 @@
-import { withTimeout } from "../application/retry.js";
-import { assistantVoicePayload, isSpeechToSpeechAssistant, type ShopAssistantPayload, type SpeechToSpeechSettings } from "../voice/voice-mode.js";
+import { redactError, withTimeout } from "../application/retry.js";
+import { assistantVoicePayload, isPayloadRejection, isSpeechToSpeechAssistant, standardVoicePayload, voiceRequest, type ShopAssistantPayload, type SpeechToSpeechSettings } from "../voice/voice-mode.js";
 
 /**
  * Self-serve line provisioning, the Rosie/Goodcall model: every shop gets its own local
@@ -111,6 +111,9 @@ function callEndCallbackDelivers(app: Record<string, unknown>, want: string): bo
   return app.status_callback === want && String(app.status_callback_method ?? "post").toLowerCase() === "post";
 }
 
+/** Telnyx's error code for an idempotency key that was already used with a different request (HTTP 422). */
+const IDEMPOTENCY_KEY_REUSED = "10027";
+
 export class TelnyxProvisioner {
   constructor(private readonly options: TelnyxProvisionerOptions) {}
 
@@ -120,28 +123,44 @@ export class TelnyxProvisioner {
    * once that is the default), so its model is never copied blind: a speech-to-speech shop delegates tools to the
    * template's text model, and a standard shop (opted out, or one the default can't make speech-to-speech) gets that
    * text model with delegation off. `onVoice` hears which mode was built and why.
+   *
+   * The default never leaves a shop without an assistant: when Telnyx refuses the speech-to-speech assistant itself
+   * (isPayloadRejection), a shop that is speech-to-speech only by the default is made once more on the standard
+   * payload (fallback "provider_rejected"), and `onVoice` hears that build too. A tenant on the opt-in list keeps
+   * the error.
    */
   async createAssistant(input: { tenantId: string; businessName: string; assistantUpdate: Record<string, unknown>; speechToSpeech?: SpeechToSpeechSettings | undefined; onVoice?: ((voice: Omit<ShopAssistantPayload, "payload">) => void) | undefined }): Promise<string> {
     const template = objectData(await this.request(`/ai/assistants/${encodeURIComponent(this.options.templateAssistantId)}`));
-    const { payload: built, ...voice } = assistantVoicePayload(input.assistantUpdate, { tenantId: input.tenantId, speechToSpeech: input.speechToSpeech, existing: template });
-    const inherited = Object.fromEntries(
-      ["model", "voice_settings", "llm_api_key_ref", "enabled_features", "insight_settings", "privacy_settings"]
-        .filter((key) => template[key] !== undefined && template[key] !== null)
-        // A speech-to-speech template's voice only works with its speaking model: a standard shop never copies it.
-        .filter((key) => !(key === "voice_settings" && voice.mode === "standard" && isSpeechToSpeechAssistant(template)))
-        .map((key) => [key, template[key]]),
-    );
-    input.onVoice?.(voice);
-    const { promote_to_main: _promote, ...update } = built;
-    const created = objectData(await this.request("/ai/assistants", {
-      method: "POST",
-      headers: { "idempotency-key": `front-office-assistant-${input.tenantId}` },
-      body: JSON.stringify({
-        ...inherited,
-        ...update,
-        name: `Call Otto · ${input.businessName}`.slice(0, 120),
-      }),
-    }));
+    const options = { tenantId: input.tenantId, speechToSpeech: input.speechToSpeech, existing: template };
+    const create = async ({ payload: built, ...voice }: ShopAssistantPayload, idempotencyKey: string): Promise<Record<string, unknown>> => {
+      const inherited = Object.fromEntries(
+        ["model", "voice_settings", "llm_api_key_ref", "enabled_features", "insight_settings", "privacy_settings"]
+          .filter((key) => template[key] !== undefined && template[key] !== null)
+          // A speech-to-speech template's voice only works with its speaking model: a standard shop never copies it.
+          .filter((key) => !(key === "voice_settings" && voice.mode === "standard" && isSpeechToSpeechAssistant(template)))
+          .map((key) => [key, template[key]]),
+      );
+      input.onVoice?.(voice);
+      const { promote_to_main: _promote, ...update } = built;
+      return objectData(await this.request("/ai/assistants", {
+        method: "POST",
+        headers: { "idempotency-key": idempotencyKey },
+        body: JSON.stringify({
+          ...inherited,
+          ...update,
+          name: `Call Otto · ${input.businessName}`.slice(0, 120),
+        }),
+      }));
+    };
+    const first = assistantVoicePayload(input.assistantUpdate, options);
+    const created = await create(first, `front-office-assistant-${input.tenantId}`).catch((error: Error & { status?: number; code?: string }) => {
+      const refused = first.mode === "speech_to_speech" && !voiceRequest(input.speechToSpeech, input.tenantId).strict
+        // A key already used with another body (an earlier attempt) says nothing about this payload.
+        && isPayloadRejection(error.status) && error.code !== IDEMPOTENCY_KEY_REUSED;
+      if (!refused) throw error;
+      // Its own key: Telnyx answers a key reused with a different body with 422.
+      return create({ ...standardVoicePayload(input.assistantUpdate, options, "provider_rejected"), providerError: redactError(error) }, `front-office-assistant-${input.tenantId}-standard`);
+    });
     const id = typeof created.id === "string" ? created.id : null;
     if (!id) throw new Error("Telnyx did not return an assistant id");
     return id;
@@ -238,10 +257,12 @@ export class TelnyxProvisioner {
       ...init,
       headers: { authorization: `Bearer ${this.options.apiKey}`, "content-type": "application/json", ...init?.headers },
     }), 10_000);
-    const payload = await response.json().catch(() => ({})) as T & { errors?: Array<{ detail?: string }> };
+    const payload = await response.json().catch(() => ({})) as T & { errors?: Array<{ code?: unknown; detail?: string }> };
     if (!response.ok && !tolerated.includes(response.status)) {
       const error = new Error(`Telnyx provisioning request failed with HTTP ${response.status}${payload.errors?.[0]?.detail ? `: ${payload.errors[0].detail}` : ""}`);
       (error as Error & { status?: number }).status = response.status;
+      const code = payload.errors?.[0]?.code;
+      if (typeof code === "string" || typeof code === "number") (error as Error & { code?: string }).code = String(code);
       throw error;
     }
     return payload;
