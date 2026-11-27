@@ -155,7 +155,16 @@ interface SetupCallRecord {
   bookedAt?: string;
   /** The setup helper emailed the forwarding steps on this call: once per call, however often the model asks. */
   stepsEmailedAt?: string;
+  /**
+   * What each helper tool answered on this call, in order (name and status only). A speech-to-speech helper's tools
+   * are run by its delegation backend and never show in Telnyx's conversation history, so the support-call selftest
+   * reads them here.
+   */
+  tools?: Array<{ name: string; status: string }>;
 }
+
+/** How many helper tool answers a support call's record keeps (a six-minute call makes far fewer). */
+const SETUP_TOOL_LOG_LIMIT = 40;
 
 /** done: they talked; missed: never picked up; voicemail: a machine answered; looped: their phone sent it to Otto. */
 type SetupCallOutcome = "done" | "missed" | "voicemail" | "looped" | "failed";
@@ -3404,8 +3413,13 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const minutes = Math.max(0, Math.round((now.getTime() - Date.parse(call.answeredAt)) / 6_000) / 10);
     // About two minutes in and not solved: the helper offers a time with our team.
     const timing = { minutes_on_call: minutes, offer_team_time: minutes >= 2 };
-    const reply = (body: Record<string, unknown>) => {
+    const reply = async (body: Record<string, unknown>) => {
       log({ level: "info", event: "setup_help_tool", tenantId, tool, status: body.status });
+      // Kept on the call's record for the selftest. A write that fails never changes the answer the helper gets.
+      await dependencies.store.withLock(`setup-call:${tenantId}`, async () => {
+        const latest = readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"));
+        if (latest?.callControlId === callId) await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...latest, tools: [...(latest.tools ?? []), { name: tool, status: typeof body.status === "string" ? body.status : "ok" }].slice(-SETUP_TOOL_LOG_LIMIT) } satisfies SetupCallRecord));
+      }).catch(() => undefined);
       return sendJson(response, 200, { ...body, ...timing });
     };
     const config = await dependencies.store.getConfig(tenantId);

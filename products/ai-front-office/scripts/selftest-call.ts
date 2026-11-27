@@ -1,7 +1,8 @@
 import { pathToFileURL } from "node:url";
 import { BLIND_CLOSURE_FLAG, PROVIDER_HISTORY_FLAG } from "../src/application/call-service.js";
 import { loadEnvironment } from "../src/config/environment.js";
-import type { CallRecord } from "../src/domain/models.js";
+import type { CallRecord, ToolEvent } from "../src/domain/models.js";
+import { currentTextModel, isSpeechToSpeechAssistant } from "../src/voice/voice-mode.js";
 
 /**
  * Post-deploy gate: one AI-to-AI call from a temporary lab caller (an assistant named fo-lab-selftest-*) to ANY
@@ -12,10 +13,14 @@ import type { CallRecord } from "../src/domain/models.js";
  *   3. that line's shop counted exactly one more call.
  * The lab assistant and its TeXML app are deleted at the end.
  *
+ * Tools are judged from Telnyx's conversation history on a standard line. On a speech-to-speech line the delegation
+ * backend runs the tools and they never show in that history, so they are judged from our own tool_events rows for
+ * the call instead: triage and intake ran, and no tool recorded an error.
+ *
  *   node --import tsx scripts/selftest-call.ts --line <E.164 line> --from <E.164 lab caller id>
  *   (or SELFTEST_LINE / SELFTEST_FROM; production image: node dist/scripts/selftest-call.js ...)
  *
- * Needs TELNYX_API_KEY, TELNYX_ASSISTANT_ID (the caller copies its model, voice and transcription),
+ * Needs TELNYX_API_KEY, TELNYX_ASSISTANT_ID (the caller copies its text model, voice and transcription),
  * SELFTEST_OUTBOUND_VOICE_PROFILE_ID, and DATABASE_URL for the store. Places a real, billed call: run it on
  * purpose, after a deploy. Prints tool names, statuses and booleans only: never a number, name or caller words.
  */
@@ -44,6 +49,11 @@ export interface ToolResult { name: string; status: string; ok: boolean }
 
 const FAILED_STATUSES = new Set(["unavailable", "error", "failed", "invalid", "rejected"]);
 
+/** A tool answer's status as our server wrote it: ok unless it is one of the failed ones. */
+export function statusOk(status: string): boolean {
+  return !FAILED_STATUSES.has(status);
+}
+
 /** Every tool Otto called and what our server answered, in order; ok only when the server said it worked. */
 export function toolResults(messages: HistoryLike[]): ToolResult[] {
   const names = new Map<string, string>();
@@ -60,14 +70,42 @@ export function toolResults(messages: HistoryLike[]): ToolResult[] {
   return results;
 }
 
+/** Call-path markers our server writes itself (call-service.ts): not tools the assistant called. */
+const LIFECYCLE_EVENTS = new Set(["call.start", "call.end"]);
+/** What the lab caller's service call must have run on our server: triage_call and save_intake, as tool_events name them. */
+export const EXPECTED_TOOL_EVENTS = ["call.triage", "call.intake"] as const;
+
+/** The call's tool_events rows as the gate reads them, in order; ok only when our server recorded success with no error. */
+export function toolEventResults(events: Array<Pick<ToolEvent, "tool" | "result" | "redactedError">>): ToolResult[] {
+  return events.filter((event) => !LIFECYCLE_EVENTS.has(event.tool)).map((event) => ({ name: event.tool, status: event.result, ok: event.result === "success" && !event.redactedError }));
+}
+
+/**
+ * The lab caller's model and voice: the template assistant's own. A template in speech-to-speech mode has a speaking
+ * model (which, copied without delegation, would never run the hang-up tool) and a voice only that model can use, so
+ * the lab caller takes its backend text model and Otto's text-to-speech voice instead.
+ */
+export function labCallerVoice(source: Record<string, unknown>, textToSpeechVoice: string): Record<string, unknown> {
+  if (isSpeechToSpeechAssistant(source)) return { model: currentTextModel(source), voice_settings: { voice: textToSpeechVoice } };
+  return { model: source.model, ...(source.voice_settings ? { voice_settings: source.voice_settings } : {}) };
+}
+
 /** The stored call as the gate judges it: finalized by the real callback, with a transcript. */
 export function finalizedByCallback(call: Pick<CallRecord, "outcome" | "endedAt" | "transcript" | "qualityFlags"> | null): boolean {
   return Boolean(call && call.outcome !== "in_progress" && call.endedAt && call.transcript?.trim()
     && !call.qualityFlags.includes(PROVIDER_HISTORY_FLAG) && !call.qualityFlags.includes(BLIND_CLOSURE_FLAG));
 }
 
-export function verdict(input: { tools: ToolResult[]; finalized: boolean; finalizeMs: number | null; usageBefore: number; usageAfter: number }): { pass: boolean; tools_ok: boolean; finalized_in_time: boolean; usage_moved_by_one: boolean } {
-  const toolsOk = input.tools.length > 0 && input.tools.every((tool) => tool.ok);
+/**
+ * `tools` is what the conversation history shows. On a speech-to-speech line (`speechToSpeech`) it is usually empty,
+ * so the tools pass on `toolEvents` (our tool_events rows): every expected tool ran and none recorded an error. A
+ * failed tool in either source fails the gate.
+ */
+export function verdict(input: { tools: ToolResult[]; finalized: boolean; finalizeMs: number | null; usageBefore: number; usageAfter: number; speechToSpeech?: boolean; toolEvents?: ToolResult[] }): { pass: boolean; tools_ok: boolean; finalized_in_time: boolean; usage_moved_by_one: boolean } {
+  const events = input.toolEvents ?? [];
+  const toolsOk = input.speechToSpeech
+    ? EXPECTED_TOOL_EVENTS.every((name) => events.some((event) => event.name === name)) && events.every((event) => event.ok) && input.tools.every((tool) => tool.ok)
+    : input.tools.length > 0 && input.tools.every((tool) => tool.ok);
   const inTime = input.finalized && input.finalizeMs !== null && input.finalizeMs <= FINALIZE_DEADLINE_MS;
   const usage = input.usageAfter === input.usageBefore + 1;
   return { pass: toolsOk && inTime && usage, tools_ok: toolsOk, finalized_in_time: inTime, usage_moved_by_one: usage };
@@ -109,11 +147,15 @@ async function main(): Promise<void> {
 
     const [, base] = await telnyx("GET", `/ai/assistants/${encodeURIComponent(template)}`);
     const source = (base.data ?? base) as Record<string, any>;
+    // The line's own assistant, read before the call: in speech-to-speech mode its tools are judged from tool_events.
+    const ottoAssistantId = (await runtime.store.getProviderRouteForTenant("telnyx", tenantId))?.externalId ?? (tenantId === env.DEFAULT_TENANT_ID ? template : null);
+    const speechToSpeech = ottoAssistantId ? isSpeechToSpeechAssistant((await telnyx("GET", `/ai/assistants/${encodeURIComponent(ottoAssistantId)}`))[1]) : false;
+    say("line_voice_mode", speechToSpeech ? "speech_to_speech" : "standard");
     const [created, assistant] = await telnyx("POST", "/ai/assistants", {
-      name: `fo-lab-selftest-${Date.now().toString(36)}`, model: source.model, enabled_features: ["telephony"], instructions: CALLER_SCRIPT, greeting: "",
+      name: `fo-lab-selftest-${Date.now().toString(36)}`, enabled_features: ["telephony"], instructions: CALLER_SCRIPT, greeting: "",
       tools: [{ type: "hangup", hangup: { description: "End the call after you have said goodbye, or after the receptionist says goodbye." } }],
       ...(source.transcription ? { transcription: source.transcription } : {}),
-      ...(source.voice_settings ? { voice_settings: source.voice_settings } : {}),
+      ...labCallerVoice(source, env.TELNYX_VOICE),
       telephony_settings: { time_limit_secs: 150, user_idle_timeout_secs: 20, recording_settings: { enabled: false } },
     });
     if (created >= 300) throw new Error(`Could not create the lab caller (${created})`);
@@ -168,9 +210,12 @@ async function main(): Promise<void> {
     messages.sort((left: any, right: any) => String(left.sent_at ?? left.created_at).localeCompare(String(right.sent_at ?? right.created_at)));
     const tools = toolResults(messages);
     for (const tool of tools) say("tool", tool.name, tool.status, tool.ok);
+    // What our server recorded for this call's tools: the only record of them on a speech-to-speech line.
+    const toolEvents = stored ? toolEventResults(await runtime.store.listToolEvents(stored.id)) : [];
+    for (const event of toolEvents) say("tool_event", event.name, event.status, event.ok);
 
     const usageAfter = await usage();
-    const result = verdict({ tools, finalized: finalizedByCallback(stored), finalizeMs, usageBefore, usageAfter });
+    const result = verdict({ tools, finalized: finalizedByCallback(stored), finalizeMs, usageBefore, usageAfter, speechToSpeech, toolEvents });
     say(result);
     pass = result.pass;
   } catch (error) {
