@@ -19,7 +19,7 @@ import { joinTeam, teamApi } from "./team-routes.js";
 import { CALL_PATH_SCRIPT, renderCallPath, renderOwnerCallRecord, renderOwnerSettings } from "../admin/owner-app.js";
 import { buildCallPath, type CallPath } from "../domain/call-path.js";
 import { chargeSentence, hasPlanAccess, isCompStatus, isPaidStatus } from "../domain/billing.js";
-import { addOneMonth, currentPlan, oneMonthBefore, hasUnlimitedPrice, introCouponId, knownPlans, legacyPlanPriceIds, monthlyCents, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, priceQuote, prorationEstimateCents, unlimitedPriceIds, type Plan, type PlanId } from "../domain/plans.js";
+import { addOneMonth, billedPlan, currentPlan, oneMonthBefore, hasUnlimitedPrice, introCouponId, knownPlans, legacyPlanPriceIds, monthlyCents, normalizePlanId, pickPlan, planCatalog, planForPriceIds, planPriceIds, priceQuote, prorationEstimateCents, unlimitedPriceIds, type Plan, type PlanId } from "../domain/plans.js";
 import { GuaranteeError, LeadGuaranteeService, recordFirstPaid, recordUnlimitedObservation, type UnlimitedItem } from "../application/billing-jobs.js";
 import { callbackLinkMatches, OWNER_SMS_OPT_IN_CONFIRMATION, readCallbackLinkToken } from "../domain/owner-sms.js";
 import { callsCsv, callsCsvFileName } from "./calls-csv.js";
@@ -1903,13 +1903,15 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         shopId: account.tenantId,
         plan: (() => {
           const current = currentPlan(known, config.planId);
+          // Already on Unlimited at a legacy price (Team at $179.99): its total is what Stripe charges, not today's.
+          const offer = config.unlimitedCalls === true ? billedPlan(known, config) : current;
           return {
             id: current.id, label: current.label, flatMonthlyPriceCents: config.flatMonthlyPriceCents, includedCalls: config.includedCalls, overageCentsPerCall: config.overageCentsPerCall,
             paid: hasPlanAccess(subscription?.status), plans: apiPlans(config.timezone),
             // Legacy Pro keeps working but is no longer sold: the owner sees it as current and can move to Solo, Team or Fleet.
             sold: current.sold,
             unlimited: config.unlimitedCalls === true,
-            unlimitedOffer: current.unlimited ? { addOnCents: current.unlimited.addOnCents, priceCents: current.unlimited.priceCents, fairUseCalls: current.unlimited.fairUseCalls } : null,
+            unlimitedOffer: offer.unlimited ? { addOnCents: offer.unlimited.addOnCents, priceCents: offer.unlimited.priceCents, fairUseCalls: offer.unlimited.fairUseCalls } : null,
           };
         })(),
         integrations: {
@@ -2634,7 +2636,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const [subscription, config] = await Promise.all([dependencies.store.getSubscription(account.tenantId), dependencies.store.getConfig(account.tenantId)]);
     if (unlimitedAsked && !plan.unlimited) throw new HttpError(409, plan.sold ? "Unlimited calls aren’t available on this plan yet." : `Unlimited calls aren’t available on ${plan.label}. Switch to Solo, Team or Fleet to add it.`);
     const unlimited = wantsUnlimited(plan, unlimitedAsked);
-    const current = currentPlan(known, config.planId);
+    const current = billedPlan(known, config);
     const base = { plan: plan.id, unlimited, monthlyCents: monthlyCents(plan, unlimited), renewsAt: subscription?.currentPeriodEnd ?? null };
     const noChange = isOnPlan(config, plan, unlimited);
     if (noChange || !liveSubscription(subscription) || !stripeClient) return { ...base, live: liveSubscription(subscription), noChange, todayCents: 0, creditCents: 0, estimated: false, prorationDate: null };
@@ -2690,7 +2692,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
   /** The top line of Plan and billing: what was last paid and what the next bill is, from Stripe. Read only. */
   async function billingSummary(account: OwnerAccount): Promise<{ lastPaid: { amountCents: number; paidAt: string } | null; next: { amountCents: number; at: string } | null; endsAt: string | null; monthlyCents: number }> {
     const [subscription, config] = await Promise.all([dependencies.store.getSubscription(account.tenantId), dependencies.store.getConfig(account.tenantId)]);
-    const monthly = monthlyCents(currentPlan(known, config.planId), config.unlimitedCalls === true);
+    const monthly = monthlyCents(billedPlan(known, config), config.unlimitedCalls === true);
     if (!stripeClient || !liveSubscription(subscription) || isCompStatus(subscription.status)) return { lastPaid: null, next: null, endsAt: null, monthlyCents: monthly };
     const read = await stripeClient.billingSummary(subscription.providerSubscriptionId).catch((error) => {
       log({ level: "warn", event: "billing_summary_failed", tenantId: account.tenantId, error: safeError(error) });

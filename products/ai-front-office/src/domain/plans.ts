@@ -25,6 +25,12 @@ export const DEFAULT_PLANS: Record<PlanId, { label: string; priceCents: number; 
   fleet: { label: "Fleet", priceCents: 34_999, includedCalls: 500, who: "About 10 people", unlimitedAddOnCents: 12_500 },
 };
 
+/**
+ * What a plan's older (legacy) Stripe price charges each month, where it differs from today's price:
+ * Team was $179.99 before 2026-11-26. A subscription still on that price is shown and saved at it, not today's.
+ */
+export const LEGACY_PRICE_CENTS: Partial<Record<PlanId, number>> = { team: 17_999 };
+
 /** The Unlimited add-on on one plan: a second Stripe subscription item, toggled at checkout or in Settings. */
 export interface UnlimitedAddOn {
   /** What the add-on adds each month: +$50 on Solo. */
@@ -209,9 +215,37 @@ export function pickPlan(plans: Plan[], value: unknown): Plan {
   return plans.find((plan) => plan.id === id) ?? plans[0]!;
 }
 
-/** Which plan a Stripe subscription is on, from its price ids; null when it is none of ours. */
+/**
+ * Which plan a Stripe subscription is on, from its price ids; null when it is none of ours.
+ * On a legacy price with its own amount (Team at $179.99), the plan comes back at what that price charges.
+ */
 export function planForPriceIds(plans: Plan[], priceIds: string[]): Plan | null {
-  return plans.find((plan) => (plan.priceId !== null && priceIds.includes(plan.priceId)) || plan.legacyPriceIds.some((id) => priceIds.includes(id))) ?? null;
+  const plan = plans.find((item) => (item.priceId !== null && priceIds.includes(item.priceId)) || item.legacyPriceIds.some((id) => priceIds.includes(id)));
+  if (!plan) return null;
+  const onToday = plan.priceId !== null && priceIds.includes(plan.priceId);
+  const legacyCents = LEGACY_PRICE_CENTS[plan.id];
+  return !onToday && legacyCents !== undefined ? atPrice(plan, legacyCents) : plan;
+}
+
+/** A plan at another monthly price (a legacy one): no intro offer, the add-on keeps its own amount. */
+function atPrice(plan: Plan, priceCents: number): Plan {
+  if (priceCents === plan.priceCents) return plan;
+  return {
+    ...plan,
+    priceCents,
+    firstMonthCents: priceCents,
+    unlimited: plan.unlimited ? { ...plan.unlimited, priceCents: priceCents + plan.unlimited.addOnCents, firstMonthCents: priceCents + plan.unlimited.addOnCents } : null,
+  };
+}
+
+/**
+ * The plan a shop is billed on: currentPlan, but at the legacy amount when its saved price is that amount and
+ * the plan has an older price on live subscriptions (Team still paying $179.99). Use it for what Stripe charges.
+ */
+export function billedPlan(known: Plan[], config: { planId?: PlanId | undefined; flatMonthlyPriceCents: number }): Plan {
+  const plan = currentPlan(known, config.planId);
+  const legacyCents = LEGACY_PRICE_CENTS[plan.id];
+  return legacyCents !== undefined && plan.legacyPriceIds.length > 0 && config.flatMonthlyPriceCents === legacyCents ? atPrice(plan, legacyCents) : plan;
 }
 
 /** The first month with a percent-off coupon, discount rounded to the cent: $49.99 at 50% off → $24.99. */

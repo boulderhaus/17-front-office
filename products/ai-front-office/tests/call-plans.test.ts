@@ -7,7 +7,7 @@ import { LeadGuaranteeService, OverageBillingService, recordFirstPaid } from "..
 import { demoEnvironment } from "../src/config/environment.js";
 import { createDemoConfig, normalizeBusinessConfig } from "../src/domain/config.js";
 import type { CallRecord, CollectedCallFields } from "../src/domain/models.js";
-import { DEFAULT_PLANS, knownPlans, planBlurb, planForPriceIds } from "../src/domain/plans.js";
+import { billedPlan, DEFAULT_PLANS, knownPlans, LEGACY_PRICE_CENTS, monthlyCents, planBlurb, planForPriceIds } from "../src/domain/plans.js";
 import { isQualifyingLead, lastClosedBillingPeriod } from "../src/domain/usage.js";
 import { createRequestHandler, createStripeClient } from "../src/http/app.js";
 import { planStripeSetup } from "../scripts/create-stripe-plans.js";
@@ -624,5 +624,28 @@ describe("money-path hardening (review fixes)", () => {
     // Without the legacy setting the old price is not ours, and the same id twice is no legacy price.
     expect(planForPriceIds(knownPlans(demoEnvironment(base)), ["price_team_old"])).toBeNull();
     expect(knownPlans(demoEnvironment({ ...base, STRIPE_PRICE_ID_TEAM_LEGACY: "price_team_new" })).find((plan) => plan.id === "team")!.legacyPriceIds).toEqual([]);
+  });
+
+  it("a Team subscription still on the old price is shown and saved at what Stripe charges it, not today's price", () => {
+    const env = demoEnvironment({
+      STRIPE_SECRET_KEY: "sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", STRIPE_WEBHOOK_SECRET: "whsec_synthetic_abcdefghijklmnopqrstuvwxyz",
+      STRIPE_PRICE_ID_SOLO: "price_solo_synthetic", STRIPE_PRICE_ID_TEAM: "price_team_new", STRIPE_PRICE_ID_TEAM_LEGACY: "price_team_old",
+      STRIPE_PRICE_ID_UNLIMITED_TEAM: "price_unl_team_synthetic", STRIPE_FIRST_MONTH_COUPON_ID: "coupon_synthetic",
+    });
+    const plans = knownPlans(env);
+    const old = LEGACY_PRICE_CENTS.team!;
+    const addOn = DEFAULT_PLANS.team.unlimitedAddOnCents!;
+    const legacy = planForPriceIds(plans, ["price_team_old", "price_unl_team_synthetic"])!;
+    expect([legacy.id, legacy.priceCents, legacy.firstMonthCents, legacy.unlimited?.priceCents]).toEqual(["team", old, old, old + addOn]);
+    // On today's price nothing changes: the catalog price, first-month offer included.
+    const today = planForPriceIds(plans, ["price_team_new"])!;
+    expect(today.priceCents).toBe(DEFAULT_PLANS.team.priceCents);
+    expect(today.firstMonthCents).toBeLessThan(today.priceCents);
+    // What the shop is billed follows its saved price: old price saved, old price shown.
+    expect(monthlyCents(billedPlan(plans, { planId: "team", flatMonthlyPriceCents: old }), true)).toBe(old + addOn);
+    expect(monthlyCents(billedPlan(plans, { planId: "team", flatMonthlyPriceCents: DEFAULT_PLANS.team.priceCents }), false)).toBe(DEFAULT_PLANS.team.priceCents);
+    // Without the legacy price set, the old amount means nothing.
+    const plain = knownPlans(demoEnvironment({ STRIPE_SECRET_KEY: "sk_test_synthetic_abcdefghijklmnopqrstuvwxyz", STRIPE_WEBHOOK_SECRET: "whsec_synthetic_abcdefghijklmnopqrstuvwxyz", STRIPE_PRICE_ID_SOLO: "price_solo_synthetic", STRIPE_PRICE_ID_TEAM: "price_team_new" }));
+    expect(billedPlan(plain, { planId: "team", flatMonthlyPriceCents: old }).priceCents).toBe(DEFAULT_PLANS.team.priceCents);
   });
 });
