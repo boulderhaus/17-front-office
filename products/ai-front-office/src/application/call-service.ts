@@ -9,6 +9,7 @@ import type {
   CollectedCallFields,
   EmergencyDecision,
   OutboxNotification,
+  ToolEvent,
 } from "../domain/models.js";
 import { evaluateServiceArea, isInServiceArea, slotWithinBookableHours } from "../domain/config.js";
 import { slotTouchesDayOff } from "../domain/days-off.js";
@@ -101,6 +102,10 @@ const EMPTY_FIELDS: CollectedCallFields = {
 /** save_intake's answer when the server's own triage finds an emergency (the owner alert is already queued). */
 export const INTAKE_EMERGENCY_INSTRUCTION = "This is an emergency and the owner has been alerted. Stop booking. Tell the caller the owner will call back as soon as possible; never promise a time.";
 
+/** save_intake's next_step lines: the tool to call now, in the same turn (never a promise to check later). */
+export const NEXT_STEP_CHECK_AREA = "Everything the caller must give is saved. Call check_service_area with the address now, in this same turn.";
+export const NEXT_STEP_CHECK_TIMES = "Everything the caller must give is saved. Call check_availability now, in this same turn, then offer the times it returns. Never tell the caller you will check: check first, then speak.";
+
 export class CallService {
   readonly #booking: BookingCoordinator;
   readonly #usageAlerts: UsageAlertService;
@@ -164,7 +169,7 @@ export class CallService {
     extraAnswerSlots?: ReadonlyArray<string | null | undefined> | undefined;
     recordingDisclosureDeclined?: boolean;
     signal?: AbortSignal | undefined;
-  }): Promise<{ status: "saved"; missing: string[]; wrap_up: boolean; emergency?: true; instruction?: string }> {
+  }): Promise<{ status: "saved"; missing: string[]; wrap_up: boolean; emergency?: true; instruction?: string; next_step?: string }> {
     input.signal?.throwIfAborted();
     await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
     const key = toolResultKey("save_intake", input.providerCallId, { fields: input.fields, declined: input.recordingDisclosureDeclined ?? null, ...(input.extraAnswerSlots ? { extraAnswerSlots: input.extraAnswerSlots.map((slot) => slot ?? null) } : {}) });
@@ -174,7 +179,7 @@ export class CallService {
         const call = await this.store.getCallByProviderId(input.providerCallId);
         return { ...prior.result, wrap_up: call ? this.wrapUpFor(call) : false };
       }
-      let result: { status: "saved"; missing: string[]; wrap_up: boolean; emergency?: true; instruction?: string };
+      let result: { status: "saved"; missing: string[]; wrap_up: boolean; emergency?: true; instruction?: string; next_step?: string };
       try {
         result = await this.saveIntakeClaimed(input);
       } catch (error) {
@@ -269,7 +274,7 @@ export class CallService {
     return this.clock.now().getTime() - Date.parse(call.startedAt) >= WRAP_UP_AFTER_SECONDS * 1000;
   }
 
-  private async saveIntakeClaimed(input: Parameters<CallService["saveIntake"]>[0]): Promise<{ status: "saved"; missing: string[]; wrap_up: boolean; emergency?: true; instruction?: string }> {
+  private async saveIntakeClaimed(input: Parameters<CallService["saveIntake"]>[0]): Promise<{ status: "saved"; missing: string[]; wrap_up: boolean; emergency?: true; instruction?: string; next_step?: string }> {
     const existing = await this.store.getCallByProviderId(input.providerCallId);
     if (!existing || existing.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
     const config = await this.store.getConfig(input.tenantId);
@@ -298,7 +303,8 @@ export class CallService {
     if (emergency.emergency) await this.queueHumanHandoffClaimed({ tenantId: input.tenantId, providerCallId: input.providerCallId, fromNumber: call.fromNumber, problemDescription: fields.problemDescription, urgent: emergency });
     // The deterministic triage above runs on every intake, whether or not the model called triage_call first (a
     // speech-to-speech line skips it now and then). The first time it sees a problem, that is this call's triage step.
-    if (fields.problemDescription.trim() && !(await this.store.listToolEvents(call.id).catch(() => [])).some((event) => event.tool === "call.triage")) {
+    const toolEvents = await this.store.listToolEvents(call.id).catch(() => []);
+    if (fields.problemDescription.trim() && !toolEvents.some((event) => event.tool === "call.triage")) {
       await this.checkpoint(call, "call.triage", this.clock.now(), { severity: emergency.severity, emergency: emergency.emergency, source: "intake" });
     }
     // Which checkpoints this intake covers, after any alert. Booleans only: the values live on the call record.
@@ -321,14 +327,32 @@ export class CallService {
       !fields.serviceCategory?.trim() ? "service_category" : null,
       ...(emergency.emergency ? [] : asked.map((question, index) => (answered.has(question) ? null : `extra_answer_${index + 1}`))),
     ].filter((value): value is string => value !== null);
+    // The next tool, said outright. A speech-to-speech line told a caller "let me check our times" and then never
+    // checked (the backend's turn had ended); the answer to this save now names the step that comes next.
+    const nextStep = this.nextStepAfterIntake({ steps, missing, emergency: emergency.emergency, humanRequested: fields.humanRequested === true, toolEvents, booked: Boolean(await this.store.getBookingForCall(call.id)) });
     // The model has no clock; the soft five-minute limit rides on tool results.
     return {
       status: "saved",
       missing,
+      ...(nextStep ? { next_step: nextStep } : {}),
       wrap_up: this.wrapUpFor((await this.store.getCallByProviderId(input.providerCallId)) ?? call),
       // An emergency the server found on its own: the model is told, so what it says matches what the owner got.
       ...(emergency.emergency ? { emergency: true as const, instruction: `${emergency.immediateInstruction ? `${emergency.immediateInstruction} ` : ""}${INTAKE_EMERGENCY_INSTRUCTION}` } : {}),
     };
+  }
+
+  /** What save_intake's answer tells the model to do next, or null when the call should just carry on. */
+  private nextStepAfterIntake(input: { steps: ReturnType<typeof callSteps>; missing: string[]; emergency: boolean; humanRequested: boolean; toolEvents: ToolEvent[]; booked: boolean }): string | null {
+    if (input.emergency || input.humanRequested || input.booked || !input.steps.offerTimes) return null;
+    // The category never holds up a booking; everything else the caller must give does.
+    if (input.missing.some((item) => item !== "service_category")) return null;
+    const ran = (tool: string) => input.toolEvents.filter((event) => event.tool === tool && event.result === "success");
+    if (input.steps.askAddress && input.steps.checkServiceArea) {
+      const coverage = ran("coverage.check");
+      if (coverage.length === 0) return NEXT_STEP_CHECK_AREA;
+      if (coverage[coverage.length - 1]!.metadata?.status !== "covered") return null;
+    }
+    return ran("calendar.availability").length === 0 ? NEXT_STEP_CHECK_TIMES : null;
   }
 
   async checkAvailability(input: {
@@ -403,7 +427,7 @@ export class CallService {
     const result = evaluateServiceArea(input.address, config);
     await this.audit(call, "coverage.check", started, "success", { status: result.status, matched: Boolean(result.matchedTerm) }, null);
     const message = result.status === "covered"
-      ? "The address is inside the owner-configured service area. Continue intake."
+      ? `The address is inside the owner-configured service area. Continue intake.${callSteps(config).offerTimes && call.fields.callerName?.trim() && !call.emergency?.emergency ? " Once the name and callback number are saved, call check_availability in the same turn; never say you will check without calling it." : ""}`
       : result.status === "unconfigured"
         ? "The owner has not configured a service area. Do not promise service or book; queue owner confirmation."
         : result.status === "incomplete"

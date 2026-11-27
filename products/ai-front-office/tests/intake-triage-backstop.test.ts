@@ -119,3 +119,42 @@ describe("an availability window the call has outrun", () => {
     expect(past.status).toBe("invalid_window");
   });
 });
+
+describe("save_intake names the next tool", () => {
+  it("area check, then open times, then nothing once times were checked; never in an emergency or with details missing", async () => {
+    const { NEXT_STEP_CHECK_AREA, NEXT_STEP_CHECK_TIMES } = await import("../src/application/call-service.js");
+    const store = new InMemoryStore();
+    const base = createDemoConfig();
+    await store.saveConfig(base);
+    const now = new Date("2026-01-15T15:00:00.000Z");
+    const service = new CallService(store, new InMemoryCalendar(), { now: () => now }, "https://front-office.example");
+    const covered = `100 Main Street, ${base.serviceAreaTerms[0]}`;
+    const save = (id: string, fields: Record<string, unknown>) => service.saveIntake({ tenantId: "demo", providerCallId: id, fromNumber: "+15555550100", fields: { problemDescription: "The kitchen faucet drips a little.", ...fields } });
+    await service.recordStarted({ eventId: "start:next", tenantId: "demo", providerCallId: "next", fromNumber: "+15555550100", startedAt: now.toISOString() });
+
+    // Name missing: no next step yet.
+    expect((await save("next", {})).next_step).toBeUndefined();
+    // Everything given, area not checked yet.
+    expect((await save("next", { callerName: "Sam Carter", address: covered })).next_step).toBe(NEXT_STEP_CHECK_AREA);
+    const area = await service.checkServiceArea({ tenantId: "demo", providerCallId: "next", address: covered });
+    expect(area.status).toBe("covered");
+    expect(area.message).toContain("check_availability");
+    // Area covered, times not checked yet.
+    expect((await save("next", { callerName: "Sam Carter", address: covered, accessNotes: "side door" })).next_step).toBe(NEXT_STEP_CHECK_TIMES);
+    await service.checkAvailability({ tenantId: "demo", providerCallId: "next", windowStart: now.toISOString(), windowEnd: new Date(now.getTime() + 3 * 86_400_000).toISOString() });
+    // Times were checked: nothing more to push.
+    expect((await save("next", { callerName: "Sam Carter", address: covered, accessNotes: "side door, dog" })).next_step).toBeUndefined();
+
+    // An emergency never gets a booking step.
+    await service.recordStarted({ eventId: "start:gas", tenantId: "demo", providerCallId: "gas", fromNumber: "+15555550101", startedAt: now.toISOString() });
+    const gas = await service.saveIntake({ tenantId: "demo", providerCallId: "gas", fromNumber: "+15555550101", fields: { problemDescription: "I smell gas in the kitchen.", callerName: "Dana Miller", address: covered } });
+    expect(gas.emergency).toBe(true);
+    expect(gas.next_step).toBeUndefined();
+
+    // A shop that never offers times gets no step either.
+    await store.saveConfig({ ...base, callSteps: { offerTimes: false } });
+    await service.recordStarted({ eventId: "start:off", tenantId: "demo", providerCallId: "off", fromNumber: "+15555550102", startedAt: now.toISOString() });
+    await service.checkServiceArea({ tenantId: "demo", providerCallId: "off", address: covered });
+    expect((await service.saveIntake({ tenantId: "demo", providerCallId: "off", fromNumber: "+15555550102", fields: { problemDescription: "Drip.", callerName: "Sam Carter", address: covered } })).next_step).toBeUndefined();
+  });
+});
