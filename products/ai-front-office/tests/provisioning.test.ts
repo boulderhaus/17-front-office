@@ -1097,6 +1097,45 @@ describe("owner one-tap go-live", () => {
         expect(await urgent()).toMatchObject({ held: false });
       });
 
+      it("Call me now after tapping Ring my phone first: the helper says one code, like the screen; two only once a test proved every call on", async () => {
+        // The owner's mobile is not the business number here, so the helper can ring them while every call may be on.
+        const made = await liveShop({ env: { TELNYX_CHECK_CONNECTION_ID: "check-connection", TELNYX_TEMPLATE_ASSISTANT_ID: "template-assistant" }, carriers: { "+19415550177": { name: "T-Mobile USA", type: "mobile" } } });
+        const { api, telnyx, baseUrl, privateKey, clock } = made;
+        await api("/api/app/line/business-number", { number: "9415550177" });
+        const helperSteps = async (id: string) => {
+          expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+          const state = (helpDials(made).at(-1)!.body as { client_state: string }).client_state;
+          const answered = JSON.stringify({ data: { record_type: "event", event_type: "call.answered", id, occurred_at: clock.now().toISOString(), payload: { call_control_id: "v3:check-call", client_state: state } } });
+          expect((await fetch(`${baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(answered, privateKey, clock.now()), body: answered })).status).toBe(200);
+          const start = telnyx.calls.filter((call) => call.url.endsWith("/actions/ai_assistant_start")).at(-1)!;
+          return (start.body as { assistant: { dynamic_variables: Record<string, string> } }).assistant.dynamic_variables.setup_steps!;
+        };
+        // New shop on every call (the default), nothing tested. They tap Ring my phone first: the screen shows the
+        // ring-first code alone (no clear step), so the helper never adds a second code and a second gray box.
+        expect((await api("/api/app/line/mode", { mode: "overflow" })).status).toBe(200);
+        expect(await testedFor(made)).toMatchObject({ mode: "every-call", code: "**21*19415550123#" });
+        expect((await line(made)).business).toMatchObject({ everyCallProven: false, update: { clearFirst: "##002#", leavingEveryCall: true } });
+        const unproven = await helperSteps("evt-help-unproven");
+        expect(unproven).toContain("For Ring my phone first, the code is **61*19415550123**10# (say it as:");
+        expect(unproven).toContain("Only if a test then says every call is still forwarded, they dial ##002# (say it as: pound pound 0 0 2 pound) first and press Call, then the ring-first code again.");
+        expect(unproven).not.toContain("so they first turn forwarding off");
+        expect(unproven).not.toContain("##004# (say it as: pound pound 0 0 4 pound) and press Call");
+
+        // Every call again, and our own timed test proves it on. Leaving it now, the screen clears it first, and the
+        // helper says the same two codes in the same order.
+        expect((await api("/api/app/line/mode", { mode: "always" })).status).toBe(200);
+        later(made, 60);
+        await api("/api/app/line/check");
+        await forwarded(made, "every-call-proven", 2);
+        expect(await testedFor(made)).toMatchObject({ mode: "every-call", code: "**21*19415550123#", timed: true });
+        expect((await api("/api/app/line/mode", { mode: "overflow" })).status).toBe(200);
+        expect((await line(made)).business).toMatchObject({ everyCallProven: true, update: { clearFirst: "##002#", leavingEveryCall: true } });
+        later(made, 60);
+        const proven = await helperSteps("evt-help-proven");
+        expect(proven).toContain("For Ring my phone first, every call may still be on, so they first turn forwarding off: dial ##002# (say it as: pound pound 0 0 2 pound) and press Call. Then they dial the ring-first code, **61*19415550123**10#");
+        expect(proven).not.toContain("Only if a test then says every call is still forwarded");
+      });
+
       it("picking ring first before there's a code on screen records nothing", async () => {
         const made = await liveShop({ carriers: { "+19415550199": { name: "AT&T Mobility", type: "mobile" } }, ringFirst: true });
         await made.api("/api/app/line/business-number", { number: "9415550199" });

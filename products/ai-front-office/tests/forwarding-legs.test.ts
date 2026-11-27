@@ -219,15 +219,25 @@ describe("the setup helper says the same steps", () => {
     expect(setupSteps(facts).join("\n")).not.toContain("Don't give them another code.");
   });
 
-  it("leaving every call clears with the code that turns every call off, the one the screen shows", () => {
+  it("leaving a proven every call clears with the code that turns every call off, the one the screen shows", () => {
     // T-Mobile family: ring first's own clear code is ##004#, but forward-all needs ##002#.
-    const leaving = setupSteps({ ...facts, everyCallOn: true, everyCallOffCode: "##002#" }).join("\n");
+    const leaving = setupSteps({ ...facts, everyCallOn: true, everyCallProven: true, everyCallOffCode: "##002#" }).join("\n");
     expect(leaving).toContain("every call may still be on, so they first turn forwarding off: dial ##002# (say it as: pound pound 0 0 2 pound) and press Call. Then they dial the ring-first code, **61*13125550100**10#");
     expect(leaving).not.toContain("turn forwarding off: dial ##004#");
     // Never the Settings switch in that step, even on this iPhone.
     expect(leaving.split("\n").find((step) => step.startsWith("2. "))).not.toMatch(/Settings|switch/);
     // Without that fact (older callers): the off code as before.
-    expect(setupSteps({ ...facts, everyCallOn: true }).join("\n")).toContain("turn forwarding off: dial ##004#");
+    expect(setupSteps({ ...facts, everyCallOn: true, everyCallProven: true }).join("\n")).toContain("turn forwarding off: dial ##004#");
+  });
+
+  it("leaving an unproven every call: one code, like the screen, and the clear code only if a test then says so", () => {
+    // A new T-Mobile iPhone owner taps Ring my phone first: the screen shows **61 alone, so the voice does too.
+    const step = setupSteps({ ...facts, everyCallOn: true, everyCallOffCode: "##002#" }).find((line) => line.startsWith("2. "))!;
+    expect(step).toContain("For Ring my phone first, the code is **61*13125550100**10# (say it as:");
+    expect(step).toContain("Only if a test then says every call is still forwarded, they dial ##002# (say it as: pound pound 0 0 2 pound) first and press Call, then the ring-first code again.");
+    expect(step).not.toContain("so they first turn forwarding off");
+    expect(step).not.toContain("##004#");
+    expect(step).not.toMatch(/Settings|switch/);
   });
 
   it("after a test found every call still forwarded, the voice names the clear code the screen shows", () => {

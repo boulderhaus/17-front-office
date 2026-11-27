@@ -3274,8 +3274,11 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       ringFirstSeconds: ringFirst?.ringSeconds ?? null,
       // Only while ring first is picked: after switching to every call, the screen asks for the new code instead.
       phoneAnswersTest: !plan?.forwardsAll && forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "phone_answers",
-      // Leaving every call: the off code first, then the ring-first code (forward-all wins over it otherwise).
+      // Leaving every call (forward-all wins over the ring-first code). Proven on by our own timed test: the screen
+      // clears it first, so the helper says so too. Unproven: the ring-first code alone, like the screen, and the
+      // clear code only if a test then finds every call still forwarded.
       everyCallOn: state.testedFor?.mode === "every-call",
+      everyCallProven: Boolean(state.confirmedAt) && everyCallProven(state.testedFor),
       everyCallOffCode: plan?.everyCallOff ?? null,
       // The same next step the screen shows after a ring-first test that never rang (ringFirstTry).
       ringFirstRetry: !plan?.forwardsAll && forwardingCheckStatus(state.check, state.confirmedAt, dependencies.clock.now().toISOString()) === "forwards_all" ? plan?.retry ?? null : null,

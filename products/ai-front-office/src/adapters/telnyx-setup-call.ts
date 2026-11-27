@@ -36,14 +36,20 @@ export interface SetupCallFacts {
   /** Their last test call was picked up by the phone itself (screening, Live Voicemail, a person). */
   phoneAnswersTest?: boolean;
   /**
-   * Their last passed test was for every call (or they left every call untested), so forward-all may still be on:
-   * for Ring my phone first they turn forwarding off first (offCode, or the website for office lines), then set ring
-   * first. Forward-all wins otherwise.
+   * Their last passed test was for every call (or they left every call untested, or a ring-first test reached Otto
+   * with no ring), so forward-all may still be on. Forward-all wins over the ring-first code. What the helper says
+   * follows the screen: the ring-first code alone, and the clear code only if a test then finds every call still
+   * forwarded. Office lines turn "forward all calls" off in the website first.
    */
   everyCallOn?: boolean;
   /**
-   * The code that turns every call off, whatever today's choice (the plan's everyCallOff): what they dial first when
-   * leaving every call, the same code the screen shows. Unset: offCode.
+   * Our own timed test proved every call on (see everyCallProven in forwarding.ts): leaving it for ring first, the
+   * screen clears it first, before any ring-first test, so the helper says both codes, the clear code first.
+   */
+  everyCallProven?: boolean;
+  /**
+   * The code that turns every call off, whatever today's choice (the plan's everyCallOff): what clears it when
+   * leaving every call, the same code the screen shows (forwardingClear). Unset: offCode.
    */
   everyCallOffCode?: string | null;
   /** Ring first, and the latest timed test reached Otto with no ring: what the screen shows next (see ringFirstTry). */
@@ -91,7 +97,9 @@ const TEAM_FALLBACK = "offer a quick 10-minute call with our team (get_open_time
  * The numbered steps for this shop's case. The way to turn forwarding on comes from forwardingSteps, the one decision
  * the owner app, the phone page and the emailed steps use, so the voice never says something the screen doesn't:
  * always a code first. Phone settings come up only after a test the phone picked up itself (every call offered
- * first), and the iPhone's switch only after a code has failed.
+ * first), and the iPhone's switch only after a code has failed. Leaving every call follows the screen too: the
+ * ring-first code alone, with a clear code first only once a test proved every call on, and after a test found every
+ * call still forwarded the clear code is the one the screen shows (forwardingClear).
  */
 export function setupSteps(facts: SetupCallFacts): string[] {
   const say = (code: string) => `${code} (say it as: ${spoken(code)})`;
@@ -115,9 +123,13 @@ export function setupSteps(facts: SetupCallFacts): string[] {
     const retry = facts.forwardsAll ? null : facts.ringFirstRetry ?? null;
     const codes = [
       everyCallCode ? `For Otto answers every call, the code is ${say(everyCallCode)}.` : "",
+      // Leaving every call, like the screen: a test proved it on, so the clear code comes first. Not proven: the
+      // ring-first code alone, and the clear code only if a test then says every call is still forwarded.
       ringFirstCode && retry !== "help"
         ? facts.everyCallOn && everyCallOff && !retry
-          ? `For Ring my phone first, every call may still be on, so they first turn forwarding off: dial ${say(everyCallOff)} and press Call. Then they dial the ring-first code, ${say(ringFirstCode)}.`
+          ? facts.everyCallProven
+            ? `For Ring my phone first, every call may still be on, so they first turn forwarding off: dial ${say(everyCallOff)} and press Call. Then they dial the ring-first code, ${say(ringFirstCode)}.`
+            : `For Ring my phone first, the code is ${say(ringFirstCode)}. Only if a test then says every call is still forwarded, they dial ${say(everyCallOff)} first and press Call, then the ring-first code again.`
           : `For Ring my phone first, the code is ${say(ringFirstCode)}.`
         : "",
     ].filter(Boolean).join(" ");

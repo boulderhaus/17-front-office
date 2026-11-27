@@ -305,18 +305,32 @@ describe("the AI setup helper's script", () => {
     expect(quiet).not.toContain("Their last test: their phone picked up our test call by itself.");
     expect(quiet).toContain("Only if a test says their phone picked up the call itself (their last test, or one you run on this call)");
   });
-  it("leaving every call: the off code first, then the ring-first code, since forward-all wins otherwise", () => {
-    const leaving = setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device: "android", everyCallOn: true });
+  it("leaving an every call a test proved on: the off code first, then the ring-first code, since forward-all wins otherwise", () => {
+    const leaving = setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device: "android", everyCallOn: true, everyCallProven: true });
     expect(leaving).toContain("For Ring my phone first, every call may still be on, so they first turn forwarding off: dial ##002# (say it as: pound pound 0 0 2 pound) and press Call. Then they dial the ring-first code, **004*19415550123**15#");
     // An iPhone hears the very same sentence: the off code, never the Settings switch.
-    expect(setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device: "iphone", everyCallOn: true })).toContain("so they first turn forwarding off: dial ##002# (say it as: pound pound 0 0 2 pound) and press Call. Then they dial the ring-first code");
+    expect(setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device: "iphone", everyCallOn: true, everyCallProven: true })).toContain("so they first turn forwarding off: dial ##002# (say it as: pound pound 0 0 2 pound) and press Call. Then they dial the ring-first code");
     expect(leaving.indexOf("turn forwarding off: dial ##002#")).toBeLessThan(leaving.indexOf("Then they dial the ring-first code"));
     // Not on: just the code.
     expect(setupInstructions({ ...base, device: "android" })).not.toContain("every call may still be on");
-    const verizon = setupInstructions({ ...base, family: "verizon", code: "*719415550123", offCode: "*73", everyCallCode: "*729415550123", ringFirstCode: "*719415550123", ringFirstSeconds: 30, forwardsAll: false, device: "iphone", everyCallOn: true });
+    const verizon = setupInstructions({ ...base, family: "verizon", code: "*719415550123", offCode: "*73", everyCallCode: "*729415550123", ringFirstCode: "*719415550123", ringFirstSeconds: 30, forwardsAll: false, device: "iphone", everyCallOn: true, everyCallProven: true });
     expect(verizon).toContain("turn forwarding off: dial *73 (say it as: star 7 3) and press Call. Then they dial the ring-first code, *719415550123");
     const office = setupInstructions({ ...base, family: "office", code: null, offCode: null, confirm: null, everyCallCode: null, ringFirstCode: null, ringFirstSeconds: null, device: "other", everyCallOn: true });
     expect(office).toContain("Every call may still be on: for Ring my phone first, they turn off forward all calls there first, then set calls not answered.");
+  });
+  it("leaving an every call no test proved (every new owner who taps Ring my phone first): the ring-first code alone, like the screen", () => {
+    // The screen shows one code and one gray box. The voice never adds a second code up front.
+    for (const device of ["iphone", "android", "other"] as const) {
+      const text = setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device, everyCallOn: true });
+      expect(text).toContain("For Ring my phone first, the code is **004*19415550123**15# (say it as: star star 0 0 4 star 1 9 4 1 5 5 5 0 1 2 3 star star 1 5 pound). Only if a test then says every call is still forwarded, they dial ##002# (say it as: pound pound 0 0 2 pound) first and press Call, then the ring-first code again.");
+      expect(text).not.toContain("every call may still be on");
+      expect(text).not.toContain("so they first turn forwarding off");
+    }
+    // Proven without the every-call record (an older caller of setupSteps): still the code alone.
+    expect(setupInstructions({ ...base, code: "**004*19415550123**15#", forwardsAll: false, ringSeconds: 15, device: "iphone", everyCallProven: true })).not.toContain("so they first turn forwarding off");
+    // An office line has no code: the website step stays as it was.
+    const office = setupInstructions({ ...base, family: "office", code: null, offCode: null, confirm: null, everyCallCode: null, ringFirstCode: null, ringFirstSeconds: null, device: "other", everyCallOn: true });
+    expect(office).toContain("Every call may still be on: for Ring my phone first, they turn off forward all calls there first");
   });
 
   it("Verizon rings about 30 seconds and nobody can change it", () => {
