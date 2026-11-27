@@ -124,8 +124,18 @@ export function cleanExtraAnswer(text: string): string {
 }
 
 /**
- * Answers by position (extra_answer_1 is the answer to the shop's first question) paired with the question as
- * the shop has it now. An answer with no question behind it is dropped.
+ * The questions a call's answers are paired against: the list as it was when the call started (kept on the call),
+ * so an owner editing questions mid-call, or before a recovery or backfill, never mispairs or loses an answer.
+ * A call with no such list (it started before the list was kept, or the shop had no questions then) uses the
+ * shop's list as it is now.
+ */
+export function askedQuestions(fields: Pick<CollectedCallFields, "askedQuestions">, config: Pick<BusinessConfig, "customQuestions">): string[] {
+  return Array.isArray(fields.askedQuestions) ? normalizeCustomQuestions(fields.askedQuestions) : normalizeCustomQuestions(config.customQuestions);
+}
+
+/**
+ * Answers by position (extra_answer_1 is the answer to the first question) paired with the question as it was
+ * asked (askedQuestions). An answer with no question behind it is dropped.
  */
 export function pairExtraAnswers(questions: readonly string[], answers: ReadonlyArray<string | null | undefined>): ExtraAnswer[] {
   const paired: ExtraAnswer[] = [];

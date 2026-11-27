@@ -550,6 +550,68 @@ describe("call steps: answers to the shop's own questions", () => {
     expect(call.fields.extraAnswers).toEqual([{ question: QUESTIONS[0], answer: "Own" }, { question: QUESTIONS[1], answer: "Yes, all day" }]);
   });
 
+  it("pairs answers with the questions the call started with, however the owner edits the list before it is finished", async () => {
+    const { store, intake } = await app();
+    const service = new CallService(store, new InMemoryCalendar(), clock, BASE);
+    await service.recordStarted({ eventId: "start:v3:edit", tenantId: "demo", providerCallId: "v3:edit", fromNumber: "+15555550110", startedAt: now.toISOString() });
+    expect((await store.getCallByProviderId("v3:edit"))!.fields.askedQuestions).toEqual(QUESTIONS);
+    await intake({ provider_call_id: "v3:edit", caller_name: "Dana Miller", extra_answer_1: "We own it" });
+    // Mid-call the owner drops the first question, reorders the rest and adds a new one.
+    const edited = [QUESTIONS[2]!, "What's the gate code?", QUESTIONS[1]!];
+    await store.saveConfig({ ...(await store.getConfig("demo")), customQuestions: edited });
+    // Otto still has the list the call started with: answer 2 is "Is anyone home", never the new second question.
+    const second = await intake({ provider_call_id: "v3:edit", extra_answer_2: "Yes, all day" });
+    expect(second.missing).toEqual(["service_address", "service_category", "extra_answer_3"]);
+    let call = (await store.getCallByProviderId("v3:edit"))!;
+    expect(call.fields.extraAnswers).toEqual([{ question: QUESTIONS[0], answer: "We own it" }, { question: QUESTIONS[1], answer: "Yes, all day" }]);
+    // The owner clears every question before the call's end arrives: nothing is lost, and the end-of-call answers
+    // (by position) fill only the question no save answered. A saved answer is never replaced.
+    await store.saveConfig({ ...(await store.getConfig("demo")), customQuestions: [] });
+    call = await service.finalize({
+      webhookEventId: "end:v3:edit", tenantId: "demo", providerCallId: "v3:edit", fromNumber: "+15555550110", startedAt: now.toISOString(), endedAt: "2026-01-15T08:03:00.000Z", durationSeconds: 180,
+      fields: { callerName: "Dana Miller", companyName: null, callbackNumber: "+15555550110", address: null, serviceCategory: null, serviceCategoryConfidence: 0, problemDescription: "Water heater is leaking", equipmentDetails: null, accessNotes: null, requestedStart: null, explicitSlotConfirmation: false, diagnosticFeeAccepted: false, humanRequested: false, confidence: 0.9 },
+      transcript: "Caller: My water heater is leaking.\nOtto: Got it.", recordingUrl: null, consentState: "unknown",
+      extraAnswerSlots: ["Rent, actually", null, "A neighbor"],
+    });
+    expect(call.fields.extraAnswers).toEqual([{ question: QUESTIONS[0], answer: "We own it" }, { question: QUESTIONS[1], answer: "Yes, all day" }, { question: QUESTIONS[2], answer: "A neighbor" }]);
+    expect(call.fields.askedQuestions).toEqual(QUESTIONS);
+    // The list stays on the call's own record: the owner app is sent the answers, never the list.
+    expect(apiCall(call).fields).not.toHaveProperty("askedQuestions");
+  });
+
+  it("a recovery or backfill long after the call still pairs by the call's own list", async () => {
+    const { store, intake } = await app();
+    await intake({ provider_call_id: "v3:recover", caller_name: "Dana Miller" });
+    await store.saveConfig({ ...(await store.getConfig("demo")), customQuestions: ["Brand new question?"] });
+    const service = new CallService(store, new InMemoryCalendar(), clock, BASE);
+    const call = await service.finalizeFromProviderHistory({
+      webhookEventId: "history:v3:recover", tenantId: "demo", providerCallId: "v3:recover", fromNumber: "+15555550110", startedAt: now.toISOString(), endedAt: "2026-01-15T08:03:00.000Z", durationSeconds: 180,
+      fields: { callerName: "Dana Miller", companyName: null, callbackNumber: "+15555550110", address: null, serviceCategory: null, serviceCategoryConfidence: 0, problemDescription: "Water heater is leaking", equipmentDetails: null, accessNotes: null, requestedStart: null, explicitSlotConfirmation: false, diagnosticFeeAccepted: false, humanRequested: false, confidence: 0.9 },
+      transcript: "Caller: My water heater is leaking.\nOtto: Got it.", recordingUrl: null, consentState: "unknown",
+      extraAnswerSlots: ["Own", "No", null],
+    }, { mode: "recover" });
+    expect(call!.fields.extraAnswers).toEqual([{ question: QUESTIONS[0], answer: "Own" }, { question: QUESTIONS[1], answer: "No" }]);
+  });
+
+  it("a call from before the list was kept on the call falls back to the shop's questions as they are now", async () => {
+    const { store, intake } = await app();
+    await intake({ provider_call_id: "v3:old", caller_name: "Dana Miller" });
+    // As a call that started before this change was stored: no list of its own.
+    const started = (await store.getCallByProviderId("v3:old"))!;
+    const { askedQuestions: _kept, ...fields } = started.fields;
+    await store.saveCall({ ...started, fields });
+    await store.saveConfig({ ...(await store.getConfig("demo")), customQuestions: ["Gate code?", QUESTIONS[0]!] });
+    const saved = await intake({ provider_call_id: "v3:old", extra_answer_1: "1234" });
+    expect(saved.missing).toEqual(["service_address", "service_category", "extra_answer_2"]);
+    const call = (await store.getCallByProviderId("v3:old"))!;
+    expect(call.fields.extraAnswers).toEqual([{ question: "Gate code?", answer: "1234" }]);
+    expect(call.fields).not.toHaveProperty("askedQuestions");
+    // A shop with no questions keeps no list on its calls either.
+    const none = await app({ customQuestions: [] });
+    await none.intake({ provider_call_id: "v3:none", caller_name: "Dana Miller" });
+    expect((await none.store.getCallByProviderId("v3:none"))!.fields).not.toHaveProperty("askedQuestions");
+  });
+
   it("go in the owner's lead email with the other details, and never in the text", async () => {
     const store = new InMemoryStore();
     const tenantId = "shop_questions";

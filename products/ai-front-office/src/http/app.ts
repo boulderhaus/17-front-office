@@ -47,7 +47,7 @@ import { anyGoogleClient, clientForAttempt, clientForNewConnections, encodeGoogl
 import { redactError, withTimeout } from "../application/retry.js";
 import type { Environment } from "../config/environment.js";
 import { createDemoConfig, normalizeServiceAreaInput } from "../domain/config.js";
-import { CALL_STEP_KEYS, callSteps, hiddenCallPathSteps, MAX_CUSTOM_QUESTION_LENGTH, MAX_CUSTOM_QUESTIONS, normalizeCallSteps, normalizeCustomQuestions, pairExtraAnswers, parseCustomQuestions, switchedOffStep, type CallSteps } from "../domain/call-steps.js";
+import { CALL_STEP_KEYS, callSteps, hiddenCallPathSteps, MAX_CUSTOM_QUESTION_LENGTH, MAX_CUSTOM_QUESTIONS, normalizeCallSteps, normalizeCustomQuestions, parseCustomQuestions, switchedOffStep, type CallSteps } from "../domain/call-steps.js";
 import { TRADES, tradeForShopName, tradeShortLabel } from "../domain/trades.js";
 import type { BusinessConfig, CallbackTask, CallRecord, OwnerAccount, PilotSignup, SubscriptionRecord, UsageSummary } from "../domain/models.js";
 import type { OwnerSession } from "../security/owner-auth.js";
@@ -4544,8 +4544,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     requireToolCallId(tool, input.provider_call_id);
     const tenantId = await tenantForCall(input.provider_call_id);
     await requireOperational(tenantId);
-    // The shop's own questions, by position; an answer with no question behind it is dropped.
-    const extraAnswers = pairExtraAnswers(normalizeCustomQuestions((await dependencies.store.getConfig(tenantId)).customQuestions), [input.extra_answer_1, input.extra_answer_2, input.extra_answer_3]);
+    // The shop's own questions, by position. The service pairs them with the questions this call started with.
+    const extraAnswerSlots = [input.extra_answer_1, input.extra_answer_2, input.extra_answer_3];
     const result = await service.saveIntake({
       tenantId,
       providerCallId: input.provider_call_id,
@@ -4563,8 +4563,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         ...(input.diagnostic_fee_accepted === undefined ? {} : { diagnosticFeeAccepted: input.diagnostic_fee_accepted }),
         ...(input.human_requested === undefined ? {} : { humanRequested: input.human_requested }),
         ...(input.confidence === undefined ? {} : { confidence: input.confidence }),
-        ...(extraAnswers.length === 0 ? {} : { extraAnswers }),
       },
+      ...(extraAnswerSlots.some((slot) => typeof slot === "string" && slot.trim()) ? { extraAnswerSlots } : {}),
       ...(input.recording_disclosure_declined === undefined ? {} : { recordingDisclosureDeclined: input.recording_disclosure_declined }),
       signal: tool.signal,
     });

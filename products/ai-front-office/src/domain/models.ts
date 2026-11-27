@@ -41,6 +41,12 @@ export interface CollectedCallFields {
   confidence: number;
   /** The caller's answers to the shop's own questions ("Ask every caller"), each with the question as it was asked. */
   extraAnswers?: Array<{ question: string; answer: string }>;
+  /**
+   * The shop's questions, in order, as they were when this call started. Answers arrive by position
+   * (extra_answer_1..3) and are paired against this list, so an owner editing questions mid-call never mispairs
+   * one. Absent on a call from before the snapshot existed, or for a shop with no questions then.
+   */
+  askedQuestions?: string[];
 }
 
 export interface EmergencyDecision {

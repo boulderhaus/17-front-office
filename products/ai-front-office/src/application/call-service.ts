@@ -13,7 +13,7 @@ import type {
 import { evaluateServiceArea, isInServiceArea, slotWithinBookableHours } from "../domain/config.js";
 import { slotTouchesDayOff } from "../domain/days-off.js";
 import { triageEmergency } from "../domain/triage.js";
-import { callSteps, feeAcceptanceRequired, mergeExtraAnswers, normalizeCustomQuestions, pairExtraAnswers } from "../domain/call-steps.js";
+import { askedQuestions, callSteps, feeAcceptanceRequired, mergeExtraAnswers, normalizeCustomQuestions, pairExtraAnswers } from "../domain/call-steps.js";
 import { audioRecordingEnabled, WRAP_UP_AFTER_SECONDS } from "../voice/system-prompt.js";
 import type { CalendarPort, Clock, Store } from "../ports.js";
 import { BookingCoordinator } from "./booking-coordinator.js";
@@ -155,12 +155,14 @@ export class CallService {
     providerCallId: string;
     fromNumber: string;
     fields: Partial<CollectedCallFields>;
+    /** save_intake's extra_answer_1..3, by position: paired here with the questions this call started with. */
+    extraAnswerSlots?: ReadonlyArray<string | null | undefined> | undefined;
     recordingDisclosureDeclined?: boolean;
     signal?: AbortSignal | undefined;
   }): Promise<{ status: "saved"; missing: string[]; wrap_up: boolean }> {
     input.signal?.throwIfAborted();
     await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
-    const key = toolResultKey("save_intake", input.providerCallId, { fields: input.fields, declined: input.recordingDisclosureDeclined ?? null });
+    const key = toolResultKey("save_intake", input.providerCallId, { fields: input.fields, declined: input.recordingDisclosureDeclined ?? null, ...(input.extraAnswerSlots ? { extraAnswerSlots: input.extraAnswerSlots.map((slot) => slot ?? null) } : {}) });
     return this.store.withLock(`call:${input.providerCallId}`, async () => {
       const prior = await this.claimToolWrite<{ status: "saved"; missing: string[] }>(input.providerCallId, key, input.signal);
       if (prior) {
@@ -264,10 +266,15 @@ export class CallService {
   private async saveIntakeClaimed(input: Parameters<CallService["saveIntake"]>[0]): Promise<{ status: "saved"; missing: string[]; wrap_up: boolean }> {
     const existing = await this.store.getCallByProviderId(input.providerCallId);
     if (!existing || existing.tenantId !== input.tenantId) throw new Error("Call no longer exists in this shop");
+    const config = await this.store.getConfig(input.tenantId);
     const incoming = completePartialFields(input.fields);
     incoming.callbackNumber = normalizeCustomerNumber(incoming.callbackNumber);
+    // The shop's own questions: answers by position, paired with the list this call started with (never the list
+    // as the owner has since edited it).
+    const asked = askedQuestions(existing.fields, config);
+    const slotAnswers = input.extraAnswerSlots ? pairExtraAnswers(asked, input.extraAnswerSlots) : [];
+    if (slotAnswers.length > 0) incoming.extraAnswers = mergeExtraAnswers(incoming.extraAnswers, slotAnswers);
     const fields = mergeCollectedFields(existing.fields, incoming);
-    const config = await this.store.getConfig(input.tenantId);
     const emergency = mergeEmergencyDecision(existing.emergency, triageEmergency(`${existing.fields.problemDescription}\n${fields.problemDescription}`, config));
     const updated: CallRecord = {
       ...existing,
@@ -300,7 +307,7 @@ export class CallService {
       steps.askAddress && !fields.address?.trim() ? "service_address" : null,
       !fields.problemDescription.trim() ? "problem_description" : null,
       !fields.serviceCategory?.trim() ? "service_category" : null,
-      ...(emergency.emergency ? [] : normalizeCustomQuestions(config.customQuestions).map((question, index) => (answered.has(question) ? null : `extra_answer_${index + 1}`))),
+      ...(emergency.emergency ? [] : asked.map((question, index) => (answered.has(question) ? null : `extra_answer_${index + 1}`))),
     ].filter((value): value is string => value !== null);
     // The model has no clock; the soft five-minute limit rides on tool results.
     return { status: "saved", missing, wrap_up: this.wrapUpFor((await this.store.getCallByProviderId(input.providerCallId)) ?? call) };
@@ -731,8 +738,12 @@ export class CallService {
     // A callback number the model wrote its own way ("941-555-0110", "same number") must never replace the number
     // that called: keep it only when it is a real number, in the one form every screen and text can use.
     const steps = callSteps(config);
-    // The shop's own questions: answers the provider's history shows (by position) fill in any a mid-call save missed.
-    const slotAnswers = input.extraAnswerSlots ? pairExtraAnswers(normalizeCustomQuestions(config.customQuestions), input.extraAnswerSlots) : [];
+    // The shop's own questions: answers the provider's history shows (by position, against the list this call
+    // started with) fill in only the questions no mid-call save answered. A saved answer is never replaced.
+    const savedAnswers = new Set((call.fields.extraAnswers ?? []).map((item) => item.question));
+    const slotAnswers = input.extraAnswerSlots
+      ? pairExtraAnswers(askedQuestions(call.fields, config), input.extraAnswerSlots).filter((item) => !savedAnswers.has(item.question))
+      : [];
     const fields = mergeCollectedFields(call.fields, {
       ...input.fields,
       callbackNumber: normalizeCustomerNumber(input.fields.callbackNumber),
@@ -1120,6 +1131,10 @@ export class CallService {
 
   private async createCall(tenantId: string, providerCallId: string, fromNumber: string, startedAt: string, fromNumberVerified: boolean, consentState: CallRecord["consentState"] = "unknown"): Promise<CallRecord> {
     const now = this.clock.now().toISOString();
+    // "Ask every caller": the questions as they are now stay with the call, so its answers (sent by position) are
+    // paired with the questions that were asked even if the owner edits the list before the call is finished. A
+    // config that can't be read keeps no list, and the call falls back to the shop's list when an answer arrives.
+    const asked = normalizeCustomQuestions((await this.store.getConfig(tenantId).catch(() => null))?.customQuestions);
     const call: CallRecord = {
       id: randomUUID(),
       tenantId,
@@ -1129,7 +1144,7 @@ export class CallService {
       startedAt,
       endedAt: null,
       durationSeconds: null,
-      fields: structuredClone(EMPTY_FIELDS),
+      fields: { ...structuredClone(EMPTY_FIELDS), ...(asked.length > 0 ? { askedQuestions: asked } : {}) },
       emergency: null,
       outcome: "in_progress",
       transcript: null,
@@ -1210,6 +1225,8 @@ function mergeCollectedFields(existing: CollectedCallFields, incoming: Collected
     confidence: Math.max(existing.confidence, incoming.confidence),
     // Only once a caller answered one of the shop's own questions; a call without any keeps no such field.
     ...(existing.extraAnswers?.length || incoming.extraAnswers?.length ? { extraAnswers: mergeExtraAnswers(existing.extraAnswers, incoming.extraAnswers) } : {}),
+    // The questions the call started with never change once kept.
+    ...(existing.askedQuestions ? { askedQuestions: existing.askedQuestions } : {}),
   };
 }
 
