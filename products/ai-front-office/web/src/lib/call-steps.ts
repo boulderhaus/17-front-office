@@ -58,14 +58,29 @@ export function questionRows(stored: string): string[] {
   return rows.length > 0 ? rows : [""]
 }
 
-/** Rows back to what is saved: trimmed, empty rows dropped. A line break can't be typed in a one-line box, but a paste could carry one. */
+/** Rows back to what is saved: trimmed, empty rows dropped. Enter adds no line break in a question box, but a paste could carry one. */
 export function joinQuestions(rows: string[]): string {
   return rows.map((row) => row.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n")
 }
 
-/** A question's length as the server counts it: trimmed, runs of spaces as one. */
+/**
+ * A question as the server will store it. The same steps, in the same order, as cleanCustomQuestion in
+ * src/domain/call-steps.ts (a test holds the two together): compatibility forms folded first, so an iPhone's
+ * auto-ellipsis is three characters here too, then control characters, braces and double quotes.
+ */
+export function cleanQuestion(text: string): string {
+  return text
+    .normalize("NFKC")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ")
+    .replace(/[{}<>\\`]/g, "")
+    .replace(/["\u201c\u201d\u201e\u201f\u2033\u00ab\u00bb]/g, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+/** A question's length as the server counts it: the length of the cleaned text it will store. */
 export function questionLength(text: string): number {
-  return text.replace(/\s+/g, " ").trim().length
+  return cleanQuestion(text).length
 }
 
 /** The fix, when a question is too long to save; null when it fits. */

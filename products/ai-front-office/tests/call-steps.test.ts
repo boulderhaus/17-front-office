@@ -22,7 +22,7 @@ import { buildTelnyxTools, buildVoiceSystemPrompt, FEE_OWNER_CONFIRMS_LINE, NO_A
 import { FAILED_TOOL_STATUSES, toolSwitchedOff } from "../src/voice/tool-results.js";
 import { buildShopAssistantPayload, S2S_INSTRUCTION_LIMIT_CHARS, speechToSpeechInstructionsFit, type SpeechToSpeechSettings } from "../src/voice/voice-mode.js";
 import { EXPECTED_TOOL_EVENTS, toolEventResults, verdict } from "../scripts/selftest-call.js";
-import { joinQuestions, LOCKED_STEPS, PRICES_OFF_FEE_ON_HINT, MAX_QUESTION_LENGTH as WEB_MAX_QUESTION_LENGTH, MAX_QUESTIONS as WEB_MAX_QUESTIONS, questionLength, questionProblem, questionRows, questionsLine, STEP_ROWS, stepState, TRANSFER_ROW } from "../web/src/lib/call-steps.js";
+import { cleanQuestion, joinQuestions, LOCKED_STEPS, PRICES_OFF_FEE_ON_HINT, MAX_QUESTION_LENGTH as WEB_MAX_QUESTION_LENGTH, MAX_QUESTIONS as WEB_MAX_QUESTIONS, questionLength, questionProblem, questionRows, questionsLine, STEP_ROWS, stepState, TRANSFER_ROW } from "../web/src/lib/call-steps.js";
 import { DEFAULT_SHOPS } from "./support/call-step-shops.js";
 
 // "What Otto does on a call" (Settings). Synthetic shops, 555 numbers and example.test addresses only.
@@ -1118,6 +1118,25 @@ describe("call steps: the Settings card", () => {
     expect(questionLength(long)).toBe(81);
     expect(questionProblem(long)).toBe("That’s 81 characters. Shorten it to 80 or less.");
     expect(questionProblem("y".repeat(80))).toBeNull();
+    // The counter counts the text the server will store, so the two never disagree: an iPhone's auto-ellipsis is
+    // three characters, a full-width letter is one, and braces and angle brackets are dropped.
+    const tricky = [
+      `${"y".repeat(78)}\u2026`, `${"y".repeat(79)}\u2026`, "Own or rent\u2026?", "Gate {code}?", "<b>Own</b> or rent?", "\uff2f\uff57\uff4e or rent\uff1f", "\ufb01ne to come by \u201ctoday\u201d?",
+      "Tab\there\u0007 and\u2028there", "  spaced   out  ", "\u00ab Quoted \u00bb `code` \\ slash", "Is it 1\u00bd baths?", "\u2460 first?", "",
+    ];
+    for (const typed of tricky) {
+      expect(cleanQuestion(typed), JSON.stringify(typed)).toBe(cleanCustomQuestion(typed));
+      expect(questionLength(typed), JSON.stringify(typed)).toBe(cleanCustomQuestion(typed).length);
+      // What the box would send is refused exactly when the counter says it is too long.
+      const refused = (() => { try { parseCustomQuestions(joinQuestions([typed])); return false; } catch { return true; } })();
+      expect(questionProblem(typed) !== null, JSON.stringify(typed)).toBe(refused);
+    }
+    // 78 letters and an ellipsis look like 79 characters and are stored as 81: counted as 81, and refused as 81.
+    expect(questionLength(`${"y".repeat(78)}\u2026`)).toBe(81);
+    expect(questionProblem(`${"y".repeat(78)}\u2026`)).toBe("That’s 81 characters. Shorten it to 80 or less.");
+    expect(() => parseCustomQuestions(joinQuestions([`${"y".repeat(78)}\u2026`]))).toThrow("Question 1 is 81 characters.");
+    expect(questionProblem(`${"y".repeat(77)}\u2026`)).toBeNull();
+    expect(parseCustomQuestions(joinQuestions([`${"y".repeat(77)}\u2026`]))).toEqual([`${"y".repeat(77)}...`]);
     // What the app would send is what the server accepts or refuses.
     expect(parseCustomQuestions(joinQuestions(["  Own   or rent? ", "", "Gate code?"]))).toEqual(["Own or rent?", "Gate code?"]);
     expect(() => parseCustomQuestions(joinQuestions([long]))).toThrow("Question 1 is 81 characters.");

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react"
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { Link, useLocation, useSearchParams } from "react-router-dom"
 import { CalendarDays, Check, CheckCircle2, ChevronDown, ChevronRight, CreditCard, Download, ExternalLink, Loader2, Lock, LogOut, Plus, X } from "lucide-react"
 import { toast } from "sonner"
@@ -386,8 +386,8 @@ function CallQuestions() {
         return (
           <div key={index} className="grid grid-cols-[minmax(0,1fr)_2.75rem] gap-x-3 gap-y-1.5">
             <label htmlFor={`question-${index}`} className="col-span-2 text-[15px] font-medium">Question {index + 1}</label>
-            <Input id={`question-${index}`} className={cn(fieldClass, !removable && "col-span-2")} value={row} placeholder={index === 0 ? "Do you own or rent the home?" : undefined} aria-invalid={problem ? true : undefined} aria-describedby={`question-${index}-help`}
-              onChange={(event) => update(rows.map((item, at) => (at === index ? event.target.value : item)))} />
+            <QuestionBox id={`question-${index}`} className={cn(!removable && "col-span-2")} value={row} placeholder={index === 0 ? "Do you own or rent the home?" : undefined} invalid={Boolean(problem)} describedBy={`question-${index}-help`}
+              onChange={(value) => update(rows.map((item, at) => (at === index ? value : item)))} />
             {removable && <Button type="button" variant="ghost" size="icon" aria-label={`Remove question ${index + 1}`} className="size-11 text-muted-foreground" onClick={() => update(rows.length > 1 ? rows.filter((_, at) => at !== index) : [""])}><X className="size-5" /></Button>}
             {problem
               ? <p id={`question-${index}-help`} role="alert" className="col-span-2 text-sm font-medium text-red-700">{problem}</p>
@@ -399,6 +399,36 @@ function CallQuestions() {
         ? <Button type="button" variant="outline" size="tap" className={actionClass} onClick={() => setRows([...rows, ""])}><Plus />Add a question</Button>
         : <p className="text-sm text-muted-foreground">That’s all {max}. Remove one to add another.</p>}
     </fieldset></div>
+  )
+}
+
+/**
+ * One question: a box that grows with its text, so the whole question shows on a phone (two lines to start there,
+ * one on a computer). Styled like the page's other fields. A question is one line: Enter adds no line break, and a
+ * pasted one becomes a space.
+ */
+function QuestionBox({ id, value, onChange, placeholder, invalid, describedBy, className }: { id: string; value: string; onChange: (value: string) => void; placeholder?: string | undefined; invalid: boolean; describedBy: string; className?: string }) {
+  const box = useRef<HTMLTextAreaElement>(null)
+  // Fit the height to the text on every change and when the box's width changes (not every browser sizes a text box to its content).
+  useLayoutEffect(() => {
+    const el = box.current
+    if (!el) return
+    const fit = () => {
+      el.style.height = "auto"
+      el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`
+    }
+    fit()
+    if (typeof ResizeObserver === "undefined") return
+    let width = el.clientWidth
+    const observer = new ResizeObserver(() => { if (el.clientWidth !== width) { width = el.clientWidth; fit() } })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [value])
+  return (
+    <Textarea ref={box} id={id} rows={1} value={value} placeholder={placeholder} enterKeyHint="done" aria-invalid={invalid ? true : undefined} aria-describedby={describedBy}
+      className={cn(areaClass, "min-h-[4.5rem] resize-none overflow-hidden py-2.5 sm:min-h-12", className)}
+      onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) event.preventDefault() }}
+      onChange={(event) => onChange(event.target.value.replace(/[\r\n]+/g, " "))} />
   )
 }
 
