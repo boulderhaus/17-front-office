@@ -77,6 +77,11 @@ export function isSpeechToSpeechTenant(settings: SpeechToSpeechSettings | undefi
   return voiceRequest(settings, tenantId).want === "speech_to_speech";
 }
 
+/** True when anything speech-to-speech is set up here, so an assistant may be in that mode and need its text model back. */
+export function speechToSpeechConfigured(settings: SpeechToSpeechSettings | undefined): boolean {
+  return Boolean(settings && (settings.defaultMode === "speech_to_speech" || settings.tenantIds.length > 0 || settings.model));
+}
+
 /** True when Telnyx reports the assistant in speech-to-speech mode (delegation on). Standard assistants report delegation_settings null. */
 export function isSpeechToSpeechAssistant(assistant: Record<string, unknown> | null | undefined): boolean {
   const delegation = objectOf(unwrap(assistant).delegation_settings);

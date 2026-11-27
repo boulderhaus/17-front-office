@@ -2,7 +2,7 @@ import type { Environment } from "../config/environment.js";
 import type { BusinessConfig } from "../domain/models.js";
 import type { Store } from "../ports.js";
 import { buildTelnyxAssistantUpdate } from "../voice/system-prompt.js";
-import { buildShopAssistantPayload, isSpeechToSpeechTenant, speechToSpeechSettings, type ShopAssistantPayload } from "../voice/voice-mode.js";
+import { buildShopAssistantPayload, isSpeechToSpeechTenant, speechToSpeechConfigured, speechToSpeechSettings, type ShopAssistantPayload } from "../voice/voice-mode.js";
 import { withTimeout } from "../application/retry.js";
 import { TelnyxVoiceRoutingClient } from "./telnyx.js";
 
@@ -37,6 +37,11 @@ async function synchronize(store: Store, env: Environment, config: BusinessConfi
       // assistant for its backend text model. A shop the default can't make speech-to-speech, or one opted out, gets
       // the standard payload, with its text model back when its assistant is still in speech-to-speech mode.
       built = build(await read());
+    } else if (speechToSpeechConfigured(s2s)) {
+      // The mode is off for this shop, but speech-to-speech is set up here, so its assistant may still be in that mode
+      // (the mode was just turned off and configure-telnyx has not run yet). Read it if we can and put it back; a read
+      // that fails never stops the save, which then pushes the standard payload as it always did.
+      built = await read().then(build).catch(() => null);
     }
     if (built && (built.fallback || built.rollback)) log({ level: built.fallback ? "warn" : "info", event: "assistant_voice_mode", tenantId: value.tenantId, mode: built.mode, fallback: built.fallback ?? null, rollback: built.rollback });
     const body = built?.payload ?? buildTelnyxAssistantUpdate(value, env.PUBLIC_BASE_URL, { voice: env.TELNYX_VOICE });

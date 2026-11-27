@@ -245,12 +245,44 @@ describe("settings saves (saveAssistantConfig) in default mode", () => {
     expect(on.posted()[0]).toMatchObject({ model: SPEECH_MODEL, voice_settings: { voice: SPEECH_VOICE }, delegation_settings: DELEGATION });
     expect((await store.getConfig("demo")).businessName).toBe("Changed");
 
-    // Mode off: no read, and the demo line keeps today's payload even when it is on the opt-in list.
+    // Mode off: the demo line keeps today's payload even when it is on the opt-in list.
     const off = telnyx(standardAssistant);
     const changed = { ...original, businessName: "Changed again" };
     await saveAssistantConfig(store, liveEnv({ TELNYX_S2S_TENANT_IDS: "demo" }), changed, off.fetcher, () => undefined);
-    expect(off.calls.map((call) => call.method)).toEqual(["POST"]);
     expect(JSON.stringify(off.posted()[0])).toBe(JSON.stringify(buildTelnyxAssistantUpdate(changed, BASE, { voice: TTS_VOICE })));
+    // Nothing speech-to-speech set up at all: no read, one push, as it always was.
+    const never = telnyx(standardAssistant);
+    await saveAssistantConfig(store, liveEnv({ TELNYX_S2S_MODEL: "", TELNYX_S2S_VOICE: "" }), { ...changed, businessName: "Changed once more" }, never.fetcher, () => undefined);
+    expect(never.calls.map((call) => call.method)).toEqual(["POST"]);
+  });
+
+  it("mode off again, before configure has run: a save puts a shop still in speech-to-speech mode back, and a failed read never stops a save", async () => {
+    const store = new InMemoryStore();
+    await store.saveConfig(createDemoConfig());
+    await store.saveConfig(shop("shop_a"));
+    await store.saveProviderRoute(route("shop_a", "assistant_a"));
+    const logs: Array<Record<string, unknown>> = [];
+    const changed = { ...shop("shop_a"), businessName: "Changed" };
+    const today = buildTelnyxAssistantUpdate(changed, BASE, { voice: TTS_VOICE });
+    const still = telnyx(s2sAssistant);
+    await saveAssistantConfig(store, liveEnv(), changed, still.fetcher, (entry) => logs.push(entry));
+    expect(still.calls.map((call) => call.method)).toEqual(["GET", "POST"]);
+    expect(still.posted()[0]).toEqual({ ...today, model: TEXT_MODEL, delegation_settings: { enabled: false } });
+    expect(logs).toEqual([{ level: "info", event: "assistant_voice_mode", tenantId: "shop_a", mode: "standard", fallback: null, rollback: true }]);
+    // Already standard: exactly today's payload, nothing logged.
+    const settled = telnyx(standardAssistant);
+    await saveAssistantConfig(store, liveEnv(), changed, settled.fetcher, (entry) => logs.push(entry));
+    expect(JSON.stringify(settled.posted()[0])).toBe(JSON.stringify(today));
+    expect(logs).toHaveLength(1);
+    // The read fails: the save goes through with today's payload.
+    const posted: string[] = [];
+    await saveAssistantConfig(store, liveEnv(), { ...changed, businessName: "Changed again" }, (async (_url: string | URL, init?: RequestInit) => {
+      if (!init?.method) return new Response("", { status: 503 });
+      posted.push(String(init.body));
+      return Response.json({ id: "assistant_a" });
+    }) as typeof fetch, (entry) => logs.push(entry));
+    expect(posted).toEqual([JSON.stringify(buildTelnyxAssistantUpdate({ ...changed, businessName: "Changed again" }, BASE, { voice: TTS_VOICE }))]);
+    expect((await store.getConfig("shop_a")).businessName).toBe("Changed again");
   });
 
   it("a shop the default can't make speech-to-speech saves on the standard voice, with its text model back, and logs why", async () => {
