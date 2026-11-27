@@ -748,7 +748,8 @@ export class CallService {
     const spamExcluded = !emergency.emergency
       && !fields.humanRequested
       && !call.qualityFlags.includes(SPAM_REFUSED)
-      && (call.billingDisposition === "spam_excluded" || input.isSpam === true);
+      // A shop that switched "End sales calls" off hears about every caller: only a mark made while it was on counts.
+      && (call.billingDisposition === "spam_excluded" || (input.isSpam === true && steps.screenSalesCalls));
     call = {
       ...call,
       fromNumber: call.fromNumber === "unknown" && isAllowedCustomerNumber(input.fromNumber) ? input.fromNumber : call.fromNumber,

@@ -452,7 +452,7 @@ describe("call steps: the server refuses a tool the shop switched off", () => {
     const call = await new CallService(store, calendar, clock, BASE).finalize({
       webhookEventId: `end:${id}`, tenantId: "demo", providerCallId: id, fromNumber: "+15555550110", startedAt: "2026-01-15T08:00:00.000Z", endedAt: "2026-01-15T08:01:00.000Z", durationSeconds: 60,
       fields: { callerName: "Sam Vendor", companyName: null, callbackNumber: "+15555550110", address: null, serviceCategory: null, serviceCategoryConfidence: 0, problemDescription: "Wants to talk about ad space", equipmentDetails: null, accessNotes: null, requestedStart: null, explicitSlotConfirmation: false, diagnosticFeeAccepted: false, humanRequested: false, confidence: 0.5 },
-      transcript: "Caller: I'm selling ad space.\nOtto: I'll pass that on.", recordingUrl: null, consentState: "unknown",
+      transcript: "Caller: I'm selling ad space.\nOtto: I'll pass that on.", recordingUrl: null, consentState: "unknown", isSpam: true,
     });
     expect(call.outcome).toBe("pending_confirmation");
     expect(call.billingDisposition).toBe("billable");
