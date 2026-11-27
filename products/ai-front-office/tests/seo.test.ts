@@ -89,6 +89,13 @@ describe("homepage entity facts", () => {
   const graph = (JSON.parse(jsonLd) as { "@graph": Array<Record<string, unknown>> })["@graph"];
   const byType = (type: string) => graph.find((node) => node["@type"] === type)!;
 
+  it("says what Call Otto is, word for word, near the top of the page", () => {
+    const visible = html.replace(/<style>[\s\S]*?<\/style>/g, " ").replace(/<script[\s\S]*?<\/script>/g, " ");
+    expect(visible).toContain(`<p class="entity">${ENTITY}</p>`);
+    // Inside the hero, before the trades, pricing and FAQ.
+    expect(visible.indexOf(ENTITY)).toBeLessThan(visible.indexOf('id="trades"'));
+  });
+
   it("carries Organization, WebSite and SoftwareApplication JSON-LD that parses", () => {
     expect(byType("Organization")).toMatchObject({ name: "Dutchworks LLC", url: "https://bydutchworks.com" });
     expect(byType("WebSite")).toMatchObject({ name: "Call Otto", url: "https://callotto.co/" });
