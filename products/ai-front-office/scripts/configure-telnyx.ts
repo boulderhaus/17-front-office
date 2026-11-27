@@ -53,11 +53,10 @@ export async function planAssistantPushes(input: {
     if (input.readAssistant) {
       try { existing = await input.readAssistant(route.externalId); }
       catch (error) {
-        // An unlisted shop still gets today's payload; a listed one can't be planned without its assistant.
-        if (listed && !input.speechToSpeech?.backendModel) {
-          pushes.push({ tenantId, assistantId: route.externalId, update: {}, error: `speech-to-speech: ${error instanceof Error ? error.message : String(error)}` });
-          continue;
-        }
+        // Never push blind: an assistant we can't read may still be in speech-to-speech mode, and today's payload alone
+        // would leave its speaking model on with a text-to-speech voice. Reported as failed; rerun configure.
+        pushes.push({ tenantId, assistantId: route.externalId, update: {}, error: `assistant read failed${listed ? " (speech-to-speech)" : ""}: ${error instanceof Error ? error.message : String(error)}` });
+        continue;
       }
     }
     try {

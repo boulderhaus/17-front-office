@@ -103,6 +103,9 @@ describe("opt-in speech-to-speech voice mode", () => {
     expect(removed).toMatchObject({ mode: "standard", rollback: true, update: { model: TEXT_MODEL, delegation_settings: { enabled: false } } });
     const [missing] = await planAssistantPushes({ store, defaultTenantId: "demo", publicBaseUrl: BASE, speechToSpeech: { ...S2S, model: undefined }, readAssistant: async () => standardAssistant });
     expect(missing?.error).toMatch(/TELNYX_S2S_MODEL/);
+    // A failed read is never pushed blind: the assistant may still be in speech-to-speech mode.
+    const [unread] = await planAssistantPushes({ store, defaultTenantId: "demo", publicBaseUrl: BASE, speechToSpeech: { ...S2S, tenantIds: [] }, readAssistant: async () => { throw new Error("HTTP 503"); } });
+    expect(unread).toMatchObject({ update: {}, error: expect.stringMatching(/read failed/) });
   });
 
   it("provisioning creates a listed shop's assistant in speech-to-speech mode on the template's text model", async () => {
@@ -218,6 +221,42 @@ describe("voice lab line script", () => {
     const sender = await labWorld();
     await expect(planLabLine({ ...sender.deps, env: { ...sender.deps.env, TELNYX_FROM_NUMBER: NUMBER } }, { tenantId: sender.labTenant, numberId: "num_lab" })).rejects.toThrow(/SMS/);
     expect(paying.telnyx.state.connection).toBe(VOICEMAIL_APP);
+  });
+
+  it("refuses at apply time when the holder pays again or the number moved since the plan", async () => {
+    const paid = await labWorld();
+    const plan = await planLabLine(paid.deps, { tenantId: paid.labTenant, numberId: "num_lab" });
+    const sub = (await paid.store.getSubscription("shop_cancelled"))!;
+    await paid.store.saveSubscription({ ...sub, status: "active" });
+    await expect(applyLabLine(paid.deps, plan)).rejects.toThrow(/paying again/);
+    expect(paid.telnyx.state.connection).toBe(VOICEMAIL_APP);
+    expect(await paid.store.getIntegrationSecret("shop_cancelled", "telnyx", "inbound_number")).toBe(NUMBER);
+
+    const moved = await labWorld();
+    const movedPlan = await planLabLine(moved.deps, { tenantId: moved.labTenant, numberId: "num_lab" });
+    moved.telnyx.state.connection = "texml_some_other_assistant";
+    await expect(applyLabLine(moved.deps, movedPlan)).rejects.toThrow(/in use/);
+    expect(moved.telnyx.state.connection).toBe("texml_some_other_assistant");
+  });
+
+  it("an interrupted apply recovers on rerun, and --remove leaves a number someone else now answers on", async () => {
+    const { store, deps, telnyx, labTenant } = await labWorld();
+    const plan = await planLabLine(deps, { tenantId: labTenant, numberId: "num_lab" });
+    // Interrupted right after the lab record was saved: the holder still has the number.
+    const original = store.deleteIntegrationSecret.bind(store);
+    store.deleteIntegrationSecret = async () => { throw new Error("interrupted"); };
+    await expect(applyLabLine(deps, plan)).rejects.toThrow(/interrupted/);
+    store.deleteIntegrationSecret = original;
+    expect(await readVoiceLabLine(store)).not.toBeNull();
+    expect(await store.getIntegrationSecret("shop_cancelled", "telnyx", "inbound_number")).toBe(NUMBER);
+    await applyLabLine(deps, await planLabLine(deps, { tenantId: labTenant, numberId: "num_lab" }));
+    expect(await store.getIntegrationSecret("shop_cancelled", "telnyx", "inbound_number")).toBeNull();
+    expect(await store.getIntegrationSecret(labTenant, "telnyx", "inbound_number")).toBe(NUMBER);
+
+    telnyx.state.connection = "texml_some_other_assistant";
+    await expect(removeLabLine(deps, true)).rejects.toThrow(/another connection/);
+    expect(telnyx.state.connection).toBe("texml_some_other_assistant");
+    expect(await readVoiceLabLine(store)).not.toBeNull();
   });
 
   it("dry run changes nothing; --apply provisions in the configured voice mode; grace never releases it; --remove restores", async () => {

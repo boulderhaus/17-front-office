@@ -170,10 +170,22 @@ export async function applyLabLine(deps: LabDeps, plan: LabLinePlan): Promise<{ 
     createdAt: previous?.createdAt ?? (deps.now ?? (() => new Date()))().toISOString(),
   };
   await store.saveIntegrationSecret(PLATFORM_TENANT_ID, VOICE_LAB_PROVIDER, VOICE_LAB_LINE_KEY, JSON.stringify(line));
-  // One shop per number: the cancelled shop's number lookup would otherwise answer calls with its voicemail.
-  if (plan.holderTenantId && !previous) {
-    for (const key of plan.holderKeys) await store.deleteIntegrationSecret(plan.holderTenantId, "telnyx", key);
+  // One shop per number: the cancelled shop's number lookup would otherwise answer calls with its voicemail. Under the
+  // holder's billing lock, rechecked unpaid, and retried on every run while its key still holds the number (an
+  // interrupted earlier run leaves it there, and the lab shop can't save the number until it is gone).
+  const holderTenantId = plan.holderTenantId;
+  if (holderTenantId) {
+    await store.withLock(`billing:${holderTenantId}`, async () => {
+      if (isPaidStatus((await store.getSubscription(holderTenantId))?.status)) throw new LabRefusal("The shop that held the number is paying again; run --remove");
+      for (const key of plan.holderKeys) {
+        if (await store.getIntegrationSecret(holderTenantId, "telnyx", key) === plan.phoneNumber) await store.deleteIntegrationSecret(holderTenantId, "telnyx", key);
+      }
+    });
   }
+  // Rechecked right before the number moves: only from where the plan found it, the grace voicemail or the lab assistant.
+  const labApp = await assistantTexmlApp(deps, assistantId);
+  const connectionNow = connectionOf(objectData(await telnyx(deps, `/phone_numbers/${encodeURIComponent(plan.numberId)}`)).connection_id);
+  if (connectionNow && ![line.previous.connectionId, env.TELNYX_VOICEMAIL_APP_ID, labApp].includes(connectionNow)) throw new LabRefusal("That number moved to another connection since the plan, so it is in use");
   await ensureCallEndCallback({ apiKey, assistantId, publicBaseUrl: env.PUBLIC_BASE_URL, apply: true, fetcher: deps.fetcher });
   const now = (deps.now ?? (() => new Date()))().toISOString();
   await store.saveIntegrationSecret(plan.tenantId, "telnyx", "inbound_number", plan.phoneNumber);
@@ -202,7 +214,12 @@ export async function removeLabLine(deps: LabDeps, apply: boolean): Promise<Reco
   if (!env.TELNYX_API_KEY) throw new LabRefusal("TELNYX_API_KEY is not set");
   await store.withLock(`config:${line.tenantId}`, async () => store.saveConfig({ ...await store.getConfig(line.tenantId), paused: true }));
   const number = objectData(await telnyx(deps, `/phone_numbers/${encodeURIComponent(line.numberId)}`));
-  if (connectionOf(number.connection_id) !== line.previous.connectionId) {
+  const current = connectionOf(number.connection_id);
+  // Only take the number back from the lab assistant: if something else answers on it now, it is someone's live line.
+  if (current && current !== line.previous.connectionId && current !== await assistantTexmlApp(deps, line.assistantId).catch(() => null)) {
+    throw new LabRefusal("That number answers on another connection now, so --remove leaves it alone");
+  }
+  if (current !== line.previous.connectionId) {
     const updated = objectData(await telnyx(deps, `/phone_numbers/${encodeURIComponent(line.numberId)}`, { method: "PATCH", body: JSON.stringify({ connection_id: line.previous.connectionId }) }));
     if (connectionOf(updated.connection_id) !== line.previous.connectionId) throw new Error("Telnyx did not put the number back on its connection");
   }
