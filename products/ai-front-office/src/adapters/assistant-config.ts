@@ -2,6 +2,7 @@ import type { Environment } from "../config/environment.js";
 import type { BusinessConfig } from "../domain/models.js";
 import type { Store } from "../ports.js";
 import { buildTelnyxAssistantUpdate } from "../voice/system-prompt.js";
+import { buildShopAssistantPayload, isSpeechToSpeechTenant, speechToSpeechSettings } from "../voice/voice-mode.js";
 import { withTimeout } from "../application/retry.js";
 import { TelnyxVoiceRoutingClient } from "./telnyx.js";
 
@@ -19,7 +20,19 @@ async function synchronize(store: Store, env: Environment, config: BusinessConfi
   const update = async (value: BusinessConfig) => {
     if (env.DEMO_MODE || !assistantId) return;
     if (!env.TELNYX_API_KEY) throw new Error("Voice configuration is unavailable");
-    const response = await withTimeout(fetcher(`https://api.telnyx.com/v2/ai/assistants/${encodeURIComponent(assistantId)}`, { method: "POST", headers: { authorization: `Bearer ${env.TELNYX_API_KEY}`, "content-type": "application/json" }, body: JSON.stringify(buildTelnyxAssistantUpdate(value, env.PUBLIC_BASE_URL, { voice: env.TELNYX_VOICE })) }), 8_000);
+    const url = `https://api.telnyx.com/v2/ai/assistants/${encodeURIComponent(assistantId)}`;
+    const headers = { authorization: `Bearer ${env.TELNYX_API_KEY}`, "content-type": "application/json" };
+    let body: Record<string, unknown>;
+    const s2s = speechToSpeechSettings(env);
+    if (isSpeechToSpeechTenant(s2s, value.tenantId) && value.tenantId !== env.DEFAULT_TENANT_ID) {
+      // Opt-in speech-to-speech shop (src/voice/voice-mode.ts): read the assistant for its backend text model.
+      const current = await withTimeout(fetcher(url, { headers }), 8_000);
+      if (!current.ok) throw new Error(`Voice configuration read failed with HTTP ${current.status}`);
+      body = buildShopAssistantPayload(value, env.PUBLIC_BASE_URL, { voice: env.TELNYX_VOICE, speechToSpeech: s2s, existing: await current.json() as Record<string, unknown> }).payload;
+    } else {
+      body = buildTelnyxAssistantUpdate(value, env.PUBLIC_BASE_URL, { voice: env.TELNYX_VOICE });
+    }
+    const response = await withTimeout(fetcher(url, { method: "POST", headers, body: JSON.stringify(body) }), 8_000);
     if (!response.ok) throw new Error(`Voice configuration update failed with HTTP ${response.status}`);
   };
   await update(config);

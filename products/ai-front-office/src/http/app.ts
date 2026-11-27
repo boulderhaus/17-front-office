@@ -53,6 +53,8 @@ import type { OwnerSession } from "../security/owner-auth.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hasUsablePassword, hashOwnerPassword, isPasswordless, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, ownerSessionIssuedAt, PASSWORDLESS_HASH, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
 import { createOwnerSignIn, GOOGLE_SIGN_IN_CALLBACK, isSignInState, safeNext, verifiedSignupEmail, type PendingSignup } from "./owner-sign-in.js";
 import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
+import { speechToSpeechSettings } from "../voice/voice-mode.js";
+import { isVoiceLabTenant } from "../application/voice-lab.js";
 import { MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_ROUTES, toolFailure, toolLimitReached, withinToolBudget, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
 import { callScreeningSetting, ensureCallEndCallback, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
 import { AMD_ENDED_EVENT, FORWARDING_CHECK_SPEECH, forwardingCheckState, GREETING_ENDED_EVENT, SCREENING_DETECTED_EVENT, TelnyxForwardingClient } from "../adapters/telnyx-forwarding.js";
@@ -2927,7 +2929,7 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         try {
           assistantId = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "provisioned_assistant_id");
           if (!assistantId) {
-            assistantId = await provisioner.createAssistant({ tenantId: account.tenantId, businessName: config.businessName, assistantUpdate: buildTelnyxAssistantUpdate(config, dependencies.env.PUBLIC_BASE_URL, { voice: dependencies.env.TELNYX_VOICE }) });
+            assistantId = await provisioner.createAssistant({ tenantId: account.tenantId, businessName: config.businessName, assistantUpdate: buildTelnyxAssistantUpdate(config, dependencies.env.PUBLIC_BASE_URL, { voice: dependencies.env.TELNYX_VOICE }), speechToSpeech: speechToSpeechSettings(dependencies.env) });
             await dependencies.store.saveIntegrationSecret(account.tenantId, "telnyx", "provisioned_assistant_id", assistantId);
           }
           inboundNumber = await dependencies.store.getIntegrationSecret(account.tenantId, "telnyx", "inbound_number");
@@ -4887,6 +4889,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     if (tenantId !== dependencies.env.DEFAULT_TENANT_ID) {
       // Voice goes live without carrier texting approval (10DLC): texts are held until it lands (TelnyxSmsAdapter).
       if (!dependencies.env.LIVE_PROVIDER_PROOF_AT) throw new HttpError(503, "Commercial provider prerequisites are not satisfied");
+      // The complimentary voice lab shop (scripts/voice-lab-line.ts) answers its one lab line; it never sends anything.
+      if (await isVoiceLabTenant(dependencies.store, tenantId)) return;
       const account = await dependencies.store.getOwnerAccountByTenant(tenantId);
       const subscription = await dependencies.store.getSubscription(tenantId);
       if (account?.status !== "active") throw new HttpError(503, "Shop activation is not complete");
