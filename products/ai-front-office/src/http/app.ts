@@ -39,7 +39,7 @@ import { localDate, parseDaysOff } from "../domain/days-off.js";
 import { apiCall, apiDashboard, apiSettings, apiTask, CALL_STEP_FIELDS, maskedPhone, settingsForm, textsOn, type ApiCallDetail, type ApiPlan } from "./owner-api-model.js";
 import { approvedAnswer } from "../domain/approved-answer.js";
 import { isExplicitHumanRequest } from "../domain/human-request.js";
-import { saveAssistantConfig } from "../adapters/assistant-config.js";
+import { resolvesToSpeechToSpeech, saveAssistantConfig } from "../adapters/assistant-config.js";
 import { DataDeletionService } from "../application/data-deletion.js";
 import { TeamService } from "../application/team-service.js";
 import { formatEmailBody } from "../adapters/resend.js";
@@ -54,7 +54,7 @@ import type { OwnerSession } from "../security/owner-auth.js";
 import { clearOwnerSessionCookie, createPasswordResetToken, hasUsablePassword, hashOwnerPassword, isPasswordless, hashPasswordResetToken, mintOwnerSession, ownerSessionCookie, ownerSessionIssuedAt, PASSWORDLESS_HASH, sessionMatchesAccount, verifyOwnerCsrf, verifyOwnerPassword, verifyOwnerSession } from "../security/owner-auth.js";
 import { createOwnerSignIn, GOOGLE_SIGN_IN_CALLBACK, isSignInState, safeNext, verifiedSignupEmail, type PendingSignup } from "./owner-sign-in.js";
 import { buildTelnyxAssistantUpdate, buildTelnyxGreeting, buildVoiceSystemPrompt, SPAM_CATEGORIES, TRANSFER_RECORDING_NOTICE } from "../voice/system-prompt.js";
-import { isSpeechToSpeechTenant, speechToSpeechInstructionsFit, speechToSpeechSettings } from "../voice/voice-mode.js";
+import { speechToSpeechInstructionsFit, speechToSpeechSettings } from "../voice/voice-mode.js";
 import { isVoiceLabTenant } from "../application/voice-lab.js";
 import { FAILED_TOOL_STATUSES, MAX_PROVIDER_CALL_ID_LENGTH, TOOL_DEADLINE_MS, TOOL_FAILED_EVENT, TOOL_ROUTES, toolFailure, toolLimitReached, toolSwitchedOff, withinToolBudget, type ToolFailure, type ToolLimitReason, type VoiceToolName } from "../voice/tool-results.js";
 import { callScreeningSetting, ensureCallEndCallback, ensureInboundCallScreening, NumberUnavailableError, TelnyxProvisioner } from "../adapters/telnyx-provisioning.js";
@@ -2244,18 +2244,26 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     await dependencies.store.withLock(`config:${account.tenantId}`, async () => {
     const current = await dependencies.store.getConfig(account.tenantId);
     const updated = configFromForm(current, form, "owner", dependencies.clock.now());
+    if (!dependencies.env.DIRECT_BOOKING_BETA) updated.bookingMode = "confirm";
+    if (!dependencies.env.WARM_TRANSFER_BETA) updated.warmTransferEnabled = false;
+    // Before anything is written. The speaking voice reads about 10,000 characters of instructions
+    // (S2S_INSTRUCTION_LIMIT_CHARS). Only a save that changes "What Otto does on a call" (a switch or a question)
+    // is ever refused for that, and only when all of this holds: the shop really is on the speaking voice, its
+    // instructions fit today, and they would not fit after. The refusal names what to shorten. Every other save
+    // goes as it always has (past the limit, the shop falls back to the standard voice by itself).
+    const savedSteps = normalizeCallSteps(current.callSteps);
+    const newSteps = normalizeCallSteps(updated.callSteps);
+    const newQuestions = normalizeCustomQuestions(updated.customQuestions);
+    const callStepsChanged = CALL_STEP_KEYS.some((key) => savedSteps[key] !== newSteps[key])
+      || normalizeCustomQuestions(current.customQuestions).join("\n") !== newQuestions.join("\n");
+    if (callStepsChanged
+      && speechToSpeechInstructionsFit(buildVoiceSystemPrompt(current)) && !speechToSpeechInstructionsFit(buildVoiceSystemPrompt(updated))
+      && await resolvesToSpeechToSpeech(dependencies.store, dependencies.env, account.tenantId, dependencies.fetcher)) {
+      throw new HttpError(400, newQuestions.length > 0 ? TOO_MUCH_FOR_A_CALL : TOO_MUCH_WITHOUT_QUESTIONS);
+    }
     if (updated.operationMode !== current.operationMode || updated.answerAfterRings !== current.answerAfterRings) await rememberLegacyTestedFor(account.tenantId, current, updated.operationMode);
     // So "Keep my phone ringing first" can put back what they had (after hours stays after hours).
     if (updated.operationMode === "always" && current.operationMode !== "always") await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "mode_before_every_call", current.operationMode);
-    if (!dependencies.env.DIRECT_BOOKING_BETA) updated.bookingMode = "confirm";
-    if (!dependencies.env.WARM_TRANSFER_BETA) updated.warmTransferEnabled = false;
-    // The speaking voice reads about 10,000 characters of instructions (S2S_INSTRUCTION_LIMIT_CHARS). A save that
-    // would take this shop past that is refused in plain words, instead of quietly putting the shop back on the
-    // standard voice. A shop already past it (long price lists from before) can still save.
-    if (isSpeechToSpeechTenant(speechToSpeechSettings(dependencies.env), account.tenantId)
-      && speechToSpeechInstructionsFit(buildVoiceSystemPrompt(current)) && !speechToSpeechInstructionsFit(buildVoiceSystemPrompt(updated))) {
-      throw new HttpError(400, TOO_MUCH_FOR_A_CALL);
-    }
     updated.flatMonthlyPriceCents = current.flatMonthlyPriceCents;
     updated.planId = current.planId ?? "solo";
     updated.includedCalls = current.includedCalls;
@@ -5272,8 +5280,10 @@ function serviceAreaMessage(errors: string[]): string {
     : "Add at least one city and state or 5-digit ZIP.";
 }
 
-/** Settings save: the change would make Otto's instructions longer than the speaking voice reads. */
-export const TOO_MUCH_FOR_A_CALL = "That’s more than Otto can keep in mind on a call. Shorten your questions, prices or answers, then save again.";
+/** Settings save: a change to "What Otto does on a call" would make Otto's instructions longer than the speaking voice reads. */
+export const TOO_MUCH_FOR_A_CALL = "That’s more than Otto can keep in mind on a call. Shorten your questions, then save again.";
+/** The same, for a shop with no questions of its own: a step switched back on brought back long prices or answers. */
+export const TOO_MUCH_WITHOUT_QUESTIONS = "That’s more than Otto can keep in mind on a call. Shorten your prices or answers, then save again.";
 
 function configFromForm(current: BusinessConfig, form: URLSearchParams, surface: "owner" | "platform", now: Date = new Date()): BusinessConfig {
   const required = (name: string): string => {

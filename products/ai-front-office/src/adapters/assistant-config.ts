@@ -2,7 +2,7 @@ import type { Environment } from "../config/environment.js";
 import type { BusinessConfig } from "../domain/models.js";
 import type { Store } from "../ports.js";
 import { buildTelnyxAssistantUpdate } from "../voice/system-prompt.js";
-import { buildShopAssistantPayload, isPayloadRejection, isSpeechToSpeechTenant, speechToSpeechConfigured, speechToSpeechSettings, standardVoicePayload, voiceRequest, type ShopAssistantPayload } from "../voice/voice-mode.js";
+import { buildShopAssistantPayload, isPayloadRejection, isSpeechToSpeechTenant, resolveVoiceMode, speechToSpeechConfigured, speechToSpeechSettings, standardVoicePayload, voiceRequest, type ShopAssistantPayload } from "../voice/voice-mode.js";
 import { redactError, withTimeout } from "../application/retry.js";
 import { TelnyxVoiceRoutingClient } from "./telnyx.js";
 
@@ -13,6 +13,32 @@ export async function saveAssistantConfig(store: Store, env: Environment, config
   // Callers serialize read/modify/write under config:<tenant>. Also serialize
   // the external update and rollback so provider revisions cannot interleave.
   return store.withLock(`assistant-config:${config.tenantId}`, () => synchronize(store, env, config, fetcher, log));
+}
+
+/**
+ * True when a save for this shop is really sent in speech-to-speech mode: the shop is asked to be (by the default or
+ * the opt-in list, and not opted out), the speaking model and its voice are set, and a backend text model can be
+ * found (TELNYX_S2S_BACKEND_MODEL, else the one the shop's assistant uses now, which is read). Anything else is
+ * false, a read that fails included: the save then goes exactly as it always has. Reads only; changes nothing.
+ */
+export async function resolvesToSpeechToSpeech(store: Store, env: Environment, tenantId: string, fetcher: typeof fetch = fetch): Promise<boolean> {
+  const s2s = speechToSpeechSettings(env);
+  if (!isSpeechToSpeechTenant(s2s, tenantId) || !s2s.model || !s2s.voice) return false;
+  const resolved = (existing: Record<string, unknown> | null): boolean => {
+    try { return resolveVoiceMode(s2s, tenantId, existing).kind === "speech_to_speech"; } catch { return false; }
+  };
+  if (s2s.backendModel) return resolved(null);
+  if (env.DEMO_MODE || !env.TELNYX_API_KEY) return false;
+  try {
+    const route = await store.getProviderRouteForTenant("telnyx", tenantId);
+    const assistantId = route?.externalId ?? (tenantId === env.DEFAULT_TENANT_ID ? env.TELNYX_ASSISTANT_ID : undefined);
+    if (!assistantId) return false;
+    const found = await withTimeout(fetcher(`https://api.telnyx.com/v2/ai/assistants/${encodeURIComponent(assistantId)}`, { headers: { authorization: `Bearer ${env.TELNYX_API_KEY}`, "content-type": "application/json" } }), 8_000);
+    if (!found.ok) return false;
+    return resolved(await found.json() as Record<string, unknown>);
+  } catch {
+    return false;
+  }
 }
 
 async function synchronize(store: Store, env: Environment, config: BusinessConfig, fetcher: typeof fetch, log: Log): Promise<void> {

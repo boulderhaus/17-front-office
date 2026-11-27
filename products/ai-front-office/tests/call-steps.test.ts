@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
+import { resolvesToSpeechToSpeech } from "../src/adapters/assistant-config.js";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
 import { parseEmailBody } from "../src/adapters/resend.js";
 import { toTelnyxCallSummary, asTelnyxConversationEnded, parseTelnyxEnvelope } from "../src/adapters/telnyx.js";
@@ -13,7 +14,7 @@ import {
 } from "../src/domain/call-steps.js";
 import { createDemoConfig, normalizeBusinessConfig } from "../src/domain/config.js";
 import type { BookingAttempt, BusinessConfig } from "../src/domain/models.js";
-import { createRequestHandler, TOO_MUCH_FOR_A_CALL } from "../src/http/app.js";
+import { createRequestHandler, TOO_MUCH_FOR_A_CALL, TOO_MUCH_WITHOUT_QUESTIONS } from "../src/http/app.js";
 import { apiCall, apiSettings, CALL_STEP_FIELDS, settingsForm } from "../src/http/owner-api-model.js";
 import type { Clock } from "../src/ports.js";
 import { buildTelnyxTools, buildVoiceSystemPrompt, FEE_OWNER_CONFIRMS_LINE } from "../src/voice/system-prompt.js";
@@ -856,7 +857,7 @@ describe("call steps: the owner settings API", () => {
       answers.push(`Topic ${index}: ${text}`);
       left -= `- Topic ${index}: ${text}\n`.length;
     }
-    const nearLimit = { ...shopOwner.settings.values, approvedKnowledge: answers.join("\n") };
+    const nearLimit = { ...shopOwner.settings.values, approvedKnowledge: answers.join("\n"), operationMode: "overflow" };
     expect((await shopOwner.put(nearLimit)).status).toBe(200);
     const saved = await store.getConfig(shopOwner.tenantId);
     expect(speechToSpeechInstructionsFit(buildVoiceSystemPrompt(saved))).toBe(true);
@@ -865,11 +866,113 @@ describe("call steps: the owner settings API", () => {
     expect(tooMuch.status).toBe(400);
     const message = (await tooMuch.json() as { error: string }).error;
     expect(message).toBe(TOO_MUCH_FOR_A_CALL);
-    expect(message).not.toMatch(/prompt|model|Telnyx|token|character/i);
+    expect(message).toBe("That’s more than Otto can keep in mind on a call. Shorten your questions, then save again.");
+    expect(message).not.toMatch(/prompt|model|Telnyx|token|character|\u2014/i);
+    expect(await store.getConfig(shopOwner.tenantId)).toEqual(saved);
+    // Refused before anything is written: the same save also asked for another answering mode and a new mobile.
+    const mobileBefore = await store.getIntegrationSecret(shopOwner.tenantId, "notifications", "owner-primary");
+    const alsoOther = await shopOwner.put({ ...nearLimit, customQuestions: [LONGEST("First"), LONGEST("Second"), LONGEST("Third")].join("\n"), operationMode: "always", answerAfterRings: 5, ownerPhone: "(941) 555-0177" });
+    expect(alsoOther.status).toBe(400);
+    expect(saved.operationMode).toBe("overflow");
+    expect(await store.getIntegrationSecret(shopOwner.tenantId, "forwarding", "mode_before_every_call")).toBeNull();
+    expect(await store.getIntegrationSecret(shopOwner.tenantId, "notifications", "owner-primary")).toBe(mobileBefore);
     expect(await store.getConfig(shopOwner.tenantId)).toEqual(saved);
     // One short question fits, and so does switching steps off (which only shortens it).
     expect((await shopOwner.put({ ...nearLimit, customQuestions: "Own or rent?" })).status).toBe(200);
     expect((await shopOwner.put({ ...nearLimit, customQuestions: [LONGEST("First"), LONGEST("Second"), LONGEST("Third")].join("\n"), stepOfferTimes: false, stepScreenSalesCalls: false })).status).toBe(200);
+  });
+
+  it("only ever refuses a change to the call steps or questions: any other save goes as it always has", async () => {
+    await start({ TELNYX_VOICE_MODE: "speech_to_speech", TELNYX_S2S_MODEL: "synthetic/speech-model", TELNYX_S2S_VOICE: "SyntheticVoice.One", TELNYX_S2S_BACKEND_MODEL: "synthetic/text-model" });
+    const shopOwner = await signUp();
+    const long = "Our crews are licensed and insured in every county we serve. ".repeat(60).slice(0, 900).trim();
+    const answers = (count: number) => Array.from({ length: count }, (_, index) => `Topic ${index}: ${long}`).join("\n");
+    // A shop that never touches the card adds answers until it is past the limit: saved, as on main (it falls
+    // back to the standard voice by itself), and never told to shorten questions it doesn't have.
+    const withQuestion = { ...shopOwner.settings.values, customQuestions: "Own or rent?" };
+    expect((await shopOwner.put(withQuestion)).status).toBe(200);
+    expect(speechToSpeechInstructionsFit(buildVoiceSystemPrompt(await store.getConfig(shopOwner.tenantId)))).toBe(true);
+    const past = await shopOwner.put({ ...withQuestion, approvedKnowledge: answers(8) });
+    expect(past.status).toBe(200);
+    expect(speechToSpeechInstructionsFit(buildVoiceSystemPrompt(await store.getConfig(shopOwner.tenantId)))).toBe(false);
+    // Back under it with prices switched off and a long price list saved.
+    const prices = Array.from({ length: 8 }, (_, index) => `Price ${index}: ${long}`).join("\n");
+    const pricesOff = { ...shopOwner.settings.values, customQuestions: "", stepQuotePrices: false, priceSnippets: prices };
+    expect((await shopOwner.put(pricesOff)).status).toBe(200);
+    expect(speechToSpeechInstructionsFit(buildVoiceSystemPrompt(await store.getConfig(shopOwner.tenantId)))).toBe(true);
+    // Switching prices back on is a call-steps change that no longer fits: refused, naming what there is to shorten.
+    const backOn = await shopOwner.put({ ...pricesOff, stepQuotePrices: true });
+    expect(backOn.status).toBe(400);
+    expect((await backOn.json() as { error: string }).error).toBe(TOO_MUCH_WITHOUT_QUESTIONS);
+    expect(TOO_MUCH_WITHOUT_QUESTIONS).toBe("That’s more than Otto can keep in mind on a call. Shorten your prices or answers, then save again.");
+    expect((await store.getConfig(shopOwner.tenantId)).callSteps).toMatchObject({ quotePrices: false });
+  });
+
+  it("never refuses for a shop that isn't really on the speaking voice", async () => {
+    const long = "Our crews are licensed and insured in every county we serve. ".repeat(60).slice(0, 900).trim();
+    const nearly = (base: BusinessConfig): string => {
+      // As in the test above: fill the answers until three long questions no longer fit.
+      const room = S2S_INSTRUCTION_LIMIT_CHARS - buildVoiceSystemPrompt(base).length + section(buildVoiceSystemPrompt(base), "HOW YOU SOUND").length - 400;
+      const list: string[] = [];
+      for (let left = room, index = 0; left > 40; index += 1) {
+        const text = long.slice(0, Math.min(900, left - 20)).trim();
+        list.push(`Topic ${index}: ${text}`);
+        left -= `- Topic ${index}: ${text}\n`.length;
+      }
+      return list.join("\n");
+    };
+    const three = [LONGEST("First"), LONGEST("Second"), LONGEST("Third")].join("\n");
+    // The mode is on, but: the speaking model isn't set; its voice isn't set; no backend text model can be found
+    // (none set, and no assistant to read one from). Each of these shops gets the standard voice anyway.
+    const cannot: Array<Record<string, string>> = [
+      { TELNYX_VOICE_MODE: "speech_to_speech", TELNYX_S2S_VOICE: "SyntheticVoice.One", TELNYX_S2S_BACKEND_MODEL: "synthetic/text-model" },
+      { TELNYX_VOICE_MODE: "speech_to_speech", TELNYX_S2S_MODEL: "synthetic/speech-model", TELNYX_S2S_BACKEND_MODEL: "synthetic/text-model" },
+      { TELNYX_VOICE_MODE: "speech_to_speech", TELNYX_S2S_MODEL: "synthetic/speech-model", TELNYX_S2S_VOICE: "SyntheticVoice.One" },
+      { TELNYX_VOICE_MODE: "speech_to_speech", TELNYX_S2S_MODEL: "synthetic/speech-model", TELNYX_S2S_VOICE: "SyntheticVoice.One", TELNYX_S2S_BACKEND_MODEL: "synthetic/speech-model" },
+    ];
+    for (const [index, overrides] of cannot.entries()) {
+      if (index > 0) await new Promise<void>((resolve) => server.close(() => resolve()));
+      await start(overrides);
+      const shopOwner = await signUp();
+      const nearLimit = { ...shopOwner.settings.values, approvedKnowledge: nearly(await store.getConfig(shopOwner.tenantId)) };
+      expect((await shopOwner.put(nearLimit)).status, JSON.stringify(overrides)).toBe(200);
+      const before = buildVoiceSystemPrompt(await store.getConfig(shopOwner.tenantId));
+      expect((await shopOwner.put({ ...nearLimit, customQuestions: three })).status, JSON.stringify(overrides)).toBe(200);
+      const after = buildVoiceSystemPrompt(await store.getConfig(shopOwner.tenantId));
+      expect([speechToSpeechInstructionsFit(before), speechToSpeechInstructionsFit(after)], JSON.stringify(overrides)).toEqual([true, false]);
+    }
+  });
+
+  it("knows a shop is on the speaking voice from its assistant when no backend model is set, and never guesses", async () => {
+    const liveEnv = (overrides: Record<string, string> = {}) => ({ ...demoEnvironment({ TELNYX_API_KEY: "synthetic-provider-key", TELNYX_ASSISTANT_ID: "assistant_demo", PUBLIC_BASE_URL: BASE, TELNYX_VOICE_MODE: "speech_to_speech", TELNYX_S2S_MODEL: "synthetic/speech-model", TELNYX_S2S_VOICE: "SyntheticVoice.One", ...overrides }), DEMO_MODE: false });
+    const memory = new InMemoryStore();
+    await memory.saveConfig(createDemoConfig("shop_live"));
+    await memory.saveProviderRoute({ provider: "telnyx", externalId: "assistant_live", tenantId: "shop_live", createdAt: "2026-11-27T00:00:00.000Z", updatedAt: "2026-11-27T00:00:00.000Z" });
+    const telnyx = (answer: () => Response | Promise<Response>) => {
+      const calls: string[] = [];
+      const fetcher = (async (input: string | URL, init?: RequestInit) => { calls.push(`${init?.method ?? "GET"} ${String(input)}`); return answer(); }) as typeof fetch;
+      return { calls, fetcher };
+    };
+    const assistant = { data: { model: "synthetic/text-model", delegation_settings: null } };
+    // The assistant's own text model is the backend: one read, nothing written.
+    const read = telnyx(() => Response.json(assistant));
+    expect(await resolvesToSpeechToSpeech(memory, liveEnv(), "shop_live", read.fetcher)).toBe(true);
+    expect(read.calls).toEqual(["GET https://api.telnyx.com/v2/ai/assistants/assistant_live"]);
+    // A read that fails, an assistant with no text model, or no assistant at all: not known, so never refused.
+    expect(await resolvesToSpeechToSpeech(memory, liveEnv(), "shop_live", telnyx(() => new Response("no", { status: 500 })).fetcher)).toBe(false);
+    expect(await resolvesToSpeechToSpeech(memory, liveEnv(), "shop_live", telnyx(() => { throw new Error("network"); }).fetcher)).toBe(false);
+    expect(await resolvesToSpeechToSpeech(memory, liveEnv(), "shop_live", telnyx(() => Response.json({ data: { model: null } })).fetcher)).toBe(false);
+    expect(await resolvesToSpeechToSpeech(memory, liveEnv(), "shop_other", read.fetcher)).toBe(false);
+    // Opted out, the mode off, or the model unset: no read at all.
+    const none = telnyx(() => Response.json(assistant));
+    expect(await resolvesToSpeechToSpeech(memory, liveEnv({ TELNYX_STANDARD_TENANT_IDS: "shop_live" }), "shop_live", none.fetcher)).toBe(false);
+    expect(await resolvesToSpeechToSpeech(memory, liveEnv({ TELNYX_VOICE_MODE: "standard" }), "shop_live", none.fetcher)).toBe(false);
+    expect(await resolvesToSpeechToSpeech(memory, liveEnv({ TELNYX_S2S_MODEL: "" }), "shop_live", none.fetcher)).toBe(false);
+    expect(none.calls).toEqual([]);
+    // A backend model in the environment needs no read; on the opt-in list counts too.
+    expect(await resolvesToSpeechToSpeech(memory, liveEnv({ TELNYX_S2S_BACKEND_MODEL: "synthetic/text-model" }), "shop_live", none.fetcher)).toBe(true);
+    expect(await resolvesToSpeechToSpeech(memory, liveEnv({ TELNYX_VOICE_MODE: "standard", TELNYX_S2S_TENANT_IDS: "shop_live", TELNYX_S2S_BACKEND_MODEL: "synthetic/text-model" }), "shop_live", none.fetcher)).toBe(true);
+    expect(none.calls).toEqual([]);
   });
 
   it("never blocks a shop on the standard voice, or one already past the limit, from saving", async () => {
