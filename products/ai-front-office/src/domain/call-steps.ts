@@ -67,9 +67,11 @@ export function feeGate(config: Pick<BusinessConfig, "callSteps" | "requireDiagn
 
 /**
  * The step a voice tool belongs to, or null for a tool no switch removes (save_intake, triage_call, request_human).
- * get_approved_answer serves two steps: prices and answers.
+ * get_approved_answer serves two steps: prices and answers. No tool belongs to "Ask for the address": that switch
+ * changes the instructions and what save_intake and book_slot ask for, never a whole tool.
  */
-export function stepForTool(tool: string, kind?: "price" | "answer"): CallStepKey | null {
+export type ToolStepKey = Exclude<CallStepKey, "askAddress">;
+export function stepForTool(tool: string, kind?: "price" | "answer"): ToolStepKey | null {
   if (tool === "mark_spam_call") return "screenSalesCalls";
   if (tool === "check_service_area") return "checkServiceArea";
   if (tool === "check_availability" || tool === "book_slot") return "offerTimes";
@@ -78,7 +80,7 @@ export function stepForTool(tool: string, kind?: "price" | "answer"): CallStepKe
 }
 
 /** The step that switches this tool off for this shop, or null when the shop still has it. */
-export function switchedOffStep(config: Pick<BusinessConfig, "callSteps">, tool: string, kind?: "price" | "answer"): CallStepKey | null {
+export function switchedOffStep(config: Pick<BusinessConfig, "callSteps">, tool: string, kind?: "price" | "answer"): ToolStepKey | null {
   const step = stepForTool(tool, kind);
   return step && !callSteps(config)[step] ? step : null;
 }

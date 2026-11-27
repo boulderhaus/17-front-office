@@ -4,7 +4,7 @@
  * unreadable. So every failure is a short, plain-English result the model can act on, and each tool
  * has a per-call budget after which it gets a fixed "stop, take a message" result.
  */
-import type { CallStepKey } from "../domain/call-steps.js";
+import type { ToolStepKey } from "../domain/call-steps.js";
 
 export type VoiceToolName =
   | "save_intake"
@@ -107,14 +107,14 @@ export function toolLimitReached(tool: VoiceToolName): ToolFailure {
   };
 }
 
-const SWITCHED_OFF: Readonly<Record<CallStepKey, { say: string; instruction: string }>> = {
+/** The status of a tool whose step the shop switched off: an ok=false answer that is not a failure. */
+export const SWITCHED_OFF_STATUS = "switched_off";
+
+/** Each step a voice tool can belong to (stepForTool). "Ask for the address" has no tool of its own, so no line here. */
+const SWITCHED_OFF: Readonly<Record<ToolStepKey, { say: string; instruction: string }>> = {
   screenSalesCalls: {
     say: "Sorry about that. How can I help?",
     instruction: "This shop takes a message from every caller. The call was not marked as spam: do not call mark_spam_call again, and do not hang up on a live person. Take a name, a number and a short message, and save it with save_intake. Only a recording with no live person on the line gets a short goodbye and the built-in hangup.",
-  },
-  askAddress: {
-    say: "Okay.",
-    instruction: "This shop does not take an address. Do not ask for one; continue the intake.",
   },
   checkServiceArea: {
     say: "Okay.",
@@ -138,8 +138,8 @@ const SWITCHED_OFF: Readonly<Record<CallStepKey, { say: string; instruction: str
  * The result when a shop switched this tool's step off ("What Otto does on a call") and the tool is called anyway:
  * the same ok=false shape, with a line to say and what to do next. Its status is not a failed one: nothing broke.
  */
-export function toolSwitchedOff(step: CallStepKey): ToolFailure {
-  return { ok: false, status: "switched_off", ...SWITCHED_OFF[step] };
+export function toolSwitchedOff(step: ToolStepKey): ToolFailure {
+  return { ok: false, status: SWITCHED_OFF_STATUS, ...SWITCHED_OFF[step] };
 }
 
 /**

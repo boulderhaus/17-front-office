@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { resolvesToSpeechToSpeech } from "../src/adapters/assistant-config.js";
+import { renderOwnerApp, renderOwnerCallRecord } from "../src/admin/owner-app.js";
 import { InMemoryCalendar, InMemoryStore } from "../src/adapters/in-memory.js";
 import { parseEmailBody } from "../src/adapters/resend.js";
 import { toTelnyxCallSummary, asTelnyxConversationEnded, parseTelnyxEnvelope } from "../src/adapters/telnyx.js";
@@ -11,17 +12,18 @@ import { demoEnvironment } from "../src/config/environment.js";
 import { buildCallPath } from "../src/domain/call-path.js";
 import {
   CALL_STEP_KEYS, callSteps, cleanCustomQuestion, DEFAULT_CALL_STEPS, feeGate, hiddenCallPathSteps, MAX_CUSTOM_QUESTION_LENGTH,
-  mergeExtraAnswers, normalizeCallSteps, normalizeCustomQuestions, pairExtraAnswers, parseCustomQuestions, switchedOffStep, type CallSteps,
+  mergeExtraAnswers, normalizeCallSteps, normalizeCustomQuestions, pairExtraAnswers, parseCustomQuestions, stepForTool, switchedOffStep, type CallSteps,
 } from "../src/domain/call-steps.js";
 import { createDemoConfig, normalizeBusinessConfig } from "../src/domain/config.js";
-import type { BookingAttempt, BusinessConfig } from "../src/domain/models.js";
+import type { BookingAttempt, BusinessConfig, CallRecord } from "../src/domain/models.js";
 import { createRequestHandler, TOO_MUCH_FOR_A_CALL, TOO_MUCH_WITHOUT_QUESTIONS } from "../src/http/app.js";
+import { ANSWERS_COLUMN, callsCsv } from "../src/http/calls-csv.js";
 import { apiCall, apiSettings, CALL_STEP_FIELDS, settingsForm } from "../src/http/owner-api-model.js";
 import type { Clock } from "../src/ports.js";
 import { buildTelnyxTools, buildVoiceSystemPrompt, FEE_OWNER_CONFIRMS_LINE, NO_ADDRESS_EMERGENCY_LINE, RECORDING_HANGUP_LINE } from "../src/voice/system-prompt.js";
-import { FAILED_TOOL_STATUSES, toolSwitchedOff } from "../src/voice/tool-results.js";
+import { FAILED_TOOL_STATUSES, SWITCHED_OFF_STATUS, toolSwitchedOff } from "../src/voice/tool-results.js";
 import { buildShopAssistantPayload, S2S_INSTRUCTION_LIMIT_CHARS, speechToSpeechInstructionsFit, type SpeechToSpeechSettings } from "../src/voice/voice-mode.js";
-import { EXPECTED_TOOL_EVENTS, toolEventResults, verdict } from "../scripts/selftest-call.js";
+import { EXPECTED_TOOL_EVENTS, toolEventResults, toolResults, verdict } from "../scripts/selftest-call.js";
 import { cleanQuestion, joinQuestions, LOCKED_STEPS, PRICES_OFF_FEE_ON_HINT, MAX_QUESTION_LENGTH as WEB_MAX_QUESTION_LENGTH, MAX_QUESTIONS as WEB_MAX_QUESTIONS, questionLength, questionProblem, questionRows, questionsLine, STEP_ROWS, stepState, TRANSFER_ROW } from "../web/src/lib/call-steps.js";
 import { DEFAULT_SHOPS } from "./support/call-step-shops.js";
 
@@ -586,6 +588,37 @@ describe("call steps: the server refuses a tool the shop switched off", () => {
     expect((await store.listNotifications(call.id)).length).toBeGreaterThan(0);
   });
 
+  it("the post-deploy selftest never counts a switched-off answer as a failed tool", () => {
+    // What the lab call's history holds for a callback-only shop: Otto tried a tool whose step is off, the server
+    // said so with ok=false, and nothing failed. A tool that really failed still fails the run.
+    const history = (status: string) => [
+      { role: "assistant", tool_calls: [{ id: "t1", function: { name: "triage_call" } }] },
+      { role: "tool", tool_call_id: "t1", text: JSON.stringify({ ok: true, severity: "routine" }) },
+      { role: "assistant", tool_calls: [{ id: "t2", function: { name: "check_availability" } }] },
+      { role: "tool", tool_call_id: "t2", text: JSON.stringify({ ...toolSwitchedOff("offerTimes"), status, wrap_up: false }) },
+      { role: "assistant", tool_calls: [{ id: "t3", function: { name: "save_intake" } }] },
+      { role: "tool", tool_call_id: "t3", text: JSON.stringify({ status: "saved", missing: [] }) },
+    ];
+    const tools = toolResults(history("switched_off"));
+    expect(tools).toEqual([{ name: "triage_call", status: "ok", ok: true }, { name: "check_availability", status: "switched_off", ok: true }, { name: "save_intake", status: "saved", ok: true }]);
+    expect(verdict({ tools, finalized: true, finalizeMs: 5_000, usageBefore: 3, usageAfter: 4 })).toMatchObject({ pass: true, tools_ok: true });
+    for (const failed of ["unavailable", "limit_reached"]) {
+      const broken = toolResults(history(failed));
+      expect(broken[1], failed).toMatchObject({ status: failed, ok: false });
+      expect(verdict({ tools: broken, finalized: true, finalizeMs: 5_000, usageBefore: 3, usageAfter: 4 }).tools_ok, failed).toBe(false);
+    }
+    // Only that one status is let through: any other ok=false answer is still a failure.
+    expect(toolResults([{ role: "tool", tool_call_id: "t9", text: JSON.stringify({ ok: false }) }])[0]).toMatchObject({ ok: false });
+    expect(toolSwitchedOff("quotePrices").status).toBe(SWITCHED_OFF_STATUS);
+    // Every step that owns a tool has a line to say; the address step owns none.
+    for (const [name, kind] of [["mark_spam_call"], ["check_service_area"], ["check_availability"], ["book_slot"], ["get_approved_answer", "price"], ["get_approved_answer", "answer"]] as Array<[string, ("price" | "answer")?]>) {
+      const step = stepForTool(name, kind)!;
+      expect(step, name).not.toBe("askAddress");
+      expect(toolSwitchedOff(step).say.length, name).toBeGreaterThan(3);
+    }
+    for (const name of ["save_intake", "triage_call", "request_human", "transfer", "hangup"]) expect(stepForTool(name), name).toBeNull();
+  });
+
   it("the post-deploy selftest asks only for the steps no shop can switch off", () => {
     expect([...EXPECTED_TOOL_EVENTS]).toEqual(["call.triage", "call.intake"]);
     // A callback-only, no-address shop on a speech-to-speech line: triage and intake ran, nothing failed.
@@ -765,6 +798,53 @@ describe("call steps: answers to the shop's own questions", () => {
     // A label with no question mark gets a colon; a call with no answers is the same email as before.
     expect(parseEmailBody(ownerCallEmail("Otto: New call: Dana\n- No heat\n\nCall back: https://front-office.example/c/x", "https://front-office.example/app/settings", [{ question: "Gate code", answer: "1234" }])).text.split("\n")[2]).toBe("- Gate code: 1234");
     expect(ownerCallEmail("Otto: New call: Dana\n- No heat\n\nCall back: https://front-office.example/c/x", "https://front-office.example/app/settings", [])).toBe(ownerCallEmail("Otto: New call: Dana\n- No heat\n\nCall back: https://front-office.example/c/x", "https://front-office.example/app/settings"));
+  });
+});
+
+describe("call steps: the older owner pages and the spreadsheet", () => {
+  const now = "2026-01-15T08:10:00.000Z";
+  const account = { id: "33333333-3333-4333-8333-333333333333", tenantId: "demo", email: "owner@example.test", displayName: "Owner", passwordHash: "synthetic", role: "owner" as const, status: "active" as const, createdAt: now, updatedAt: now };
+  const call = (fields: Partial<CallRecord["fields"]> = {}, id = "44444444-4444-4444-8444-444444444444"): CallRecord => ({
+    id, tenantId: "demo", providerCallId: `v3:${id}`, fromNumber: "+15555550110", fromNumberVerified: true, startedAt: "2026-01-15T08:00:00.000Z", endedAt: "2026-01-15T08:02:00.000Z", durationSeconds: 120,
+    fields: { callerName: "Dana Miller", companyName: null, callbackNumber: "+15555550110", address: null, serviceCategory: "other", serviceCategoryConfidence: 1, problemDescription: "Bike needs a tune-up", equipmentDetails: null, accessNotes: null, requestedStart: null, explicitSlotConfirmation: false, diagnosticFeeAccepted: false, humanRequested: false, confidence: 0.9, ...fields },
+    emergency: null, outcome: "pending_confirmation", transcript: "Caller: My bike needs a tune-up.", recordingUrl: null, consentState: "unknown", billingDisposition: "billable", qualityFlags: [], createdAt: now, updatedAt: now,
+  });
+  const usage = { periodStart: "2026-01-01T00:00:00.000Z", periodEnd: "2026-02-01T00:00:00.000Z", billableCalls: 1, excludedSpamCalls: 0, excludedShortCalls: 0, billedMinutes: 2 };
+  const record = (config: BusinessConfig, item: CallRecord) => renderOwnerCallRecord({ account, config, call: item, booking: null, callbackTask: null, notifications: [], recordingUrl: null, csrf: "synthetic", canDelete: true, path: null });
+  const today = (config: BusinessConfig, item: CallRecord) => renderOwnerApp({ account, config, calls: [item], tasks: [], usage, googleConnected: true, subscription: null, csrf: "synthetic", checkoutConfigured: false, checkoutUrl: null, now, selectedCallId: item.id });
+  const addressRow = /<dt>Address<\/dt><dd>([^<]*)<\/dd>/;
+
+  it("show no \"Address: Not confirmed\" for a shop that takes no address, and keep the row everywhere else", () => {
+    const noAddress = { ...createDemoConfig(), callSteps: { ...DEFAULT_CALL_STEPS, askAddress: false } };
+    for (const page of [record, today]) {
+      // No address asked for and none given: no row at all.
+      expect(page(noAddress, call())).not.toMatch(addressRow);
+      // One the caller gave anyway (or from before the switch) still shows.
+      expect(addressRow.exec(page(noAddress, call({ address: "42 Oak Ave, Springfield, IL 62704" })))?.[1]).toBe("42 Oak Ave, Springfield, IL 62704");
+      // A shop that asks for the address still sees that one is missing.
+      expect(addressRow.exec(page(createDemoConfig(), call()))?.[1]).toBe("Not confirmed");
+      expect(addressRow.exec(page({ ...createDemoConfig(), callSteps: { ...DEFAULT_CALL_STEPS, checkServiceArea: false } }, call()))?.[1]).toBe("Not confirmed");
+    }
+  });
+
+  it("the calls spreadsheet carries the answers in one column, and is unchanged for a shop that never asked a question", () => {
+    const zone = "America/New_York";
+    const plain = callsCsv([call()], zone, new Date(now));
+    expect(plain.split("\r\n")[0]).toBe('\ufeff"Date","Caller name","Callback number","Address","Problem","Outcome"');
+    expect(plain.split("\r\n")[1]).toMatch(/"Bike needs a tune-up","Needs your OK"$/);
+    const answered = call({ extraAnswers: [{ question: QUESTIONS[0]!, answer: "We own it" }, { question: "Gate code", answer: "1234 | then \"star\"" }] }, "55555555-5555-4555-8555-555555555555");
+    const lines = callsCsv([{ ...answered, startedAt: "2026-01-15T08:05:00.000Z" }, call()], zone, new Date(now)).trimEnd().split("\r\n");
+    expect(lines[0]).toBe(`\ufeff"Date","Caller name","Callback number","Address","Problem","Outcome","${ANSWERS_COLUMN}"`);
+    expect(ANSWERS_COLUMN).toBe("Your questions");
+    // "question: answer" pairs joined with " | "; quotes doubled like every other cell; a call with none is empty.
+    expect(lines[1]).toMatch(/,"Needs your OK","Do you own or rent the home\?: We own it \| Gate code: 1234 \/ then ""star"""$/);
+    expect(lines[2]).toMatch(/,"Needs your OK",""$/);
+    // A caller (or a question) can't plant a formula: the cell is guarded like the others, and stays one line.
+    for (const start of ["=", "+", "-", "@"]) {
+      const planted = callsCsv([call({ extraAnswers: [{ question: `${start}HYPERLINK("https://example.test")`, answer: "=1+1\n=2+2" }] })], zone, new Date(now)).trimEnd().split("\r\n");
+      expect(planted).toHaveLength(2);
+      expect(planted[1], start).toMatch(new RegExp(`,"'\\${start}HYPERLINK\\(""https://example\\.test""\\): =1\\+1 =2\\+2"$`));
+    }
   });
 });
 
