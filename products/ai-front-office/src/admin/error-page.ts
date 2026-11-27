@@ -1,4 +1,4 @@
-import { NO_SWITCH_LINK, OLDER_IPHONE_LINE, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS } from "../domain/forwarding-steps.js";
+import { CODE_FAILED_LINK, OLDER_IPHONE_LINE, RETRY_CODE_LINE, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, SWITCH_INSTEAD_LINE } from "../domain/forwarding-steps.js";
 import { escapeHtml as e } from "./render.js";
 
 /**
@@ -24,8 +24,9 @@ a:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
  * number, big, with the one way this phone can dial it (Android: a link that opens the dialer filled in; iPhone:
  * press and hold to copy, then paste in Phone). One code per screen, never two that could be dialed as one string:
  * when our test found every call still forwarded, the clear code comes first and "Next" opens the shop's code.
- * `settings` (every call, or clearing it, on a GSM-family iPhone): the iPhone's Call Forwarding switch instead, with
- * the code flow unchanged behind "Don't see Call Forwarding?" (forwardingSteps decides).
+ * The code is always the page. `settings` (every call, or clearing it, on a GSM-family iPhone; forwardingSteps
+ * decides) only adds a closed "Code didn't work?" under it: the code again, typed, then the iPhone's Call Forwarding
+ * switch. Nothing about Settings shows until the owner opens it.
  */
 export function renderDialHandoff(input: { businessNumber: string; code: string | null; what: string; dialLink: string | null; device: "iphone" | "android" | "other"; family?: string | null; clearFirst?: { code: string; dialLink: string | null } | null; nextHref?: string | null; settings?: { ottoNumber: string; digits: string } | null; retry?: "clear" | "clear_again" | "instead" | "help" | null }): string {
   const clearing = Boolean(input.clearFirst);
@@ -45,11 +46,13 @@ export function renderDialHandoff(input: { businessNumber: string; code: string 
   const codeFlow = retry === "help" && !clearing ? `<p class="next">Ring first didn’t work on this phone.</p><p>On the setup page, tap Call me now and our team helps you set it up. Or pick Otto answers every call.</p>`
     : !code ? `<p>${e(input.what)}</p>`
     : `${lead ? `<p class="next">${e(lead)}</p>` : ""}<div class="code">${e(code)}</div>${how}<p class="muted">${e(after)}</p>${next}`;
-  const settings = input.settings && code ? input.settings : null;
+  const settings = input.settings && code && !(retry === "help" && !clearing) ? input.settings : null;
+  // The other way, closed until the owner taps it: the fix with no Settings first, then the switch.
+  const switchSteps = !settings ? ""
+    : clearing ? `<p>${e(SETTINGS_OFF_LINE)}</p>`
+      : `<div class="num">${e(settings.ottoNumber)}</div><button type="button" class="back" data-copy="${e(settings.digits)}" hidden>Copy number</button><p class="muted" data-copy-hint>Press and hold the number, tap Copy.</p><ol>${SETTINGS_ON_STEPS.map((step) => `<li>${e(step)}</li>`).join("")}</ol><p class="muted">${e(OLDER_IPHONE_LINE)}</p>`;
   const body = !settings ? codeFlow
-    : clearing
-      ? `<p class="next">Every call is still being forwarded. Turn that off first.</p><p>${e(SETTINGS_OFF_LINE)}</p>${next}<details><summary>${e(NO_SWITCH_LINK)}</summary><div class="alt-flow">${codeFlow.replace(next, "")}</div></details>`
-      : `<div class="num">${e(settings.ottoNumber)}</div><button type="button" class="back" data-copy="${e(settings.digits)}" hidden>Copy number</button><p class="muted" data-copy-hint>Press and hold the number, tap Copy.</p><ol>${SETTINGS_ON_STEPS.map((step) => `<li>${e(step)}</li>`).join("")}</ol><p class="muted">${e(OLDER_IPHONE_LINE)}</p><details><summary>${e(NO_SWITCH_LINK)}</summary><div class="alt-flow">${codeFlow}</div></details><script src="/assets/copy-number.js" defer></script>`;
+    : `${codeFlow}<details><summary>${e(CODE_FAILED_LINK)}</summary><div class="alt-flow"><p>${e(RETRY_CODE_LINE)}</p><p class="next">${e(SWITCH_INSTEAD_LINE)}</p>${switchSteps}</div></details>${clearing ? "" : `<script src="/assets/copy-number.js" defer></script>`}`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><meta name="referrer" content="no-referrer"><meta name="format-detection" content="telephone=no"><title>Your forwarding code · Call Otto</title><style>
 :root{--ink:#0b2545;--paper:#faf8f1;--muted:#5d6676;--yellow:#e9f447;--border:#e6e1d3}
 *{box-sizing:border-box}body{margin:0;min-height:100dvh;background:var(--paper);color:var(--ink);font:400 17px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -68,5 +71,5 @@ details summary{display:flex;align-items:center;min-height:44px;cursor:pointer;f
 details .alt-flow{display:grid;gap:14px;padding-top:6px}
 summary:focus-visible,button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
 a:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
-</style></head><body><header><span class="brand"><b aria-hidden="true">CO</b><span>Call&nbsp;<em>Otto</em></span></span></header><main><h1>${retry === "help" && !clearing ? "Let’s set up" : clearing ? "Clear the old forwarding on" : retry === "instead" ? "Try this code on" : settings ? "Forward calls on" : "Dial this on"} ${e(input.businessNumber)}</h1>${body}<p class="muted">This link stops working soon. Get a new one on your computer.</p></main></body></html>`;
+</style></head><body><header><span class="brand"><b aria-hidden="true">CO</b><span>Call&nbsp;<em>Otto</em></span></span></header><main><h1>${retry === "help" && !clearing ? "Let’s set up" : clearing ? "Clear the old forwarding on" : retry === "instead" ? "Try this code on" : "Dial this on"} ${e(input.businessNumber)}</h1>${body}<p class="muted">This link stops working soon. Get a new one on your computer.</p></main></body></html>`;
 }

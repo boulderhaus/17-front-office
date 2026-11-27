@@ -159,6 +159,38 @@ describe("the phone page follows the same steps", () => {
     expect(page).toContain("Ring first didn’t work on this phone.");
     expect(page).toContain("Call me now");
     expect(page).not.toContain('<div class="code">');
+    // Even if a caller passed the switch: help shows no code, so there is no "Code didn't work?" either.
+    expect(renderDialHandoff({ ...base, device: "iphone", code: "**61*13125550100**10#", retry: "help", settings: { ottoNumber: "(312) 555-0100", digits: "3125550100" } })).not.toContain("<details");
+  });
+
+  it("the code is always the page; the iPhone switch sits closed under it, code again first", () => {
+    const main = (page: string) => page.slice(page.indexOf("<main>"));
+    const settings = { ottoNumber: "(312) 555-0100", digits: "3125550100" };
+    const page = main(renderDialHandoff({ ...base, device: "iphone", code: "**21*13125550100#", settings }));
+    expect(page).toContain("<h1>Dial this on (941) 555-0100</h1>");
+    const [code, other] = page.split("<details><summary>Code didn’t work?</summary>");
+    expect(code).toContain('<div class="code">**21*13125550100#</div>');
+    expect(code).toContain("Your carrier shows a gray box that says Succeeded. Tap Dismiss and come back here.");
+    expect(code).not.toMatch(/Settings|Call Forwarding|Live Voicemail|Screen Unknown/);
+    expect(other).toMatch(/^<div class="alt-flow"><p>First try the code once more, typed by hand\.<\/p><p class="next">Or use the switch on your iPhone:<\/p><div class="num">\(312\) 555-0100<\/div>/);
+    expect(other).toContain("<li>Open Settings › Apps › Phone.</li>");
+    expect(page).not.toContain("<details open");
+    // No switch for this step (ring first, Verizon, Android): no link at all, and no Settings anywhere.
+    const plain = main(renderDialHandoff({ ...base, device: "iphone", code: "**61*13125550100**10#" }));
+    expect(plain).not.toContain("<details");
+    expect(plain).not.toMatch(/Settings|Call Forwarding|Live Voicemail|Screen Unknown/);
+  });
+
+  it("clearing: the clear code and Next stay the page; turning the switch off is behind the same link", () => {
+    const page = renderDialHandoff({ ...base, device: "iphone", code: "**61*13125550100**10#", clearFirst: { code: "##002#", dialLink: null }, nextHref: "/d/abc?step=code", settings: { ottoNumber: "(312) 555-0100", digits: "3125550100" } });
+    const [code, other] = page.slice(page.indexOf("<main>")).split("<details><summary>Code didn’t work?</summary>");
+    expect(code).toContain("<h1>Clear the old forwarding on (941) 555-0100</h1>");
+    expect(code).toContain('<div class="code">##002#</div>');
+    expect(code).toContain('<a class="back alt" href="/d/abc?step=code">Next: your code</a>');
+    expect(code).not.toMatch(/Settings|Call Forwarding/);
+    expect(other).toContain("<p>Open Settings › Apps › Phone. Tap Call Forwarding and turn it off.</p>");
+    expect(other).not.toContain("copy-number.js");
+    expect(page.match(/class="code"/g)).toHaveLength(1);
   });
 });
 

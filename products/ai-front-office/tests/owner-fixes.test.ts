@@ -132,29 +132,37 @@ describe("owner app fixes (walk 70039f169)", () => {
     const sent = await post("/api/app/line/handoff/email");
     expect(sent.status).toBe(200);
     expect(await sent.json()).toEqual({ sentTo: "qr-mail@synthetic.example" });
-    const email = [...store.notifications.values()].find((item) => item.destinationRef === "email:qr-mail@synthetic.example" && item.body.includes("forwarding steps"));
-    // Every call on a GSM-family number: the iPhone Settings switch steps, the same words as the screens, Otto's number as digits.
-    expect(email?.body).toContain("On an iPhone, Otto's number is 3125550147:");
-    expect(email?.body).toContain("1. Open Settings › Apps › Phone.");
-    expect(email?.body).toContain("3. Tap Forward To and paste the number.");
+    const email = [...store.notifications.values()].find((item) => item.destinationRef === "email:qr-mail@synthetic.example" && item.body.includes("forwarding code"));
+    // Every call on a GSM-family number: the same email as every other carrier. The link to the code page, and never
+    // phone Settings steps (2026-11-27: an owner is never sent into Settings to set forwarding up).
+    expect(email?.body).toContain("Your Call Otto forwarding code");
+    expect(email?.body).toContain("Open this on the phone your customers call. It shows your code and how to dial it:");
+    expect(email?.body).not.toMatch(/Settings|Call Forwarding|Live Voicemail|Screen Unknown/);
     expect(email?.body).not.toContain("**21");
     const link = /http:\/\/127\.0\.0\.1:8787(\/d\/[A-Za-z0-9]{8})/.exec(email?.body ?? "")?.[1];
     expect(link).toBeTruthy();
     at = new Date(now.getTime() + 3 * 60 * 60_000);
     const page = await (await fetch(`${baseUrl}${link}`, { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148" } })).text();
-    // iPhone, every call: the Settings switch is the way (no gray box), Otto's number with a Copy button.
-    expect(page).toContain("Forward calls on (941) 555-0180");
-    expect(page).toContain('<div class="num">(312) 555-0147</div>');
-    expect(page).toContain('data-copy="3125550147"');
-    expect(page).toContain("<li>Open Settings › Apps › Phone.</li><li>Tap Call Forwarding and turn it on.</li><li>Tap Forward To and paste the number.</li>");
+    // iPhone, every call: the code is the page, with the heads-up about the gray box the carrier shows.
+    expect(page).toContain("Dial this on (941) 555-0180");
+    expect(page).not.toContain("Forward calls on");
+    const [codePart, fallback] = page.split("<details><summary>Code didn’t work?</summary>");
+    expect(codePart).toContain('<div class="code">**21*13125550147#</div>');
+    expect(codePart).toContain("tap Paste, then Call");
+    expect(codePart).toContain("gray box that says Succeeded. Tap Dismiss");
+    // Nothing about Settings until the owner opens the quiet link under the code.
+    expect(codePart!.slice(codePart!.indexOf("<main>"))).not.toMatch(/Settings|Call Forwarding|Live Voicemail|Screen Unknown|class="num"/);
+    expect(page).not.toContain("<details open");
+    // Behind it: the code again first (typed), then the iPhone's switch with Otto's number and a Copy button.
+    expect(fallback).toBeTruthy();
+    expect(fallback!.indexOf("First try the code once more, typed by hand.")).toBeGreaterThan(0);
+    expect(fallback!.indexOf("Or use the switch on your iPhone:")).toBeGreaterThan(fallback!.indexOf("First try the code once more, typed by hand."));
+    expect(fallback).toContain('<div class="num">(312) 555-0147</div>');
+    expect(fallback).toContain('data-copy="3125550147"');
+    expect(fallback).toContain("<li>Open Settings › Apps › Phone.</li><li>Tap Call Forwarding and turn it on.</li><li>Tap Forward To and paste the number.</li>");
+    expect(fallback).not.toContain("gray box");
     expect(page).toContain('<script src="/assets/copy-number.js" defer></script>');
-    // The code flow stays, unchanged, behind the quiet link (and only there does the gray box come up).
-    const [switchPart, fallback] = page.split("<details><summary>Don’t see Call Forwarding?</summary>");
-    expect(switchPart).not.toContain("gray box");
-    expect(switchPart).not.toContain("**21");
-    expect(fallback).toContain("**21*13125550147#");
-    expect(fallback).toContain("tap Paste, then Call");
-    expect(fallback).toContain("gray box that says Succeeded. Tap Dismiss");
+    expect(page.match(/class="code"/g)).toHaveLength(1);
     expect(page).not.toContain("tel:");
     expect((await fetch(`${baseUrl}/assets/copy-number.js`)).status).toBe(200);
     // Android keeps today's code flow, no switch.
@@ -178,7 +186,8 @@ describe("owner app fixes (walk 70039f169)", () => {
     expect(page).toContain("Dial this on (941) 555-0182");
     expect(page).toContain("*723125550149");
     expect(page).not.toContain("Call Forwarding");
-    // Ring first on a GSM iPhone: still the code, with the heads-up about the gray box.
+    // Ring first on a GSM iPhone: the code alone, with the heads-up about the gray box. No switch does ring first,
+    // so there is no quiet link, and nothing about Settings, Live Voicemail or screening anywhere on the page.
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "AT&T Mobility", lineType: "mobile", family: "gsm", chosen: false }));
     await store.saveConfig({ ...await store.getConfig(account.tenantId), operationMode: "overflow" });
     const ring = await (await fetch(`${baseUrl}${link}`, { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148" } })).text();
@@ -186,6 +195,8 @@ describe("owner app fixes (walk 70039f169)", () => {
     expect(ring).toContain("**004*13125550149");
     expect(ring).toContain("gray box that says Succeeded. Tap Dismiss");
     expect(ring).not.toContain("data-copy");
+    expect(ring).not.toContain("<details");
+    expect(ring.slice(ring.indexOf("<main>"))).not.toMatch(/Settings|Call Forwarding|Live Voicemail|Screen Unknown/);
   });
 
   it("the QR page shows one code at a time: the clear code only after a test found every call still forwarded, then Next", async () => {
@@ -214,13 +225,21 @@ describe("owner app fixes (walk 70039f169)", () => {
     const next = await (await fetch(`${baseUrl}${path}?step=code`, android)).text();
     expect(next).toContain("**004*13125550146");
     expect(next).not.toContain("##002#");
-    // iPhone: clear it with the Settings switch, the clear code behind the quiet link, then Next to the ring-first code.
+    // iPhone: the same clear code first, then Next to the ring-first code. The Settings switch that also clears it is
+    // closed behind the quiet link, after "try the code once more".
     const iphone = { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148" } };
     const off = await (await fetch(`${baseUrl}${path}`, iphone)).text();
     expect(off).toContain("Clear the old forwarding on (941) 555-0179");
-    expect(off).toContain("<p>Open Settings › Apps › Phone. Tap Call Forwarding and turn it off.</p>");
-    expect(off.split("<details>")[0]).not.toContain("##002#");
-    expect(off.split("<details>")[1]).toContain('<div class="code">##002#</div>');
+    const [offCode, offSwitch] = off.split("<details><summary>Code didn’t work?</summary>");
+    expect(offCode).toContain("Every call is still being forwarded. Dial this first to clear it.");
+    expect(offCode).toContain('<div class="code">##002#</div>');
+    expect(offCode).toContain("gray box that says Succeeded. Tap Dismiss");
+    expect(offCode!.slice(offCode!.indexOf("<main>"))).not.toMatch(/Settings|Call Forwarding/);
+    expect(offSwitch).toContain("<p>First try the code once more, typed by hand.</p>");
+    expect(offSwitch).toContain("<p>Open Settings › Apps › Phone. Tap Call Forwarding and turn it off.</p>");
+    expect(offSwitch).not.toContain("##002#");
+    expect(off).not.toContain("**004*");
+    expect(off.match(/class="code"/g)).toHaveLength(1);
     expect(off.match(/Next: your code/g)).toHaveLength(1);
     const ringCode = await (await fetch(`${baseUrl}${path}?step=code`, iphone)).text();
     expect(ringCode).toContain("Dial this on (941) 555-0179");
@@ -229,23 +248,60 @@ describe("owner app fixes (walk 70039f169)", () => {
     expect(ringCode).not.toContain("Call Forwarding");
   });
 
-  it("an iPhone leaving every call for ring first turns the Settings switch off first, before any test", async () => {
+  it("an iPhone leaving an every call that a test proved clears it first by code, before any ring-first test", async () => {
     const { account, post } = await signUp("qr-leave@synthetic.example", "(941) 555-0150");
     await store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", "+13125550150");
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "business_number", "+19415550183");
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "AT&T Mobility", lineType: "mobile", family: "gsm", chosen: false }));
     await store.saveIntegrationSecret(account.tenantId, "forwarding", "confirmed_at", now.toISOString());
-    await store.saveIntegrationSecret(account.tenantId, "forwarding", "tested_for", JSON.stringify({ mode: "every-call", code: "**21*13125550150#", at: now.toISOString() }));
+    // Our own timed test proved every call on.
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "tested_for", JSON.stringify({ mode: "every-call", code: "**21*13125550150#", at: now.toISOString(), timed: true }));
     await store.saveConfig({ ...await store.getConfig(account.tenantId), operationMode: "overflow" });
     const { url } = await (await post("/api/app/line/handoff")).json() as { url: string };
     const path = new URL(url).pathname;
-    const iphone = await (await fetch(`${baseUrl}${path}`, { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148" } })).text();
-    expect(iphone).toContain("Open Settings › Apps › Phone. Tap Call Forwarding and turn it off.");
-    expect(iphone).toContain(`href="${path}?step=code"`);
+    const ua = { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148" } };
+    const iphone = await (await fetch(`${baseUrl}${path}`, ua)).text();
+    // The code that turns every call off (it clears forward-all whether a code or the iPhone switch turned it on),
+    // alone on the page; the switch only behind the quiet link.
+    const [clearCode, clearSwitch] = iphone.split("<details><summary>Code didn’t work?</summary>");
+    expect(clearCode).toContain("Clear the old forwarding on (941) 555-0183");
+    expect(clearCode).toContain('<div class="code">##002#</div>');
+    expect(clearCode).not.toContain("**004*");
+    expect(clearCode!.slice(clearCode!.indexOf("<main>"))).not.toMatch(/Settings|Call Forwarding/);
+    expect(clearCode).toContain(`href="${path}?step=code"`);
+    expect(clearSwitch).toContain("Open Settings › Apps › Phone. Tap Call Forwarding and turn it off.");
+    const ringCode = await (await fetch(`${baseUrl}${path}?step=code`, ua)).text();
+    expect(ringCode).toContain("**004*13125550150");
+    expect(ringCode).not.toContain("##002#");
+    expect(ringCode).not.toContain("<details");
     // Android is unchanged: just the ring-first code.
     const android = await (await fetch(`${baseUrl}${path}`, { headers: { "user-agent": "Mozilla/5.0 (Linux; Android 14) Chrome/130 Mobile" } })).text();
     expect(android).toContain("**004*13125550150");
     expect(android).not.toContain("##002#");
+    // A T-Mobile family iPhone clears a proven every call with the all-forwarding code, not ring first's ##004#.
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "T-Mobile USA", lineType: "mobile", family: "gsm", chosen: false }));
+    const tmobile = await (await fetch(`${baseUrl}${path}`, ua)).text();
+    expect(tmobile).toContain('<div class="code">##002#</div>');
+    expect(tmobile).not.toContain("##004#");
+  });
+
+  it("an iPhone leaving an every call no test proved gets the ring-first code alone: nothing to clear until a test says so", async () => {
+    const { account, post } = await signUp("qr-leave-unproven@synthetic.example", "(941) 555-0151");
+    await store.saveIntegrationSecret(account.tenantId, "telnyx", "inbound_number", "+13125550151");
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "business_number", "+19415550184");
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "carrier", JSON.stringify({ name: "T-Mobile USA", lineType: "mobile", family: "gsm", chosen: false }));
+    // Every call was on screen and may have been dialed, but no test passed for it (rememberLegacyTestedFor writes
+    // this), even though an older test once reached Otto.
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "confirmed_at", new Date(now.getTime() - 3_600_000).toISOString());
+    await store.saveIntegrationSecret(account.tenantId, "forwarding", "tested_for", JSON.stringify({ mode: "every-call", code: "**21*13125550151#", at: now.toISOString() }));
+    await store.saveConfig({ ...await store.getConfig(account.tenantId), operationMode: "overflow" });
+    const { url } = await (await post("/api/app/line/handoff")).json() as { url: string };
+    const page = await (await fetch(`${baseUrl}${new URL(url).pathname}`, { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148" } })).text();
+    expect(page).toContain("Dial this on (941) 555-0184");
+    expect(page).toMatch(/<div class="code">\*\*61\*13125550151\*\*10#<\/div>/);
+    expect(page).not.toContain("Clear the old forwarding");
+    expect(page).not.toContain("<details");
+    expect(page.slice(page.indexOf("<main>"))).not.toMatch(/Settings|Call Forwarding|Live Voicemail|Screen Unknown/);
   });
 
   it("Cancel ends a running test, and a test our call couldn't place says why", async () => {

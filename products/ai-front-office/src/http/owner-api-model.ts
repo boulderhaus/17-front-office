@@ -1,7 +1,7 @@
 import type { CallPath } from "../domain/call-path.js";
 import { ownerTaskReason } from "../domain/task-reason.js";
 import { forwardingInstructions } from "../adapters/telnyx-provisioning.js";
-import { CARRIER_CHOICES, forwardingChoice, forwardingPlan, mayForwardAll, NOT_FORWARDING_AFTER_MS, ringFirstSeconds, type CarrierInfo, type ForwardingChoice, type ForwardingMode, type ForwardingPlan, type TestedFor } from "../domain/forwarding.js";
+import { CARRIER_CHOICES, everyCallProven, forwardingChoice, forwardingPlan, mayForwardAll, NOT_FORWARDING_AFTER_MS, ringFirstSeconds, type CarrierInfo, type ForwardingChoice, type ForwardingMode, type ForwardingPlan, type TestedFor } from "../domain/forwarding.js";
 import { hasPlanAccess } from "../domain/billing.js";
 import { describeHours } from "../domain/hours.js";
 import { formatDaysOff, localDate, upcomingDaysOff, type DayOff } from "../domain/days-off.js";
@@ -61,6 +61,8 @@ export interface ApiDashboard {
       update: { clearFirst: string | null; leavingEveryCall: boolean } | null;
       /** Forwarding works, and the last passed test was for every call. */
       everyCallOn: boolean;
+      /** Our own timed test proved every call on: leaving it for ring first clears it first (see everyCallProven). */
+      everyCallProven: boolean;
       /** Forwarding works, and the last passed test was for today's choice and code, so its ring time is what they get. */
       codeApplied: boolean;
       /**
@@ -409,6 +411,7 @@ function lineModel(lineNumber: string | null, config: Pick<BusinessConfig, "oper
       suggested: state?.businessNumber ? null : ownerMobile,
       update,
       everyCallOn: Boolean(confirmedAt) && testedFor?.mode === "every-call",
+      everyCallProven: Boolean(confirmedAt) && everyCallProven(testedFor),
       codeApplied: Boolean(confirmedAt && plan && testedFor) && !update,
       mayForwardAll: mayForwardAll({ mode, testedFor }),
       ringFirstSeconds: state?.carrier ? ringFirstSeconds(state.carrier.family, config.answerAfterRings) : null,

@@ -10,8 +10,9 @@
  */
 export type DialPlatform = "iphone" | "android" | "phone" | "desktop"
 
-// Settings switch or code: one decision, shared with the phone page and the emailed steps (src/domain/forwarding-steps.ts).
-export { forwardingSteps, forwardToDigits, ringFirstNext, NO_SWITCH_LINK, NO_SWITCH_LINK_DESKTOP, OLDER_IPHONE_LINE, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, type ForwardingSteps, type RingFirstNext } from "../../../src/domain/forwarding-steps.js"
+// The code by default, the iPhone switch only behind a quiet link: one decision and one set of words, shared with the
+// phone page, the emailed steps and the setup helper (src/domain/forwarding-steps.ts).
+export { forwardingSteps, forwardToDigits, ringFirstNext, BACK_TO_CODE_LINK, CODE_FAILED_LINK, CODE_FAILED_LINK_DESKTOP, OLDER_IPHONE_LINE, RETRY_CODE_LINE, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, SWITCH_INSTEAD_LINE, type ForwardingSteps, type RingFirstNext } from "../../../src/domain/forwarding-steps.js"
 
 export function dialPlatform(userAgent: string): DialPlatform {
   if (/iPhone|iPad|iPod/i.test(userAgent)) return "iphone"
@@ -94,6 +95,33 @@ export function pasteLine(platform: DialPlatform): string {
   if (platform === "iphone") return "Open Phone, tap Keypad, press and hold the number line, tap Paste, then Call."
   if (platform === "desktop") return "On your phone: open Phone, tap Keypad, type the code, then Call."
   return "Open your Phone app’s keypad, paste the code, then Call."
+}
+
+/** The phone in the owner's hand, for advice about the phone's own answering. */
+export type AnswerDevice = "iphone" | "android" | "other"
+
+/**
+ * Ring first, and the phone itself (or its voicemail) took our test call: the fix that needs no phone settings, said
+ * first, right above the "Switch to Otto answers every call" button.
+ */
+export const EVERY_CALL_FIX_LINE = "Easiest fix: let Otto answer every call."
+
+/** Where the iPhone's two answering settings live, kept on one line (no-break spaces) so a "›" never starts a line. */
+export const IPHONE_PHONE_SETTINGS = "Settings\u00a0›\u00a0Apps\u00a0›\u00a0Phone"
+
+/**
+ * The phone setting that keeps ring first after such a test, in one line. Always last: under the every-call button
+ * (and, for voicemail, after "dial the code again"). Never shown before a test says so. null: nothing to say here
+ * (an iPhone that picked up the test gets its two settings as a short list instead).
+ */
+export function keepRingFirstLine(status: "phone_answers" | "voicemail", device: AnswerDevice): string | null {
+  if (status === "voicemail") {
+    if (device === "android") return null
+    return device === "iphone" ? `Still voicemail? Turn Live Voicemail off in ${IPHONE_PHONE_SETTINGS}.` : `Still voicemail? On iPhone, turn Live Voicemail off in ${IPHONE_PHONE_SETTINGS}.`
+  }
+  if (device === "iphone") return null
+  if (device === "android") return "To keep Ring my phone first, turn off call screening in your Phone app’s settings."
+  return `To keep Ring my phone first: on iPhone, ${IPHONE_PHONE_SETTINGS}, Live Voicemail off and Screen Unknown Callers Never. On Android, call screening off.`
 }
 
 /** What the phone shows once the code goes through, said right before they dial so it never looks like an error. */

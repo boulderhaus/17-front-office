@@ -1,45 +1,53 @@
 /**
- * Which way the owner turns forwarding on and off: the iPhone's own Call Forwarding switch, or a carrier code.
- * Pure, no imports: the owner app (web/src/lib/dial.ts), the phone page (/d/<id>) and the emailed steps all use it,
- * so the three always show the same thing.
+ * How the owner turns forwarding on, clears it and turns it off. Pure, no imports: the owner app
+ * (web/src/lib/dial.ts), the phone page (/d/<id>), the emailed steps and the setup helper all use it, so they always
+ * say the same thing.
  *
- * Why: a forwarding code makes an iPhone show the carrier's gray "Dismiss" box, and iOS blocks every way around it.
- * The switch in Settings › Apps › Phone › Call Forwarding (older iPhones: Settings › Phone) sets forward-all with no
- * code and no gray box. It exists on GSM-family carriers (AT&T, T-Mobile and their resellers), not on the Verizon
- * family, and it only does every call: "Ring my phone first" has no switch, so it stays a code.
+ * The rule (Brock, 2026-11-27): an owner is never sent into phone Settings to set forwarding up. Every step's default,
+ * on every device, is a carrier code they copy and dial. A code dialed on an iPhone shows the carrier's gray "Dismiss"
+ * box: iOS draws it, nothing hides it, and one line warns the owner first.
+ *
+ * The iPhone's own switch (Settings › Apps › Phone › Call Forwarding; older iPhones: Settings › Phone) is only the
+ * other way, behind a quiet link the owner taps under the code ("Code didn't work?"). It exists on GSM-family
+ * carriers (AT&T, T-Mobile and their resellers), not on the Verizon family, and it only does every call: "Ring my
+ * phone first" has no switch.
  */
 
 /** Who's setting up: an iPhone, an Android, another phone browser, or a computer (the owner then picks up the phone). */
 export type SetupDevice = "iphone" | "android" | "phone" | "desktop";
-/** The iPhone's Settings switch, or a carrier code (or, for office lines, the phone company's website). */
+/** A carrier code (for office lines, the phone company's website), or the iPhone's Settings switch. */
 export type SetupWay = "settings" | "code";
 
 export interface ForwardingSteps {
-  /** How to turn today's choice on. */
+  /** The default way to turn today's choice on. Always the code. */
   on: SetupWay;
-  /** How to clear every-call forwarding before ring first works (after a test found every call forwarded). */
+  /** The default way to clear every-call forwarding before ring first works. Always the code. */
   clear: SetupWay;
-  /** How to turn today's forwarding off ("How to turn forwarding off"). */
+  /** The default way to turn today's forwarding off ("How to turn forwarding off"). Always the code. */
   off: SetupWay;
+  /** Where the iPhone's switch can do that step too. Only ever offered behind the quiet link, never up front. */
+  iphoneSwitch: { on: boolean; clear: boolean; off: boolean };
   /**
-   * Leaving every call for ring first where every call was the Settings switch: turn the switch off first, even
-   * before a test finds it on (it beats any ring-first code, and turning it off shows no gray box).
+   * Leaving every call for ring first, once a test proved every call on, where the switch exists: clear it first,
+   * before any ring-first test (it beats any ring-first code, whether a code or the switch turned it on). Unproven,
+   * the ring-first code comes first and our timed test says whether there is anything to clear.
    */
   clearFirst: boolean;
 }
 
 /**
- * The one decision. The switch is THE way only for every call, on an iPhone (or a computer, whose steps are read on
- * the phone), with a GSM-family carrier or one we couldn't place. Verizon family, Android and office lines keep codes.
+ * The one decision. The default is the code for every step, device and carrier. The switch is the other way only on an
+ * iPhone (or a computer, whose steps are read on the phone) with a GSM-family carrier or one we couldn't place: for
+ * every call (on and off) and for clearing it. Verizon family, Android and office lines have no other way.
  */
-export function forwardingSteps(input: { device: SetupDevice; family: string | null | undefined; everyCall: boolean; leavingEveryCall?: boolean }): ForwardingSteps {
+export function forwardingSteps(input: { device: SetupDevice; family: string | null | undefined; everyCall: boolean; leavingProvenEveryCall?: boolean }): ForwardingSteps {
   const hasSwitch = (input.device === "iphone" || input.device === "desktop") && (input.family === "gsm" || input.family === "unknown" || input.family == null);
-  const settingsForEveryCall: SetupWay = hasSwitch && input.everyCall ? "settings" : "code";
   return {
-    on: settingsForEveryCall,
-    clear: hasSwitch ? "settings" : "code",
-    off: settingsForEveryCall,
-    clearFirst: hasSwitch && !input.everyCall && input.leavingEveryCall === true,
+    on: "code",
+    clear: "code",
+    off: "code",
+    iphoneSwitch: { on: hasSwitch && input.everyCall, clear: hasSwitch, off: hasSwitch && input.everyCall },
+    clearFirst: hasSwitch && !input.everyCall && input.leavingProvenEveryCall === true,
   };
 }
 
@@ -49,9 +57,9 @@ export type RingFirstRetry = "clear" | "clear_again" | "instead" | "help";
 export interface RingFirstNext {
   /** The step to show, or null when the latest test didn't find ring first failing. */
   retry: RingFirstRetry | null;
-  /** A clear step may show (the off code or the switch). "instead" and "help" clear nothing. */
+  /** A clear step may show (the off code, with the switch behind its link). "instead" and "help" clear nothing. */
   mayClear: boolean;
-  /** Clearing again is the all-forwarding code even on an iPhone: the switch was the first clear. */
+  /** Clearing again is the all-forwarding code alone, even on an iPhone: no switch behind a link this time. */
   clearByCode: boolean;
   /** No more codes: the help that exists (Call me now, a time with our team, or every call). */
   noCodes: boolean;
@@ -72,6 +80,17 @@ export function forwardToDigits(number: string): string {
   return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
 }
 
+/** The quiet link under a code: the only way to the iPhone's switch. */
+export const CODE_FAILED_LINK = "Code didn’t work?";
+/** On a computer the owner may not have an iPhone: the same link says who it's for. */
+export const CODE_FAILED_LINK_DESKTOP = "Code didn’t work on your iPhone?";
+/** Behind that link, the fix that needs no Settings comes first: a typed code works where a pasted one is blocked. */
+export const RETRY_CODE_LINE = "First try the code once more, typed by hand.";
+/** Then the switch, second. */
+export const SWITCH_INSTEAD_LINE = "Or use the switch on your iPhone:";
+/** From the switch steps back to the code. */
+export const BACK_TO_CODE_LINK = "Back to the code";
+
 export const OLDER_IPHONE_LINE = "Older iPhones: Settings › Phone.";
 /** The steps after the number is copied. */
 export const SETTINGS_ON_STEPS: readonly string[] = [
@@ -80,16 +99,3 @@ export const SETTINGS_ON_STEPS: readonly string[] = [
   "Tap Forward To and paste the number.",
 ];
 export const SETTINGS_OFF_LINE = "Open Settings › Apps › Phone. Tap Call Forwarding and turn it off.";
-/** The quiet link to the code flow: the Verizon-family and odd-carrier fallback. */
-export const NO_SWITCH_LINK = "Don’t see Call Forwarding?";
-/** On a computer the owner may not have an iPhone: the same link also says Android. */
-export const NO_SWITCH_LINK_DESKTOP = "Android, or no Call Forwarding?";
-
-/** The Settings steps as plain text, for the emailed steps (same words as the screens). */
-export function settingsStepsText(ottoNumber: string): string {
-  return [
-    `On an iPhone, Otto's number is ${forwardToDigits(ottoNumber)}:`,
-    ...SETTINGS_ON_STEPS.map((step, index) => `${index + 1}. ${step}`),
-    OLDER_IPHONE_LINE,
-  ].join("\n");
-}

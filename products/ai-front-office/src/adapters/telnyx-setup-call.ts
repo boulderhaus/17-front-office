@@ -95,7 +95,7 @@ export function setupSteps(facts: SetupCallFacts): string[] {
   const everyCallCode = facts.everyCallCode ?? (facts.forwardsAll ? facts.code : null);
   const ringFirstCode = facts.ringFirstCode ?? (facts.forwardsAll ? null : facts.code);
   // An iPhone on an AT&T or T-Mobile family line turns every call on with its own Call Forwarding switch, no code.
-  const switchWay = facts.device === "iphone" && forwardingSteps({ device: "iphone", family: facts.family, everyCall: true }).on === "settings";
+  const switchWay = facts.device === "iphone" && forwardingSteps({ device: "iphone", family: facts.family, everyCall: true }).iphoneSwitch.on;
   const digits = spoken(forwardToDigits(facts.ottoNumber));
   if (facts.code) {
     steps.push(`Ask which they want, and explain each in one sentence, every call first. Otto answers every call: no phone settings to change, Otto answers right away, and their phone won't ring for calls to this number (calls they make and texts work like before). Ring my phone first: their phone rings${ringFor ? ` for ${ringFor}` : ""} first and Otto takes the calls they miss or decline. ${facts.device === "android" ? "On Android there's nothing else to change." : iphoneFirst} Suggest every call unless they want their phone to ring. Their screen shows both choices at the top, and ${picked} is picked now; if they want the other one, they tap it and the steps on screen change to match.`);

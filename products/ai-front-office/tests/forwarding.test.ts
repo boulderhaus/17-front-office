@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { InMemoryStore } from "../src/adapters/in-memory.js";
 import { TelnyxOwnerCallSender } from "../src/adapters/telnyx-owner-call.js";
@@ -6,11 +7,11 @@ import { dialsBackToOtto } from "../src/application/forwarding-loop.js";
 import { urgentOwnerCallNotification } from "../src/application/owner-alerts.js";
 import { approvedTransferTargets } from "../src/application/transfer-policy.js";
 import { createDemoConfig } from "../src/domain/config.js";
-import { carrierFamily, forwardingChoice, forwardingOffInstruction, forwardingPlan, forwardsBackToOtto, isForwardAllCode, mayForwardAll, parseTestedFor, RING_CHOICES, ringChoicesWith, ringSeconds, type TestedFor } from "../src/domain/forwarding.js";
+import { carrierFamily, everyCallProven, forwardingChoice, forwardingOffInstruction, forwardingPlan, forwardsBackToOtto, isForwardAllCode, mayForwardAll, parseTestedFor, RING_CHOICES, ringChoicesWith, ringSeconds, type TestedFor } from "../src/domain/forwarding.js";
 import { forwardingCheckStatus, forwardingUpdate } from "../src/http/owner-api-model.js";
 import { NotificationHeldError } from "../src/ports.js";
-import { afterDialLine, codeChunks, copyText, dialHref, dialPlatform, forwardingSteps as webForwardingSteps, pasteLine, RING_CHOICES as WEB_RING_CHOICES, ringChoicesWith as webRingChoicesWith, ringSeconds as webRingSeconds, spokenCode, VERIZON_RING_LINE } from "../web/src/lib/dial.js";
-import { forwardingSteps, forwardToDigits, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, settingsStepsText, type SetupDevice } from "../src/domain/forwarding-steps.js";
+import { afterDialLine, CODE_FAILED_LINK as WEB_CODE_FAILED_LINK, codeChunks, copyText, dialHref, dialPlatform, EVERY_CALL_FIX_LINE, forwardingSteps as webForwardingSteps, IPHONE_PHONE_SETTINGS, keepRingFirstLine, pasteLine, RING_CHOICES as WEB_RING_CHOICES, ringChoicesWith as webRingChoicesWith, ringSeconds as webRingSeconds, spokenCode, VERIZON_RING_LINE } from "../web/src/lib/dial.js";
+import { BACK_TO_CODE_LINK, CODE_FAILED_LINK, CODE_FAILED_LINK_DESKTOP, forwardingSteps, forwardToDigits, RETRY_CODE_LINE, SETTINGS_OFF_LINE, SETTINGS_ON_STEPS, SWITCH_INSTEAD_LINE, type SetupDevice } from "../src/domain/forwarding-steps.js";
 import { pauseHint } from "../web/src/lib/pause-hint.js";
 import { loginReturningHere } from "../web/src/lib/login-next.js";
 import { safeNext } from "../src/http/owner-sign-in.js";
@@ -417,53 +418,153 @@ describe("timing a ring-first test", () => {
   });
 });
 
-describe("iPhone Settings switch or carrier code (forwardingSteps)", () => {
-  const steps = (device: SetupDevice, family: string | null, everyCall: boolean, leavingEveryCall = false) => forwardingSteps({ device, family, everyCall, leavingEveryCall });
+describe("the code by default, the iPhone switch only behind a link (forwardingSteps)", () => {
+  const steps = (device: SetupDevice, family: string | null, everyCall: boolean, leavingProvenEveryCall = false) => forwardingSteps({ device, family, everyCall, leavingProvenEveryCall });
+  const devices: SetupDevice[] = ["iphone", "android", "phone", "desktop"];
+  const families = ["gsm", "verizon", "office", "unknown", null];
 
-  it("every call on an iPhone with a GSM-family or unknown carrier is the Settings switch, on and off", () => {
-    expect(steps("iphone", "gsm", true)).toEqual({ on: "settings", clear: "settings", off: "settings", clearFirst: false });
-    expect(steps("iphone", "unknown", true)).toEqual({ on: "settings", clear: "settings", off: "settings", clearFirst: false });
-    expect(steps("iphone", null, true)).toEqual({ on: "settings", clear: "settings", off: "settings", clearFirst: false });
-  });
-
-  it("ring first on that iPhone stays a code (no switch for it), but clearing every call is the switch", () => {
-    expect(steps("iphone", "gsm", false)).toEqual({ on: "code", clear: "settings", off: "code", clearFirst: false });
-    expect(steps("iphone", "unknown", false)).toEqual({ on: "code", clear: "settings", off: "code", clearFirst: false });
-    // Leaving every call: switch it off first, before any test.
-    expect(steps("iphone", "gsm", false, true)).toEqual({ on: "code", clear: "settings", off: "code", clearFirst: true });
-  });
-
-  it("Verizon family (no switch on those iPhones), office lines and Android keep today's codes in both modes", () => {
-    for (const [device, family] of [["iphone", "verizon"], ["iphone", "office"], ["android", "gsm"], ["android", "verizon"], ["android", "unknown"], ["phone", "gsm"]] as const) {
-      for (const everyCall of [true, false]) expect(steps(device, family, everyCall, true)).toEqual({ on: "code", clear: "code", off: "code", clearFirst: false });
+  it("the default way to turn forwarding on, clear it and turn it off is the code: every device, carrier and choice", () => {
+    for (const device of devices) for (const family of families) for (const everyCall of [true, false]) for (const leaving of [true, false]) {
+      expect(steps(device, family, everyCall, leaving)).toMatchObject({ on: "code", clear: "code", off: "code" });
     }
   });
 
-  it("a computer shows the iPhone switch steps for every call on GSM family (the owner then picks up the phone)", () => {
-    expect(steps("desktop", "gsm", true)).toEqual({ on: "settings", clear: "settings", off: "settings", clearFirst: false });
-    expect(steps("desktop", "gsm", false)).toEqual({ on: "code", clear: "settings", off: "code", clearFirst: false });
-    expect(steps("desktop", "verizon", true)).toEqual({ on: "code", clear: "code", off: "code", clearFirst: false });
+  it("every call on an iPhone with a GSM-family or unknown carrier: the switch is the other way, on and off", () => {
+    expect(steps("iphone", "gsm", true)).toEqual({ on: "code", clear: "code", off: "code", iphoneSwitch: { on: true, clear: true, off: true }, clearFirst: false });
+    expect(steps("iphone", "unknown", true).iphoneSwitch).toEqual({ on: true, clear: true, off: true });
+    expect(steps("iphone", null, true).iphoneSwitch).toEqual({ on: true, clear: true, off: true });
+  });
+
+  it("ring first on that iPhone has no switch (code only), but clearing every call can be the switch", () => {
+    expect(steps("iphone", "gsm", false)).toEqual({ on: "code", clear: "code", off: "code", iphoneSwitch: { on: false, clear: true, off: false }, clearFirst: false });
+    expect(steps("iphone", "unknown", false).iphoneSwitch).toEqual({ on: false, clear: true, off: false });
+  });
+
+  it("clears first only when leaving an every call a test proved on; unproven, the ring-first code comes first", () => {
+    expect(steps("iphone", "gsm", false, true).clearFirst).toBe(true);
+    expect(steps("desktop", "gsm", false, true).clearFirst).toBe(true);
+    expect(steps("iphone", "gsm", false, false).clearFirst).toBe(false);
+    expect(forwardingSteps({ device: "iphone", family: "gsm", everyCall: false }).clearFirst).toBe(false);
+    // Never while every call is the choice.
+    expect(steps("iphone", "gsm", true, true).clearFirst).toBe(false);
+  });
+
+  it("proven means our own timed test for every call: a choice only picked, or a test from another phone, isn't", () => {
+    const at = "2026-11-27T15:00:00.000Z";
+    expect(everyCallProven({ mode: "every-call", code: "**21*19415550123#", at, timed: true })).toBe(true);
+    // Left every call untested (rememberLegacyTestedFor), or a ring-first test found every call still on.
+    expect(everyCallProven({ mode: "every-call", code: "**21*19415550123#", at })).toBe(false);
+    expect(everyCallProven({ mode: "every-call", code: null, at })).toBe(false);
+    expect(everyCallProven({ mode: "ring-first", code: "**004*19415550123**10#", at, timed: true, rangSeconds: 10 })).toBe(false);
+    expect(everyCallProven(null)).toBe(false);
+  });
+
+  it("Verizon family (no switch on those iPhones), office lines and Android have no other way, in both modes", () => {
+    for (const [device, family] of [["iphone", "verizon"], ["iphone", "office"], ["android", "gsm"], ["android", "verizon"], ["android", "unknown"], ["phone", "gsm"]] as const) {
+      for (const everyCall of [true, false]) expect(steps(device, family, everyCall, true)).toEqual({ on: "code", clear: "code", off: "code", iphoneSwitch: { on: false, clear: false, off: false }, clearFirst: false });
+    }
+  });
+
+  it("a computer offers the iPhone switch behind the link for every call on GSM family (the owner then picks up the phone)", () => {
+    expect(steps("desktop", "gsm", true).iphoneSwitch).toEqual({ on: true, clear: true, off: true });
+    expect(steps("desktop", "gsm", false).iphoneSwitch).toEqual({ on: false, clear: true, off: false });
+    expect(steps("desktop", "verizon", true).iphoneSwitch).toEqual({ on: false, clear: false, off: false });
   });
 
   it("the owner app uses the very same decision and words", () => {
     expect(webForwardingSteps).toBe(forwardingSteps);
+    expect(WEB_CODE_FAILED_LINK).toBe(CODE_FAILED_LINK);
   });
 
-  it("copies Otto's number as the 10 digits Forward To takes, and the emailed steps match the screens", () => {
+  it("the quiet link names no Settings, and behind it the code comes first, then the switch", () => {
+    expect(CODE_FAILED_LINK).toBe("Code didn’t work?");
+    expect(CODE_FAILED_LINK_DESKTOP).toBe("Code didn’t work on your iPhone?");
+    expect(RETRY_CODE_LINE).toBe("First try the code once more, typed by hand.");
+    expect(SWITCH_INSTEAD_LINE).toBe("Or use the switch on your iPhone:");
+    expect(BACK_TO_CODE_LINK).toBe("Back to the code");
+    for (const line of [CODE_FAILED_LINK, CODE_FAILED_LINK_DESKTOP, RETRY_CODE_LINE, SWITCH_INSTEAD_LINE, BACK_TO_CODE_LINK]) expect(line).not.toMatch(/Settings|Live Voicemail|Screen Unknown|—/);
+  });
+
+  it("copies Otto's number as the 10 digits Forward To takes", () => {
     expect(forwardToDigits("+13125550144")).toBe("3125550144");
     expect(forwardToDigits("(312) 555-0144")).toBe("3125550144");
-    expect(settingsStepsText("+13125550144")).toBe([
-      "On an iPhone, Otto's number is 3125550144:",
-      "1. Open Settings › Apps › Phone.",
-      "2. Tap Call Forwarding and turn it on.",
-      "3. Tap Forward To and paste the number.",
-      "Older iPhones: Settings › Phone.",
-    ].join("\n"));
+    expect(SETTINGS_ON_STEPS).toEqual(["Open Settings › Apps › Phone.", "Tap Call Forwarding and turn it on.", "Tap Forward To and paste the number."]);
+    expect(SETTINGS_OFF_LINE).toBe("Open Settings › Apps › Phone. Tap Call Forwarding and turn it off.");
     // The switch path never mentions the gray box: there is none.
     expect([...SETTINGS_ON_STEPS, SETTINGS_OFF_LINE].join(" ")).not.toMatch(/gray|Dismiss/i);
   });
 
-  it("keeps the gray-box heads-up for codes dialed on an iPhone (ring first, and the fallback)", () => {
+  it("the plan names the code that turns every call off, whatever today's choice", () => {
+    // T-Mobile family ring first clears missed-call rules with ##004#; forward-all (a code or the switch) needs ##002#.
+    expect(forwardingPlan("gsm", "+19415550123", "overflow", 2, { carrierName: "T-Mobile USA" })).toMatchObject({ off: "##004#", everyCallOff: "##002#" });
+    expect(forwardingPlan("gsm", "+19415550123", "overflow", 2, { carrierName: "AT&T Mobility" })).toMatchObject({ off: "##002#", everyCallOff: "##002#" });
+    expect(forwardingPlan("gsm", "+19415550123", "always")).toMatchObject({ off: "##002#", everyCallOff: "##002#" });
+    expect(forwardingPlan("verizon", "+19415550123", "overflow")).toMatchObject({ off: "*73", everyCallOff: "*73" });
+    expect(forwardingPlan("office", "+19415550123", "overflow").everyCallOff ?? null).toBeNull();
+  });
+
+  it("keeps the gray-box heads-up for every code dialed on an iPhone (iOS draws the box; nothing hides it)", () => {
     expect(afterDialLine("gsm", "iphone")).toBe("Your carrier shows a gray box that says Succeeded. Tap Dismiss and come back.");
+  });
+});
+
+describe("after a test the phone took itself: every call first, the phone's settings last", () => {
+  it("leads with the fix that needs no phone settings", () => {
+    expect(EVERY_CALL_FIX_LINE).toBe("Easiest fix: let Otto answer every call.");
+    expect(EVERY_CALL_FIX_LINE).not.toMatch(/Settings|Live Voicemail|Screen Unknown/);
+  });
+
+  it("the phone picked up the test: an iPhone gets its two settings as a list, others one line to keep ring first", () => {
+    expect(keepRingFirstLine("phone_answers", "iphone")).toBeNull();
+    expect(keepRingFirstLine("phone_answers", "android")).toBe("To keep Ring my phone first, turn off call screening in your Phone app’s settings.");
+    expect(keepRingFirstLine("phone_answers", "other")).toBe(`To keep Ring my phone first: on iPhone, ${IPHONE_PHONE_SETTINGS}, Live Voicemail off and Screen Unknown Callers Never. On Android, call screening off.`);
+  });
+
+  it("voicemail answered: Live Voicemail is the last thing said, and never on Android", () => {
+    // The path stays on one line (no-break spaces), so a "›" never starts a line on a phone.
+    expect(IPHONE_PHONE_SETTINGS.replace(/\u00a0/g, " ")).toBe("Settings › Apps › Phone");
+    expect(IPHONE_PHONE_SETTINGS).not.toContain(" ");
+    expect(keepRingFirstLine("voicemail", "iphone")).toBe(`Still voicemail? Turn Live Voicemail off in ${IPHONE_PHONE_SETTINGS}.`);
+    expect(keepRingFirstLine("voicemail", "other")).toBe(`Still voicemail? On iPhone, turn Live Voicemail off in ${IPHONE_PHONE_SETTINGS}.`);
+    expect(keepRingFirstLine("voicemail", "android")).toBeNull();
+  });
+
+  it("the card shows those settings only under the every-call button of a failed test, never in step 1", () => {
+    const card = readFileSync(new URL("../web/src/components/app/forwarding-card.tsx", import.meta.url), "utf8");
+    const stepOne = card.slice(card.indexOf('<Step n={1}'), card.indexOf('<Step n={2}'));
+    expect(stepOne).toContain("<ModeChoice");
+    expect(stepOne).not.toMatch(/IphoneSettings|KeepRingFirst|Settings|Live Voicemail/);
+    // One place renders the two-settings box: KeepRingFirst, after a phone_answers test.
+    expect(card.match(/<IphoneSettings \/>/g)).toHaveLength(1);
+    expect(card).toContain('if (status === "phone_answers" && isIphone) return <IphoneSettings />');
+    expect(card.match(/<KeepRingFirst /g)).toHaveLength(1);
+    const stepThree = card.slice(card.indexOf('<Step n={3}'), card.indexOf("</ol>"));
+    const button = stepThree.indexOf("Switch to Otto answers every call");
+    const keep = stepThree.indexOf('{fixOffer && (status === "phone_answers" || status === "voicemail") && <KeepRingFirst status={status} />}');
+    expect(stepThree.indexOf("<CheckResult")).toBeLessThan(button);
+    expect(keep).toBeGreaterThan(button);
+    // The result itself: every call first for a phone that picked up; the code again first for voicemail.
+    const result = card.slice(card.indexOf("function CheckResult"), card.indexOf("function redial"));
+    expect(result).toContain('? ["Your phone picked up the test itself.", everyCallOffer ? EVERY_CALL_FIX_LINE : settingsFix()]');
+    expect(result).toContain('? ["Your voicemail answered the test.", redial(plan.family), ...(isAndroid || everyCallOffer ? [] : ["iPhone: turn Live Voicemail off (Settings › Apps › Phone)."])]');
+  });
+
+  it("the card's step 2 is the code by default; the switch shows only after the quiet link, and every new code starts on the code", () => {
+    const card = readFileSync(new URL("../web/src/components/app/forwarding-card.tsx", import.meta.url), "utf8");
+    expect(card).toContain("const [switchWay, setSwitchWay] = useState(false)");
+    expect(card).toContain("const viaSettings = hasSwitch && switchWay");
+    expect(card).toContain("useEffect(() => { setSwitchWay(false) }, [dialCode])");
+    expect(card).toContain("{switchWay ? BACK_TO_CODE_LINK : codeFailedLink}");
+    expect(card).not.toMatch(/NO_SWITCH_LINK|Use iPhone Settings instead|codeWay/);
+    // Behind the link the code again comes first, then the switch; never the QR to the code page next to switch steps.
+    for (const name of ["function SettingsSwitch", "function SwitchOff"]) {
+      const block = card.slice(card.indexOf(name), card.indexOf("\n}\n", card.indexOf(name)));
+      expect(block.indexOf("{RETRY_CODE_LINE}")).toBeGreaterThan(0);
+      expect(block.indexOf("{SWITCH_INSTEAD_LINE}")).toBeGreaterThan(block.indexOf("{RETRY_CODE_LINE}"));
+      expect(block).not.toContain("<PhoneHandoff");
+    }
+    // Leaving a proven every call: the code that turns every call off, before any ring-first test.
+    expect(card).toContain("leavingProvenEveryCall: Boolean(business.update?.leavingEveryCall) && business.everyCallProven === true");
+    expect(card).toContain("const clearCode = forwardsAll ? plan?.off ?? null : plan?.everyCallOff ?? plan?.off ?? null");
   });
 });

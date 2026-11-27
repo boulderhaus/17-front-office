@@ -922,6 +922,8 @@ describe("owner one-tap go-live", () => {
         expect((await api("/api/app/line/mode", { mode: "overflow" })).status).toBe(200);
         expect(assistantUpdates()).toHaveLength(before + 2);
         expect((await line(made)).business).toMatchObject({ plan: { on: "**004*19415550123**10#", forwardsAll: false }, update: { clearFirst: "##002#" }, everyCallOn: true, mayForwardAll: true });
+        // Our own timed test proved every call on, so the card clears it first, with the code that turns every call off.
+        expect((await line(made)).business).toMatchObject({ everyCallProven: true, plan: { everyCallOff: "##002#" } });
 
         // A passing test records what they picked when they started it, however long it took: the owner's choice is
         // the source of truth, never the timing.
@@ -1068,7 +1070,7 @@ describe("owner one-tap go-live", () => {
         // They may have dialed **21 already. Ring my phone first, untested: the off code first, and still guarded.
         expect((await api("/api/app/line/mode", { mode: "overflow" })).status).toBe(200);
         expect(await testedFor(made)).toMatchObject({ mode: "every-call", code: "**21*19415550123#" });
-        expect(await line(made)).toMatchObject({ confirmedAt: null, business: { plan: { on: "**004*19415550123**10#" }, update: { clearFirst: "##002#", leavingEveryCall: true }, everyCallOn: false, mayForwardAll: true } });
+        expect(await line(made)).toMatchObject({ confirmedAt: null, business: { plan: { on: "**004*19415550123**10#" }, update: { clearFirst: "##002#", leavingEveryCall: true }, everyCallOn: false, everyCallProven: false, mayForwardAll: true } });
         expect(await dialsBackToOtto(store, account.tenantId, "+19415550199")).toBe(true);
         expect(await urgent()).toMatchObject({ held: true });
         expect((await api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
