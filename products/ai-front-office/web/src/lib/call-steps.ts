@@ -20,7 +20,7 @@ export const LOCKED_STEPS: Array<{ key: string; label: string; line: string }> =
 ]
 
 export const STEP_ROWS: StepRow[] = [
-  { field: "stepScreenSalesCalls", label: "End sales calls", on: "Otto says goodbye to sales calls, robocalls and wrong numbers.", off: "Otto takes a message from everyone." },
+  { field: "stepScreenSalesCalls", label: "End sales calls", on: "Otto says goodbye to sales calls, robocalls and wrong numbers.", off: "Otto takes a message from everyone. These calls count toward your plan." },
   { field: "stepAskAddress", label: "Ask for the address", on: "Otto asks where the job is.", off: "Otto never asks for an address." },
   { field: "stepCheckServiceArea", label: "Check your service area", on: "Otto checks the address against where you work.", off: "Otto takes a job at any address." },
   { field: "stepOfferTimes", label: "Offer appointment times", on: "Otto offers your open times.", off: "Otto takes the details and says you’ll call back." },

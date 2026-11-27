@@ -17,7 +17,7 @@ import type { BookingAttempt, BusinessConfig } from "../src/domain/models.js";
 import { createRequestHandler, TOO_MUCH_FOR_A_CALL, TOO_MUCH_WITHOUT_QUESTIONS } from "../src/http/app.js";
 import { apiCall, apiSettings, CALL_STEP_FIELDS, settingsForm } from "../src/http/owner-api-model.js";
 import type { Clock } from "../src/ports.js";
-import { buildTelnyxTools, buildVoiceSystemPrompt, FEE_OWNER_CONFIRMS_LINE } from "../src/voice/system-prompt.js";
+import { buildTelnyxTools, buildVoiceSystemPrompt, FEE_OWNER_CONFIRMS_LINE, RECORDING_HANGUP_LINE } from "../src/voice/system-prompt.js";
 import { FAILED_TOOL_STATUSES, toolSwitchedOff } from "../src/voice/tool-results.js";
 import { buildShopAssistantPayload, S2S_INSTRUCTION_LIMIT_CHARS, speechToSpeechInstructionsFit, type SpeechToSpeechSettings } from "../src/voice/voice-mode.js";
 import { EXPECTED_TOOL_EVENTS, toolEventResults, verdict } from "../scripts/selftest-call.js";
@@ -162,6 +162,14 @@ describe("call steps: what each switch changes in the instructions and tools", (
     expect(text).not.toContain("this line is only for service calls");
     expect(text).toContain("- Not a service call (a vendor, a salesperson, a wrong number)? Never turn them away or hang up for that: take a name, a number and a short message for the owner.");
     expect(toolNames(config)).toEqual(allTools.filter((name) => name !== "mark_spam_call"));
+    // A recording with nobody on the line can't hold the line: the built-in hangup alone, right after the rule above.
+    const style = section(text, "CONVERSATION STYLE").split("\n");
+    const at = style.findIndex((line) => line.startsWith("- Not a service call"));
+    expect(style[at + 1]).toBe(`- ${RECORDING_HANGUP_LINE}`);
+    expect(RECORDING_HANGUP_LINE).toBe(`Only when it is clearly a recording or a robocall with no live person on the line: say "Goodbye." and invoke the built-in hangup tool in the same turn. A live person always gets a message taken.`);
+    expect(toolNames(config)).toContain("hangup");
+    // A shop with the switch on has no such line: its service-call check handles those calls.
+    expect(all).not.toContain(RECORDING_HANGUP_LINE);
   });
 
   it("askAddress off: never asks for an address, and the service-area step goes with it", () => {
@@ -355,7 +363,7 @@ describe("call steps: the server refuses a tool the shop switched off", () => {
       expect(answer, name).toMatchObject({ ok: false, status: "switched_off", wrap_up: false });
       expect(String(answer.say).length, name).toBeGreaterThan(3);
     }
-    expect(answers.spam!.instruction).toContain("do not hang up");
+    expect(answers.spam!.instruction).toContain("do not hang up on a live person");
     expect(answers.times!.say).toBe("The owner will call you back to set up a time.");
     expect(answers.price!.say).toBe("The owner will go over pricing when they call you back.");
     expect(JSON.stringify(answers)).not.toContain("$89");
@@ -1023,7 +1031,8 @@ describe("call steps: the Settings card", () => {
       }
       expect(stepState(row, flags([], [TRANSFER_ROW.field]))).toEqual({ checked: true, disabled: false, hint: row.on });
     }
-    expect(stepState(STEP_ROWS[0]!, flags(["stepScreenSalesCalls"]))).toEqual({ checked: false, disabled: false, hint: "Otto takes a message from everyone." });
+    // Off, these calls are billed like any other, and the row says so.
+    expect(stepState(STEP_ROWS[0]!, flags(["stepScreenSalesCalls"]))).toEqual({ checked: false, disabled: false, hint: "Otto takes a message from everyone. These calls count toward your plan." });
   });
 
   it("shows the service-area check off and locked while the address is off, whatever was saved", () => {

@@ -110,7 +110,7 @@ export function toolLimitReached(tool: VoiceToolName): ToolFailure {
 const SWITCHED_OFF: Readonly<Record<CallStepKey, { say: string; instruction: string }>> = {
   screenSalesCalls: {
     say: "Sorry about that. How can I help?",
-    instruction: "This shop takes a message from every caller. The call was not marked as spam: do not hang up and do not call mark_spam_call again. Take a name, a number and a short message, and save it with save_intake.",
+    instruction: "This shop takes a message from every caller. The call was not marked as spam: do not call mark_spam_call again, and do not hang up on a live person. Take a name, a number and a short message, and save it with save_intake. Only a recording with no live person on the line gets a short goodbye and the built-in hangup.",
   },
   askAddress: {
     say: "Okay.",

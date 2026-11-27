@@ -27,7 +27,9 @@ export function buildVoiceSystemPrompt(config: BusinessConfig): string {
 - Never use ${SPAM_TOOL_NAME} for a possible customer, an emergency or safety concern, or an existing customer. When unsure, continue the call normally.
 
 ` : "";
-  const everyCaller = steps.screenSalesCalls ? "" : "- Not a service call (a vendor, a salesperson, a wrong number)? Never turn them away or hang up for that: take a name, a number and a short message for the owner.\n";
+  // "End sales calls" off: a live person always gets a message taken. Only a recording with nobody on the line is
+  // hung up on (the built-in hangup alone; the spam tool is gone), so a robocall can't hold the line.
+  const everyCaller = steps.screenSalesCalls ? "" : `- Not a service call (a vendor, a salesperson, a wrong number)? Never turn them away or hang up for that: take a name, a number and a short message for the owner.\n- ${RECORDING_HANGUP_LINE}\n`;
   const collect = steps.askAddress
     ? "the problem, the caller's name, the callback number, and the service address."
     : "the problem, the caller's name, and the callback number. Never ask for an address: this shop doesn't take one.";
@@ -144,6 +146,9 @@ ENDING THE CALL
  * owner confirms every appointment.
  */
 export const FEE_OWNER_CONFIRMS_LINE = "This shop has a service-call fee that you can't quote, so the owner confirms every appointment. Take the time the caller picks with book_slot (diagnostic_fee_accepted=false), never say it is booked, and say the owner will confirm it. If they ask about the fee, say the owner will go over it.";
+
+/** CONVERSATION STYLE, for a shop that switched "End sales calls" off: the one call Otto may still end itself. */
+export const RECORDING_HANGUP_LINE = `Only when it is clearly a recording or a robocall with no live person on the line: say "Goodbye." and invoke the built-in hangup tool in the same turn. A live person always gets a message taken.`;
 
 /** The tool the assistant calls to drop a vendor, solicitor, recruiter, robocall or wrong number. */
 export const SPAM_TOOL_NAME = "mark_spam_call";
