@@ -4,7 +4,7 @@ import { money, type Plan } from "../domain/plans.js";
 /**
  * What search engines and AI answers need to find Call Otto and tell it apart from look-alikes
  * (Ottomatic's "Otto Front Desk", OttoCalls, callotto.ai). Every public page credits one address, says
- * the same sentence about what Call Otto is, and names Dutchworks LLC as its maker.
+ * the same sentence about what Call Otto is. Dutchworks LLC appears only as the legal maker in JSON-LD, never in brand copy.
  */
 
 /** The one public address. The Railway URL and www both lead here, so every canonical link names it. */
@@ -13,9 +13,12 @@ export const SITE_URL = "https://callotto.co";
 /** Public pages, in the order the sitemap lists them. Owner screens, demos and call-back links stay out. */
 export const SITEMAP_PATHS = ["/", "/signup", "/privacy", "/terms"] as const;
 
-/** The same sentence everywhere Call Otto is described, built from the plan price so it never goes stale. */
+/**
+ * The same sentence everywhere Call Otto is described, built from the plan price so it never goes stale. It shows in the
+ * homepage footer and is the JSON-LD description, so visible text and structured data agree. Brand-facing, so no Dutchworks.
+ */
 export function entitySentence(monthlyCents: number): string {
-  return `Call Otto (callotto.co) is a ${money(monthlyCents)}-a-month AI answering service for solo HVAC and plumbing owners, made by ${COMPANY.legalName}.`;
+  return `Call Otto (callotto.co) is a ${money(monthlyCents)}-a-month AI answering service for HVAC, plumbing and other trades teams of 1 to 10.`;
 }
 
 const escapeAttribute = (value: string): string => value.replace(/[&<>"']/g, (character) => `&#${character.charCodeAt(0)};`);
@@ -72,7 +75,7 @@ export function structuredData(plans: readonly Plan[], fallbackMonthlyCents: num
         applicationCategory: "BusinessApplication",
         applicationSubCategory: "AI answering service",
         operatingSystem: "Web",
-        audience: { "@type": "BusinessAudience", audienceType: "Owners of HVAC, plumbing and other home-service trade businesses" },
+        audience: { "@type": "BusinessAudience", audienceType: "HVAC, plumbing and other trades teams of 1 to 10" },
         creator: maker,
         publisher: maker,
         offers: plans.length ? plans.map((plan) => offer(plan.label, plan.priceCents)) : [offer(null, base)],
