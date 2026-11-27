@@ -18,7 +18,7 @@ import type { BookingAttempt, BusinessConfig } from "../src/domain/models.js";
 import { createRequestHandler, TOO_MUCH_FOR_A_CALL, TOO_MUCH_WITHOUT_QUESTIONS } from "../src/http/app.js";
 import { apiCall, apiSettings, CALL_STEP_FIELDS, settingsForm } from "../src/http/owner-api-model.js";
 import type { Clock } from "../src/ports.js";
-import { buildTelnyxTools, buildVoiceSystemPrompt, FEE_OWNER_CONFIRMS_LINE, RECORDING_HANGUP_LINE } from "../src/voice/system-prompt.js";
+import { buildTelnyxTools, buildVoiceSystemPrompt, FEE_OWNER_CONFIRMS_LINE, NO_ADDRESS_EMERGENCY_LINE, RECORDING_HANGUP_LINE } from "../src/voice/system-prompt.js";
 import { FAILED_TOOL_STATUSES, toolSwitchedOff } from "../src/voice/tool-results.js";
 import { buildShopAssistantPayload, S2S_INSTRUCTION_LIMIT_CHARS, speechToSpeechInstructionsFit, type SpeechToSpeechSettings } from "../src/voice/voice-mode.js";
 import { EXPECTED_TOOL_EVENTS, toolEventResults, verdict } from "../scripts/selftest-call.js";
@@ -190,7 +190,13 @@ describe("call steps: what each switch changes in the instructions and tools", (
   it("askAddress off: never asks for an address, and the service-area step goes with it", () => {
     const config = shop({ askAddress: false });
     const text = buildVoiceSystemPrompt(config);
-    expect(text).toContain("- Collect, in this order, only what is still missing: the problem, the caller's name, and the callback number. Never ask for an address: this shop doesn't take one.");
+    const style = section(text, "CONVERSATION STYLE").split("\n");
+    const at = style.findIndex((line) => line.startsWith("- Collect, in this order"));
+    expect(style[at]).toBe("- Collect, in this order, only what is still missing: the problem, the caller's name, and the callback number. Never ask for an address on a normal call: this shop doesn't take one.");
+    // An address the caller volunteers is kept, and in an emergency Otto asks where they are.
+    expect(style[at + 1]).toBe(`- ${NO_ADDRESS_EMERGENCY_LINE}`);
+    expect(NO_ADDRESS_EMERGENCY_LINE).toBe("If the caller gives an address anyway, save it with save_intake service_address. In an emergency, ask where they are and save it the same way, so the owner knows where to go.");
+    expect(all).not.toContain(NO_ADDRESS_EMERGENCY_LINE);
     expect(text).not.toContain("the service address");
     expect(text).not.toContain("SERVICE AREA");
     expect(text).not.toContain("check_service_area");
@@ -198,7 +204,10 @@ describe("call steps: what each switch changes in the instructions and tools", (
     expect(text).not.toContain("numbered streets");
     expect(section(text, "SERVICES")).toBe(`SERVICES\nService categories: plumbing, drain cleaning, water heaters, other (if unsure, "other" with lower confidence).\n- Speak phone numbers in short groups.`);
     expect(toolNames(config)).toEqual(allTools.filter((name) => name !== "check_service_area"));
-    expect(tool(config, "save_intake")!.body_parameters.properties).not.toHaveProperty("service_address");
+    // save_intake keeps the address as an optional field (for an emergency); nothing requires it.
+    expect(tool(config, "save_intake")!.body_parameters.properties.service_address).toEqual({ type: "string", description: "Optional. Never ask for it on a normal call. Only an address the caller gave without being asked, or where they are in an emergency." });
+    expect(tool(config, "save_intake")!.body_parameters.required).toEqual(["problem_description"]);
+    expect(tool(shop(), "save_intake")!.body_parameters.properties.service_address).toEqual({ type: "string", description: "Full service address." });
     const book = tool(config, "book_slot")!.body_parameters;
     expect(book.properties).not.toHaveProperty("address");
     expect(book.required).toEqual(["slot_start", "caller_name", "callback_number", "service_category", "problem_description", "explicit_confirmation", "diagnostic_fee_accepted"]);
@@ -302,7 +311,7 @@ describe("call steps: what each switch changes in the instructions and tools", (
     // No questions, no fields: the default tool is untouched.
     expect(Object.keys(tool(shop(), "save_intake")!.body_parameters.properties).some((key) => key.startsWith("extra_answer_"))).toBe(false);
     // With booking off there is no "before offering any time".
-    expect(buildVoiceSystemPrompt(shop({ offerTimes: false, askAddress: false }, { customQuestions: QUESTIONS.slice(0, 1) }))).toContain("doesn't take one.\n- Then ask each of these once, one at a time, in these words.");
+    expect(buildVoiceSystemPrompt(shop({ offerTimes: false, askAddress: false }, { customQuestions: QUESTIONS.slice(0, 1) }))).toContain(`${NO_ADDRESS_EMERGENCY_LINE}\n- Then ask each of these once, one at a time, in these words.`);
   });
 });
 
@@ -328,7 +337,9 @@ describe("call steps: the instructions stay inside what the speaking voice reads
   it("no switch makes the instructions longer than today by more than a line, and most make them shorter", () => {
     const today = buildVoiceSystemPrompt(TYPICAL).length;
     for (const key of CALL_STEP_KEYS) expect(buildVoiceSystemPrompt(shop({ [key]: false })).length, key).toBeLessThan(today + 160);
-    expect(buildVoiceSystemPrompt(shop(Object.fromEntries(CALL_STEP_KEYS.map((key) => [key, false])))).length).toBeLessThan(today - 1_500);
+    // Everything off is still well over a thousand characters shorter, with the two lines such a shop gains (hang
+    // up on a recording, where the caller is in an emergency).
+    expect(buildVoiceSystemPrompt(shop(Object.fromEntries(CALL_STEP_KEYS.map((key) => [key, false])))).length).toBeLessThan(today - 1_200);
   });
 });
 
@@ -440,6 +451,39 @@ describe("call steps: the server refuses a tool the shop switched off", () => {
     const strict = await app({});
     const missing = await strict.post("/tools/save-intake", { provider_call_id: "strict", from_number: "+15555550110", problem_description: "Thermostat screen is blank", caller_name: "Dana Miller", callback_number: "+15555550110", service_category: "HVAC repair" });
     expect(missing.missing).toEqual(["service_address"]);
+  });
+
+  it("askAddress off: an emergency still tells the owner where, and a routine call never asks", async () => {
+    const store = new InMemoryStore();
+    const tenantId = "shop_walk_in";
+    await store.createOwnerWorkspace({
+      account: { id: "22222222-2222-4222-8222-222222222222", tenantId, email: "owner@example.test", displayName: "Owner", passwordHash: "synthetic", role: "owner", status: "active", createdAt: clock.now().toISOString(), updatedAt: clock.now().toISOString() },
+      config: { ...createDemoConfig(tenantId), businessName: "Synthetic Cycles", callSteps: { ...DEFAULT_CALL_STEPS, askAddress: false } },
+      ownerPhone: "+15555550100",
+    });
+    const service = new CallService(store, new InMemoryCalendar(), clock, BASE, { callbackLinkKey: "synthetic-callback-link-key-abcdefghijklmnop", ownerEmailAvailable: true });
+    // Routine: nothing about an address is missing, and one the caller volunteers is kept.
+    const routine = await service.saveIntake({ tenantId, providerCallId: "routine", fromNumber: "+15555550110", fields: { problemDescription: "Bike needs a tune-up", callerName: "Dana Miller", callbackNumber: "+15555550110", serviceCategory: "other" } });
+    expect(routine.missing).toEqual([]);
+    await service.saveIntake({ tenantId, providerCallId: "routine", fromNumber: "+15555550110", fields: { problemDescription: "Bike needs a tune-up", address: "100 Main St, Springfield, IL 62701" } });
+    expect((await store.getCallByProviderId("routine"))!.fields.address).toBe("100 Main St, Springfield, IL 62701");
+    // Emergency: Otto is told the address is still missing, then saves where the caller is.
+    const first = await service.saveIntake({ tenantId, providerCallId: "gas", fromNumber: "+15555550111", fields: { problemDescription: "I smell gas in the shop", callerName: "Sam Lee", callbackNumber: "+15555550111" } });
+    expect(first.missing).toContain("service_address");
+    const second = await service.saveIntake({ tenantId, providerCallId: "gas", fromNumber: "+15555550111", fields: { problemDescription: "I smell gas in the shop", address: "42 Oak Ave, Springfield, IL 62704" } });
+    expect(second.missing).not.toContain("service_address");
+    const call = await service.finalize({
+      webhookEventId: "end:gas", tenantId, providerCallId: "gas", fromNumber: "+15555550111", startedAt: "2026-01-15T07:58:00.000Z", endedAt: clock.now().toISOString(), durationSeconds: 120,
+      fields: { callerName: "Sam Lee", companyName: null, callbackNumber: "+15555550111", address: null, serviceCategory: null, serviceCategoryConfidence: 0, problemDescription: "I smell gas in the shop", equipmentDetails: null, accessNotes: null, requestedStart: null, explicitSlotConfirmation: false, diagnosticFeeAccepted: false, humanRequested: false, confidence: 0.9 },
+      transcript: "Caller: I smell gas in the shop.\nOtto: Please leave the building and call 911.", recordingUrl: null, consentState: "unknown",
+    });
+    expect(call.emergency?.emergency).toBe(true);
+    expect(call.fields.address).toBe("42 Oak Ave, Springfield, IL 62704");
+    // The owner's alert after the address was saved says where.
+    const alerts = (await store.listNotifications(call.id)).filter((item) => item.channel === "sms" && item.idempotencyKey.startsWith("call-summary:"));
+    expect(alerts.length).toBeGreaterThan(0);
+    expect(alerts[0]!.priority).toBe("high");
+    expect(alerts[0]!.body).toContain("- 42 Oak Ave, Springfield");
   });
 
   it("checkServiceArea off: an address outside the saved cities still books", async () => {

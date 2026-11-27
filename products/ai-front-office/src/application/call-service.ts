@@ -299,14 +299,15 @@ export class CallService {
       callback: /^\+[1-9]\d{7,14}$/.test(fields.callbackNumber ?? call.fromNumber),
       address: Boolean(fields.address?.trim()),
     });
-    // "What Otto does on a call": a shop that takes no address is never told one is missing, and the shop's own
-    // questions ("Ask every caller") count as missing until answered (never in an emergency).
+    // "What Otto does on a call": a shop that takes no address is never told one is missing on a routine call (in an
+    // emergency it is, so the owner's alert says where to go), and the shop's own questions ("Ask every caller")
+    // count as missing until answered (never in an emergency).
     const steps = callSteps(config);
     const answered = new Set((fields.extraAnswers ?? []).map((item) => item.question));
     const missing = [
       !fields.callerName?.trim() ? "caller_name" : null,
       !/^\+[1-9]\d{7,14}$/.test(fields.callbackNumber ?? call.fromNumber) ? "callback_number" : null,
-      steps.askAddress && !fields.address?.trim() ? "service_address" : null,
+      (steps.askAddress || emergency.emergency) && !fields.address?.trim() ? "service_address" : null,
       !fields.problemDescription.trim() ? "problem_description" : null,
       !fields.serviceCategory?.trim() ? "service_category" : null,
       ...(emergency.emergency ? [] : asked.map((question, index) => (answered.has(question) ? null : `extra_answer_${index + 1}`))),
