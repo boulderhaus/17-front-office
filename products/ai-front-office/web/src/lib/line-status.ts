@@ -30,7 +30,8 @@ export function staleCheck(line: LineInput): boolean {
   if (!choice || status === "calling" || status === "passed" || status === "idle") return false
   const today = line.mode === "always" ? "every-call" : "ring-first"
   // Ring first that never rang moved the code on (Try this code instead, or help): that result is still today's.
-  if (status === "forwards_all" && choice === today && today === "ring-first" && line.business.plan?.retry) return false
+  const retry = line.business.plan?.retry
+  if (status === "forwards_all" && choice === today && today === "ring-first" && (retry === "instead" || retry === "help")) return false
   return choice !== today || (code ?? null) !== (line.business.plan?.on ?? null)
 }
 

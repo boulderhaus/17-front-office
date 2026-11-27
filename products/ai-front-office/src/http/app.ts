@@ -3138,8 +3138,12 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     ]);
     const parse = <T>(value: string | null): T | null => { try { return value ? JSON.parse(value) as T : null; } catch { return null; } };
     const check = parse<ForwardingCheckRecord>(checkJson);
+    // A lookup-derived carrier is placed again with today's names (a legacy name stored as unknown becomes GSM);
+    // a carrier the owner picked stays as picked.
+    const stored = parse<CarrierInfo>(carrierJson);
+    const carrier = stored && !stored.chosen ? { ...stored, family: carrierFamily(stored.name, stored.lineType) } : stored;
     return {
-      businessNumber, carrier: parse<CarrierInfo>(carrierJson), confirmedAt, testedFor: parseTestedFor(testedForJson), ringFirstMisses: parseRingFirstMisses(missesValue),
+      businessNumber, carrier, confirmedAt, testedFor: parseTestedFor(testedForJson), ringFirstMisses: parseRingFirstMisses(missesValue),
       check: check ? { startedAt: check.startedAt, method: check.method, answeredAt: check.answeredAt ?? null, endedAt: check.endedAt ?? null, hangupCause: check.hangupCause ?? null, screenedAt: check.screenedAt ?? null, amdResult: check.amdResult ?? null, code: check.code ?? null, choice: check.choice ?? null, autoFailed: check.autoFailed === true, forwardedAfterMs: typeof check.forwardedAfterMs === "number" ? check.forwardedAfterMs : null, atOnce: check.atOnce === true, rangFirst: check.rangFirst === true } : null,
       helpRequestedAt,
       helpCall: ((call) => call?.to && call.startedAt ? { to: call.to, startedAt: call.startedAt, answeredAt: call.answeredAt ?? null, endedAt: call.endedAt ?? null, outcome: call.outcome ?? null, booked: Boolean(call.bookedAt) } : null)(readSetupCall(setupCallJson)),

@@ -691,6 +691,16 @@ describe("owner one-tap go-live", () => {
           expect(passed.business.lastTest).toMatchObject({ mode: "ring-first", rangSeconds: 10, timed: true });
         });
 
+        it("a legacy carrier name saved as unknown before these names were known is placed again; a picked carrier stays", async () => {
+          const made = await ringFirstTest("Aerial Communications");
+          const tenantId = made.account.tenantId;
+          await made.store.saveIntegrationSecret(tenantId, "forwarding", "carrier", JSON.stringify({ name: "Aerial Communications", lineType: "mobile", family: "unknown", chosen: false }));
+          const placed = await made.line();
+          expect(placed.business.plan!.on).toMatch(/^\*\*61\*/);
+          await made.store.saveIntegrationSecret(tenantId, "forwarding", "carrier", JSON.stringify({ name: "Aerial Communications", lineType: "mobile", family: "verizon", chosen: true }));
+          expect((await made.line()).business.plan!.on).not.toMatch(/^\*\*61\*/);
+        });
+
         it("AT&T family: **004 first, then clear with ##002#, then Try this code instead (**61), then help; **61 stays once it works", async () => {
           const made = await ringFirstTest("AT&T Mobility");
           expect((await made.line()).business.plan).toMatchObject({ off: "##002#", retry: null, extras: [] });

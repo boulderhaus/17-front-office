@@ -99,14 +99,17 @@ export function setupSteps(facts: SetupCallFacts): string[] {
   const digits = spoken(forwardToDigits(facts.ottoNumber));
   if (facts.code) {
     steps.push(`Ask which they want, and explain each in one sentence, every call first. Otto answers every call: no phone settings to change, Otto answers right away, and their phone won't ring for calls to this number (calls they make and texts work like before). Ring my phone first: their phone rings${ringFor ? ` for ${ringFor}` : ""} first and Otto takes the calls they miss or decline. ${facts.device === "android" ? "On Android there's nothing else to change." : iphoneFirst} Suggest every call unless they want their phone to ring. Their screen shows both choices at the top, and ${picked} is picked now; if they want the other one, they tap it and the steps on screen change to match.`);
+    // Ring first that never rang: the same next step the screen shows. "help" gives no ring-first code at all, and
+    // "instead" clears nothing first.
+    const retry = facts.forwardsAll ? null : facts.ringFirstRetry ?? null;
     const codes = [
       everyCallCode
         ? switchWay
           ? `For Otto answers every call, on this iPhone they use the Call Forwarding switch, no code. They can do it while on this call: open Settings, then Apps, then Phone. Tap Call Forwarding and turn it on. Tap Forward To and enter Otto's number, ${digits}. Older iPhones: Settings, then Phone. If they don't see Call Forwarding, the code is ${say(everyCallCode)}.`
           : `For Otto answers every call, the code is ${say(everyCallCode)}.`
         : "",
-      ringFirstCode
-        ? facts.everyCallOn && facts.offCode
+      ringFirstCode && retry !== "help"
+        ? facts.everyCallOn && facts.offCode && !retry
           ? `For Ring my phone first, every call may still be on, so they first turn forwarding off${switchWay ? " (on this iPhone: the Call Forwarding switch in Settings, then Apps, then Phone, turned off; or" : ":"} dial ${say(facts.offCode)} and press Call${switchWay ? ")" : ""}. Then they dial the ring-first code, ${say(ringFirstCode)}.`
           : `For Ring my phone first, the code is ${say(ringFirstCode)}.`
         : "",
@@ -116,7 +119,6 @@ export function setupSteps(facts: SetupCallFacts): string[] {
     if (facts.device !== "iphone") steps.push("On Android: they tap Tap to dial on their screen. The Phone app opens with the code filled in, and they tap Call. Android may ask them to confirm; that's expected.");
     if (facts.confirm) steps.push(`What they should see or hear after a code: ${facts.confirm}`);
     steps.push(`${switchWay ? "The switch works during this call. " : ""}A code can't be dialed during this call, so once they understand it, tell them to hang up, dial it, then come back to the Call Otto screen and tap Test it (or Test again). If it's on already, run start_forwarding_test yourself. With every call, their phone won't ring, and they'll see a green check in a few seconds. With ring first, their phone rings and they don't answer or decline it: they let it ring${facts.ringFirstSeconds ? ` (about ${facts.ringFirstSeconds} seconds)` : " until it stops"}, and they'll see a green check. The test times the ring, so a Decline makes it look like the phone never rang.`);
-    const retry = facts.forwardsAll ? null : facts.ringFirstRetry ?? null;
     if ((retry === "clear" || retry === "clear_again") && facts.offCode && ringFirstCode) steps.push(`Their last ring-first test reached Otto with no ring, so old forwarding is still on. First they dial ${say(facts.offCode)} and press Call${retry === "clear" && switchWay ? " (on this iPhone they can turn off the Call Forwarding switch instead)" : ""}, then the ring-first code again, ${say(ringFirstCode)}, then test again.`);
     if (retry === "instead" && ringFirstCode) steps.push(`Their last two ring-first tests reached Otto with no ring, so this phone may not take that code. Their screen now says Try this code instead: ${say(ringFirstCode)}. They dial it, then test again.`);
     if (retry === "help") steps.push(`Ring first codes didn't work on this phone after several tries. Don't give them another code. Offer Otto answers every call, or ${TEAM_FALLBACK}.`);

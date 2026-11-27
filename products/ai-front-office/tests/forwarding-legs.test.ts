@@ -23,6 +23,17 @@ describe("which GSM network a carrier name is on", () => {
     expect(carrierFamily(name, "mobile")).toBe("gsm");
   });
 
+  it.each(["Assurance Wireless", "Project Fi"])("%s is the T-Mobile family and a GSM phone", (name) => {
+    expect(gsmNetwork(name)).toBe("tmobile");
+    expect(carrierFamily(name, "mobile")).toBe("gsm");
+    expect(carrierFamily(name, null)).toBe("gsm");
+  });
+
+  it("Aio Wireless is the AT&T family and a GSM phone", () => {
+    expect(gsmNetwork("Aio Wireless")).toBe("att");
+    expect(carrierFamily("Aio Wireless", null)).toBe("gsm");
+  });
+
   it.each([null, undefined, "", "Some Regional Wireless", "Tracfone"])("%s stays generic GSM", (name) => {
     expect(gsmNetwork(name)).toBe("gsm");
   });
@@ -166,6 +177,13 @@ describe("the setup helper says the same steps", () => {
     expect(setupSteps({ ...facts, ringFirstRetry: "instead" }).join("\n")).toContain("Try this code instead: **61*13125550100**10#");
     const help = setupSteps({ ...facts, ringFirstRetry: "help" }).join("\n");
     expect(help).toContain("Don't give them another code.");
+    // Help never gives the ring-first code again, even with every call still on.
+    expect(help).not.toContain("**61*13125550100**10#");
+    expect(setupSteps({ ...facts, everyCallOn: true, ringFirstRetry: "help" }).join("\n")).not.toContain("**61*13125550100**10#");
+    // Instead clears nothing first, even though a miss records every call.
+    const instead = setupSteps({ ...facts, offCode: "##002#", everyCallOn: true, ringFirstRetry: "instead" }).join("\n");
+    expect(instead).not.toContain("they first turn forwarding off");
+    expect(instead).toContain("For Ring my phone first, the code is **61*13125550100**10#");
     expect(setupSteps(facts).join("\n")).not.toContain("Don't give them another code.");
   });
 
@@ -216,5 +234,8 @@ describe("a ring-first miss that moved the code on is still today's result", () 
     expect(staleCheck(line("help"))).toBe(false);
     // Without a next step, a result for another code is still stale.
     expect(staleCheck(line(null))).toBe(true);
+    // Clear steps keep the same code: a result for another ring time is still stale.
+    expect(staleCheck(line("clear"))).toBe(true);
+    expect(staleCheck(line("clear_again"))).toBe(true);
   });
 });

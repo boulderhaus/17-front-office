@@ -257,7 +257,7 @@ export function parseRingFirstMisses(value: string | null | undefined): number {
 }
 
 const VERIZON = /verizon|cellco|xfinity|comcast.*mobile|spectrum mobile|charter.*mobile|visible|straight ?talk.*verizon|total wireless/i;
-const GSM = /at&t|at ?& ?t|\batt\b|new cingular|cingular|cricket|t-?mobile|metro ?pcs|metro by|mint|sprint|consumer cellular|us mobile|ultra mobile|tracfone|h2o|red pocket|boost|dish wireless|google fi|aerial comm|omnipoint|voicestream|voice stream|powertel|suncom|nextel/i;
+const GSM = /at&t|at ?& ?t|\batt\b|new cingular|cingular|cricket|t-?mobile|metro ?pcs|metro by|mint|sprint|consumer cellular|us mobile|ultra mobile|tracfone|h2o|red pocket|boost|dish wireless|google fi|aerial comm|omnipoint|voicestream|voice stream|powertel|suncom|nextel|assurance wireless|project fi|aio wireless/i;
 
 export function carrierFamily(name: string | null | undefined, lineType: string | null | undefined): CarrierFamily {
   const carrier = name ?? "";
