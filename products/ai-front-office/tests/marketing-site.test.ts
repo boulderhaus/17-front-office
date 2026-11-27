@@ -124,7 +124,7 @@ describe("homepage pricing", () => {
   });
 
   it("shows the price they pay now big, with the full price struck through next to it (SITE-06)", () => {
-    for (const [plan, now, full] of [["solo", "$24.99", "$49.99"], ["team", "$89.99", "$179.99"], ["fleet", "$174.99", "$349.99"]]) {
+    for (const [plan, now, full] of [["solo", "$24.99", "$49.99"], ["team", "$74.99", "$149.99"], ["fleet", "$174.99", "$349.99"]]) {
       expect(pricing).toContain(`href="/signup?plan=${plan}">`);
       expect(pricing).toContain(`<span class="plan-price"><b>${now}</b><s><span class="vh">Regular price </span>${full}</s><small>first month, then ${full}/mo</small></span>`);
     }

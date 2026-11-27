@@ -1113,7 +1113,7 @@ describe("HTTP boundary", () => {
     expect(landingHtml).toContain("3 steps to go live");
     expect(landingHtml).not.toContain("3 taps");
     // Three plans in plain words, priced by answered calls, with the guarantee and shared calls. Pro is no longer sold.
-    for (const item of ["Solo", "Team", "Fleet", "60 answered calls a month", "About 2 a day", "250 answered calls a month", "About 8 a day", "500 answered calls a month", "About 17 a day", "$49.99", "$179.99", "$349.99", "Lead guarantee", "each extra call is&nbsp;75¢"]) expect(landingHtml).toContain(item);
+    for (const item of ["Solo", "Team", "Fleet", "60 answered calls a month", "About 2 a day", "250 answered calls a month", "About 8 a day", "500 answered calls a month", "About 17 a day", "$49.99", "$149.99", "$349.99", "Lead guarantee", "each extra call is&nbsp;75¢"]) expect(landingHtml).toContain(item);
     expect(landingHtml).not.toContain("125 answered calls a month");
     // Teammates are not free (plans are sized by team); what is true is that the plan's calls are shared.
     expect(landingHtml).not.toMatch(/team members (are )?free|teammates are (always )?free/i);

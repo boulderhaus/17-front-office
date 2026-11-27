@@ -15,7 +15,7 @@ describe("priceQuote: one price for every summary", () => {
   // [plan, unlimited, today, monthly] with the half-off first month.
   const offerTable: Array<[string, boolean, number, number]> = [
     ["solo", false, 2_499, 4_999], ["solo", true, 4_999, 9_999],
-    ["team", false, 8_999, 17_999], ["team", true, 12_749, 25_499],
+    ["team", false, 7_499, 14_999], ["team", true, 11_249, 22_499],
     ["fleet", false, 17_499, 34_999], ["fleet", true, 23_749, 47_499],
   ];
   it.each(offerTable)("%s with Unlimited %s: today %i, struck-through full price, then %i a month", (id, unlimited, today, monthly) => {

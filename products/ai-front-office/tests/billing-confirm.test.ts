@@ -8,7 +8,7 @@ import { createDemoConfig } from "../src/domain/config.js";
 import { createRequestHandler } from "../src/http/app.js";
 
 type Recorded = { method: string; url: string; body: URLSearchParams };
-const PRICES: Record<string, number> = { price_solo_synthetic: 4_999, price_team_synthetic: 17_999, price_fleet_synthetic: 34_999, price_unl_solo: 5_000, price_unl_team: 7_500, price_unl_fleet: 12_500 };
+const PRICES: Record<string, number> = { price_solo_synthetic: 4_999, price_team_synthetic: 14_999, price_fleet_synthetic: 34_999, price_unl_solo: 5_000, price_unl_team: 7_500, price_unl_fleet: 12_500 };
 const PERIOD_START = Math.floor(Date.parse("2026-11-26T14:00:00.000Z") / 1_000);
 const PERIOD_END = Math.floor(Date.parse("2026-12-26T14:00:00.000Z") / 1_000);
 
@@ -174,8 +174,8 @@ describe("plan and Unlimited changes: a tap never charges", () => {
     const shop = await paidOwner();
     expect((await shop.confirm(await shop.preview("solo", true))).status).toBe(200);
     const quote = await shop.preview("team", true);
-    expect(quote).toMatchObject({ plan: "team", unlimited: true, monthlyCents: 25_499, estimated: false });
-    expect(quote.todayCents).toBe(Math.round((17_999 - 4_999 + 7_500 - 5_000) * 25 / 30));
+    expect(quote).toMatchObject({ plan: "team", unlimited: true, monthlyCents: 22_499, estimated: false });
+    expect(quote.todayCents).toBe(Math.round((14_999 - 4_999 + 7_500 - 5_000) * 25 / 30));
     expect(stripe.writes()).toHaveLength(1);
     expect((await shop.confirm(quote)).status).toBe(200);
     expect(stripe.writes()).toHaveLength(2);

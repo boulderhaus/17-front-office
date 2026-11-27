@@ -37,7 +37,7 @@ describe("Privacy and Terms: a document layout that changes no words (LEGAL-01)"
   } as const;
 
   /**
-   * The only two sentences changed since (walk 11-26, SITE-10 and SET-20), each mapped back to its old wording so
+   * The only sentences changed since (walk 11-26, SITE-10, SET-20 and the SITE-20 Team price), each mapped back to its old wording so
    * the fingerprint still proves nothing else moved.
    */
   const EDITS: Array<[now: string, before: string]> = [
@@ -45,7 +45,17 @@ describe("Privacy and Terms: a document layout that changes no words (LEGAL-01)"
     // The cancel button on Plan and billing is now "Cancel plan" (SET-17), so the Terms name it.
     ["Settings → Plan and billing, then Cancel plan.", "Settings → Plan and billing, then Manage billing or cancel."],
     [`Call records are kept until the shop deletes them or closes its account, and a shop can ask us to delete them at any time. When a subscription is cancelled, its call records are deleted ${config.dataRetentionDays} days after it ends.`, `Call records are retained for ${config.dataRetentionDays} days unless legal or customer obligations require a different period.`],
+    // SITE-20 (2026-11-26): Team is $149.99, not $179.99. Only the Team numbers moved.
+    ["Team is $149.99 per month and includes 250 answered calls", "Team is $179.99 per month and includes 250 answered calls"],
+    ["Team plus $75 per month ($224.99 in total)", "Team plus $75 per month ($254.99 in total)"],
   ];
+
+  it("states Team at $149.99 a month, never the old $179.99", () => {
+    for (const name of ["terms", "termsWithOffer"] as const) {
+      expect(pages[name]).toContain(EDITS[3]![0]);
+      expect(pages[name]).not.toMatch(/179\.99|254\.99/);
+    }
+  });
 
   it("says calls are shared by the team and records are kept until the shop deletes them, never the old lines", () => {
     expect(pages.terms).toContain(EDITS[0]![0]);
