@@ -4,6 +4,7 @@ import { withTimeout } from "../src/application/retry.js";
 import { loadEnvironment } from "../src/config/environment.js";
 import type { Store } from "../src/ports.js";
 import { buildTelnyxAssistantUpdate } from "../src/voice/system-prompt.js";
+import { buildShopAssistantPayload, isSpeechToSpeechTenant, speechToSpeechSettings, type SpeechToSpeechSettings } from "../src/voice/voice-mode.js";
 import { buildSetupAssistant, inheritedModel } from "../src/adapters/telnyx-setup-call.js";
 import { PLATFORM_TENANT_ID } from "../src/ports.js";
 
@@ -11,13 +12,31 @@ export interface AssistantPush {
   tenantId: string;
   assistantId: string;
   update: Record<string, unknown>;
+  /** "speech_to_speech" only for a tenant in TELNYX_S2S_TENANT_IDS (src/voice/voice-mode.ts). */
+  mode?: "standard" | "speech_to_speech";
+  /** This push also returns a speech-to-speech assistant to its text model (the tenant left the list). */
+  rollback?: boolean;
+  /** Instruction sections cut to fit the speech-to-speech limit. */
+  cut?: string[];
+  /** Set when this assistant can't be configured (e.g. a listed tenant with TELNYX_S2S_MODEL unset): never pushed. */
+  error?: string;
 }
 
 /**
  * Every assistant we run gets the current prompt, tools, voice (TELNYX_VOICE), turn-taking and
  * telephony_settings (seven-minute backstop time_limit_secs, idle timers): the demo/template assistant plus each shop's provisioned assistant.
  */
-export async function planAssistantPushes(input: { store: Store; defaultTenantId: string; demoAssistantId?: string | undefined; publicBaseUrl: string; voice?: string | undefined }): Promise<AssistantPush[]> {
+export async function planAssistantPushes(input: {
+  store: Store;
+  defaultTenantId: string;
+  demoAssistantId?: string | undefined;
+  publicBaseUrl: string;
+  voice?: string | undefined;
+  /** Opt-in speech-to-speech tenants. The demo assistant never uses it. */
+  speechToSpeech?: SpeechToSpeechSettings | undefined;
+  /** Reads a shop's assistant as Telnyx has it (GET), for the speech-to-speech backend model and for rollback. */
+  readAssistant?: ((assistantId: string) => Promise<Record<string, unknown>>) | undefined;
+}): Promise<AssistantPush[]> {
   const pushes: AssistantPush[] = [];
   const seen = new Set<string>();
   if (input.demoAssistantId) {
@@ -28,7 +47,25 @@ export async function planAssistantPushes(input: { store: Store; defaultTenantId
     const route = await input.store.getProviderRouteForTenant("telnyx", tenantId);
     if (!route || seen.has(route.externalId)) continue;
     seen.add(route.externalId);
-    pushes.push({ tenantId, assistantId: route.externalId, update: buildTelnyxAssistantUpdate(await input.store.getConfig(tenantId), input.publicBaseUrl, { voice: input.voice }) });
+    const config = await input.store.getConfig(tenantId);
+    const listed = isSpeechToSpeechTenant(input.speechToSpeech, tenantId);
+    let existing: Record<string, unknown> | null = null;
+    if (input.readAssistant) {
+      try { existing = await input.readAssistant(route.externalId); }
+      catch (error) {
+        // An unlisted shop still gets today's payload; a listed one can't be planned without its assistant.
+        if (listed && !input.speechToSpeech?.backendModel) {
+          pushes.push({ tenantId, assistantId: route.externalId, update: {}, error: `speech-to-speech: ${error instanceof Error ? error.message : String(error)}` });
+          continue;
+        }
+      }
+    }
+    try {
+      const built = buildShopAssistantPayload(config, input.publicBaseUrl, { voice: input.voice, speechToSpeech: input.speechToSpeech, existing });
+      pushes.push({ tenantId, assistantId: route.externalId, update: built.payload, mode: built.mode, ...(built.rollback ? { rollback: true } : {}), ...(built.cut.length ? { cut: built.cut } : {}) });
+    } catch (error) {
+      pushes.push({ tenantId, assistantId: route.externalId, update: {}, error: error instanceof Error ? error.message : String(error) });
+    }
   }
   return pushes;
 }
@@ -93,11 +130,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const runtime = await createRuntime(env);
 
   try {
-    const pushes = await planAssistantPushes({ store: runtime.store, defaultTenantId: env.DEFAULT_TENANT_ID, demoAssistantId: env.TELNYX_ASSISTANT_ID, publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE });
+    const pushes = await planAssistantPushes({
+      store: runtime.store, defaultTenantId: env.DEFAULT_TENANT_ID, demoAssistantId: env.TELNYX_ASSISTANT_ID, publicBaseUrl: env.PUBLIC_BASE_URL, voice: env.TELNYX_VOICE,
+      speechToSpeech: speechToSpeechSettings(env),
+      // Read-only GETs, in dry runs too: a listed shop's backend model, and rollback for a shop that left the list.
+      ...(env.TELNYX_API_KEY ? { readAssistant: (assistantId: string) => telnyxRequest<Record<string, unknown>>(env.TELNYX_API_KEY!, `/ai/assistants/${encodeURIComponent(assistantId)}`) } : {}),
+    });
     if (!apply) {
       console.log(JSON.stringify({
         mode: "dry_run",
-        assistants: pushes.map((push) => ({ tenantId: push.tenantId, assistantId: push.assistantId, voice_settings: push.update.voice_settings, telephony_settings: push.update.telephony_settings })),
+        assistants: pushes.map((push) => ({ tenantId: push.tenantId, assistantId: push.assistantId, mode: push.mode ?? "standard", rollback: push.rollback ?? false, cut: push.cut ?? [], error: push.error, model: push.update.model, delegation_settings: push.update.delegation_settings, voice_settings: push.update.voice_settings, telephony_settings: push.update.telephony_settings })),
         demoUpdate: pushes.find((push) => push.assistantId === env.TELNYX_ASSISTANT_ID)?.update ?? null,
         // Read-only: which assistants' TeXML apps still lack the end-of-call callback ("would_set").
         callEndCallbacks: env.TELNYX_API_KEY ? await syncCallEndCallbacks({ pushes, apiKey: env.TELNYX_API_KEY, publicBaseUrl: env.PUBLIC_BASE_URL, apply: false }) : "TELNYX_API_KEY not set",
@@ -113,6 +155,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       let updated: Record<string, unknown> = {};
       const failed: Array<{ tenantId: string; assistantId: string; error: string }> = [];
       for (const push of pushes) {
+        if (push.error) {
+          failed.push({ tenantId: push.tenantId, assistantId: push.assistantId, error: push.error });
+          continue;
+        }
         try {
           const result = await telnyxRequest<Record<string, unknown>>(apiKey, `/ai/assistants/${encodeURIComponent(push.assistantId)}`, { method: "POST", body: JSON.stringify(push.update) });
           if (push.assistantId === env.TELNYX_ASSISTANT_ID) updated = result;

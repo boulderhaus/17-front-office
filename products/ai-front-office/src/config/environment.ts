@@ -52,6 +52,19 @@ const schema = z.object({
    * expressive_mode: it leaks <break> tags into transcripts.
    */
   TELNYX_VOICE: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).default(DEFAULT_TELNYX_VOICE)),
+  /**
+   * Opt-in speech-to-speech voice (src/voice/voice-mode.ts): comma-separated tenant ids whose assistant uses a
+   * speech-to-speech model. Empty (the default): every shop and the demo line build exactly today's assistant.
+   * Rollback is removing a tenant here and running scripts/configure-telnyx.ts --apply.
+   */
+  TELNYX_S2S_TENANT_IDS: z.preprocess((value) => value === undefined ? "" : value, z.string().max(4_000)
+    .transform((value) => [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))])),
+  /** The speech-to-speech model for listed tenants. No default: a listed tenant with this unset is never pushed. */
+  TELNYX_S2S_MODEL: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).max(200).optional()),
+  /** The voice paired with TELNYX_S2S_MODEL (Telnyx rejects a speech-to-speech model with another provider's voice). No default. */
+  TELNYX_S2S_VOICE: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).max(200).optional()),
+  /** Optional backend text model that runs tools for a speech-to-speech assistant. Unset: the model the shop's assistant already uses. */
+  TELNYX_S2S_BACKEND_MODEL: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).max(200).optional()),
   /** Speech-to-text model for Settings > Names and words "Say it" clips (Telnyx /v2/ai/audio/transcriptions). Unset: clips are kept, nothing is transcribed. */
   TELNYX_STT_MODEL: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional()),
   /**

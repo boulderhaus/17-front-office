@@ -1,4 +1,5 @@
 import { withTimeout } from "../application/retry.js";
+import { resolveVoiceMode, speechToSpeechPayload, type SpeechToSpeechSettings } from "../voice/voice-mode.js";
 
 /**
  * Self-serve line provisioning, the Rosie/Goodcall model: every shop gets its own local
@@ -114,14 +115,17 @@ export class TelnyxProvisioner {
   constructor(private readonly options: TelnyxProvisionerOptions) {}
 
   /** Create the shop's assistant from the template's voice and model plus this shop's prompt and tools. */
-  async createAssistant(input: { tenantId: string; businessName: string; assistantUpdate: Record<string, unknown> }): Promise<string> {
+  async createAssistant(input: { tenantId: string; businessName: string; assistantUpdate: Record<string, unknown>; speechToSpeech?: SpeechToSpeechSettings | undefined }): Promise<string> {
     const template = objectData(await this.request(`/ai/assistants/${encodeURIComponent(this.options.templateAssistantId)}`));
     const inherited = Object.fromEntries(
       ["model", "voice_settings", "llm_api_key_ref", "enabled_features", "insight_settings", "privacy_settings"]
         .filter((key) => template[key] !== undefined && template[key] !== null)
         .map((key) => [key, template[key]]),
     );
-    const { promote_to_main: _promote, ...update } = input.assistantUpdate;
+    // An opt-in speech-to-speech tenant (src/voice/voice-mode.ts) delegates tools to the template's text model.
+    const mode = resolveVoiceMode(input.speechToSpeech, input.tenantId, template);
+    const built = mode.kind === "speech_to_speech" ? speechToSpeechPayload(input.assistantUpdate, mode).payload : input.assistantUpdate;
+    const { promote_to_main: _promote, ...update } = built;
     const created = objectData(await this.request("/ai/assistants", {
       method: "POST",
       headers: { "idempotency-key": `front-office-assistant-${input.tenantId}` },

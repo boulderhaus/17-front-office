@@ -8,6 +8,7 @@ import { forwardingOffInstruction, type CarrierInfo } from "../domain/forwarding
 import type { OutboxNotification } from "../domain/models.js";
 import type { Clock, Store } from "../ports.js";
 import { redactError } from "./retry.js";
+import { readVoiceLabLine } from "./voice-lab.js";
 
 /**
  * Billing grace line. When a shop's subscription lapses we keep its Call Otto number answering
@@ -69,7 +70,11 @@ export async function releaseProvisionedLine(context: GraceContext, tenantId: st
     store.getIntegrationSecret(tenantId, "telnyx", "pending_number"),
   ]);
   if (!assistantId) return true; // not a line we provisioned: nothing of ours to give back
-  const phoneNumber = inbound ?? pending;
+  // The voice lab line (src/application/voice-lab.ts) is never released by a shop's cancel, grace or delete.
+  const lab = await readVoiceLabLine(store);
+  const saved = inbound ?? pending;
+  const phoneNumber = lab && saved === lab.phoneNumber ? null : saved;
+  if (lab && assistantId === lab.assistantId && !phoneNumber) return true;
   if (!env.TELNYX_API_KEY) {
     context.log({ level: "error", event: "line_release_blocked", tenantId, reason: "TELNYX_API_KEY is not set" });
     return false;
@@ -81,7 +86,7 @@ export async function releaseProvisionedLine(context: GraceContext, tenantId: st
       messagingProfileId: env.TELNYX_MESSAGING_PROFILE_ID ?? "",
       ...(context.fetcher ? { fetcher: context.fetcher } : {}),
       campaignId: env.TELNYX_CAMPAIGN_ID,
-    }).release({ phoneNumber, assistantId });
+    }).release({ phoneNumber, assistantId: lab && assistantId === lab.assistantId ? null : assistantId });
     return true;
   } catch (error) {
     context.log({ level: "error", event: "line_release_failed", tenantId, phoneNumber, assistantId, error: redactError(error) });
@@ -272,6 +277,7 @@ export class GraceLineService {
       store.getIntegrationSecret(tenantId, "telnyx", "inbound_number"),
     ]);
     if (assistantId || !inbound) return true; // ours (deleted by the release) or nothing to move
+    if ((await readVoiceLabLine(store))?.phoneNumber === inbound) return true; // the voice lab line is never moved
     const route = await store.getProviderRouteForTenant("telnyx", tenantId);
     if (!env.TELNYX_API_KEY || !route) {
       log({ level: "error", event: "grace_disconnect_blocked", tenantId, reason: env.TELNYX_API_KEY ? "no assistant route" : "TELNYX_API_KEY is not set" });
