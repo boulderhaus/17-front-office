@@ -56,7 +56,7 @@ export function parseClipUpload(body: unknown): ClipUpload | ClipProblem {
 /** What speech-to-text heard, tidied for the "sounds like" field: no end punctuation or quotes, one line, 240 max. */
 export function cleanHeard(text: string | null): string | null {
   if (!text) return null;
-  const cleaned = text.replace(/[\r\n]+/g, " ").replace(/:/g, " ").replace(/^[\s"'“”‘’.,!?¡¿-]+|[\s"'“”‘’.,!?;-]+$/g, "").replace(/\s+/g, " ").trim().slice(0, 240);
+  const cleaned = text.replace(/[\r\n]+/g, " ").replace(/:/g, " ").replace(/^[\s"'“”‘’«»()[\]…*.,!?¡¿;-]+|[\s"'“”‘’«»()[\]…*.,!?;-]+$/g, "").replace(/\s+/g, " ").trim().slice(0, 240);
   return cleaned || null;
 }
 

@@ -378,3 +378,126 @@ function signedHeaders(body: string, privateKey: KeyObject, now: Date): Record<s
     "telnyx-signature-ed25519": sign(null, Buffer.from(`${timestamp}|${body}`), privateKey).toString("base64"),
   };
 }
+
+describe("a tool the model repeats in one call does its work once", () => {
+  // A real test call saw request_human five times in one call. Each tool below is called three times on one call:
+  // exactly one owner alert (per channel), one task, one booking, and the repeat answer is short and final.
+  const forCall = (store: InMemoryStore, callId: string) => [...store.notifications.values()].filter((item) => item.callId === callId);
+  const tasksFor = (store: InMemoryStore, callId: string) => [...store.callbackTasks.values()].filter((task) => task.callId === callId);
+  const one = (items: Array<{ idempotencyKey: string }>) => new Set(items.map((item) => item.idempotencyKey)).size === items.length;
+
+  it("request_human: one owner alert and one task; the second answer says it's done, the third is the stop", async () => {
+    const { store, post } = await demoApp();
+    const body = { provider_call_id: "thrice-human", from_number: "+15555550110", reason: "explicit_request", caller_quote: "I want to speak to the owner", problem_description: "Water heater leaking" };
+    expect(await json(await post("/tools/request-human", body))).toMatchObject({ status: "handoff_queued" });
+    const repeat = await json(await post("/tools/request-human", body));
+    expect(repeat).toMatchObject({ status: "handoff_queued", already: true, transferAvailable: false, transferTargets: [] });
+    expect(repeat.message).toMatch(/^Already done\. .*Do not call request_human again/);
+    expect(await json(await post("/tools/request-human", body))).toMatchObject({ ok: false, status: "limit_reached" });
+    const call = (await store.getCallByProviderId("thrice-human"))!;
+    const alerts = forCall(store, call.id);
+    expect(alerts.filter((item) => item.channel === "sms")).toHaveLength(1);
+    expect(one(alerts)).toBe(true);
+    expect(tasksFor(store, call.id)).toHaveLength(1);
+  });
+
+  it("request_human three at once: one owner alert, one task, and only the first answer is the real one", async () => {
+    const { store, post } = await demoApp();
+    const body = { provider_call_id: "thrice-human-at-once", from_number: "+15555550110", reason: "explicit_request", caller_quote: "I want to speak to the owner", problem_description: "Water heater leaking" };
+    const answers = await Promise.all([0, 1, 2].map(async () => json(await post("/tools/request-human", body))));
+    expect(answers.filter((answer) => answer.status === "handoff_queued" && !answer.already)).toHaveLength(1);
+    const call = (await store.getCallByProviderId("thrice-human-at-once"))!;
+    expect(forCall(store, call.id).filter((item) => item.channel === "sms")).toHaveLength(1);
+    expect(one(forCall(store, call.id))).toBe(true);
+    expect(tasksFor(store, call.id)).toHaveLength(1);
+  });
+
+  it("request_human that fails partway is finished by the next try, not answered as already done", async () => {
+    const { store, post } = await demoApp();
+    const real = store.getIntegrationSecret.bind(store);
+    let failed = false;
+    store.getIntegrationSecret = async (tenantId, provider, key) => {
+      if (!failed && key.startsWith("attempt:")) {
+        failed = true;
+        throw new Error("synthetic transfer lookup failure");
+      }
+      return real(tenantId, provider, key);
+    };
+    const body = { provider_call_id: "human-retry", from_number: "+15555550110", reason: "explicit_request", caller_quote: "I want to speak to the owner", problem_description: "Water heater leaking" };
+    const first = await json(await post("/tools/request-human", body));
+    expect(failed).toBe(true);
+    expect(first.transferTargets).toBeUndefined();
+    const retry = await json(await post("/tools/request-human", body));
+    expect(retry).toMatchObject({ status: "handoff_queued" });
+    expect(retry.already).toBeUndefined();
+    const call = (await store.getCallByProviderId("human-retry"))!;
+    expect(forCall(store, call.id).filter((item) => item.channel === "sms")).toHaveLength(1);
+    expect(tasksFor(store, call.id)).toHaveLength(1);
+  });
+
+  it("triage_call on an emergency: one owner alert and one task", async () => {
+    const { store, post } = await demoApp();
+    const body = { provider_call_id: "thrice-triage", from_number: "+15555550110", problem_description: "I smell gas in the basement" };
+    for (let attempt = 0; attempt < 3; attempt += 1) await post("/tools/triage", body);
+    const call = (await store.getCallByProviderId("thrice-triage"))!;
+    expect(call.emergency?.emergency).toBe(true);
+    const alerts = forCall(store, call.id);
+    expect(alerts.filter((item) => item.channel === "sms")).toHaveLength(1);
+    expect(one(alerts)).toBe(true);
+    expect(tasksFor(store, call.id)).toHaveLength(1);
+  });
+
+  it("save_intake on an emergency, saved three times with new details each time: one owner alert and one task", async () => {
+    const { store, post } = await demoApp();
+    const base = { provider_call_id: "thrice-intake", from_number: "+15555550110", problem_description: "I smell gas in the basement" };
+    await post("/tools/save-intake", base);
+    await post("/tools/save-intake", { ...base, caller_name: "Synthetic Caller" });
+    await post("/tools/save-intake", { ...base, caller_name: "Synthetic Caller", service_address: "100 Main St, Springfield" });
+    const call = (await store.getCallByProviderId("thrice-intake"))!;
+    expect(call.fields.address).toBe("100 Main St, Springfield");
+    const alerts = forCall(store, call.id);
+    expect(alerts.filter((item) => item.channel === "sms")).toHaveLength(1);
+    expect(one(alerts)).toBe(true);
+    expect(tasksFor(store, call.id)).toHaveLength(1);
+  });
+
+  it("book_slot: one booking and one calendar event, even when the repeat names another offered time", async () => {
+    const calendar = new GatedCalendar();
+    const { store, post } = await demoApp({ calendar });
+    const offer = async (windowStart: string, windowEnd: string) => ((await json(await post("/tools/check-availability", { provider_call_id: "thrice-book", window_start: windowStart, window_end: windowEnd }))).slots as AvailabilitySlot[])[0]!;
+    const slots = [await offer(window.window_start, window.window_end)];
+    const booking = (slotStart: string) => ({
+      provider_call_id: "thrice-book", slot_start: slotStart, caller_name: "Synthetic Caller", callback_number: "+15555550110",
+      address: "100 Main St, Springfield IL 62701", service_category: "HVAC maintenance", problem_description: "Furnace check",
+      explicit_confirmation: true, diagnostic_fee_accepted: true,
+    });
+    expect((await json(await post("/tools/book", booking(slots[0]!.start)))).status).toBe("confirmed");
+    // The model asks for times again and books one of the new ones.
+    slots.push(await offer("2026-01-16T15:00:00Z", "2026-01-16T18:00:00Z"));
+    expect(slots[1]!.start).not.toBe(slots[0]!.start);
+    const again = await json(await post("/tools/book", booking(slots[1]!.start)));
+    // Never a second appointment for the same caller, whatever the repeat names.
+    expect(again).toMatchObject({ status: "confirmed" });
+    expect(again.message).toMatch(/^Already booked for .+\. Do not book again\.$/);
+    expect(await json(await post("/tools/book", booking(slots[0]!.start)))).toMatchObject({ status: "limit_reached" });
+    expect(calendar.createCalls).toBe(1);
+    expect(calendar.events).toHaveLength(1);
+    const call = (await store.getCallByProviderId("thrice-book"))!;
+    expect([...store.bookings.values()].filter((item) => item.callId === call.id)).toHaveLength(1);
+    expect(one(forCall(store, call.id))).toBe(true);
+  });
+
+  it("mark_spam_call: marks once and never alerts the owner", async () => {
+    const store = new InMemoryStore();
+    await store.saveConfig({ ...createDemoConfig(), bookingMode: "direct", requireDiagnosticFeeAcceptance: false });
+    await new CallService(store, new InMemoryCalendar(), clock, "https://front-office.example")
+      .recordStarted({ eventId: "start:thrice-spam", tenantId: "demo", providerCallId: "thrice-spam", fromNumber: "+15555550110", startedAt: clock.now().toISOString() });
+    const { post } = await demoApp({ store });
+    const body = { provider_call_id: "thrice-spam", from_number: "+15555550110", category: "vendor", caller_quote: "I'm calling about your merchant services" };
+    for (let attempt = 0; attempt < 3; attempt += 1) await post("/tools/mark-spam", body);
+    const call = (await store.getCallByProviderId("thrice-spam"))!;
+    expect(call.billingDisposition).toBe("spam_excluded");
+    expect(forCall(store, call.id)).toHaveLength(0);
+    expect(tasksFor(store, call.id)).toHaveLength(0);
+  });
+});

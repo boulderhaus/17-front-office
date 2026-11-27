@@ -29,6 +29,9 @@ describe("Say it clip helpers (walk 11-26, SET-05)", () => {
     expect(cleanHeard("“Myakka!”")).toBe("Myakka");
     expect(cleanHeard("a: b\nc")).toBe("a b c");
     expect(cleanHeard("...")).toBeNull();
+    // What speech-to-text sends back for one said phrase: never a stray full stop or quote in "Sounds like".
+    for (const raw of ["Kiss me.", "\"Kiss me.\"", " \"Kiss me\". ", "“Kiss me.”", "'Kiss me!'", "(Kiss me…)", "Kiss me?\n", "«Kiss me»"]) expect(cleanHeard(raw)).toBe("Kiss me");
+    expect(cleanHeard("Kiss me, Kate.")).toBe("Kiss me, Kate");
     expect(cleanHeard(null)).toBeNull();
   });
 
@@ -115,6 +118,12 @@ describe("Say it endpoints", () => {
     transcriber.answer = async () => "my ACK uh";
     await shop.upload("myakka", mp4(), "audio/mp4");
     expect((await store.getConfig(shop.tenantId)).pronunciations).toEqual([{ term: "Myakka", spokenAs: "my ACK uh" }]);
+    // Speech-to-text often ends with a full stop or wraps it in quotes: "Sounds like" saves the words only.
+    transcriber.answer = async () => " \"Kiss me.\" ";
+    const quoted = await (await shop.upload("Kismet")).json() as { heard: string; pronunciations: string };
+    expect(quoted.heard).toBe("Kiss me");
+    expect((await store.getConfig(shop.tenantId)).pronunciations).toEqual([{ term: "Myakka", spokenAs: "my ACK uh" }, { term: "Kismet", spokenAs: "Kiss me" }]);
+    expect((await shop.settings()).wordClips.find((clip) => clip.term === "Kismet")?.heard).toBe("Kiss me");
     const played = await shop.play("MYAKKA");
     expect(played.status).toBe(200);
     expect(played.headers.get("content-type")).toBe("audio/mp4");

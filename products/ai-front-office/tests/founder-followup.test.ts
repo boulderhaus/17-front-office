@@ -1056,6 +1056,74 @@ describe("Call me now: Otto's support call", () => {
     expect(email.body).toContain("Your Call Otto forwarding");
   });
 
+  it("email_steps sends once per support call: a repeat sends nothing and says it's already sent; the app's button keeps its own limit", async () => {
+    const made = await onTheCall();
+    const stepEmails = () => [...made.store.notifications.values()].filter((item) => item.idempotencyKey.startsWith("handoff-email:"));
+    expect(await (await made.tool("email_steps", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "sent" });
+    for (let repeat = 0; repeat < 2; repeat += 1) {
+      made.clock.at = new Date(made.clock.at.getTime() + 7_000);
+      expect(await (await made.tool("email_steps", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "already_sent", say: "It's already in your email." });
+    }
+    expect(stepEmails()).toHaveLength(1);
+    // Two at once still queue one.
+    const again = await onTheCall();
+    const both = await Promise.all([again.tool("email_steps", { provider_call_id: "v3:help-call" }), again.tool("email_steps", { provider_call_id: "v3:help-call" })]);
+    expect((await Promise.all(both.map((item) => item.json() as Promise<{ status: string }>))).map((item) => item.status).sort()).toEqual(["already_sent", "sent"]);
+    expect([...again.store.notifications.values()].filter((item) => item.idempotencyKey.startsWith("handoff-email:"))).toHaveLength(1);
+    // "Email me these steps" in the app is the owner asking: it still sends.
+    made.clock.at = new Date(made.clock.at.getTime() + 1_000);
+    expect((await made.api("/api/app/line/handoff/email")).status).toBe(200);
+    expect(stepEmails()).toHaveLength(2);
+  });
+
+  it("start_forwarding_test asked again while the test still rings never hangs up and dials a second one", async () => {
+    const made = await onTheCall();
+    const checkDials = () => made.recorded.filter((call) => call.url === "https://api.telnyx.com/v2/calls" && (call.body as { to?: string }).to === "+19415550177");
+    expect(await (await made.tool("start_forwarding_test", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "calling" });
+    for (let repeat = 0; repeat < 2; repeat += 1) {
+      made.clock.at = new Date(made.clock.at.getTime() + 3_000);
+      expect(await (await made.tool("start_forwarding_test", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "already_calling", say: "The test is already calling. Wait for it." });
+    }
+    expect(checkDials()).toHaveLength(1);
+    expect(made.recorded.filter((call) => /\/actions\/hangup$/.test(call.url))).toHaveLength(0);
+    // Two at once while nothing rings: still one test call.
+    const fresh = await onTheCall();
+    const freshDials = () => fresh.recorded.filter((call) => call.url === "https://api.telnyx.com/v2/calls" && (call.body as { to?: string }).to === "+19415550177");
+    const pair = await Promise.all([0, 1].map(async () => (await fresh.tool("start_forwarding_test", { provider_call_id: "v3:help-call" })).json() as Promise<{ status: string }>));
+    expect(pair.map((item) => item.status).sort()).toEqual(["already_calling", "calling"]);
+    expect(freshDials()).toHaveLength(1);
+    // Once that test is over, a new one may start.
+    made.clock.at = new Date(made.clock.at.getTime() + 3 * 60_000);
+    expect(await (await made.tool("start_forwarding_test", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "calling" });
+    expect(checkDials()).toHaveLength(2);
+  });
+
+  it("get_open_times with no team calendar, asked three times, sends our team's email once", async () => {
+    const made = await onTheCall();
+    for (let repeat = 0; repeat < 3; repeat += 1) expect(await (await made.tool("get_open_times", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "no_calendar" });
+    expect(made.founderEmails(made.account.tenantId)).toHaveLength(1);
+  });
+
+  it("book_time asked three times books once: one event, one confirmation, one team email, and a short final repeat", async () => {
+    const made = await onTheCall({ founders: BROCK });
+    const open = await (await made.tool("get_open_times", { provider_call_id: "v3:help-call" })).json() as { times: Array<{ slot_start: string; label: string }> };
+    const book = async (slot: string) => await (await made.tool("book_time", { provider_call_id: "v3:help-call", slot_start: slot, explicit_confirmation: true })).json() as { status: string; say: string; when: string };
+    expect((await book(open.times[0]!.slot_start)).status).toBe("booked");
+    for (const slot of [open.times[0]!.slot_start, open.times[1]!.slot_start]) {
+      expect(await book(slot)).toMatchObject({ status: "already_booked", when: open.times[0]!.label, say: "You're already booked. That's all set." });
+    }
+    expect(made.recorded.filter((call) => call.method === "POST" && call.url.includes("/calendars/primary/events"))).toHaveLength(1);
+    expect(made.founderEmails(made.account.tenantId).filter((item) => item.idempotencyKey.endsWith(":confirmation"))).toHaveLength(1);
+    expect([...made.store.notifications.values()].filter((item) => item.destinationRef === "email:help@callotto.example" && item.idempotencyKey.startsWith("setup-help-booking:"))).toHaveLength(1);
+    // Our team's email never got queued (the outbox failed): the repeat sends it, once.
+    const teamEmails = () => [...made.store.notifications.values()].filter((item) => item.idempotencyKey.startsWith("setup-help-booking:"));
+    for (const item of teamEmails()) made.store.notifications.delete(item.id);
+    expect(teamEmails()).toHaveLength(0);
+    expect((await book(open.times[0]!.slot_start)).status).toBe("already_booked");
+    expect((await book(open.times[0]!.slot_start)).status).toBe("already_booked");
+    expect(teamEmails()).toHaveLength(1);
+  });
+
   it("book_time books inside our team's windows, says the time, and emails the owner and the support inbox with a calendar invite", async () => {
     const made = await onTheCall({ founders: BROCK });
     const open = await (await made.tool("get_open_times", { provider_call_id: "v3:help-call" })).json() as { status: string; times: Array<{ slot_start: string; label: string }> };

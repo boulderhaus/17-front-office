@@ -170,7 +170,7 @@ export const SETUP_HELP_INSTRUCTIONS = [
   "",
   "Tools:",
   "- start_forwarding_test: once they say forwarding is on, start our test call, then call get_test_result every few seconds until it isn't calling. Read its say line.",
-  "- email_steps: if they want the steps in writing, email them. Say it's on its way.",
+  "- email_steps: if they want the steps in writing, email them once. Say it's on its way. Never call it again on this call.",
   "- get_open_times and book_time: a 10-minute call with our team. Read the times exactly as given, let them pick, repeat the time back, and only book after they say yes. Then say the booked time out loud and that a confirmation email is coming.",
   "",
   "Rules:",
@@ -208,7 +208,7 @@ export function setupHelpTools(publicBaseUrl: string): Array<Record<string, unkn
   return [
     webhook("start_forwarding_test", "Start Call Otto's test call to their business phone. Only after they say forwarding is on. Then poll get_test_result.", {}, [], "Okay, starting the test."),
     webhook("get_test_result", "Read the latest forwarding test. status is calling, passed, or a problem; say is the line to read."),
-    webhook("email_steps", "Email the owner the forwarding steps for their phone.", {}, [], "Sending that now."),
+    webhook("email_steps", "Email the owner the forwarding steps for their phone. Once per call.", {}, [], "Sending that now."),
     webhook("get_open_times", "Up to three open times for a 10-minute call with our team, in the owner's time zone. Read each label exactly.", {}, [], "Let me look at the times."),
     webhook("book_time", "Book one of the times from get_open_times after the owner says yes. Only status=booked means booked.", {
       slot_start: { type: "string", description: "The exact start of the time they picked, as given by get_open_times." },
