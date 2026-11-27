@@ -20,6 +20,7 @@ import { buildTelnyxTools, buildVoiceSystemPrompt } from "../src/voice/system-pr
 import { FAILED_TOOL_STATUSES, toolSwitchedOff } from "../src/voice/tool-results.js";
 import { buildShopAssistantPayload, S2S_INSTRUCTION_LIMIT_CHARS, speechToSpeechInstructionsFit, type SpeechToSpeechSettings } from "../src/voice/voice-mode.js";
 import { EXPECTED_TOOL_EVENTS, toolEventResults, verdict } from "../scripts/selftest-call.js";
+import { joinQuestions, LOCKED_STEPS, MAX_QUESTION_LENGTH as WEB_MAX_QUESTION_LENGTH, MAX_QUESTIONS as WEB_MAX_QUESTIONS, questionLength, questionProblem, questionRows, questionsLine, STEP_ROWS, stepState, TRANSFER_ROW } from "../web/src/lib/call-steps.js";
 import { DEFAULT_SHOPS } from "./support/call-step-shops.js";
 
 // "What Otto does on a call" (Settings). Synthetic shops, 555 numbers and example.test addresses only.
@@ -776,5 +777,55 @@ describe("call steps: the owner settings API", () => {
     expect(form.has("bogus")).toBe(false);
     const values = apiSettings({ ...createDemoConfig(), callSteps: { askAddress: false }, customQuestions: ["Own or rent?", "Gate code?"], warmTransferEnabled: true });
     expect(values).toMatchObject({ stepAskAddress: false, stepCheckServiceArea: true, stepOfferTimes: true, customQuestions: "Own or rent?\nGate code?", warmTransferEnabled: true });
+  });
+});
+
+describe("call steps: the Settings card", () => {
+  const flags = (off: string[] = [], on: string[] = []) => (field: string) => (STEP_ROWS.some((row) => row.field === field) ? !off.includes(field) : on.includes(field));
+
+  it("has one switch for each step the server knows, plus two locked rows with no switch", () => {
+    expect(STEP_ROWS.map((row) => row.field)).toEqual(Object.values(CALL_STEP_FIELDS));
+    expect(LOCKED_STEPS.map((step) => step.label)).toEqual(["Safety check", "Name, number and problem"]);
+    expect(LOCKED_STEPS[0]!.line).toBe("For gas, smoke or carbon monoxide, Otto tells the caller to leave and call 911, and alerts you right away.");
+    expect(TRANSFER_ROW.field).toBe("warmTransferEnabled");
+    expect([WEB_MAX_QUESTIONS, WEB_MAX_QUESTION_LENGTH]).toEqual([3, MAX_CUSTOM_QUESTION_LENGTH]);
+  });
+
+  it("says in one plain line what the caller gets, on and off, with no em dashes and nothing about the machinery", () => {
+    for (const row of [...STEP_ROWS, TRANSFER_ROW]) {
+      for (const line of [row.label, row.on, row.off]) {
+        expect(line, line).not.toMatch(/\u2014|prompt|model|Telnyx|phone settings|AI\b/i);
+        expect(line.length, line).toBeLessThanOrEqual(80);
+      }
+      expect(stepState(row, flags([], [TRANSFER_ROW.field]))).toEqual({ checked: true, disabled: false, hint: row.on });
+    }
+    expect(stepState(STEP_ROWS[0]!, flags(["stepScreenSalesCalls"]))).toEqual({ checked: false, disabled: false, hint: "Otto takes a message from everyone." });
+  });
+
+  it("shows the service-area check off and locked while the address is off, whatever was saved", () => {
+    const area = STEP_ROWS.find((row) => row.field === "stepCheckServiceArea")!;
+    expect(stepState(area, flags(["stepAskAddress"]))).toEqual({ checked: false, disabled: true, hint: "Off, because Otto isn’t asking for the address." });
+    expect(stepState(area, flags(["stepCheckServiceArea"]))).toEqual({ checked: false, disabled: false, hint: "Otto takes a job at any address." });
+  });
+
+  it("says the fee question goes too when prices are switched off", () => {
+    const prices = STEP_ROWS.find((row) => row.field === "stepQuotePrices")!;
+    expect(stepState(prices, flags(["stepQuotePrices"], ["requireDiagnosticFeeAcceptance"])).hint).toBe("Otto never gives a price or asks about your service-call fee. It takes a message.");
+    expect(stepState(prices, flags(["stepQuotePrices"])).hint).toBe("Otto never gives a price. It takes a message.");
+  });
+
+  it("edits the questions as rows over one saved value, and counts a question the way the server does", () => {
+    expect(questionRows("")).toEqual([""]);
+    expect(questionRows("Own or rent?\n\n Gate code? ")).toEqual(["Own or rent?", "Gate code?"]);
+    expect(joinQuestions(["  Own   or rent? ", "", "Gate\ncode?"])).toBe("Own or rent?\nGate code?");
+    const long = `  ${"y".repeat(81)}  `;
+    expect(questionLength(long)).toBe(81);
+    expect(questionProblem(long)).toBe("That’s 81 characters. Shorten it to 80 or less.");
+    expect(questionProblem("y".repeat(80))).toBeNull();
+    // What the app would send is what the server accepts or refuses.
+    expect(parseCustomQuestions(joinQuestions(["  Own   or rent? ", "", "Gate code?"]))).toEqual(["Own or rent?", "Gate code?"]);
+    expect(() => parseCustomQuestions(joinQuestions([long]))).toThrow("Question 1 is 81 characters.");
+    expect(questionsLine(3, true, true)).toBe("Up to 3 short questions. Otto asks them after the address, before offering times.");
+    expect(questionsLine(3, false, false)).toBe("Up to 3 short questions. Otto asks them after the callback number.");
   });
 });

@@ -163,6 +163,34 @@ export function Facts({ rows }: { rows: Array<[string, ReactNode]> }) {
   )
 }
 
+/**
+ * The caller's answers to the shop's own questions (Settings > "Ask every caller"): the question above its answer,
+ * since a question is too long for the facts table's label column. Nothing when the call has none.
+ */
+export function ExtraAnswers({ call }: { call: ApiCall }) {
+  const answers = call.fields.extraAnswers ?? []
+  if (answers.length === 0) return null
+  return (
+    <section className="ph-no-capture grid gap-2">
+      <h3 className="text-[15px] font-semibold">Your questions</h3>
+      <dl className="divide-y overflow-hidden rounded-xl border bg-card">
+        {answers.map((item) => (
+          <div key={item.question} className="grid gap-0.5 px-4 py-3">
+            <dt className="text-sm text-muted-foreground text-pretty">{item.question}</dt>
+            <dd className="text-[15px] break-words">{item.answer}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  )
+}
+
+/** The Address row: left out for a shop that takes no address, unless this call has one anyway. */
+export function addressFact(call: ApiCall, asksAddress: boolean | undefined): Array<[string, string]> {
+  const address = call.fields.address?.trim()
+  return address || asksAddress !== false ? [["Address", address || "Not confirmed"]] : []
+}
+
 export function phoneFact(call: ApiCall): [string, string] {
   return ["Phone", call.phone ? formatPhone(call.phone) : "Not confirmed"]
 }
