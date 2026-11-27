@@ -30,7 +30,7 @@ import { buildTelnyxAssistantUpdate } from "./system-prompt.js";
  * calls showed it skipping triage_call now and then; the server triages every intake anyway (call-service.ts), and
  * this keeps the live alert early.
  */
-export const BACKEND_TOOL_REMINDER = "You run the tools for a live phone call. The moment the caller has said what the problem is, call triage_call before anything else, every call, even when it sounds routine. Call save_intake as soon as you have the name and the problem, again whenever a detail changes, and once more before the call ends. Never skip a tool the instructions call for.";
+export const BACKEND_TOOL_REMINDER = "You run the tools for a live phone call. The moment the caller has said what the problem is, call triage_call before anything else, every call, even when it sounds routine. Call save_intake as soon as you have the name and the problem, again whenever a detail changes, and once more before the call ends. Never skip a tool the instructions call for. Never say you will check, look up or book something without calling that tool in the same turn.";
 
 /**
  * Telnyx: its hosted speech-to-speech model reads about 2,500 tokens (~10,000 characters) of instructions; longer ones are

@@ -96,3 +96,24 @@ describe("the routine selftest caller", () => {
     expect(verdict({ ...base, toolEvents: [ok("call.triage"), ok("call.intake"), ok("coverage.check"), ok("calendar.availability")], expectedEvents: routineExpectedEvents({ askAddress: true, checkServiceArea: true, offerTimes: true }) }).pass).toBe(true);
   });
 });
+
+describe("an availability window the call has outrun", () => {
+  it("starts now when it began a few minutes ago, and is still refused when it is all in the past", async () => {
+    const { startNoEarlierThanNow } = await import("../src/application/call-service.js");
+    const now = new Date("2026-01-15T18:32:00.000Z");
+    expect(startNoEarlierThanNow("2026-01-15T18:30:00.000Z", "2026-01-22T23:59:59.000Z", now)).toBe(now.toISOString());
+    expect(startNoEarlierThanNow("2026-01-16T09:00:00.000Z", "2026-01-22T23:59:59.000Z", now)).toBe("2026-01-16T09:00:00.000Z");
+    expect(startNoEarlierThanNow("2025-06-08T20:00:00.000Z", "2025-06-08T23:00:00.000Z", now)).toBe("2025-06-08T20:00:00.000Z");
+    expect(startNoEarlierThanNow("not a date", "2026-01-22T23:59:59.000Z", now)).toBe("not a date");
+
+    const store = new InMemoryStore();
+    await store.saveConfig(createDemoConfig());
+    const clock = { now: () => now };
+    const service = new CallService(store, new InMemoryCalendar(), clock, "https://front-office.example");
+    await service.recordStarted({ eventId: "start:outrun", tenantId: "demo", providerCallId: "outrun", fromNumber: "+15555550100", startedAt: now.toISOString() });
+    const result = await service.checkAvailability({ tenantId: "demo", providerCallId: "outrun", windowStart: "2026-01-15T18:30:00.000Z", windowEnd: "2026-01-22T23:59:59.000Z" });
+    expect(result.status).not.toBe("invalid_window");
+    const past = await service.checkAvailability({ tenantId: "demo", providerCallId: "outrun", windowStart: "2025-06-08T20:00:00.000Z", windowEnd: "2025-06-08T23:00:00.000Z" });
+    expect(past.status).toBe("invalid_window");
+  });
+});

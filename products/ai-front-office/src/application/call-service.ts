@@ -344,7 +344,11 @@ export class CallService {
     const call = await this.ensureCall(input.tenantId, input.providerCallId, "unknown", this.clock.now().toISOString());
     if (!callSteps(config).offerTimes) return { slots: [], status: "pending", message: TIMES_OFF_MESSAGE, spokenSummary: null, timezone: config.timezone };
     if (call.emergency?.emergency) return { slots: [], status: "pending", message: "Emergency escalation is active. Do not offer appointments; the owner has been alerted.", spokenSummary: null, timezone: config.timezone };
-    const windowError = validateAvailabilityWindow(input.windowStart, input.windowEnd, this.clock.now());
+    // The model has no clock: its window starts at the time the call began, which is in the past a minute into the
+    // call. A window that began earlier today and is still open starts now instead of being refused (a real call
+    // burned its two availability checks on a start two minutes old, then could not offer a time at all).
+    const windowStart = startNoEarlierThanNow(input.windowStart, input.windowEnd, this.clock.now());
+    const windowError = validateAvailabilityWindow(windowStart, input.windowEnd, this.clock.now());
     if (windowError) {
       return {
         slots: [],
@@ -359,7 +363,7 @@ export class CallService {
       const slots = await withRetry(
         () => this.calendar.listAvailableSlots({
           tenantId: input.tenantId,
-          windowStart: input.windowStart,
+          windowStart,
           windowEnd: input.windowEnd,
           durationMinutes: config.defaultServiceDurationMinutes,
           timezone: config.timezone,
@@ -1297,6 +1301,15 @@ function mergeEmergencyDecision(existing: EmergencyDecision | null, incoming: Em
     evidence: [...new Set([...existing.evidence, ...incoming.evidence])],
     immediateInstruction: incoming.immediateInstruction ?? existing.immediateInstruction,
   };
+}
+
+/** A window whose start has just passed but whose end is still ahead starts now. Anything else is left for validation. */
+export function startNoEarlierThanNow(windowStart: string, windowEnd: string, now: Date): string {
+  const start = Date.parse(windowStart);
+  const end = Date.parse(windowEnd);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return windowStart;
+  // One second of slack so "now" is never itself in the past by the time it is validated.
+  return start < now.getTime() && end > now.getTime() + 60_000 ? new Date(now.getTime()).toISOString() : windowStart;
 }
 
 function validateAvailabilityWindow(windowStart: string, windowEnd: string, now: Date): string | null {
