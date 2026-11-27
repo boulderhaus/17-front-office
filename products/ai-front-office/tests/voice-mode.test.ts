@@ -1,3 +1,4 @@
+import { BACKEND_TOOL_REMINDER } from "../src/voice/voice-mode.js";
 import { describe, expect, it } from "vitest";
 import { InMemoryStore } from "../src/adapters/in-memory.js";
 import { TelnyxProvisioner } from "../src/adapters/telnyx-provisioning.js";
@@ -49,7 +50,7 @@ describe("opt-in speech-to-speech voice mode", () => {
     expect(payload.model).toBe(S2S.model);
     expect(payload.voice_settings).toEqual({ voice: S2S.voice, tool_call_audio: (today.voice_settings as Record<string, unknown>).tool_call_audio });
     // Tools run through delegation to the text model the shop already uses.
-    expect(payload.delegation_settings).toEqual({ enabled: true, mode: "telnyx", model: TEXT_MODEL, speak_results: true });
+    expect(payload.delegation_settings).toEqual({ enabled: true, mode: "telnyx", model: TEXT_MODEL, speak_results: true, instructions: BACKEND_TOOL_REMINDER });
     expect(toolNames(payload)).toEqual(toolNames(today));
     expect(toolNames(payload)).toEqual(["get_approved_answer", "save_intake", "triage_call", "check_service_area", "check_availability", "book_slot", "request_human", "mark_spam_call", "transfer", "hangup"]);
     for (const key of ["instructions", "greeting", "tools", "tool_ids", "dynamic_variables_webhook_url", "dynamic_variables_webhook_timeout_ms", "dynamic_variables", "telephony_settings", "transcription", "interruption_settings", "promote_to_main"]) {

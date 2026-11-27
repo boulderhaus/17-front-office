@@ -402,7 +402,8 @@ describe("call steps: the server refuses a tool the shop switched off", () => {
     expect(await store.getBookingForCall(call.id)).toBeNull();
     expect(calendar.events).toHaveLength(0);
     const events = await store.listToolEvents(call.id);
-    expect(events.map((event) => event.tool).sort()).toEqual(["call.intake", "call.start"]);
+    // The intake carried a problem, so the server's own triage step is on the record too.
+    expect(events.map((event) => event.tool).sort()).toEqual(["call.intake", "call.start", "call.triage"]);
     expect(logs.filter((entry) => entry.event === "tool_switched_off").map((entry) => entry.step)).toEqual(["screenSalesCalls", "checkServiceArea", "offerTimes", "offerTimes", "quotePrices", "answerQuestions"]);
     // The post-deploy selftest reads these rows on a speech-to-speech line: a refused tool is not a broken one.
     expect(toolEventResults(events).every((event) => event.ok)).toBe(true);

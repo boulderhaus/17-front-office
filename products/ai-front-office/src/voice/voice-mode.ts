@@ -26,6 +26,13 @@ import { buildTelnyxAssistantUpdate } from "./system-prompt.js";
  */
 
 /**
+ * Extra words for the delegation backend only (the text model that runs the tools on a speech-to-speech call). Real
+ * calls showed it skipping triage_call now and then; the server triages every intake anyway (call-service.ts), and
+ * this keeps the live alert early.
+ */
+export const BACKEND_TOOL_REMINDER = "You run the tools for a live phone call. The moment the caller has said what the problem is, call triage_call before anything else, every call, even when it sounds routine. Call save_intake as soon as you have the name and the problem, again whenever a detail changes, and once more before the call ends. Never skip a tool the instructions call for.";
+
+/**
  * Telnyx: its hosted speech-to-speech model reads about 2,500 tokens (~10,000 characters) of instructions; longer ones are
  * accepted but the middle is dropped. Kept under that so the safety and booking rules are always read.
  */
@@ -242,7 +249,7 @@ export function speechToSpeechPayload(standard: Record<string, unknown>, mode: E
       model: mode.model,
       // The speaking model's own voice; voice_speed is a text-to-speech setting, so it is left out.
       voice_settings: { voice: mode.voice, ...(voiceSettings.tool_call_audio ? { tool_call_audio: voiceSettings.tool_call_audio } : {}) },
-      delegation_settings: { enabled: true, mode: "telnyx", model: mode.backendModel, speak_results: true },
+      delegation_settings: { enabled: true, mode: "telnyx", model: mode.backendModel, speak_results: true, instructions: BACKEND_TOOL_REMINDER },
     },
     cut,
   };
