@@ -1,3 +1,4 @@
+import { callSteps } from "../src/domain/call-steps.js";
 import { pathToFileURL } from "node:url";
 import { BLIND_CLOSURE_FLAG, PROVIDER_HISTORY_FLAG } from "../src/application/call-service.js";
 import { loadEnvironment } from "../src/config/environment.js";
@@ -38,7 +39,7 @@ export function parseSelftestArgs(argv: string[], env: Record<string, string | u
     const arg = argv[index]!;
     return arg.includes("=") ? arg.slice(flag.length + 1) : argv[index + 1];
   };
-  for (const arg of argv) if (arg.startsWith("--") && !/^--(line|from)(=|$)/.test(arg)) throw new Error(`Unknown argument ${arg}. Use --line and --from.`);
+  for (const arg of argv) if (arg.startsWith("--") && arg !== "--routine" && !/^--(line|from)(=|$)/.test(arg)) throw new Error(`Unknown argument ${arg}. Use --line and --from (and --routine for the booking call).`);
   const line = read("--line") ?? env.SELFTEST_LINE;
   const from = read("--from") ?? env.SELFTEST_FROM;
   if (!line || !E164.test(line)) throw new Error("Pass the line to test with --line (E.164) or SELFTEST_LINE");
@@ -106,10 +107,10 @@ export function finalizedByCallback(call: Pick<CallRecord, "outcome" | "endedAt"
  * so the tools pass on `toolEvents` (our tool_events rows): every expected tool ran and none recorded an error. A
  * failed tool in either source fails the gate.
  */
-export function verdict(input: { tools: ToolResult[]; finalized: boolean; finalizeMs: number | null; usageBefore: number; usageAfter: number; speechToSpeech?: boolean; toolEvents?: ToolResult[] }): { pass: boolean; tools_ok: boolean; finalized_in_time: boolean; usage_moved_by_one: boolean } {
+export function verdict(input: { tools: ToolResult[]; finalized: boolean; finalizeMs: number | null; usageBefore: number; usageAfter: number; speechToSpeech?: boolean; toolEvents?: ToolResult[]; expectedEvents?: readonly string[] }): { pass: boolean; tools_ok: boolean; finalized_in_time: boolean; usage_moved_by_one: boolean } {
   const events = input.toolEvents ?? [];
   const toolsOk = input.speechToSpeech
-    ? EXPECTED_TOOL_EVENTS.every((name) => events.some((event) => event.name === name)) && events.every((event) => event.ok) && input.tools.every((tool) => tool.ok)
+    ? (input.expectedEvents ?? EXPECTED_TOOL_EVENTS).every((name) => events.some((event) => event.name === name)) && events.every((event) => event.ok) && input.tools.every((tool) => tool.ok)
     : input.tools.length > 0 && input.tools.every((tool) => tool.ok);
   const inTime = input.finalized && input.finalizeMs !== null && input.finalizeMs <= FINALIZE_DEADLINE_MS;
   const usage = input.usageAfter === input.usageBefore + 1;
@@ -121,7 +122,25 @@ Your furnace stopped working last night and there is no heat in the house. Say t
 Answer each question with one short sentence. If asked: your name is Dana Miller; the number you are calling from is the best callback number; the address is 100 Main Street, Springfield, Illinois 62701; any time tomorrow morning works.
 Accept whatever the receptionist offers. Never ask for a person. Stay on the line and keep answering until the receptionist has your name, your callback number and your address, even after you are told the owner will call back. Only when the receptionist asks if there is anything else, or says goodbye, say "Okay, thanks, bye." and stop talking.`;
 
+/**
+ * The second lab caller (--routine): a job that is not urgent, at an address the shop covers, who takes the first
+ * time offered. It walks the path most real calls take: intake, area check, open times, booking.
+ */
+export function routineCallerScript(place: string): string {
+  return `You are Sam, a homeowner phoning a home-service company. You are a real person; never say you are an AI. Keep this call short.
+Your kitchen faucet has a slow drip. It is not urgent and there is no water on the floor. Say that first, in one sentence, after the receptionist greets you.
+Answer each question with one short sentence. If asked: your name is Sam Carter; the number you are calling from is the best callback number; the address is 100 Main Street, ${place}; you would like the earliest time they have.
+If the receptionist offers times, pick the first one. If asked to confirm it, say "Yes, that works." Accept whatever the receptionist offers. Never ask for a person. Answer any other question briefly.
+Stay on the line and keep answering until the receptionist asks if there is anything else, or says goodbye. Then say "No, that's all, thanks, bye." and stop talking.`;
+}
+
+/** What the routine call must have run on our server, given the steps this shop has on. */
+export function routineExpectedEvents(steps: { askAddress: boolean; checkServiceArea: boolean; offerTimes: boolean }): string[] {
+  return ["call.triage", "call.intake", ...(steps.askAddress && steps.checkServiceArea ? ["coverage.check"] : []), ...(steps.offerTimes ? ["calendar.availability"] : [])];
+}
+
 async function main(): Promise<void> {
+  const routine = process.argv.includes("--routine");
   const { line, from } = parseSelftestArgs(process.argv.slice(2), process.env);
   const env = loadEnvironment(process.env);
   const key = env.TELNYX_API_KEY;
@@ -145,6 +164,10 @@ async function main(): Promise<void> {
     // A shop's own line, or the demo line (the default shop).
     const tenantId = await runtime.store.getTenantIdByInboundNumber(line) ?? (line === env.TELNYX_FROM_NUMBER ? env.DEFAULT_TENANT_ID : null);
     if (!tenantId) throw new Error("No shop answers on that line");
+    const shopConfig = await runtime.store.getConfig(tenantId);
+    const callerScript = routine ? routineCallerScript(shopConfig.serviceAreaTerms[0] ?? "Springfield") : CALLER_SCRIPT;
+    const expectedEvents = routine ? routineExpectedEvents(callSteps(shopConfig)) : undefined;
+    say("scenario", routine ? "routine" : "urgent");
     const windowStart = new Date(Date.now() - 86_400_000).toISOString();
     const windowEnd = new Date(Date.now() + 86_400_000).toISOString();
     const usage = async () => (await runtime.store.getUsageSummary(tenantId, windowStart, windowEnd)).billableCalls;
@@ -157,7 +180,7 @@ async function main(): Promise<void> {
     const speechToSpeech = ottoAssistantId ? isSpeechToSpeechAssistant((await telnyx("GET", `/ai/assistants/${encodeURIComponent(ottoAssistantId)}`))[1]) : false;
     say("line_voice_mode", speechToSpeech ? "speech_to_speech" : "standard");
     const [created, assistant] = await telnyx("POST", "/ai/assistants", {
-      name: `fo-lab-selftest-${Date.now().toString(36)}`, enabled_features: ["telephony"], instructions: CALLER_SCRIPT, greeting: "",
+      name: `fo-lab-selftest-${Date.now().toString(36)}`, enabled_features: ["telephony"], instructions: callerScript, greeting: "",
       tools: [{ type: "hangup", hangup: { description: "End the call after you have said goodbye, or after the receptionist says goodbye." } }],
       ...(source.transcription ? { transcription: source.transcription } : {}),
       ...labCallerVoice(source, env.TELNYX_VOICE),
@@ -220,7 +243,7 @@ async function main(): Promise<void> {
     for (const event of toolEvents) say("tool_event", event.name, event.status, event.ok);
 
     const usageAfter = await usage();
-    const result = verdict({ tools, finalized: finalizedByCallback(stored), finalizeMs, usageBefore, usageAfter, speechToSpeech, toolEvents });
+    const result = verdict({ tools, finalized: finalizedByCallback(stored), finalizeMs, usageBefore, usageAfter, speechToSpeech, toolEvents, ...(expectedEvents ? { expectedEvents } : {}) });
     say(result);
     pass = result.pass;
   } catch (error) {

@@ -45,6 +45,30 @@ describe("the server triages every intake, with or without triage_call", () => {
     expect(triage[0]!.metadata).toMatchObject({ emergency: false, source: "intake" });
   });
 
+  it("replays the emergency words when the same save_intake is retried after a lost answer", async () => {
+    await start("retry");
+    const first = await intake("retry", "I smell gas in the kitchen and the stove is off.");
+    const again = await intake("retry", "I smell gas in the kitchen and the stove is off.");
+    expect(again.emergency).toBe(true);
+    expect(again.instruction).toBe(first.instruction);
+    const call = (await store.getCallByProviderId("retry"))!;
+    expect((await events("retry")).filter((event) => event.tool === "call.triage")).toHaveLength(1);
+    expect(call.outcome).toBe("handoff_queued");
+  });
+
+  it("records the triage step exactly once whatever came first", async () => {
+    await start("blank-first");
+    await intake("blank-first", "   ");
+    await intake("blank-first", "The kitchen faucet drips a little.");
+    expect((await events("blank-first")).filter((event) => event.tool === "call.triage")).toHaveLength(1);
+    await start("tool-first");
+    await service.triageCall({ tenantId: "demo", providerCallId: "tool-first", fromNumber: "+15555550100", problemDescription: "The kitchen faucet drips a little." });
+    await intake("tool-first", "The kitchen faucet drips a little.");
+    const triage = (await events("tool-first")).filter((event) => event.tool === "call.triage");
+    expect(triage).toHaveLength(1);
+    expect(triage[0]!.metadata).not.toHaveProperty("source");
+  });
+
   it("an intake with no problem yet records no triage step", async () => {
     await start("no-problem");
     await intake("no-problem", "");
@@ -56,5 +80,19 @@ describe("the server triages every intake, with or without triage_call", () => {
     expect(built.payload.delegation_settings).toEqual({ enabled: true, mode: "telnyx", model: "text-model", speak_results: true, instructions: BACKEND_TOOL_REMINDER });
     expect(BACKEND_TOOL_REMINDER).toContain("triage_call");
     expect(BACKEND_TOOL_REMINDER).toContain("save_intake");
+  });
+});
+
+describe("the routine selftest caller", () => {
+  it("expects the steps the shop has on, and its script names a covered place", async () => {
+    const { parseSelftestArgs, routineCallerScript, routineExpectedEvents, verdict } = await import("../scripts/selftest-call.js");
+    expect(routineExpectedEvents({ askAddress: true, checkServiceArea: true, offerTimes: true })).toEqual(["call.triage", "call.intake", "coverage.check", "calendar.availability"]);
+    expect(routineExpectedEvents({ askAddress: false, checkServiceArea: true, offerTimes: false })).toEqual(["call.triage", "call.intake"]);
+    expect(routineCallerScript("Springfield")).toContain("100 Main Street, Springfield");
+    expect(parseSelftestArgs(["--line", "+15555550123", "--from", "+15555550177", "--routine"], {})).toMatchObject({ line: "+15555550123", from: "+15555550177" });
+    const ok = (name: string) => ({ name, status: "success", ok: true });
+    const base = { tools: [], finalized: true, finalizeMs: 1000, usageBefore: 1, usageAfter: 2, speechToSpeech: true };
+    expect(verdict({ ...base, toolEvents: [ok("call.triage"), ok("call.intake")], expectedEvents: routineExpectedEvents({ askAddress: true, checkServiceArea: true, offerTimes: true }) }).pass).toBe(false);
+    expect(verdict({ ...base, toolEvents: [ok("call.triage"), ok("call.intake"), ok("coverage.check"), ok("calendar.availability")], expectedEvents: routineExpectedEvents({ askAddress: true, checkServiceArea: true, offerTimes: true }) }).pass).toBe(true);
   });
 });

@@ -169,19 +169,20 @@ export class CallService {
     await this.ensureCall(input.tenantId, input.providerCallId, input.fromNumber, this.clock.now().toISOString());
     const key = toolResultKey("save_intake", input.providerCallId, { fields: input.fields, declined: input.recordingDisclosureDeclined ?? null, ...(input.extraAnswerSlots ? { extraAnswerSlots: input.extraAnswerSlots.map((slot) => slot ?? null) } : {}) });
     return this.store.withLock(`call:${input.providerCallId}`, async () => {
-      const prior = await this.claimToolWrite<{ status: "saved"; missing: string[] }>(input.providerCallId, key, input.signal);
+      const prior = await this.claimToolWrite<{ status: "saved"; missing: string[]; emergency?: true; instruction?: string }>(input.providerCallId, key, input.signal);
       if (prior) {
         const call = await this.store.getCallByProviderId(input.providerCallId);
         return { ...prior.result, wrap_up: call ? this.wrapUpFor(call) : false };
       }
-      let result: { status: "saved"; missing: string[]; wrap_up: boolean };
+      let result: { status: "saved"; missing: string[]; wrap_up: boolean; emergency?: true; instruction?: string };
       try {
         result = await this.saveIntakeClaimed(input);
       } catch (error) {
         await this.store.releaseToolResult(input.providerCallId, key).catch(() => undefined);
         throw error;
       }
-      await this.store.completeToolResult(input.providerCallId, key, { status: result.status, missing: result.missing }, this.clock.now().toISOString());
+      // A retry after a lost answer replays the emergency fields too: the caller must still hear the safety words.
+      await this.store.completeToolResult(input.providerCallId, key, { status: result.status, missing: result.missing, ...(result.emergency ? { emergency: result.emergency, instruction: result.instruction } : {}) }, this.clock.now().toISOString());
       return result;
     });
   }
@@ -297,7 +298,9 @@ export class CallService {
     if (emergency.emergency) await this.queueHumanHandoffClaimed({ tenantId: input.tenantId, providerCallId: input.providerCallId, fromNumber: call.fromNumber, problemDescription: fields.problemDescription, urgent: emergency });
     // The deterministic triage above runs on every intake, whether or not the model called triage_call first (a
     // speech-to-speech line skips it now and then). The first time it sees a problem, that is this call's triage step.
-    if (!existing.emergency && fields.problemDescription.trim()) await this.checkpoint(call, "call.triage", this.clock.now(), { severity: emergency.severity, emergency: emergency.emergency, source: "intake" });
+    if (fields.problemDescription.trim() && !(await this.store.listToolEvents(call.id).catch(() => [])).some((event) => event.tool === "call.triage")) {
+      await this.checkpoint(call, "call.triage", this.clock.now(), { severity: emergency.severity, emergency: emergency.emergency, source: "intake" });
+    }
     // Which checkpoints this intake covers, after any alert. Booleans only: the values live on the call record.
     await this.checkpoint(call, "call.intake", this.clock.now(), {
       problem: fields.problemDescription.trim().length > 0,
