@@ -1666,7 +1666,9 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       const callTo = ownerPhone && /^\+1[2-9]\d{9}$/.test(ownerPhone) ? ownerPhone : null;
       // Never ring a mobile that forwards every call to Otto (Otto would call Otto): every call is picked on the
       // business number they ring, or the last passed test was (or they left it untested) for every call.
-      const loops = Boolean(callTo) && forwardsBackToOtto({ mode: config.operationMode, businessNumber: state.businessNumber, phone: callTo, testedFor: state.testedFor ?? null });
+      // Our own numbers saved as the mobile (the shop's Otto line or the number we call from) are a loop too.
+      const ownNumber = Boolean(callTo) && (callTo === lineNumber || callTo === dependencies.env.TELNYX_FROM_NUMBER);
+      const loops = ownNumber || (Boolean(callTo) && forwardsBackToOtto({ mode: config.operationMode, businessNumber: state.businessNumber, phone: callTo, testedFor: state.testedFor ?? null }));
       if (loops) log({ level: "info", event: "setup_call_skipped_forwards_to_otto", tenantId: account.tenantId });
       // One setup call per shop at a time, written only under this lock (here and by the call's webhooks).
       const calling = await dependencies.store.withLock(`setup-call:${account.tenantId}`, async (): Promise<string | "limit" | "looped" | null> => {
@@ -1681,11 +1683,12 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
         const placed = parseTimes(await dependencies.store.getIntegrationSecret(account.tenantId, "forwarding", "setup_calls_placed")).filter((at) => nowMs - Date.parse(at) < 24 * 60 * 60_000);
         if (placed.length >= SETUP_CALLS_PER_DAY) return "limit";
         if (setupCallsConfigured() && callTo && lineNumber && account.status !== "suspended") {
+          // Counted before the dial: a dial that times out may still ring, so it never frees a call for today.
+          await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "setup_calls_placed", JSON.stringify([...placed, now]));
           const callControlId = await setupCaller()!
             .dial({ connectionId: dependencies.env.TELNYX_CHECK_CONNECTION_ID!, from: dependencies.env.TELNYX_FROM_NUMBER!, to: callTo, tenantId: account.tenantId, webhookUrl: `${dependencies.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/telnyx` })
             .catch((error) => { log({ level: "error", event: "setup_call_dial_failed", tenantId: account.tenantId, error: safeError(error) }); return null; });
           if (callControlId) {
-            await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "setup_calls_placed", JSON.stringify([...placed, now]));
             await dependencies.store.saveIntegrationSecret(account.tenantId, "forwarding", "setup_call", JSON.stringify({ startedAt: now, callControlId, device, to: callTo } satisfies SetupCallRecord));
             // The helper's tools find this shop by the call they're on (signed by Telnyx), never by anything said.
             await dependencies.store.saveIntegrationSecret(PLATFORM_TENANT_ID, SETUP_HELP_PROVIDER, callControlId, account.tenantId);
@@ -3274,9 +3277,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
       // Voicemail picked up: hang up (never leave a message) and the screen offers a time with our team instead.
       const result = typeof envelope.data.payload.result === "string" ? envelope.data.payload.result : null;
       if (result !== "machine") return;
+      // A retried event (the hang-up failed) hangs up again until the call has really ended.
       const machine = await lockedCall(async (call) => {
-        if (call.endedAt || call.outcome === "voicemail") return null;
-        await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...call, outcome: "voicemail" } satisfies SetupCallRecord));
+        if (call.endedAt) return null;
+        if (call.outcome !== "voicemail") await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...call, outcome: "voicemail" } satisfies SetupCallRecord));
         return call;
       });
       if (machine) {
@@ -3346,14 +3350,13 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     } catch {
       payload = {};
     }
-    // The call id from the signed body (the preset {{call_control_id}}), else the provider header.
-    const fromBody = typeof payload.provider_call_id === "string" ? payload.provider_call_id : null;
-    const callId = fromBody ?? singleHeader(request.headers["x-telnyx-call-control-id"]) ?? null;
+    // The call id only from the signed body (the preset {{call_control_id}}): an unsigned header never picks the shop.
+    const callId = typeof payload.provider_call_id === "string" ? payload.provider_call_id : null;
     if (!callId || callId.length > MAX_PROVIDER_CALL_ID_LENGTH) return sendJson(response, 200, { status: "unavailable", say: "Sorry, I can't do that on this call." });
     if (!limiter.allow(`setup-help:${callId}`, 60, 60_000)) return sendJson(response, 200, { status: "unavailable", say: "One moment, then try again." });
     const tenantId = await dependencies.store.getIntegrationSecret(PLATFORM_TENANT_ID, SETUP_HELP_PROVIDER, callId);
     const call = tenantId ? readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call")) : null;
-    if (!tenantId || !call || call.callControlId !== callId || call.endedAt || !call.answeredAt) {
+    if (!tenantId || !call || call.callControlId !== callId || call.endedAt || !call.answeredAt || call.outcome === "voicemail" || call.outcome === "looped") {
       log({ level: "warn", event: "setup_help_tool_refused", tool });
       return sendJson(response, 200, { status: "unavailable", say: "Sorry, I can't do that on this call." });
     }
@@ -3828,8 +3831,8 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
    * minute, still up): it's the helper's leg, forwarded back. Mark it ended as looped under the setup-call lock (so its
    * answer never starts the helper) and hang it up; the screen says their phone already sends every call to Otto. How fast it came back
    * never decides what's on: a Decline, a busy phone or no signal forward as fast as forward-all does.
-   * A test that started after the helper call is open: this call is that test (say the owner, on the phone with the
-   * helper, tapped Call me now and the busy phone forwarded it), so the helper is left alone.
+   * While any forwarding test is open, or once the helper was picked up, this call is taken to be something else of
+   * ours (the test's own leg), so the helper is left alone.
    */
   async function endLoopedSetupCall(tenantId: string, businessNumber: string | null, now: Date, openTestStartedAt: string | null): Promise<void> {
     if (!businessNumber) return;
@@ -3843,8 +3846,10 @@ export function createRequestHandler(dependencies: AppDependencies): FrontOffice
     const ended = await dependencies.store.withLock(`setup-call:${tenantId}`, async () => {
       const call = readSetupCall(await dependencies.store.getIntegrationSecret(tenantId, "forwarding", "setup_call"));
       // Any phone we rang for the helper (the owner's mobile, often the business number itself) that forwards here.
-      if (!call?.callControlId || call.endedAt || !call.startedAt) return null;
-      if (openTestStartedAt && Date.parse(openTestStartedAt) >= Date.parse(call.startedAt)) return null;
+      // Picked up: the owner is talking to the helper, so this is some other call of ours. A forwarding test still
+      // open (started before or after the helper) is the likelier source of this call: the helper is left alone.
+      if (!call?.callControlId || call.endedAt || !call.startedAt || call.answeredAt) return null;
+      if (openTestStartedAt) return null;
       const afterMs = now.getTime() - Date.parse(call.startedAt);
       if (!(afterMs < 60_000)) return null;
       await dependencies.store.saveIntegrationSecret(tenantId, "forwarding", "setup_call", JSON.stringify({ ...call, endedAt: now.toISOString(), hangupCause: "no_answer", outcome } satisfies SetupCallRecord));

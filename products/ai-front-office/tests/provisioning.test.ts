@@ -1116,6 +1116,31 @@ describe("owner one-tap go-live", () => {
           expect(await testedFor(made)).toBeNull();
         });
 
+        it("a test started just before Call me now reaches Otto: that's the test, the helper stays up", async () => {
+          const made = await liveShop({ env, carriers: { "+19415550199": { name: "T-Mobile USA", type: "mobile" } }, ringFirst: true });
+          await made.api("/api/app/line/business-number", { number: "9415550199" });
+          await made.api("/api/app/line/check");
+          later(made, 2);
+          expect((await made.api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+          later(made, 10);
+          const init = JSON.stringify({ data: { record_type: "event", event_type: "assistant.initialization", id: "earlier-test", occurred_at: made.clock.now().toISOString(), payload: { telnyx_conversation_channel: "phone_call", telnyx_agent_target: "+19415550123", telnyx_end_user_target: "+15555550199", call_control_id: "v3:earlier-test", assistant_id: "assistant-1" } } });
+          await fetch(`${made.baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(init, made.privateKey, made.clock.now()), body: init });
+          const setupCall = JSON.parse(await made.store.getIntegrationSecret(made.account.tenantId, "forwarding", "setup_call") ?? "null") as Record<string, unknown>;
+          expect(setupCall).not.toHaveProperty("endedAt");
+          expect([...made.store.notifications.values()].filter((item) => item.senderRef === "founder")).toHaveLength(0);
+        });
+
+        it("once the owner picked up the helper, our own call arriving never hangs it up", async () => {
+          const made = await ringing();
+          const state = (helpDials(made).at(-1)!.body as { client_state: string }).client_state;
+          const answered = JSON.stringify({ data: { record_type: "event", event_type: "call.answered", id: "evt-picked-up", occurred_at: made.clock.now().toISOString(), payload: { call_control_id: "v3:check-call", client_state: state } } });
+          await fetch(`${made.baseUrl}/webhooks/telnyx`, { method: "POST", headers: signed(answered, made.privateKey, made.clock.now()), body: answered });
+          later(made, 5);
+          expect(await made.arrives("other-of-ours", "+15555550199")).toBe("forwarding_check");
+          expect(await made.setupCall()).not.toHaveProperty("endedAt");
+          expect(made.founderEmails()).toHaveLength(0);
+        });
+
         it("a call from the business number itself is a real call: never ends the helper, never proves forwarding", async () => {
           const made = await ringing();
           later(made, 3);

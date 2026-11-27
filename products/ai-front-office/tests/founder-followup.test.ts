@@ -333,7 +333,7 @@ async function app(options: { setupCalls?: boolean; failDial?: boolean; failHelp
     const body = JSON.stringify(payload);
     return fetch(`${baseUrl}/setup-help/tools/${name}`, { method: "POST", headers: sign ? signed(body, keys.privateKey, clock.now()) : { "content-type": "application/json" }, body });
   };
-  return { store, clock, baseUrl, handler, recorded, busy, events, logs, owner, founderEmails, webhook, dialState, tool, setTokenReply: (value: Record<string, unknown>) => { tokenReply = value; }, setDialFails: (value: boolean) => { dialFails = value; },
+  return { store, clock, baseUrl, handler, recorded, busy, events, logs, owner, founderEmails, webhook, dialState, tool, privateKey: keys.privateKey, setTokenReply: (value: Record<string, unknown>) => { tokenReply = value; }, setDialFails: (value: boolean) => { dialFails = value; },
     holdEvents: () => { let release = () => {}; eventGate = new Promise<void>((resolve) => { release = () => { eventGate = null; resolve(); }; }); return release; } };
 }
 
@@ -965,6 +965,42 @@ describe("Call me now: Otto's support call", () => {
     expect(person.recorded.filter((call) => call.url.endsWith("/actions/hangup"))).toHaveLength(0);
   });
 
+  it("voicemail after the helper started: a retried event hangs up again, and no tool runs on the machine", async () => {
+    const made = await onTheCall();
+    await made.webhook("call.machine.premium.detection.ended", "evt-amd", { call_control_id: "v3:help-call", client_state: made.dialState(), result: "machine" });
+    await made.webhook("call.machine.premium.detection.ended", "evt-amd", { call_control_id: "v3:help-call", client_state: made.dialState(), result: "machine" });
+    expect(hangups(made)).toBe(2);
+    const before = made.recorded.filter((call) => call.url === "https://api.telnyx.com/v2/calls").length;
+    expect(await (await made.tool("start_forwarding_test", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "unavailable" });
+    expect(made.recorded.filter((call) => call.url === "https://api.telnyx.com/v2/calls")).toHaveLength(before);
+    await made.webhook("call.hangup", "evt-hangup", { call_control_id: "v3:help-call", client_state: made.dialState(), hangup_cause: "normal_clearing" });
+    await made.webhook("call.machine.premium.detection.ended", "evt-amd", { call_control_id: "v3:help-call", client_state: made.dialState(), result: "machine" });
+    expect(hangups(made)).toBe(2);
+  });
+
+  it("a saved mobile that is one of Otto's own numbers is never dialed", async () => {
+    for (const number of ["+19415550123", "+15555550199"]) {
+      const made = await app();
+      const owner = await made.owner();
+      await made.store.saveIntegrationSecret(owner.account.tenantId, "notifications", "owner-primary", number);
+      expect((await owner.api("/api/app/line/help", { device: "iphone" })).status).toBe(200);
+      expect(dials(made)).toHaveLength(0);
+      expect((await line(made, owner.cookie)).helpCall).toMatchObject({ outcome: "looped" });
+    }
+  });
+
+  it("a dial that fails still counts toward today's calls (it may have rung)", async () => {
+    const made = await app();
+    const owner = await made.owner();
+    made.setDialFails(true);
+    for (let tap = 0; tap < 3; tap += 1) {
+      await owner.api("/api/app/line/help", { device: "iphone" });
+      made.clock.at = new Date(made.clock.at.getTime() + 3 * 60_000);
+    }
+    made.setDialFails(false);
+    expect((await owner.api("/api/app/line/help", { device: "iphone" })).status).toBe(429);
+  });
+
   it("their phone forwards every call to Otto: no call (it would come back to Otto), and the screen says so plainly", async () => {
     const made = await app({ founders: BROCK });
     const owner = await made.owner();
@@ -982,6 +1018,10 @@ describe("Call me now: Otto's support call", () => {
     expect((await made.tool("get_test_result", { provider_call_id: "v3:help-call" }, false)).status).toBe(401);
     expect(await (await made.tool("get_test_result", { provider_call_id: "v3:someone-else" })).json()).toMatchObject({ status: "unavailable" });
     expect((await made.tool("delete_everything", { provider_call_id: "v3:help-call" })).status).toBe(404);
+    // A signed body without the call id never picks the shop from an unsigned header.
+    const bare = JSON.stringify({});
+    const viaHeader = await fetch(`${made.baseUrl}/setup-help/tools/get_test_result`, { method: "POST", headers: { ...signed(bare, made.privateKey, made.clock.now()), "x-telnyx-call-control-id": "v3:help-call" }, body: bare });
+    expect(await viaHeader.json()).toMatchObject({ status: "unavailable" });
     expect(await (await made.tool("get_test_result", { provider_call_id: "v3:help-call" })).json()).toMatchObject({ status: "idle", minutes_on_call: 0, offer_team_time: false });
     await made.webhook("call.hangup", "evt-hangup", { call_control_id: "v3:help-call", client_state: made.dialState(), hangup_cause: "normal_clearing" });
     // Over: nothing more runs on it.
